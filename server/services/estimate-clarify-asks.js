@@ -641,6 +641,11 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
         await trx('message_drafts').where({ id: fresh.id }).update({ status: 'rejected' });
         return { outcome: 'retired', message };
       };
+      // The admin reject route moves status WITHOUT the clarify lock — if it
+      // won the race, respect its verdict: no status write, no stamp.
+      if (!['approved', 'revised'].includes(fresh.status)) {
+        return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+      }
       // A consumed ask (every item answered while the claim was in flight)
       // or an already-dispatched row must never send again.
       if (fresh.sent_at || flags.answered_at || !missing.length) {
@@ -692,27 +697,46 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
           firstName: lead?.first_name || customer?.first_name || null,
         });
         const rewrittenFlags = { ...flags, missing: stillMissing };
+        // Conditional writes: the unlocked reject route can still move the
+        // row between our read and this statement — READ COMMITTED re-checks
+        // the WHERE against the winner's row, so zero rows updated means the
+        // claim is gone and nothing may dispatch.
         if (isRevision) {
           // The owner's revision was typed against the stale multi-question
           // copy — rewrite the stored draft and bounce the send; the queue
           // now shows the single remaining question.
-          await trx('message_drafts').where({ id: fresh.id }).update({
-            draft_response: rewritten,
-            flags: JSON.stringify(rewrittenFlags),
-          });
+          const rewrote = await trx('message_drafts')
+            .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+            .update({
+              draft_response: rewritten,
+              flags: JSON.stringify(rewrittenFlags),
+            });
+          if (!rewrote) {
+            return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+          }
           return { outcome: 'rewritten' };
         }
-        await trx('message_drafts').where({ id: fresh.id }).update({
-          draft_response: rewritten,
-          flags: JSON.stringify(rewrittenFlags),
-          sent_at: new Date(),
-        });
+        const stamped = await trx('message_drafts')
+          .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+          .update({
+            draft_response: rewritten,
+            flags: JSON.stringify(rewrittenFlags),
+            sent_at: new Date(),
+          });
+        if (!stamped) {
+          return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+        }
         return { outcome: 'send', body: rewritten, flags: rewrittenFlags };
       }
       // Sendable as-is — the sent_at stamp IS the commitment: from this
       // commit on, replies route as answers to a sent ask, parks fall under
       // the recent-sent cooldown, and no writer rewrites the copy.
-      await trx('message_drafts').where({ id: fresh.id }).update({ sent_at: new Date() });
+      const stamped = await trx('message_drafts')
+        .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+        .update({ sent_at: new Date() });
+      if (!stamped) {
+        return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+      }
       return {
         outcome: 'send',
         body: isRevision ? (fresh.final_response || fresh.draft_response) : fresh.draft_response,
@@ -750,6 +774,14 @@ async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null,
         flags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
       } catch { flags = {}; }
       const missing = Array.isArray(flags.missing) ? flags.missing : [];
+      // A concurrent reject (unlocked route) already resolved the draft —
+      // respect its status, but the false stamp must still go: the 7-day
+      // cooldown would otherwise key on a send that never happened.
+      if (!['approved', 'revised'].includes(fresh.status)) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
       if (flags.answered_at || !missing.length) {
         await trx('message_drafts').where({ id: fresh.id })
           .update({ status: 'rejected', sent_at: null, ...releaseFields });
@@ -769,18 +801,27 @@ async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null,
       const missingChanged = Array.isArray(dispatchedMissing)
         && (dispatchedMissing.length !== missing.length
           || missing.some((item) => !dispatchedMissing.includes(item)));
-      await trx('message_drafts').where({ id: fresh.id }).update({
-        status: 'pending',
-        approved_by: null,
-        approved_at: null,
-        sent_at: null,
-        // Recompose only when a reply shrank the ask mid-flight — otherwise
-        // the parked copy (with its greeting) is still exactly right.
-        ...(missingChanged
-          ? { draft_response: composeClarifyBody({ missing, firstName: null }) }
-          : {}),
-        ...releaseFields,
-      });
+      // Conditional on the claim still standing — a reject interleaving
+      // after the fresh read must not be resurrected to pending.
+      const reopened = await trx('message_drafts')
+        .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+        .update({
+          status: 'pending',
+          approved_by: null,
+          approved_at: null,
+          sent_at: null,
+          // Recompose only when a reply shrank the ask mid-flight — otherwise
+          // the parked copy (with its greeting) is still exactly right.
+          ...(missingChanged
+            ? { draft_response: composeClarifyBody({ missing, firstName: null }) }
+            : {}),
+          ...releaseFields,
+        });
+      if (!reopened) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
       return { reopened: true, retired: false };
     });
   } catch (err) {

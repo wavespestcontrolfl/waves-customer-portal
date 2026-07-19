@@ -68,6 +68,7 @@ function makeBuilder(table, cfg = {}) {
   b.returning = jest.fn(() => Promise.resolve(cfg.returning ?? []));
   b.catch = jest.fn(() => Promise.resolve());
   b.then = (resolve, reject) => {
+    if (cfg.error) return Promise.reject(cfg.error).then(resolve, reject);
     const value = b._mode === 'update' ? (cfg.update ?? 1)
       : b._mode === 'first' ? cfg.first
         : (cfg.rows ?? []);
@@ -237,6 +238,27 @@ describe('approve — clarify dispatch wiring', () => {
     // No direct message_drafts write beyond the claim — reconciliation is
     // the service's job, under the clarify lock.
     expect(updates.filter((u) => u.table === 'message_drafts')).toHaveLength(1);
+  });
+
+  test('a recipient-lookup throw AFTER the stamp reconciles via reopen', async () => {
+    // sms_log_id forces resolveDraftRecipient onto a db read we can fail.
+    enqueue('message_drafts', { returning: [clarifyDraft({ sms_log_id: 'sms-1' })] });
+    enqueue('sms_log', { error: new Error('db connection lost') });
+    claimClarifyDispatch.mockResolvedValue({
+      outcome: 'send', body: 'Q?', flags: CLARIFY_FLAGS,
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/approve`, { method: 'PUT' });
+      expect(res.status).toBe(500);
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reopenClarifyAfterFailedSend).toHaveBeenCalledWith({
+      draftId: 'draft-9',
+      dispatchedMissing: ['street_address'],
+      releaseFields: {},
+    });
   });
 
   test('a blocked send (sent:false) also reconciles via reopen', async () => {

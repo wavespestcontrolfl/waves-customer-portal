@@ -25,7 +25,7 @@ jest.mock('../models/db', () => {
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
-        return 1;
+        return mockState.updateResults.length ? mockState.updateResults.shift() : 1;
       },
       insert: (payload) => ({
         returning: async () => {
@@ -95,7 +95,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -511,6 +511,22 @@ describe('claimClarifyDispatch', () => {
     expect(verdict.outcome).toBe('error');
     expect(mockState.updates).toHaveLength(0);
   });
+
+  test('a draft the unlocked reject route already resolved is respected — no write, no send', async () => {
+    mockState.firstQueue = [freshRow({ status: 'rejected' })];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('no longer claimed');
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a reject interleaving between the fresh read and the stamp aborts the dispatch', async () => {
+    mockState.firstQueue = [freshRow()];
+    mockState.updateResults = [0]; // conditional stamp matches zero rows
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('no longer claimed');
+  });
 });
 
 describe('reopenClarifyAfterFailedSend', () => {
@@ -567,6 +583,25 @@ describe('reopenClarifyAfterFailedSend', () => {
     expect(result).toEqual({ reopened: false, retired: true });
     expect(mockState.updates[0].payload.status).toBe('rejected');
     expect(mockState.updates[0].payload.sent_at).toBeNull();
+  });
+
+  test('a draft rejected during the send window keeps its status — only the false stamp clears', async () => {
+    const rejected = stampedRow();
+    rejected.status = 'rejected';
+    mockState.firstQueue = [rejected, rejected];
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates[0].payload).toEqual({ sent_at: null });
+  });
+
+  test('a reject interleaving after the fresh read wins — reopen falls back to clearing the stamp', async () => {
+    mockState.firstQueue = [stampedRow(), stampedRow(), null];
+    mockState.updateResults = [0]; // conditional reopen matches zero rows
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates).toHaveLength(2);
+    expect(mockState.updates[1].payload).toEqual({ sent_at: null });
   });
 
   test('revision releaseFields ride along on reopen', async () => {

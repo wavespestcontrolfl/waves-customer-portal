@@ -633,7 +633,19 @@ router.put('/:id/approve', async (req, res, next) => {
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
 
-    const recipient = await resolveDraftRecipient(draft);
+    // From here to the provider call a clarify draft already carries its
+    // dispatch stamp — any throw must reconcile, or the row reads falsely
+    // sent for the 7-day cooldown. Non-clarify drafts keep the legacy
+    // behavior (claim left in place on a lookup throw).
+    let recipient;
+    let sendPolicy;
+    try {
+      recipient = await resolveDraftRecipient(draft);
+      sendPolicy = sendPolicyForDraft(draft, recipient);
+    } catch (resolveErr) {
+      if (clarifyGuard?.dispatchCommitted) await releaseFailedSendClaim(draft, clarifyGuard);
+      throw resolveErr;
+    }
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
@@ -641,8 +653,6 @@ router.put('/:id/approve', async (req, res, next) => {
       await releaseFailedSendClaim(draft, clarifyGuard);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
-
-    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
@@ -758,7 +768,18 @@ router.put('/:id/revise', async (req, res, next) => {
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
     if (clarifyGuard.blocked) return;
 
-    const recipient = await resolveDraftRecipient(draft);
+    // Same stamp-reconciliation contract as the approve route — see there.
+    let recipient;
+    let sendPolicy;
+    try {
+      recipient = await resolveDraftRecipient(draft);
+      sendPolicy = sendPolicyForDraft(draft, recipient);
+    } catch (resolveErr) {
+      if (clarifyGuard?.dispatchCommitted) {
+        await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
+      }
+      throw resolveErr;
+    }
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
@@ -766,8 +787,6 @@ router.put('/:id/revise', async (req, res, next) => {
       await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
-
-    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
