@@ -6915,15 +6915,31 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     if (!estData) return;
     const snapshot = estData.membershipSnapshot;
     const frozenSnapshot = !!(snapshot && snapshot.isExistingCustomer);
-    // A SERVER-stamped recurring flag in the replay shapes (admin persistence
-    // writes it for a verified active-plan member — including one-time-only
-    // members with NO qualifying priors, whose snapshot may be absent) is
-    // itself a frozen membership artifact: extractEngineInputs() replays it on
-    // every reprice, so a lapsed member would keep the recurring perk forever
-    // if only the snapshot path triggered this reconcile.
-    const frozenRecurring = estData.engineInputs?.recurringCustomer === true
-      || estData.inputs?.recurringCustomer === true
-      || estData.inputs?.isRecurringCustomer === 'YES';
+    // EVERY membership artifact the cleanup below removes must also arm the
+    // trigger, or an estimate carrying only that artifact returns before the
+    // live plan check and keeps the discount: SERVER-stamped recurring flags
+    // in any replay shape (admin persistence writes them for a verified
+    // active-plan member — including one-time-only members with NO qualifying
+    // priors, whose snapshot may be absent), prior-service lists nested in a
+    // replay shape (legacy rows predating the save-time sanitizer), and the
+    // top-level priorQualifyingServices even without a snapshot.
+    // extractEngineInputs() replays all of them on every reprice.
+    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+      .filter((shape) => shape && typeof shape === 'object');
+    // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
+    // recurring value (boolean true, 'true', legacy strings, form 'YES') as
+    // recurring, so the trigger must too — only explicit negatives are inert.
+    // Over-triggering is safe: an active member early-returns on the live
+    // check, and a lapsed one gets exactly the cleanup+reprice it needs.
+    const truthyRecurringFlag = (value) => {
+      if (value == null || value === false) return false;
+      const normalized = String(value).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    };
+    const frozenRecurring = replayShapes.some((shape) => truthyRecurringFlag(shape.recurringCustomer)
+      || truthyRecurringFlag(shape.isRecurringCustomer)
+      || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
+      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
     if (!frozenSnapshot && !frozenRecurring) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
     // Drop every frozen artifact derived from the stale "existing customer"
@@ -6937,11 +6953,14 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
     delete estData.priorQualifyingServices;
-    for (const shape of [estData.engineInputs, estData.inputs, estData.engineRequest?.options]) {
-      if (shape && typeof shape === 'object') {
-        delete shape.recurringCustomer;
-        delete shape.isRecurringCustomer;
-      }
+    for (const shape of replayShapes) {
+      delete shape.recurringCustomer;
+      delete shape.isRecurringCustomer;
+      // A prior-service list NESTED in a replay shape (legacy rows predate
+      // the save-time sanitizer) replays straight through extractEngineInputs
+      // and restores the combined-tier discount the top-level delete just
+      // removed.
+      delete shape.priorQualifyingServices;
     }
     // Clearing the flags alone is not enough: the discount is already BAKED
     // INTO the stored result/totals from save-time, and buildPricingBundle's
@@ -6955,13 +6974,32 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // membershipLapsedRequote makes resolveEstimateQuoteRequirement mark the
     // bundle quote-required on every path, so accept/deposit refuse instead
     // of charging the stale member price.
+    // Frozen per-tier discount RATES were snapshotted under the stale member
+    // classification — accept-time tier math (snapshotTierDiscount) prefers
+    // them over live rates, so they must go with the rest of the artifacts.
+    if (estData.sendSnapshot && typeof estData.sendSnapshot === 'object') {
+      delete estData.sendSnapshot.tierDiscounts;
+    }
+    if (estData.pricingContext && typeof estData.pricingContext === 'object') {
+      delete estData.pricingContext.tierDiscounts;
+    }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(estData, {});
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
+      // A successful authoritative reprice supersedes any earlier fail-closed
+      // flag — without this a transient failure would leave the estimate
+      // permanently quote-required.
+      delete estData.membershipLapsedRequote;
       estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
       estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
       estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
+      // Acceptance reads the ROW tier for discount math — leaving the stale
+      // member tier would reapply e.g. a Platinum discount to Bronze-priced
+      // data at invoice time.
+      estimate.waveguard_tier = reprice.serverResult?.recurring?.waveGuardTier
+        || reprice.serverResult?.recurring?.tier
+        || null;
     } else {
       estData.membershipLapsedRequote = true;
     }

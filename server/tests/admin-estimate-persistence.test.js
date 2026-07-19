@@ -917,6 +917,34 @@ describe('admin estimate persistence', () => {
     expect(stored.inputs.recurringCustomer).toBe(true);
   });
 
+  test('P1-2: an authoritative admin reprice clears a stale membershipLapsedRequote flag', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+    });
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { oneTimePest: {} } },
+          result: { total: 125 },
+          // Left behind by a failed lapse reconcile that later persisted —
+          // an authoritative save must supersede it or the estimate stays
+          // permanently quote-required.
+          membershipLapsedRequote: true,
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const stored = JSON.parse(inserts.find((e) => e.table === 'estimates').row.estimate_data);
+    expect(stored.membershipLapsedRequote).toBeUndefined();
+  });
+
   test('P1-2: a NON-member does not gain a recurring flag in the stored engineInputs', async () => {
     const now = () => new Date('2026-05-15T12:00:00.000Z');
     const { database, inserts } = makeDatabase({

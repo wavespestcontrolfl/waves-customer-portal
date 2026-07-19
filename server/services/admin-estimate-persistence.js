@@ -480,6 +480,11 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
+    // An authoritative reprice supersedes the lapse-reconcile's fail-closed
+    // quote-required flag (set when a lapsed member's row could not be
+    // repriced) — otherwise a revised/re-saved estimate stays permanently
+    // quote-required.
+    delete estimateData.membershipLapsedRequote;
     const drift = compareClientToServer(clientPreview, result.serverTotals, now);
     audit.pricing_authority = 'SERVER';
     audit.server_computed_price = positiveMoney(result.serverTotals.annualTotal);
