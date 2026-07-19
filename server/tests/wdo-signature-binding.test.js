@@ -253,7 +253,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const staleUpdate = chain();
-    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, staleUpdate]; // chain() = PUT trx lock read
+    const projectQueries = [projectRead, chain(), projectUpdate, staleUpdate, projectRefetch]; // lock read, edit, in-trx staleness write, refetch
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -336,7 +336,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const unstaleUpdate = chain();
-    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, unstaleUpdate]; // chain() = PUT trx lock read
+    const projectQueries = [projectRead, chain(), projectUpdate, unstaleUpdate, projectRefetch]; // lock read, edit, in-trx staleness write, refetch
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -745,7 +745,7 @@ describe('WDO signature content binding', () => {
     const projectRead = chain({ first: jest.fn().mockResolvedValue(signed) });
     const colInfo = chain();
     const clearUpdate = chain();
-    const projectQueries = [projectRead, colInfo, clearUpdate];
+    const projectQueries = [projectRead, colInfo, chain(), clearUpdate]; // chain() = DELETE trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();

@@ -2122,30 +2122,36 @@ router.put('/:id', async (req, res, next) => {
     // Serialized with in-flight deliveries the same way photo mutations are:
     // a findings/date edit landing while a send (or the payment-hold release)
     // is building would make the emailed signed PDF differ from the live
-    // public report, or race the staleness bookkeeping below.
+    // public report, or race the staleness bookkeeping.
+    // The staleness refresh rides the SAME locked transaction, computed from
+    // the LOCKED row's signature — a post-commit refresh from a refetch could
+    // overwrite a concurrently saved replacement signature with the old one
+    // marked stale. Best-effort within the edit (the send gates re-verify the
+    // content hash themselves; only legacy pre-hash signatures rely on this
+    // flag — hence the loud warn).
+    let signatureStale = null;
     try {
       await db.transaction(async (trx) => {
-        await lockProjectForPhotoMutation(project, trx, 'the edit');
+        const locked = await lockProjectForPhotoMutation(project, trx, 'the edit', null);
         await trx('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
+        if (updates.findings !== undefined || updates.project_date !== undefined) {
+          const before = locked || project;
+          signatureStale = await refreshWdoSignatureStaleness(
+            req,
+            before,
+            { ...before, ...updates, id: project.id },
+            { connection: trx },
+          ).catch((err) => {
+            logger.warn(`[projects] WDO signature staleness update failed for ${project.id}: ${err.message}`);
+            return null;
+          });
+        }
       });
     } catch (e) {
       if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
       throw e;
     }
     const updated = await db('projects').where({ id: req.params.id }).first();
-
-    // If this edit changed the content a captured WDO signature attests to,
-    // flag the signature stale so the send gates force a re-sign. Best-effort:
-    // the send gates re-verify the content hash themselves, so a bookkeeping
-    // failure here can't let a hashed signature stamp edited content (only
-    // legacy pre-hash signatures rely on this flag — hence the loud warn).
-    let signatureStale = null;
-    if (updates.findings !== undefined || updates.project_date !== undefined) {
-      signatureStale = await refreshWdoSignatureStaleness(req, project, updated).catch((err) => {
-        logger.warn(`[projects] WDO signature staleness update failed for ${updated.id}: ${err.message}`);
-        return null;
-      });
-    }
 
     await logProjectActivity(
       req,
@@ -2334,7 +2340,11 @@ function wdoCoreFindingsIncomplete(project) {
 // is edited back to exactly what was signed). The send gates re-verify the
 // hash themselves, so this flag is the UX signal plus the only protection for
 // legacy un-hashed signatures.
-async function refreshWdoSignatureStaleness(req, before, after) {
+// `connection` lets the findings-edit path run this INSIDE its locked
+// transaction with the locked row's signature — a post-commit refresh from a
+// refetch could overwrite a concurrently saved replacement signature with
+// the old one marked stale.
+async function refreshWdoSignatureStaleness(req, before, after, { connection = db } = {}) {
   if (after.project_type !== 'wdo_inspection') return null;
   let sig = after.wdo_signature;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
@@ -2346,7 +2356,7 @@ async function refreshWdoSignatureStaleness(req, before, after) {
     // stays stale until the licensee re-signs.
     : (Boolean(sig.content_stale) || wdoContentHash(before) !== newHash);
   if (Boolean(sig.content_stale) === stale) return stale;
-  await db('projects').where({ id: after.id }).update({
+  await connection('projects').where({ id: after.id }).update({
     wdo_signature: JSON.stringify({ ...sig, content_stale: stale }),
     updated_at: db.fn.now(),
   });
@@ -2380,11 +2390,11 @@ async function refreshWdoSignatureStaleness(req, before, after) {
 // signature save can invalidate) also feeds the staleness decision below.
 // Applies to every project type — any in-flight send is rendering content it
 // already validated.
-async function lockProjectForPhotoMutation(project, trx, what = 'the photo change') {
-  const locked = await trx('projects')
-    .where({ id: project.id })
-    .forUpdate()
-    .first('wdo_signature', 'delivery_status', 'project_type', 'report_hold_status');
+// Pass columns = null to lock and return the FULL row (the findings-edit
+// path needs it to compute staleness from locked state).
+async function lockProjectForPhotoMutation(project, trx, what = 'the photo change', columns = ['wdo_signature', 'delivery_status', 'project_type', 'report_hold_status']) {
+  const query = trx('projects').where({ id: project.id }).forUpdate();
+  const locked = await (columns ? query.first(...columns) : query.first());
   // Two in-flight delivery claims to respect: the shared send claim
   // (delivery_status) AND the payment-hold release sweep's claim
   // (report_hold_status='releasing') — the release path builds and emails
@@ -4103,8 +4113,21 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
     }
     const cols = await db('projects').columnInfo().catch(() => ({}));
     if (cols.wdo_signature) {
-      const prior = loadWdoSignature(project);
-      await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+      // Same lock + in-flight-delivery guard as capture and photo mutations:
+      // clearing mid-send would revoke a signature the send already
+      // validated; the locked row (not the request snapshot) is what gets
+      // logged, so a concurrently saved replacement is never misattributed.
+      let prior = null;
+      try {
+        await db.transaction(async (trx) => {
+          const locked = await lockProjectForPhotoMutation(project, trx, 'the signature change');
+          prior = loadWdoSignature(locked || project);
+          await trx('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+        });
+      } catch (e) {
+        if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+        throw e;
+      }
       // Clearing the licensee's e-signature on a legal filing must leave a
       // trail — capture logs project_wdo_signed, so removal logs too.
       if (prior) {

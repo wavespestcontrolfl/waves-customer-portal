@@ -35,10 +35,16 @@ const CATEGORY = 'wdo_report_attention';
 async function findAttentionItems(now = new Date()) {
   // Signed but never sent: the licensee did their part and the filing is
   // sitting in drafts. 48h grace covers the normal same-week office send.
+  // Aged from the signature's own signed_at — updated_at moves on every
+  // unrelated edit or staleness bookkeeping write, which would restart the
+  // clock and postpone the alert indefinitely. Legacy signatures without a
+  // signed_at fall back to updated_at.
   const signedUnsent = await db('projects')
     .where({ project_type: 'wdo_inspection', status: 'draft' })
     .whereNotNull('wdo_signature')
-    .where('updated_at', '<', new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3))
+    .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
+      new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
+    ])
     .select('id', 'customer_id', 'project_date', 'updated_at');
 
   // Inspection happened (or was due) and the visit is still in an ACTIVE
