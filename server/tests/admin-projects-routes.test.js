@@ -1696,6 +1696,12 @@ describe('admin projects routes', () => {
       expect(photoDelete.del).toHaveBeenCalledTimes(1);
       const logger = require('../services/logger');
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('orphaned after delete'));
+      // Durable tombstone: the orphaned key is recorded where a cleanup pass
+      // can find it (the plaintext log above carries IDs only).
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'project_photo_delete_orphaned',
+        metadata: expect.objectContaining({ s3_key: 'project-photos/project-1/photo.jpg' }),
+      }));
     });
   });
 

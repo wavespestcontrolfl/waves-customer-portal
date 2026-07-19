@@ -5532,9 +5532,19 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
       } catch (err) {
         if (!isMissingS3ObjectError(err)) {
           // Row is gone; the object is an orphan to sweep up, not a failure
-          // the operator can act on — surface it in logs only. IDs only:
-          // s3 keys embed the original filename, which can carry PII.
+          // the operator can act on. Plaintext log carries IDs only (s3 keys
+          // embed the original filename, which can carry PII) — the key
+          // itself goes into a durable activity-log tombstone, DB-resident
+          // and admin-scoped like project_photos.s3_key was, so a cleanup
+          // pass can find and reclaim the object.
           logger.warn(`[projects] photo object orphaned after delete ${photo.id} (project ${req.params.id}): ${err.message}`);
+          await logProjectActivity(
+            req,
+            project,
+            'project_photo_delete_orphaned',
+            `Photo storage object could not be deleted and is orphaned (photo ${photo.id})`,
+            { photo_id: photo.id, s3_key: photo.s3_key, error: err.message },
+          ).catch(() => {});
         } else {
           logger.warn(`[projects] photo object already missing ${photo.id} (project ${req.params.id})`);
         }
