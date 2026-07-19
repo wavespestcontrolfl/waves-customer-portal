@@ -56,6 +56,7 @@ const {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
   WAVES_ADDRESS_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -4550,6 +4551,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <div class="estimate-ask-prompts" aria-label="Example questions">
       ${askPrompts.map((prompt) => `<button type="button" data-estimate-ask-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join('')}
     </div>
+    <div class="estimate-ask-safety">Prefer to read it yourself? See exactly what we apply and why: <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a></div>
     <div class="estimate-ask-answer" id="estimate-ask-answer" aria-live="polite" hidden></div>
   </section>` : '';
 
@@ -4737,6 +4739,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .estimate-ask-prompts{display:flex;flex-wrap:wrap;gap:8px}
   .estimate-ask-prompts button{appearance:none;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:999px;padding:8px 12px;font:700 12px/1 Inter,system-ui,sans-serif;cursor:pointer}
   .estimate-ask-prompts button:hover{background:#121E3D;border-color:#121E3D}
+  .estimate-ask-safety{font-size:14px;color:#3F4A65;line-height:1.5;text-align:center}
+  .estimate-ask-safety a{color:#1B2C5B;font-weight:600;white-space:nowrap}
   .estimate-ask-answer{border-left:4px solid ${ESTIMATE_BUTTON_BLUE};background:#F8FCFE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:14px;line-height:1.55;white-space:pre-line}
   .estimate-ask-answer[data-state="error"]{border-left-color:#C8102E;background:#FFF5F5}
   @media(max-width:640px){.estimate-ask-form{grid-template-columns:1fr}.estimate-ask-form button{width:100%}}
@@ -5253,6 +5257,8 @@ ${shellTopBar()}
       <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
+      <span class="dot">&middot;</span>
+      <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a>
     </div>
     <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>

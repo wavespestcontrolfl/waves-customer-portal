@@ -39,6 +39,8 @@ import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -1303,6 +1305,18 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             {prompt}
           </button>
         ))}
+      </div>
+
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
+        Prefer to read it yourself? See exactly what we apply and why:{' '}
+        <a
+          href={WAVES_PRODUCTS_SAFETY_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: ESTIMATE_TEXT, fontWeight: 600, whiteSpace: 'nowrap' }}
+        >
+          Products &amp; Safety
+        </a>
       </div>
 
       {answer ? (
@@ -3313,6 +3327,10 @@ export function ServiceSection({
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
 }) {
+  // On phones the corner-pinned WaveGuard badge's 170px heading clearance
+  // eats most of the card width and crunches the headline — stack the badge
+  // in flow instead. Hook must precede the early return (rules of hooks).
+  const compactTierBadge = useIsMobile(560);
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
   const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
@@ -3357,17 +3375,22 @@ export function ServiceSection({
           render like" the Waves AI card). */}
       <div style={estimateCard({ position: 'relative' })}>
         {/* WaveGuard membership badge pinned to the box's top-right corner
-            (owner directive 2026-07-10 — was inline next to the price). */}
+            (owner directive 2026-07-10 — was inline next to the price). On
+            phones it stacks above the headline in flow (owner 2026-07-19 —
+            the pinned badge's clearance crunched the headline). */}
         {showTierBadge ? (
-          <span style={{
-            position: 'absolute', top: 16, right: 16,
-            display: 'inline-block', padding: '4px 12px',
-            ...waveGuardChipStyle(waveGuardTier),
-            borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-            whiteSpace: 'nowrap',
-          }}>
-            WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-          </span>
+          <div style={compactTierBadge
+            ? { display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }
+            : { position: 'absolute', top: 16, right: 16 }}>
+            <span style={{
+              display: 'inline-block', padding: '4px 12px',
+              ...waveGuardChipStyle(waveGuardTier),
+              borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+              whiteSpace: 'nowrap',
+            }}>
+              WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
+            </span>
+          </div>
         ) : null}
         {servicesLength > 1 ? (
           <h3 style={{
@@ -3376,8 +3399,9 @@ export function ServiceSection({
             margin: '0 0 16px',
             // Keep clear of the absolutely-positioned corner badge — sized
             // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
-            // padding + the 16px corner inset).
-            paddingRight: showTierBadge ? 170 : 0,
+            // padding + the 16px corner inset). No clearance needed when the
+            // badge stacks in flow on phones.
+            paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
@@ -3392,7 +3416,7 @@ export function ServiceSection({
           color: '#04395E', margin: '0 0 4px',
           // Same corner-badge clearance as the h3 above; only needed when
           // this headline is the first line in the card (single-service).
-          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
+          paddingRight: servicesLength > 1 || !showTierBadge || compactTierBadge ? 0 : 170,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
