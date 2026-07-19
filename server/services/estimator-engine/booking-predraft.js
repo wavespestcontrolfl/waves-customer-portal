@@ -68,6 +68,27 @@ async function isAssessmentBooking(booking) {
     || ASSESSMENT_NAME_RE.test(String(serviceRow.name || '').trim());
 }
 
+// Merge the booking linkage into an engine-created draft's estimate_data.
+// Best-effort read-modify-write, fail-soft; an existing linkage (the call
+// pipeline stitches this key when one call produced both rows) wins.
+async function linkEstimateToBooking(estimateId, scheduledServiceId) {
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first();
+    if (!row) return;
+    let data = row.estimate_data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { data = null; }
+    }
+    data = data && typeof data === 'object' ? data : {};
+    if (data.scheduled_service_id) return;
+    await db('estimates').where({ id: estimateId }).update({
+      estimate_data: JSON.stringify({ ...data, scheduled_service_id: scheduledServiceId }),
+    });
+  } catch (err) {
+    logger.warn(`[booking-predraft] booking linkage merge failed for estimate ${estimateId}: ${err.message}`);
+  }
+}
+
 async function maybePreDraftForBooking(scheduledServiceId) {
   try {
     if (!bookingPreDraftsEnabled()) return { drafted: false, skipped: 'gate_off' };
@@ -92,6 +113,13 @@ async function maybePreDraftForBooking(scheduledServiceId) {
         callLogId: booking.source_call_log_id,
         quotePromised: true,
       });
+      if (outcome?.estimateId) {
+        // The engine stamps its call linkage but not the booking's — merge
+        // scheduled_service_id so the draft gets the exact schedule badge
+        // and the booking-link collision guard sees it (existing linkage,
+        // e.g. call-pipeline stitching, is never clobbered).
+        await linkEstimateToBooking(outcome.estimateId, booking.id);
+      }
       return {
         drafted: outcome?.created === true,
         delegated: 'call_engine',
@@ -135,7 +163,24 @@ async function maybePreDraftForBooking(scheduledServiceId) {
       Math.max(expiryBase.getTime(), Date.now()) + 14 * 86400000,
     );
 
-    const result = await withAutomatedEstimatePhoneLock(customer.phone, async (trx) => {
+    // withAutomatedEstimatePhoneLock degrades to a bare (unserialized)
+    // callback when the customer has no usable phone — concurrent hook
+    // replays could then both pass the idempotency probe. Email-only
+    // customers are real (the leads flow supports them), so fall back to a
+    // per-booking advisory transaction lock, analogous to the engine's
+    // call-id fallback.
+    const hasUsablePhone = String(customer.phone || '').replace(/\D/g, '').length >= 10;
+    const runUnderLock = hasUsablePhone
+      ? (cb) => withAutomatedEstimatePhoneLock(customer.phone, cb)
+      : (cb) => db.transaction(async (trx) => {
+        await trx.raw(
+          'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+          ['booking_predraft', String(booking.id)],
+        );
+        return cb(trx);
+      });
+
+    const result = await runUnderLock(async (trx) => {
       // Per-booking idempotency: the tagger hook replays (admin
       // regenerate-brief), and the duplicate guard alone stops covering us
       // once the first draft closes. Keyed on the top-level
