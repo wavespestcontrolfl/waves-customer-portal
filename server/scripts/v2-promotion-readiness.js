@@ -151,7 +151,11 @@ async function main() {
     console.log(`Excluded ${staleExcluded} shadow row(s) from older extractor versions (not counted toward the gate).`);
   }
 
-  if (rows.length === 0) {
+  // Guard on the WHOLE bounded cohort — zero primary rows with a populated
+  // fallback cohort means every primary attempt failed (fallback rescued
+  // them all), which must surface as a 0% primary pass rate below, not as
+  // "nothing ran".
+  if (boundedRouteRows.length === 0) {
     console.log(`\nNo shadow extractions from the current extractor yet (${totalAttempted} total from older versions).`);
     console.log('Confirm CALL_EXTRACTION_V2_ENABLED=true and wait for inbound calls on the deployed extractor.');
     await db.destroy();
