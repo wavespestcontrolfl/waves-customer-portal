@@ -132,6 +132,7 @@ describe('_private helpers', () => {
     expect(_private.sourceKey('quote_wizard')).toBe('quote_wizard');
     expect(_private.sourceKey('email_inquiry')).toBe('email_inquiry');
     expect(_private.sourceKey('lead_agent')).toBe('lead_agent');
+    expect(_private.sourceKey('booking_assessment')).toBe('booking_assessment');
     expect(_private.sourceKey('who_knows')).toBe('other');
   });
 

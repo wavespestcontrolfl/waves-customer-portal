@@ -42,8 +42,10 @@ const logger = require('./logger');
 // (the SMS-thread lane included — it shares the engine pipeline); the
 // legacy IB quoting tool stamps source='ai_agent'. Everything else
 // (manual, quote_wizard, email_inquiry, lead_webhook, sms_intake,
-// lead_agent) is out of scope for edit distance — human-authored,
-// customer-self-served, template-built, or bare unpriced intake shells.
+// lead_agent, booking_assessment) is out of scope for edit distance —
+// human-authored, customer-self-served, template-built, or bare unpriced
+// intake shells (booking_assessment included: an assessment pre-draft
+// carries no AI-composed pricing to measure edits against).
 const AI_DRAFT_SOURCES = new Set(['estimator_engine', 'ai_agent']);
 
 function parseData(raw) {

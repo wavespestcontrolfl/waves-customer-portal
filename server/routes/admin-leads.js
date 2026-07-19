@@ -1328,6 +1328,21 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
 
+    // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
+    // default OFF): a Waves Assessment booked from the leads page seeds a
+    // draft estimate. Self-filtering + idempotent; post-commit and detached —
+    // must never abort or delay the booking response.
+    try {
+      const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('../services/estimator-engine/booking-predraft');
+      if (bookingPreDraftsEnabled()) {
+        maybePreDraftForBooking(appt.id).catch((err) => {
+          logger.warn(`[leads] booking pre-draft failed for appointment ${appt.id}: ${err.message}`);
+        });
+      }
+    } catch (predraftErr) {
+      logger.warn(`[leads] booking pre-draft hook unavailable: ${predraftErr.message}`);
+    }
+
     // Funnel-row mirror for the in-transaction 'won' conversion above.
     // Post-commit deliberately: the bridge must never abort the booking
     // transaction, and it is monotonic + idempotent on its own.

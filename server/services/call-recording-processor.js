@@ -7756,6 +7756,28 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
+    // default OFF): a phone-booked Waves Assessment (the fail-open catch-all)
+    // seeds a draft through the FULL engine call context. Self-filtering
+    // (non-assessment bookings return skipped), idempotent via the engine's
+    // per-call dedupe, fire-and-forget — never blocks call processing.
+    if (appointmentResult?.scheduledServiceId) {
+      try {
+        const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
+        if (bookingPreDraftsEnabled()) {
+          maybePreDraftForBooking(appointmentResult.scheduledServiceId)
+            .then((outcome) => {
+              if (outcome.drafted) {
+                logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
+              }
+            })
+            .catch((err) => logger.warn(`[call-proc] assessment pre-draft failed for ${maskSid(callSid)}: ${err.message}`));
+        }
+      } catch (predraftErr) {
+        logger.warn(`[call-proc] assessment pre-draft hook unavailable: ${predraftErr.message}`);
+      }
+    }
+
     // Step 6: Enroll in the local new_lead automation sequence.
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
