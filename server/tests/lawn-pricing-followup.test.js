@@ -1302,6 +1302,37 @@ describe('lawn pricing production follow-up', () => {
     expect(disarmed.pricingMetadata.pestProgramFloorArmed).toBe(false);
   });
 
+  test('the LIST-price bottom replays at the saved per-visit floor, not the live one (pre-push P0, round 13)', () => {
+    // A floor-bound quote saved under one pest_base.floor must replay at
+    // THAT bottom even after the live floor moves — basePrice reads the
+    // same resolved value as the post-discount metadata.
+    const { PEST } = require('../services/pricing-engine/constants');
+    const prior = PEST.floor;
+    PEST.floor = 200; // live floor moved after save — binds basePrice hard
+    try {
+      const replayed = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        pestProgramFloorArmed: true,
+        pestProgramFloorPerVisit: 79,
+        services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      const replayedPest = replayed.lineItems.find((li) => li.service === 'pest_control');
+      // Saved $79 bottom: the quote's own base+adj price stands (< 200).
+      expect(replayedPest.perApp).toBeLessThan(200);
+      expect(replayed.pricingMetadata.pestProgramFloorPerVisit).toBe(79);
+
+      // No override: a live run bottoms at the live $200 floor.
+      const live = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      expect(live.lineItems.find((li) => li.service === 'pest_control').perApp)
+        .toBeGreaterThanOrEqual(200);
+    } finally {
+      PEST.floor = prior;
+    }
+  });
+
   test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });

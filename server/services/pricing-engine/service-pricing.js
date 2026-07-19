@@ -1408,11 +1408,21 @@ function pricePestControl(property, options = {}) {
     modifiers = {},
   } = options;
 
-  // Post-discount floor arm: caller override first (saved-estimate replays
-  // — pre-push codex P0, round 9 on #2827), then the live DB-synced flag.
+  // Post-discount floor arm + per-visit floor VALUE: caller overrides first
+  // (saved-estimate replays — pre-push codex P0s, round 9/13 on #2827),
+  // then the live DB-synced constants. The resolved value feeds BOTH the
+  // list-price bottom (basePrice below) and the post-discount floor
+  // metadata — a live pest_base.floor change must never re-price a saved
+  // quote's replay in either place.
   const pestFloorArmedResolved = typeof options.pestProgramFloorArmed === 'boolean'
     ? options.pestProgramFloorArmed
     : PEST.enforceFloorPostDiscount === true;
+  const pestFloorPerVisitResolved = (() => {
+    const override = Number(options.pestProgramFloorPerVisit);
+    if (Number.isFinite(override) && override > 0) return override;
+    const live = Number(PEST.floor);
+    return Number.isFinite(live) && live > 0 ? live : 0;
+  })();
 
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
@@ -1461,7 +1471,7 @@ function pricePestControl(property, options = {}) {
 
   const propAdj = PROPERTY_TYPE_ADJ[propertyTypeMeta.propertyType] || 0;
   const ageAdj = pestAgeMeta.pestAgeAdj;
-  let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
+  let basePrice = Math.max(pestFloorPerVisitResolved, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
 
   const roachMod = PEST.roachModifier[roachMeta.roachType] || 0;
   // Session 11a Step 2b-3: 2-decimal rounding matches v2 (pricing-engine-v2.js:743).
@@ -1506,7 +1516,7 @@ function pricePestControl(property, options = {}) {
     // resolve caller-first (saved-estimate replays — pre-push codex P0,
     // round 9 on #2827), then the live constants.
     const floorAnn = pestFloorArmedResolved
-      ? pestProgramFloorAnnual(fm, v, options.pestProgramFloorPerVisit)
+      ? pestProgramFloorAnnual(fm, v, pestFloorPerVisitResolved)
       : null;
     return {
       frequency: freqKey,
@@ -1515,7 +1525,7 @@ function pricePestControl(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       ...(floorAnn !== null ? {
-        programFloorPerVisit: pestProgramFloorPerVisit(fm, options.pestProgramFloorPerVisit),
+        programFloorPerVisit: pestProgramFloorPerVisit(fm, pestFloorPerVisitResolved),
         programFloorAnnual: floorAnn,
         programFloorMonthly: Math.round(floorAnn / 12 * 100) / 100,
       } : {}),
