@@ -592,6 +592,25 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             });
             return result;
           }
+          if (proposalOutcome?.blocked) {
+            // Mirror the created-draft blocked path below: an open estimate
+            // already covers this prospect, and the generic red "send it
+            // manually" bell would prompt the operator to build a duplicate.
+            result.blocked = true;
+            if (quotePromised) {
+              await notify({
+                call: context.call,
+                context,
+                lane,
+                quotePromised,
+                threadKey,
+                estimateId: proposalOutcome.existingEstimateId || null,
+                title: S.blockedTitle,
+                body: S.blockedBody(callerLabel(intent, context)),
+              });
+            }
+            return result;
+          }
         }
       } catch (proposalErr) {
         logger.warn(`[estimator-engine] commercial proposal lane failed (red bell takes over): ${proposalErr.message}`);

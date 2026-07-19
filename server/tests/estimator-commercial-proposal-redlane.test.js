@@ -165,7 +165,7 @@ test('relationship red + gate on ⇒ proposal draft + deep-linked bell, no red b
   expect(mockCreateDraft).not.toHaveBeenCalled();
 });
 
-test('builder declines (duplicate/error) ⇒ falls through to the standard red bell', async () => {
+test('builder declines (error) ⇒ falls through to the standard red bell', async () => {
   mockBuildProposal.mockResolvedValue({ created: false, skipped: 'error' });
   const result = await run();
 
@@ -173,6 +173,31 @@ test('builder declines (duplicate/error) ⇒ falls through to the standard red b
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   const [, title] = mockNotifyAdmin.mock.calls[0];
   expect(title).toBe('RED-TITLE');
+});
+
+test('builder blocked on an open estimate ⇒ BLOCKED bell, never the "send it manually" red', async () => {
+  mockBuildProposal.mockResolvedValue({ created: false, blocked: true, existingEstimateId: 'est-open' });
+  const result = await run();
+
+  expect(result.blocked).toBe(true);
+  expect(result.created).toBe(false);
+  expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+  expect(title).toBe('BLOCKED-TITLE');
+  expect(opts.metadata.estimateId).toBe('est-open');
+});
+
+test('builder blocked on a request-only red stays silent (no false owed-quote task)', async () => {
+  mockBuildProposal.mockResolvedValue({ created: false, blocked: true, existingEstimateId: 'est-open' });
+  const result = await runDraftPipeline({
+    context: { ...CONTEXT },
+    origin: ORIGIN,
+    result: { lane: null, created: false },
+    quotePromised: false,
+  });
+
+  expect(result.blocked).toBe(true);
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
 });
 
 test('builder THROWS ⇒ red bell still rings (owed quote never lost)', async () => {
