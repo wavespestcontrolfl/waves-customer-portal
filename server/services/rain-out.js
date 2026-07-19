@@ -1,16 +1,16 @@
 /**
  * Tech rain-out flow — weather hits mid-route, the tech taps Rain Out,
  * picks where the visit (or the rest of today's route) goes, and the
- * customer gets a "we moved you" text they can adjust by reply.
+ * customer gets a "we moved you" text.
  *
  * Design rule: the appointment NEVER goes unbooked. We move it first
  * (SmartRebooker.reschedule with allowLive — works from en_route /
- * on_site since PR #1555), then the SMS offers an adjustment:
- *   reply 1 → confirm (re-stamps the same slot; handled by the existing
- *   reschedule-sms webhook flow, fed by writing option1 into the
- *   reschedule_log row the rebooker just created)
- *   any other time → the customer self-serves on the tokenized
- *   /reschedule/:token page, via the same link the 72h/24h reminders send.
+ * on_site since PR #1555). The new slot is already booked, so the SMS
+ * asks for nothing: if the time works the customer does nothing, and if
+ * it doesn't they self-serve on the tokenized /reschedule/:token page —
+ * the same link the 72h/24h reminders send. (The old reply-1/reply-2
+ * flow is gone; replies to previously-sent texts still resolve via
+ * reschedule-sms from their own reschedule_log rows.)
  *
  * Florida reality: storm cells roll in and roll back out, so the first
  * options offered are LATER TODAY (+2h / +4h), then SmartRebooker's
@@ -24,9 +24,9 @@ const SmartRebooker = require('./rebooker');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { buildRescheduleLink } = require('./reschedule-link');
-const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
   weather_rain: 'heavy rain',
@@ -34,6 +34,113 @@ const WEATHER_PHRASES = {
   weather_lightning: 'lightning',
   weather_heat: 'extreme heat',
 };
+
+// Customer-facing lead for the moved SMS, grounded in what we actually know
+// instead of a fixed "heavy rain rolled through" claim (owner call,
+// 2026-07-18). A same-day push means the tech is standing in the weather —
+// present tense. A day move quotes today's NWS chance when we have one, and
+// degrades to an honest generic when we don't (NWS is fail-open). Non-rain
+// reasons state the real operational constraint rather than a weather label.
+function composeWeatherLead({ reasonCode, isSameDay, hour, todayChance }) {
+  if (reasonCode === 'weather_wind') return 'winds are too high to spray safely today';
+  if (reasonCode === 'weather_lightning') return "there's lightning in the area";
+  if (reasonCode === 'weather_heat') return "today's heat is too extreme to treat safely";
+  if (isSameDay) {
+    const partOfDay = hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
+    return `rain is moving through your area this ${partOfDay}`;
+  }
+  if (todayChance != null && todayChance >= 60) return `storms are likely today (${todayChance}% chance)`;
+  if (todayChance != null && todayChance >= 30) return `rain is in today's forecast (${todayChance}% chance)`;
+  return "the weather isn't cooperating today";
+}
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// 'Tomorrow' when the chosen date is literally tomorrow, else the weekday
+// name. Date-only strings are anchored at UTC noon so the weekday can't
+// slip a day in either hemisphere of a DST change.
+function dayLabel(dateStr, todayStr) {
+  const chosen = new Date(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(chosen.getTime())) return null;
+  const tomorrow = new Date(`${todayStr}T12:00:00Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  if (tomorrow.toISOString().slice(0, 10) === String(dateStr)) return 'Tomorrow';
+  return WEEKDAY_NAMES[chosen.getUTCDay()];
+}
+
+function partOfDay(hour) {
+  return hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
+}
+
+// Max precip chance across the customer-facing arrival window from NWS
+// hourly periods — every hour the window touches, so a half-hour start
+// like 11:30 samples 11, 12 AND 13 (understating the last hour let the
+// SMS claim "looks better" into a stormy period). Null when the hourly
+// feed has no coverage for those hours — callers fall back to the
+// day-level number.
+function windowRainChance(hours, dateStr, windowStartHHMM) {
+  if (!Array.isArray(hours)) return null;
+  const startMinutes = hhmmToMinutes(windowStartHHMM);
+  if (startMinutes == null) return null;
+  const firstHour = Math.floor(startMinutes / 60);
+  const lastHour = Math.floor((startMinutes + ARRIVAL_WINDOW_MINUTES - 1) / 60);
+  const wanted = [];
+  for (let h = firstHour; h <= lastHour; h += 1) wanted.push(h);
+  let max = null;
+  for (const period of hours) {
+    const start = String(period?.startTime || '');
+    if (start.slice(0, 10) !== String(dateStr)) continue;
+    const hour = parseInt(start.slice(11, 13), 10);
+    if (!wanted.includes(hour) || period.rainChance == null) continue;
+    if (max == null || period.rainChance > max) max = period.rainChance;
+  }
+  return max;
+}
+
+// " Tomorrow morning looks a lot better — just a 10% chance of rain around
+// your new time." Only claims what the forecast supports. Preferred source
+// is the HOURLY chance scored on the actual booked arrival window (that's
+// what lets us say morning vs afternoon, and lets a same-day push say
+// "later today"); day-level chance is the fallback. Thresholds: window
+// claims need ≤40% (≤30% same-day — same storm system, be conservative)
+// and, when today's number is known, today ≥20 points worse. Always
+// "looks better", never a dry-weather promise.
+function composeBetterDayClause({
+  reasonCode, isSameDay, chosenDate, todayStr, todayChance, newChance, windowChance, windowStart,
+}) {
+  if (reasonCode !== 'weather_rain' && reasonCode !== 'weather_lightning') return '';
+
+  if (windowChance != null) {
+    const cap = isSameDay ? 30 : 40;
+    if (windowChance > cap) return '';
+    if (todayChance != null && todayChance - windowChance < 20) return '';
+    const day = isSameDay ? null : dayLabel(chosenDate, todayStr);
+    if (!isSameDay && !day) return '';
+    const startHour = Math.floor((hhmmToMinutes(windowStart) ?? 0) / 60);
+    const label = isSameDay ? 'Later today' : `${day} ${partOfDay(startHour)}`;
+    return windowChance <= 20
+      ? ` ${label} looks a lot better — just a ${windowChance}% chance of rain around your new time.`
+      : ` ${label} looks better — a ${windowChance}% chance of rain around your new time.`;
+  }
+
+  if (isSameDay || newChance == null || newChance > 40) return '';
+  if (todayChance != null && todayChance - newChance < 20) return '';
+  const label = dayLabel(chosenDate, todayStr);
+  if (!label) return '';
+  return newChance <= 20
+    ? ` ${label} looks a lot better — just a ${newChance}% chance of rain.`
+    : ` ${label} looks better — a ${newChance}% chance of rain.`;
+}
+
+// Explains WHY rain moves a spray visit. Dark until the owner flips
+// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away.
+const EFFICACY_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
+function composeEfficacyClause({ reasonCode, serviceType }) {
+  if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
+  if (reasonCode !== 'weather_rain') return '';
+  if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
+  return '\n\nWhy the move? Treatments need a few rain-free hours to bond — applying right before rain washes them away before they can work.';
+}
 
 // Statuses a rain-out may move. Mirrors the rebooker's reschedulable +
 // live-override sets; terminal rows are never touched.
@@ -158,7 +265,11 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
     .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
-    .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order');
+    .select(
+      'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
+      // Stamped service-address fields feed the moved-SMS forecast copy.
+      'lat', 'lng', 'service_address_zip',
+    );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
     const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
@@ -269,34 +380,100 @@ async function getOptions(serviceId) {
   };
 }
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, confirmable, serviceId }) {
+// Forecast decoration gets this long per stop before the SMS goes out
+// without it — the copy is optional, the tech's response is not.
+const FORECAST_DECORATION_TIMEOUT_MS = 1500;
+
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, forecastHealth = { degraded: false } }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
-  // Self-serve adjustments go through the same tokenized /reschedule link
-  // the 72h/24h reminders send. Only the anchor stop offers reply-1 confirm
-  // (commit() attaches its option1 to the reschedule_log row).
+  // Moved-first means the new slot is already booked — no confirmation
+  // reply to ask for. Adjustments self-serve through the same tokenized
+  // /reschedule link the 72h/24h reminders send.
   const { url: rescheduleUrl } = await buildRescheduleLink(serviceId, { customerId: customer.id });
-  const confirmPart = confirmable ? ' Reply 1 to confirm.' : '';
   const altClause = rescheduleUrl
-    ? `${confirmPart} Need a different time? Reschedule online: ${rescheduleUrl}`
-    : `${confirmPart} Need a different time? Reply to this message.`;
-  const forecastLink = forecastLinkForZip(customer.zip);
+    ? ` Need a different time? Reschedule online: ${rescheduleUrl}`
+    : ' Need a different time? Reply to this message.';
+  // Stamped service-address coordinates/zip beat the customer profile —
+  // same precedence as track-transitions and gps-arrival-detector — so a
+  // rain-out at a secondary property quotes THAT address's forecast.
+  const lat = job.lat ?? customer.latitude;
+  const lng = job.lng ?? customer.longitude;
+  const zip = job.service_address_zip || customer.zip;
+
+  const forecastLink = forecastLinkForZip(zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
-  const body = await renderSmsTemplate('rain_out_moved', {
+  // Forecast decoration is fail-open (same rule as the options sheet):
+  // any NWS problem renders the generic lead, never blocks the SMS.
+  // Daily gives the lead its today-number; hourly scores the actual
+  // booked arrival window so the better-day clause can say morning vs
+  // afternoon. Fetched in parallel, capped by the per-commit decoration
+  // budget: one slow pair marks the whole rain-out degraded so a
+  // route-scope move never queues per-stop NWS waits in front of the
+  // tech's response (the grid cache makes healthy repeats instant).
+  const todayStr = etDateString();
+  const isSameDay = String(chosen.date) === todayStr;
+  let outlook = null;
+  let hourly = null;
+  if (lat != null && lng != null && !forecastHealth.degraded) {
+    const fetched = await Promise.race([
+      Promise.all([
+        getDailyRainOutlook(lat, lng).catch(() => null),
+        getHourlyRainOutlook(lat, lng).catch(() => null),
+      ]),
+      new Promise((resolve) => { setTimeout(resolve, FORECAST_DECORATION_TIMEOUT_MS).unref?.(); }),
+    ]);
+    if (fetched) {
+      [outlook, hourly] = fetched;
+    } else {
+      forecastHealth.degraded = true;
+    }
+  }
+  const todayChance = outlook?.[todayStr]?.rainChance ?? null;
+  const newChance = outlook?.[String(chosen.date)]?.rainChance ?? null;
+  const windowChance = windowRainChance(hourly, String(chosen.date), chosen.window?.start);
+
+  const sharedVars = {
     first_name: customer.first_name || 'there',
-    weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
     service_type: (job.service_type || 'service').toLowerCase(),
     new_option: customerArrivalOption(chosen.date, chosen.window),
     alt_clause: altClause,
     forecast_clause: forecastClause,
-  }, {
+  };
+  const renderContext = {
     workflow: 'tech_rain_out',
     entity_type: 'scheduled_service',
     entity_id: serviceId,
-  });
+  };
+
+  // rain_out_moved_v2 is the forecast-grounded template this PR's
+  // migration seeds; the legacy rain_out_moved row stays untouched so an
+  // older server (or a rolled-back deploy) keeps rendering it. The legacy
+  // fallback fires ONLY when the v2 ROW is absent (a rolled-back
+  // migration) — an existing-but-disabled v2 row is the ops kill switch
+  // and must stop the send, not reroute it to old copy. The legacy row
+  // is retired in the cleanup PR once this deploy is verified.
+  let body = await renderSmsTemplate('rain_out_moved_v2', {
+    ...sharedVars,
+    weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
+    better_day_clause: composeBetterDayClause({
+      reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
+      windowChance, windowStart: chosen.window?.start,
+    }),
+    efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
+  }, renderContext);
   if (!body) {
-    logger.warn(`[rain-out] rain_out_moved template missing/disabled — moved ${serviceId} without SMS`);
+    const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
+    if (!v2Row) {
+      body = await renderSmsTemplate('rain_out_moved', {
+        ...sharedVars,
+        weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
+      }, renderContext);
+    }
+  }
+  if (!body) {
+    logger.warn(`[rain-out] rain-out template missing/disabled — moved ${serviceId} without SMS`);
     return { sent: false, reason: 'missing_template' };
   }
 
@@ -314,38 +491,6 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, confirmable, se
     return { sent: false, reason: result.code || result.reason || 'blocked' };
   }
   return { sent: true };
-}
-
-// Wire the reply path: the rebooker's reschedule() just inserted a
-// reschedule_log row for this move; write option1 (the chosen slot —
-// reply 1 re-confirms) into its notes so the existing
-// handleRescheduleReply webhook flow can act on it. There is no
-// option2 anymore — other times self-serve via the /reschedule link —
-// but replies of "2" to older texts still resolve from their own rows.
-// Windows carry `display` because the reply confirmation SMS renders
-// selectedOption.window.display for its {time} variable. start/end are the tight
-// 1-hour internal slot the appointment is actually booked into — a reply re-books
-// (or, for the slot the customer is already on, confirms) exactly that, so the
-// on-the-hour booking is never widened. `display` is the customer-facing 2-hour
-// arrival window, matching the moved SMS. A late reply inside the quoted window
-// is handled by the confirm-in-place path in reschedule-sms (it does not
-// re-validate a slot the appointment already occupies), so the 1-hour end here
-// no longer risks a same-day elapsed rejection.
-function replyWindow(window) {
-  return { start: window.start, end: window.end, display: customerArrivalLabel(window) };
-}
-
-async function attachReplyOptions(serviceJobId, chosen) {
-  const latest = await db('reschedule_log')
-    .where({ scheduled_service_id: serviceJobId })
-    .orderBy('created_at', 'desc')
-    .first('id');
-  if (!latest) return;
-  await db('reschedule_log').where({ id: latest.id }).update({
-    notes: JSON.stringify({
-      option1: { date: chosen.date, window: replyWindow(chosen.window) },
-    }),
-  });
 }
 
 /**
@@ -412,6 +557,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // there fires its reply-alt SMS first.
   const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
   const results = [];
+  // Shared across the whole rain-out: the first slow NWS pair degrades
+  // forecast decoration for every remaining stop's SMS.
+  const forecastHealth = { degraded: false };
   for (const job of orderedJobs) {
     let newWindow;
     if (job.id === serviceId) {
@@ -442,7 +590,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     // The move is COMMITTED past this point. Notification problems —
-    // a throwing provider/audit wrapper, a reply-option write failure —
+    // a throwing provider/audit wrapper, a failed forecast fetch —
     // must never mark the job failed, or the tech retries and
     // double-reschedules / double-texts an already-moved appointment.
     const chosen = { date: target.date, window: newWindow };
@@ -450,12 +598,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     if (notifyCustomer) {
       try {
         const customer = job.id === serviceId
-          ? { id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name, zip: service.zip }
-          : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, confirmable: job.id === serviceId, serviceId: job.id });
-        if (sms.sent && job.id === serviceId) {
-          await attachReplyOptions(job.id, chosen);
-        }
+          ? {
+            id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name,
+            zip: service.zip, latitude: service.customer_latitude, longitude: service.customer_longitude,
+          }
+          : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
+        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, forecastHealth });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };
@@ -478,5 +626,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 module.exports = {
   getOptions,
   commit,
-  _test: { sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES },
+  _test: {
+    sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
+    composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
+  },
 };
