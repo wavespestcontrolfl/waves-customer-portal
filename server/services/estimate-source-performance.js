@@ -21,8 +21,9 @@ const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 // here (manual/null from the admin builder, estimator_engine + ai_agent
 // from the AI composers, quote_wizard from the public self-serve wizard,
 // email_inquiry from the Gmail-sync draft lane, lead_webhook / sms_intake /
-// lead_agent bare intake shells); unknown or future values fold into
-// 'other' instead of vanishing.
+// lead_agent / booking_assessment bare intake shells — the last seeded by
+// Waves Assessment bookings); unknown or future values fold into 'other'
+// instead of vanishing.
 const KNOWN_SOURCES = [
   'manual',
   'estimator_engine',
@@ -32,6 +33,7 @@ const KNOWN_SOURCES = [
   'lead_webhook',
   'sms_intake',
   'lead_agent',
+  'booking_assessment',
 ];
 const SOURCE_ORDER = [...KNOWN_SOURCES, 'other'];
 

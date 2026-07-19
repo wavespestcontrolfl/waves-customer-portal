@@ -21,6 +21,7 @@ const SOURCE_LABELS = {
   lead_webhook: "Lead form",
   sms_intake: "SMS intake",
   lead_agent: "Lead agent",
+  booking_assessment: "Assessment booking",
   other: "Other",
 };
 

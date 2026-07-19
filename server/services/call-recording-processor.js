@@ -6331,7 +6331,10 @@ const CallRecordingProcessor = {
     // bell above already rang synchronously (the DURABLE owed-quote record);
     // the engine upgrades that bell in place with the draft when it finishes.
     // Non-blocking by contract — a drafting failure must never break call
-    // processing or eat the promise.
+    // processing or eat the promise. The settled chain is retained so the
+    // assessment pre-draft hook below can sequence AFTER it (never a second
+    // concurrent composer run for the same call).
+    let estimatorEnginePromise = null;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
@@ -6339,7 +6342,7 @@ const CallRecordingProcessor = {
       // a drafting pass. The engine's own dedupe guards make re-entry safe
       // and it degrades to the fallback notification on any failure.
       const { maybeDraftEstimateForCall } = require('./estimator-engine');
-      maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
+      estimatorEnginePromise = maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
         .then((engineOutcome) => {
           logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
         })
@@ -6577,6 +6580,10 @@ const CallRecordingProcessor = {
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      // Declared OUTSIDE the try so the catch can see whether a schedule row
+      // was already inserted when a later confirmation/SMS step threw — the
+      // insert-first contract means the booking can be real even on error.
+      let scheduledServiceId = null;
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
@@ -6679,8 +6686,8 @@ const CallRecordingProcessor = {
           // the SMS first and inserted the schedule row afterward — if the
           // insert threw, the customer received "your appointment is booked"
           // for an appointment that never landed on the schedule. Now: insert
-          // first, send only if it succeeded.
-          let scheduledServiceId = null;
+          // first, send only if it succeeded. (scheduledServiceId itself is
+          // declared above the outer try so the catch keeps the booked id.)
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
@@ -7481,7 +7488,11 @@ const CallRecordingProcessor = {
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+            // Keep scheduledServiceId (same rule as the outbound branch
+            // above): the schedule row EXISTS — dropping the id made the
+            // downstream approved-but-unbooked audit read this as a skipped
+            // booking, and starves the assessment pre-draft hook.
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -7704,7 +7715,11 @@ const CallRecordingProcessor = {
         }
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
-        appointmentResult = { error: err.message };
+        // The schedule row can already exist (insert-first contract): a
+        // confirmation/SMS failure must not erase its id — the
+        // approved-but-unbooked audit would read a real booking as skipped
+        // and the assessment pre-draft hook below would starve.
+        appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
       }
     }
 
@@ -7753,6 +7768,37 @@ const CallRecordingProcessor = {
           });
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
+      }
+    }
+
+    // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
+    // default OFF): a phone-booked Waves Assessment (the fail-open catch-all)
+    // seeds a draft through the FULL engine call context. Self-filtering
+    // (non-assessment bookings return skipped) and fire-and-forget — never
+    // blocks call processing. Sequenced AFTER the quote lane's engine run
+    // settles so the paid composer never runs twice concurrently: for a
+    // call the engine already drafted, the delegation's early
+    // existing-draft path re-notifies with quotePromised=true (an
+    // assessment booking IS an owed quote — the initial launch may have
+    // run quote-requested-only) and the booking linkage merges in;
+    // otherwise this is the first and only engine run for the call.
+    if (appointmentResult?.scheduledServiceId) {
+      try {
+        const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
+        if (bookingPreDraftsEnabled()) {
+          const preDraftBookingId = appointmentResult.scheduledServiceId;
+          void (estimatorEnginePromise || Promise.resolve())
+            .catch(() => {})
+            .then(() => maybePreDraftForBooking(preDraftBookingId))
+            .then((outcome) => {
+              if (outcome?.drafted) {
+                logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
+              }
+            })
+            .catch((err) => logger.warn(`[call-proc] assessment pre-draft failed for ${maskSid(callSid)}: ${err.message}`));
+        }
+      } catch (predraftErr) {
+        logger.warn(`[call-proc] assessment pre-draft hook unavailable: ${predraftErr.message}`);
       }
     }
 

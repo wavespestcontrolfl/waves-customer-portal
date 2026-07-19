@@ -62,6 +62,22 @@ class AppointmentTagger {
     const type = this.classifyAppointmentType(service.service_type);
     await db('scheduled_services').where({ id: scheduledServiceId }).update({ appointment_type: type.tag });
 
+    // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
+    // default OFF): a Waves Assessment booking seeds a draft estimate so the
+    // owner walks into the visit with context assembled. Self-filtering,
+    // idempotent (this hook replays via the regenerate-brief endpoint), and
+    // detached — a pre-draft failure must never block tagging or prep.
+    try {
+      const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
+      if (bookingPreDraftsEnabled()) {
+        void maybePreDraftForBooking(scheduledServiceId).catch((err) => {
+          logger.warn(`[appointment-tagger] booking pre-draft failed for ${scheduledServiceId}: ${err.message}`);
+        });
+      }
+    } catch (predraftErr) {
+      logger.warn(`[appointment-tagger] booking pre-draft hook unavailable: ${predraftErr.message}`);
+    }
+
     try {
       switch (type.tag) {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
