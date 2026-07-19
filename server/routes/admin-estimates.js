@@ -1413,6 +1413,27 @@ router.get('/', async (req, res, next) => {
               reviewNotes: estData.estimatorEngine.reviewNotes || null,
             }
             : null,
+          // ai_agent (IB quoting agent) drafts keep their reasoning /
+          // assumptions / uncertainty in estimate_data for the same reason —
+          // surface the operator review material so the pipeline can render
+          // it before send.
+          agentDraftReview: estData?.agentDraftReview
+            ? {
+              reasoning: estData.agentDraftReview.reasoning || null,
+              assumptions: Array.isArray(estData.agentDraftReview.assumptions)
+                ? estData.agentDraftReview.assumptions : [],
+              uncertainty: Array.isArray(estData.agentDraftReview.uncertainty)
+                ? estData.agentDraftReview.uncertainty : [],
+              sqftSource: estData.agentDraftReview.sqftSource || null,
+              belowTargetServices: Array.isArray(estData.agentDraftReview.marginCheck?.below_target_services)
+                ? estData.agentDraftReview.marginCheck.below_target_services : [],
+              // Priced lines whose margin could not be verified are a review
+              // signal too — dropping this would show an unflagged badge for
+              // a draft the engine could not fully vouch for.
+              unverifiedLineCount: Number(estData.agentDraftReview.marginCheck?.unverified_line_count || 0),
+              createdAt: estData.agentDraftReview.createdAt || null,
+            }
+            : null,
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
