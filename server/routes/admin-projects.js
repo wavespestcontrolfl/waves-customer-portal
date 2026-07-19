@@ -5601,8 +5601,12 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
     // DB record first, bytes second: destroying the S3 object before the
     // transaction meant a rolled-back delete (lock conflict, staleness-flag
     // failure) left a live DB row pointing at permanently-gone evidence on a
-    // legal filing. An orphaned S3 object (post-commit delete failure below)
-    // is the recoverable direction.
+    // legal filing. The deletion-job tombstone rides the SAME transaction —
+    // after commit it is the only surviving reference to the object, so it
+    // must not be a best-effort write (a swallowed insert would strand the
+    // object with nothing left to find it by). The post-commit S3 delete
+    // below retires it; any failure leaves it queued for the
+    // photo-orphan-reclaim sweep.
     let mutation;
     try {
       mutation = await db.transaction(async (trx) => {
@@ -5611,36 +5615,54 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
           .where({ id: req.params.photoId, project_id: req.params.id })
           .del();
         if (!count) return { deleted: 0, staleness: false };
+        let tombstoneId = null;
+        if (config.s3?.bucket && photo.s3_key) {
+          const [tombstone] = await trx('activity_log').insert({
+            admin_user_id: req.technicianId || null,
+            customer_id: project.customer_id,
+            action: 'project_photo_delete_orphaned',
+            description: `Photo storage object pending deletion (photo ${photo.id})`,
+            metadata: { project_id: project.id, photo_id: photo.id, s3_key: photo.s3_key },
+          }).returning('id');
+          tombstoneId = (tombstone && tombstone.id) || tombstone || null;
+        }
         const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
-        return { deleted: count, staleness: stale };
+        return { deleted: count, staleness: stale, tombstoneId };
       });
     } catch (e) {
       if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
       throw e;
     }
-    const { deleted, staleness } = mutation;
+    const { deleted, staleness, tombstoneId } = mutation;
     if (!deleted) return res.status(404).json({ error: 'Photo not found' });
+    // Best-effort is fine for RETIRING the tombstone (a missed stamp just
+    // means the reclaim sweep re-deletes an already-missing key — a no-op on
+    // S3 — and stamps it then); it was NOT fine for creating it.
+    const retireTombstone = async (note) => {
+      if (!tombstoneId) return;
+      await db('activity_log').where({ id: tombstoneId }).update({
+        metadata: JSON.stringify({
+          project_id: project.id,
+          photo_id: photo.id,
+          s3_key: photo.s3_key,
+          reclaimed_at: new Date().toISOString(),
+          ...(note ? { reclaim_note: note } : {}),
+        }),
+      }).catch(() => {});
+    };
     if (config.s3?.bucket && photo.s3_key) {
       try {
         await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: photo.s3_key }));
+        await retireTombstone();
       } catch (err) {
         if (!isMissingS3ObjectError(err)) {
-          // Row is gone; the object is an orphan to sweep up, not a failure
-          // the operator can act on. Plaintext log carries IDs only (s3 keys
-          // embed the original filename, which can carry PII) — the key
-          // itself goes into a durable activity-log tombstone, DB-resident
-          // and admin-scoped like project_photos.s3_key was, so a cleanup
-          // pass can find and reclaim the object.
-          logger.warn(`[projects] photo object orphaned after delete ${photo.id} (project ${req.params.id}): ${err.message}`);
-          await logProjectActivity(
-            req,
-            project,
-            'project_photo_delete_orphaned',
-            `Photo storage object could not be deleted and is orphaned (photo ${photo.id})`,
-            { photo_id: photo.id, s3_key: photo.s3_key, error: err.message },
-          ).catch(() => {});
+          // Row is gone; the durable tombstone keeps the object reclaimable.
+          // Plaintext log carries IDs only: s3 keys embed the original
+          // filename, which can carry PII.
+          logger.warn(`[projects] photo object orphaned after delete ${photo.id} (project ${req.params.id}); tombstone ${tombstoneId || 'n/a'} queued: ${err.message}`);
         } else {
           logger.warn(`[projects] photo object already missing ${photo.id} (project ${req.params.id})`);
+          await retireTombstone('already_missing');
         }
       }
     }

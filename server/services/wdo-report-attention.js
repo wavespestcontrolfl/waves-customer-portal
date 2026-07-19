@@ -39,8 +39,12 @@ async function findAttentionItems(now = new Date()) {
   // unrelated edit or staleness bookkeeping write, which would restart the
   // clock and postpone the alert indefinitely. Legacy signatures without a
   // signed_at fall back to updated_at.
+  // sent_at IS NULL, not status='draft': the /close path permits closing a
+  // signed WDO without a successful send, and that filing is exactly as
+  // stalled as a draft one.
   const signedUnsent = await db('projects')
-    .where({ project_type: 'wdo_inspection', status: 'draft' })
+    .where({ project_type: 'wdo_inspection' })
+    .whereNull('sent_at')
     .whereNotNull('wdo_signature')
     // Pay-before-report holds park signed drafts INTENTIONALLY (status stays
     // 'draft' until the invoice is paid) — those aren't stalled, and failing

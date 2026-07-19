@@ -116,7 +116,7 @@ function chain(overrides = {}) {
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
-    returning: jest.fn(),
+    returning: jest.fn().mockResolvedValue([{ id: 'row-1' }]),
     del: jest.fn().mockResolvedValue(1),
     ...overrides,
   };
