@@ -155,6 +155,19 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
 }
 
 /**
+ * A row belongs to the Commercial Proposal editor when a proposal is
+ * authored (enabled) OR machine-scaffolded by the estimator engine's
+ * commercial lane (scaffold, enabled:false). A disabled scaffold must not
+ * enter the normal edit flow: the list would offer "Edit estimate" and
+ * edit-source would report it editable, but the revise write rejects
+ * COMMERCIAL rows — the operator would lose their edits at save time.
+ */
+function isCommercialProposalData(estimateData) {
+  const proposal = parseEstimateData(estimateData)?.proposal;
+  return proposal?.enabled === true || proposal?.scaffold === true;
+}
+
+/**
  * Normalize whatever is stored in estimate_data.proposal into a stable shape.
  * Falls back to a synthesized single-building proposal when none is authored.
  *
@@ -248,4 +261,5 @@ module.exports = {
   normalizeProposal,
   annualizedAmount,
   computeProposalTotals,
+  isCommercialProposalData,
 };

@@ -784,7 +784,10 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (estimate?.archived_at) {
     return { message: 'Estimate is archived. Unarchive it before editing.', statusCode: 400 };
   }
-  if (parsed?.proposal?.enabled === true) {
+  // Scaffolds (enabled:false, machine-seeded by the commercial proposal
+  // lane) count too — the revise write below rejects COMMERCIAL rows, so
+  // letting one into the builder loses the operator's edits at save time.
+  if (require('./estimate-proposal').isCommercialProposalData(parsed)) {
     return { message: 'This estimate is a commercial proposal — edit it with the Commercial proposal editor.', statusCode: 400 };
   }
   if (estimate?.price_locked_at) {

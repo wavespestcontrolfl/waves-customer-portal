@@ -43,7 +43,7 @@ const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
-const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
 const {
   generateEstimateProposalPDF,
   buildEstimateProposalEmailAttachment,
@@ -1399,7 +1399,10 @@ router.get('/', async (req, res, next) => {
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
-          isCommercialProposal: estData?.proposal?.enabled === true,
+          // Scaffolds count: a disabled machine-seeded proposal must route
+          // to the proposal builder, not the normal edit flow (revise
+          // rejects COMMERCIAL rows).
+          isCommercialProposal: isCommercialProposalData(estData),
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           // Estimator-engine drafts keep their operator review material in
