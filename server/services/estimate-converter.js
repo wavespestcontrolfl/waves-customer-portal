@@ -890,12 +890,21 @@ function legacyLawnProgramMinimumMonthly(estimateData = {}) {
     rows.push(li);
     if (Array.isArray(li.tiers)) rows.push(...li.tiers);
   }
-  let inferred = null;
+  // Explicit value stamps are exact — prefer them outright. Value-less
+  // applied rows (client-fallback saves) only bound the minimum from above:
+  // each clamped annual is ceil'd to a whole per-application multiple, so a
+  // $50 minimum produces rows at $50 (6x/12x) and $50.25 (9x). The MIN over
+  // applied rows recovers the tightest cadence-rounding-free estimate and
+  // never raises any saved row (every applied row's own price ≥ the min, and
+  // the ladder clamp only lifts below-minimum values) — max would over-infer
+  // $50.25 and re-price $50 tiers (pre-push codex P0, round 9 on #2827).
+  let stampedMax = null;
+  let appliedMin = null;
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
     const stampedValue = Number(row.programMinimumMonthly ?? row.prov?.programMinimumMonthly);
     if (Number.isFinite(stampedValue) && stampedValue > 0) {
-      inferred = Math.max(inferred ?? 0, stampedValue);
+      stampedMax = Math.max(stampedMax ?? 0, stampedValue);
       continue;
     }
     const applied = row.programMinimumApplied === true
@@ -909,9 +918,11 @@ function legacyLawnProgramMinimumMonthly(estimateData = {}) {
       const annual = Number(row.annualAfterDiscount ?? row.annual ?? row.ann);
       monthly = Number.isFinite(annual) && annual > 0 ? Math.round((annual / 12) * 100) / 100 : NaN;
     }
-    if (Number.isFinite(monthly) && monthly > 0) inferred = Math.max(inferred ?? 0, monthly);
+    if (Number.isFinite(monthly) && monthly > 0) {
+      appliedMin = appliedMin == null ? monthly : Math.min(appliedMin, monthly);
+    }
   }
-  return inferred;
+  return stampedMax ?? appliedMin;
 }
 
 // Signal-only variant: stamp → legacy row evidence → NULL (no live-global

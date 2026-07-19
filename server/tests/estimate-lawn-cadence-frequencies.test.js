@@ -688,6 +688,23 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(Object.fromEntries(appliedFlag.map((f) => [f.key, f])).standard.monthly)
       .toBeCloseTo(50, 2);
 
+    // Cadence rounding must not inflate the inference: the historical $50
+    // minimum produced $50 (6x) AND $50.25 (9x — annual ceil'd to a whole
+    // per-app multiple). The MIN over applied rows recovers $50; max would
+    // re-price $50 tiers to $50.25 (pre-push codex P0, round 9).
+    const roundedRows = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: {
+        results: {
+          lawn: [
+            { v: 6, mo: 50, ann: 600, programMinimumApplied: true },
+            { v: 9, mo: 50.25, ann: 603, programMinimumApplied: true },
+          ],
+        },
+      },
+    });
+    expect(Object.fromEntries(roundedRows.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(50, 2);
+
     // A post-disarm stamp (0) BEATS row evidence — deliberate disarm wins.
     const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
       result: {

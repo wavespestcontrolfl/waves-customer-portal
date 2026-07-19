@@ -159,6 +159,42 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     expect(entry.monthly).toBe(134.1);
   });
 
+  test('a re-armed cost floor rides the combo selection — WaveGuard cannot cut the lawn slice below it (pre-push codex P0 round 9 #2827)', () => {
+    // Stored rows carry costFloorAnnual for margin REPORTING on every
+    // quote; with the estimate's arm resolution ARMED the selected tier's
+    // own floor joins the post-discount clamp (never above the authored
+    // base — same rule as generateEstimate's guards).
+    const stats = {
+      lawn: [
+        { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120, costFloorAnnual: 700 },
+        { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 810 },
+      ],
+    };
+    const map = nonPestTierBaseMap(stats);
+    const armed = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
+      pest_control: 'quarterly',
+      lawn_care: 'standard',
+    }, { lawnCostFloorArmed: true });
+    // pest 60*0.9 = 54 ; lawn 60*0.9 = 54 → clamped at 700/12 = 58.33 → 112.33
+    expect(armed.monthly).toBe(112.33);
+
+    // A floor ABOVE the authored base never raises the price — the line is
+    // merely undiscountable (Enhanced: base 66.75, floor 810/12 = 67.5).
+    const aboveBase = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
+      pest_control: 'quarterly',
+      lawn_care: 'enhanced',
+    }, { lawnCostFloorArmed: true });
+    // pest 54 ; lawn held at its base 66.75 → 120.75
+    expect(aboveBase.monthly).toBe(120.75);
+
+    // Disarmed (default): the same reporting field moves nothing.
+    const disarmed = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
+      pest_control: 'quarterly',
+      lawn_care: 'standard',
+    });
+    expect(disarmed.monthly).toBe(108);
+  });
+
   test('a bundle manual discount applies IN FULL — no lawn floor caps the headroom (owner ruling 2026-07-17)', () => {
     // No WaveGuard %; floors disarmed so the lawn Standard base stays $45.50.
     // The $65/mo ($780/yr) manual discount spends against the whole bundle:
