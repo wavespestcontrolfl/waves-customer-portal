@@ -148,5 +148,30 @@ describe('runWdoReportAttentionSweep', () => {
     // Allowlist, not a terminal-state blocklist — rescheduled/skipped/any
     // future terminal status must never ring.
     expect(apptChain.whereIn).toHaveBeenCalledWith('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    // scheduled_date is an ET wall-clock DATE — the cutoff must be an ET
+    // calendar-date string, never a JS Date instant.
+    expect(apptChain.where).toHaveBeenCalledWith(
+      'ss.scheduled_date',
+      '<',
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+    );
+  });
+
+  test('a failed bell insert fails the sweep instead of recording a ring', async () => {
+    isEnabled.mockReturnValue(true);
+    NotificationService.notifyAdmin.mockResolvedValue(null); // insert failed
+    db.mockImplementation((table) => {
+      if (table === 'projects') {
+        return chain({
+          select: jest.fn().mockImplementation(function selectImpl() {
+            const wantsHolds = this.whereIn.mock.calls.length > 0;
+            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1' }]);
+          }),
+        });
+      }
+      if (table === 'notifications') return chain({ select: jest.fn().mockResolvedValue([]) });
+      return chain();
+    });
+    await expect(runWdoReportAttentionSweep()).rejects.toThrow('bell not recorded');
   });
 });

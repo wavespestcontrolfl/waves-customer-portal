@@ -2359,14 +2359,29 @@ async function refreshWdoSignatureStaleness(req, before, after) {
 // findings hash, this doesn't self-heal on revert — a photo edit is a re-sign.
 // Returns false (no signature / not a WDO), 'already_stale', or 'flagged'
 // (newly flagged by THIS mutation — the caller logs the activity entry).
-async function flagWdoSignatureStaleForPhotos(project, trx) {
+// Locks the project row for the duration of a photo mutation's transaction
+// and rejects while a send claim is active: a photo change landing between
+// the send's freshness check and its addendum snapshot would otherwise ride
+// into the emailed filing unattested. The locked row (not the request-scope
+// snapshot, which a concurrent signature save can invalidate) also feeds the
+// staleness decision below. Applies to every project type — any in-flight
+// send is rendering photos it already validated.
+async function lockProjectForPhotoMutation(project, trx) {
+  const locked = await trx('projects')
+    .where({ id: project.id })
+    .forUpdate()
+    .first('wdo_signature', 'delivery_status', 'project_type');
+  if (String(locked?.delivery_status || '') === 'sending') {
+    const err = new Error('This report is being sent right now — retry the photo change in a moment.');
+    err.code = 'send_in_progress';
+    throw err;
+  }
+  return locked;
+}
+
+async function flagWdoSignatureStaleForPhotos(project, trx, lockedRow) {
   if (!project || project.project_type !== 'wdo_inspection') return false;
-  // Re-read the signature UNDER LOCK inside the mutation's transaction — the
-  // request-scope project snapshot can predate a concurrent signature save,
-  // and writing that snapshot back would resurrect the old signature image
-  // (or miss flagging the one that just landed).
-  const row = await trx('projects').where({ id: project.id }).forUpdate().first('wdo_signature');
-  let sig = row ? row.wdo_signature : null;
+  let sig = lockedRow ? lockedRow.wdo_signature : null;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
   if (!sig || !sig.image) return false;
   if (sig.content_stale) return 'already_stale';
@@ -3067,7 +3082,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // two copies and the project two identical archived filings. Claim the
     // row as 'sending' before any side effect (mirrors the send-with-invoice
     // invoice claim); a crashed claim self-recovers after 10 minutes.
-    const previousDeliveryStatus = project.delivery_status || null;
+    // A recovered STALE claim normalizes its revert target to 'failed' — an
+    // abort must never write 'sending' back with a fresh updated_at, which
+    // would re-lock retries for another 10 minutes per failure, indefinitely.
+    const previousDeliveryStatus = project.delivery_status === 'sending'
+      ? 'failed'
+      : (project.delivery_status || null);
     const sendClaim = await db('projects')
       .where({ id: project.id })
       .where((q) => q
@@ -4321,8 +4341,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Shared project delivery claim (see hoist comment): one claim namespace
     // across /send and /send-with-invoice so the two routes can't race each
     // other into duplicate FDACS emails/archives. Taken AFTER the invoice
-    // claim; losing it returns the invoice claim before 409ing.
-    const previousDeliveryStatus = project.delivery_status || null;
+    // claim; losing it returns the invoice claim before 409ing. Same stale-
+    // recovery normalization as /send: never revert back to 'sending'.
+    const previousDeliveryStatus = project.delivery_status === 'sending'
+      ? 'failed'
+      : (project.delivery_status || null);
     const deliveryClaimRows = await db('projects')
       .where({ id: project.id })
       .where((q) => q
@@ -5285,18 +5308,26 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       ContentType: contentType,
     }));
 
-    const { row, staleness } = await db.transaction(async (trx) => {
-      const [inserted] = await trx('project_photos').insert({
-        project_id: project.id,
-        s3_key: key,
-        category: req.body.category || null,
-        caption: clampPhotoCaption(req.body.caption),
-        visit: req.body.visit === 'followup' ? 'followup' : 'primary',
-        uploaded_by_tech_id: req.technicianId,
-      }).returning('*');
-      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
-      return { row: inserted, staleness: stale };
-    });
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const [inserted] = await trx('project_photos').insert({
+          project_id: project.id,
+          s3_key: key,
+          category: req.body.category || null,
+          caption: clampPhotoCaption(req.body.caption),
+          visit: req.body.visit === 'followup' ? 'followup' : 'primary',
+          uploaded_by_tech_id: req.technicianId,
+        }).returning('*');
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { row: inserted, staleness: stale };
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { row, staleness } = mutation;
 
     await logProjectActivity(
       req,
@@ -5332,26 +5363,41 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const photo = await db('project_photos').where({ id: req.params.photoId, project_id: req.params.id }).first();
     if (!photo) return res.status(404).json({ error: 'Photo not found' });
+    // DB record first, bytes second: destroying the S3 object before the
+    // transaction meant a rolled-back delete (lock conflict, staleness-flag
+    // failure) left a live DB row pointing at permanently-gone evidence on a
+    // legal filing. An orphaned S3 object (post-commit delete failure below)
+    // is the recoverable direction.
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const count = await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .del();
+        if (!count) return { deleted: 0, staleness: false };
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { deleted: count, staleness: stale };
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { deleted, staleness } = mutation;
+    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     if (config.s3?.bucket && photo.s3_key) {
       try {
         await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: photo.s3_key }));
       } catch (err) {
         if (!isMissingS3ObjectError(err)) {
-          logger.warn(`[projects] failed to delete photo object ${photo.id}: ${err.message}`);
-          return res.status(502).json({ error: 'Could not delete photo from storage. Please retry.' });
+          // Row is gone; the object is an orphan to sweep up, not a failure
+          // the operator can act on — surface it in logs only.
+          logger.warn(`[projects] photo object orphaned after delete ${photo.id} (${photo.s3_key}): ${err.message}`);
+        } else {
+          logger.warn(`[projects] photo object already missing ${photo.id}: ${photo.s3_key}`);
         }
-        logger.warn(`[projects] photo object already missing ${photo.id}: ${photo.s3_key}`);
       }
     }
-    const { deleted, staleness } = await db.transaction(async (trx) => {
-      const count = await trx('project_photos')
-        .where({ id: req.params.photoId, project_id: req.params.id })
-        .del();
-      if (!count) return { deleted: 0, staleness: false };
-      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
-      return { deleted: count, staleness: stale };
-    });
-    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     await logProjectActivity(
       req,
       project,
@@ -5376,16 +5422,24 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
       }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
-    const { changed, staleness } = await db.transaction(async (trx) => {
-      const count = await trx('project_photos')
-        .where({ id: req.params.photoId, project_id: req.params.id })
-        .update({ ...updates, updated_at: db.fn.now() });
-      if (!count) return { changed: 0, staleness: false };
-      // Caption/category/order all render into the FDACS photo addendum —
-      // an edit to any of them on a signed WDO requires a re-sign.
-      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
-      return { changed: count, staleness: stale };
-    });
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const count = await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .update({ ...updates, updated_at: db.fn.now() });
+        if (!count) return { changed: 0, staleness: false };
+        // Caption/category/order all render into the FDACS photo addendum —
+        // an edit to any of them on a signed WDO requires a re-sign.
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { changed: count, staleness: stale };
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { changed, staleness } = mutation;
     if (!changed) return res.status(404).json({ error: 'Photo not found' });
     if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo details edited');
     res.json({ ok: true, ...(staleness ? { signature_stale: true } : {}) });

@@ -21,6 +21,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { etDateString } = require('../utils/datetime-et');
 
 const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
@@ -45,10 +46,14 @@ async function findAttentionItems(now = new Date()) {
   // skipped / any future terminal status can never ring a false alarm.
   // A linked project row does NOT exempt the visit: a past-date on_site
   // WITH a draft report is a half-finished closeout, still a stall.
+  // scheduled_date is an ET wall-clock DATE — compare it to an ET calendar
+  // date, never a UTC instant (a JS timestamp cutoff would flag a visit on
+  // its own scheduled evening once UTC rolls past midnight).
+  const stuckApptCutoff = etDateString(new Date(now.getTime() - STUCK_APPT_HOURS * 3600e3));
   const stuckAppts = await db('scheduled_services as ss')
     .join('services as s', 's.id', 'ss.service_id')
     .where('s.name', 'ilike', '%wdo%')
-    .where('ss.scheduled_date', '<', new Date(now.getTime() - STUCK_APPT_HOURS * 3600e3))
+    .where('ss.scheduled_date', '<', stuckApptCutoff)
     .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
 
@@ -120,7 +125,7 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
     if (await priorBellCovers(ids, now)) return { ok: true, deduped: true, items: ids.length };
 
     const summary = summarize(items);
-    await NotificationService.notifyAdmin(
+    const bell = await NotificationService.notifyAdmin(
       CATEGORY,
       'WDO reports need attention',
       `${summary}. Open the projects list to finish and send them — each is a dated FDACS filing someone is waiting on.`,
@@ -135,6 +140,11 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
         },
       },
     );
+    // notifyAdmin returns null when the insert fails (its create() swallows
+    // the error) — a bell that didn't land must fail the sweep loudly, not
+    // record a ring and go quiet for six hours. (Intentional suppression
+    // returns a truthy sentinel and correctly counts as rung.)
+    if (!bell) throw new Error('admin notification insert failed — bell not recorded');
     logger.info(`[wdo-report-attention] rang: ${summary}`);
     return { ok: true, rang: true, items: ids.length };
   });

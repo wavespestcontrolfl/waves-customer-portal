@@ -112,6 +112,7 @@ function chain(overrides = {}) {
     limit: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
@@ -1655,9 +1656,12 @@ describe('admin projects routes', () => {
     });
   });
 
-  test('photo delete does not drop database row when storage delete fails', async () => {
+  // DB record first, bytes second: a storage failure AFTER the committed
+  // delete leaves an orphaned S3 object (logged for cleanup), never a live
+  // DB row pointing at permanently-gone evidence.
+  test('photo delete commits the DB delete even when the storage delete fails', async () => {
     const projectRead = chain({
-      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+      first: jest.fn().mockResolvedValue({ id: 'project-1', customer_id: 'customer-1', created_by_tech_id: 'tech-1' }),
     });
     const photoRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -1667,14 +1671,15 @@ describe('admin projects routes', () => {
       }),
     });
     const photoDelete = chain();
+    const activityInsert = chain();
     const storageError = new Error('S3 timeout');
     mockS3Send.mockRejectedValue(storageError);
 
+    const photoQueries = [photoRead, photoDelete];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectRead;
-      if (table === 'project_photos') return table === 'project_photos' && photoRead.first.mock.calls.length === 0
-        ? photoRead
-        : photoDelete;
+      if (table === 'project_photos') return photoQueries.shift();
+      if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1684,9 +1689,11 @@ describe('admin projects routes', () => {
         headers: { Authorization: 'Bearer tech-1' },
       });
       const body = await res.json();
-      expect(res.status).toBe(502);
-      expect(body.error).toMatch(/storage/);
-      expect(photoDelete.del).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(photoDelete.del).toHaveBeenCalledTimes(1);
+      const logger = require('../services/logger');
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('orphaned after delete'));
     });
   });
 

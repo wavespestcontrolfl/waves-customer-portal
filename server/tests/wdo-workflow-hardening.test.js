@@ -315,6 +315,50 @@ describe('POST /:id/send concurrency claim', () => {
       expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
     });
   });
+
+  test('a recovered stale claim reverts to failed, never back to sending', async () => {
+    // Stale takeover: the row still says 'sending' but the claim UPDATE wins
+    // (10-minute recovery window). The send then aborts on the WDO no-email
+    // gate — the revert must write 'failed', not re-lock the row as 'sending'.
+    const projects = chain({
+      first: jest.fn().mockResolvedValue(wdoProject({ delivery_status: 'sending' })),
+      update: jest.fn().mockResolvedValue(1),
+    });
+    mockTables({
+      projects,
+      customers: chain({ first: jest.fn().mockResolvedValue({ ...CUSTOMER, email: '' }) }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('email_required');
+      expect(projects.update).toHaveBeenCalledWith(expect.objectContaining({ delivery_status: 'failed' }));
+      const reverted = projects.update.mock.calls.filter(([payload]) => payload?.delivery_status === 'sending');
+      expect(reverted).toHaveLength(1); // the claim itself — never the revert
+    });
+  });
+
+  test('photo mutations 409 while a send claim is active', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject({ delivery_status: 'sending' })) });
+    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
+    mockTables({ projects, project_photos: photos });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-9`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caption: 'Late edit' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('send_in_progress');
+      expect(photos.update).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('photo mutations flag a signed WDO signature stale', () => {
