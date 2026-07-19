@@ -236,7 +236,9 @@ describe('maybeBuildCommercialProposalDraft', () => {
     expect(proposal.enabled).toBe(false);
     expect(proposal.synthesized).toBe(false);
     expect(proposal.scaffold).toBe(true);
-    expect(proposal.buildings.map((b) => b.name)).toEqual(['Building A', 'Building B', 'Clubhouse']);
+    // Deterministic: aggregate building count, NEVER the brief's names —
+    // proposal fields reach the customer PDF; model text stays in the card.
+    expect(proposal.buildings.map((b) => b.name)).toEqual(['Building 1', 'Building 2', 'Building 3']);
     for (const b of proposal.buildings) {
       expect(b.lineItems.length).toBeGreaterThan(0);
       for (const li of b.lineItems) expect(li.unitPrice).toBe(0);
@@ -376,15 +378,19 @@ describe('buildProposalScaffold', () => {
   const { buildProposalScaffold, parcelFacts } = _private;
   const facts = parcelFacts(PROPERTY_RECORD, PARCEL_VIEW);
 
-  test('brief buildings win over the aggregate count', () => {
-    const scaffold = buildProposalScaffold({ intent: INTENT(), brief: { buildings: [{ name: 'Tower', note: null }], servicePrograms: [] }, facts });
-    expect(scaffold.buildings.map((b) => b.name)).toEqual(['Tower']);
+  test('the scaffold is fully deterministic — the brief cannot shape it', () => {
+    // buildProposalScaffold takes NO brief input at all: model text must
+    // never reach proposal fields (they land on the customer PDF once the
+    // operator prices), and no regex reliably catches every price phrasing.
+    const scaffold = buildProposalScaffold({ intent: INTENT(), facts });
+    expect(scaffold.buildings.map((b) => b.name)).toEqual(['Building 1', 'Building 2', 'Building 3']);
+    const descriptions = scaffold.buildings[0].lineItems.map((li) => li.description);
+    expect(descriptions.every((d) => d.includes('scope and pricing after walkthrough'))).toBe(true);
   });
 
-  test('no brief + no aggregate ⇒ single building named after the address', () => {
+  test('no aggregate ⇒ single building named after the address', () => {
     const scaffold = buildProposalScaffold({
       intent: INTENT(),
-      brief: null,
       facts: parcelFacts(null, null),
     });
     expect(scaffold.buildings).toHaveLength(1);
@@ -394,7 +400,6 @@ describe('buildProposalScaffold', () => {
   test('no services at all still yields one generic $0 program line', () => {
     const scaffold = buildProposalScaffold({
       intent: INTENT({ services: {} }),
-      brief: null,
       facts: parcelFacts(null, null),
     });
     const lines = scaffold.buildings[0].lineItems;
@@ -403,17 +408,8 @@ describe('buildProposalScaffold', () => {
     expect(lines[0].description).toContain('Commercial service program');
   });
 
-  test('brief program cadence normalizes into proposal frequencies', () => {
-    const scaffold = buildProposalScaffold({
-      intent: INTENT(),
-      brief: { buildings: [], servicePrograms: [{ name: 'Turf', cadence: 'every other month', scope: 'shared lawns' }] },
-      facts,
-    });
-    expect(scaffold.buildings[0].lineItems[0].frequency).toBe('bimonthly');
-  });
-
   test('scaffold is disabled, non-synthesized, and marked', () => {
-    const scaffold = buildProposalScaffold({ intent: INTENT(), brief: null, facts });
+    const scaffold = buildProposalScaffold({ intent: INTENT(), facts });
     expect(scaffold.enabled).toBe(false);
     expect(scaffold.synthesized).toBe(false);
     expect(scaffold.scaffold).toBe(true);

@@ -596,7 +596,7 @@ export default function CommercialProposalPage() {
                   )}
                   {prospectBrief.researchedAt && (
                     <div className="text-11 text-zinc-400">
-                      Researched {new Date(prospectBrief.researchedAt).toLocaleString()}
+                      Researched {new Date(prospectBrief.researchedAt).toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
                     </div>
                   )}
                 </CardBody>

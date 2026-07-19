@@ -19,8 +19,12 @@
  *     Commercial Proposal builder opens pre-filled instead of empty
  *
  * DOLLAR AUTHORITY: this lane never prices anything. generateEstimate is the
- * sole dollar authority and it deliberately red-lanes this segment; the LLM
- * brief is scope/intent-only and is REJECTED OUTRIGHT if it contains any
+ * sole dollar authority and it deliberately red-lanes this segment. Model
+ * text NEVER reaches proposal fields — the scaffold is fully deterministic
+ * (intent keys + parcel facts), because proposal fields reach the
+ * customer-facing PDF once the operator prices and saves and no regex
+ * reliably catches every phrasing of a price. The brief is INTERNAL-ONLY
+ * (research card) and is additionally REJECTED OUTRIGHT if it contains any
  * dollar figure. Prices enter exclusively through the operator's
  * PUT /:id/proposal, which recomputes the authoritative totals.
  *
@@ -255,10 +259,18 @@ function serviceLabel(key) {
  * scaffold off the customer page, out of the send attachment, and the send
  * gate's authored-proposal exemption closed. Every line is $0 — the operator
  * prices after the walkthrough; save-time normalization keeps 0 legal.
+ *
+ * FULLY DETERMINISTIC — no model text, ever. Proposal fields (building
+ * names, line descriptions, cadences) reach the customer-facing PDF once
+ * the operator prices and saves, and no regex can reliably catch every way
+ * a model might phrase a price ("annual cost 1200", "twelve hundred").
+ * The composed brief stays INTERNAL-ONLY (estimate_data.commercialProspect
+ * → the read-only research card); the operator copies what they want into
+ * the proposal by hand.
  */
-function buildProposalScaffold({ intent, brief, facts }) {
-  let buildings = (brief?.buildings || []).map((b) => ({ name: b.name, note: b.note }));
-  if (!buildings.length && facts.aggregated && facts.buildingCount > 1) {
+function buildProposalScaffold({ intent, facts }) {
+  let buildings = [];
+  if (facts.aggregated && facts.buildingCount > 1) {
     buildings = Array.from(
       { length: Math.min(facts.buildingCount, MAX_SCAFFOLD_BUILDINGS) },
       (_, i) => ({ name: `Building ${i + 1}`, note: null }),
@@ -268,13 +280,11 @@ function buildProposalScaffold({ intent, brief, facts }) {
     buildings = [{ name: intent.address || 'Service location', note: null }];
   }
 
-  const programs = (brief?.servicePrograms || []).length
-    ? brief.servicePrograms
-    : Object.keys(intent.services || {}).map((key) => ({
-      name: ONE_TIME_SERVICE_KEYS.has(key) ? serviceLabel(key) : `${serviceLabel(key)} program`,
-      cadence: ONE_TIME_SERVICE_KEYS.has(key) ? 'one_time' : 'monthly',
-      scope: 'scope and pricing after walkthrough',
-    }));
+  const programs = Object.keys(intent.services || {}).map((key) => ({
+    name: ONE_TIME_SERVICE_KEYS.has(key) ? serviceLabel(key) : `${serviceLabel(key)} program`,
+    cadence: ONE_TIME_SERVICE_KEYS.has(key) ? 'one_time' : 'monthly',
+    scope: 'scope and pricing after walkthrough',
+  }));
   const lineItems = (programs.length ? programs : [{
     name: 'Commercial service program',
     cadence: 'monthly',
@@ -335,7 +345,10 @@ async function maybeBuildCommercialProposalDraft({
 
     const facts = parcelFacts(propertyRecord, parcelView);
     const brief = await composeProspectBrief({ intent, propertyFacts, facts, context, reasons });
-    const scaffold = buildProposalScaffold({ intent, brief, facts });
+    // The brief NEVER shapes the scaffold — proposal fields reach the
+    // customer PDF after operator pricing, so they are built exclusively
+    // from deterministic inputs (intent keys + parcel facts).
+    const scaffold = buildProposalScaffold({ intent, facts });
 
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + PROPOSAL_DRAFT_EXPIRY_DAYS * 86400000);
