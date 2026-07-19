@@ -488,11 +488,18 @@ async function handleClarifyReply({ phone, body }) {
       if (!fresh.sent_at && fresh.status === 'pending') {
         // Answered before approval: rewrite the pending copy to the
         // remainder or retire it outright (status-guarded — a claim wins).
-        await trx('message_drafts')
+        const applied = await trx('message_drafts')
           .where({ id: fresh.id, status: 'pending' })
           .update(remaining.length
             ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
+        if (!applied) {
+          // The UNLOCKED admin claim flipped pending→approved after our
+          // read — the answer must not be silently lost. Stamp the flags
+          // against the now-claimed row (status untouched); the dispatch
+          // decision runs under this same lock afterward and honors them.
+          await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
+        }
       } else {
         await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
       }
@@ -585,11 +592,17 @@ async function recordClarifyAnswer({ phone, items = [] }) {
         // Answered before approval: rewrite the pending copy down to the
         // remainder, or retire it outright when nothing remains. Guarded on
         // status — a claim landing before the lock wins.
-        await trx('message_drafts')
+        const applied = await trx('message_drafts')
           .where({ id: awaiting.id, status: 'pending' })
           .update(remaining.length
             ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
+        if (!applied) {
+          // The UNLOCKED admin claim won the race after our read — fall
+          // back to stamp-only so the answer reaches the claimed row and
+          // the dispatch decision (under this same lock) honors it.
+          await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
+        }
       } else {
         await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
       }

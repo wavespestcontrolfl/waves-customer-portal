@@ -345,10 +345,25 @@ function draftMessageType(draft, legacyValue) {
 // sendCustomerMessage regardless. Narrowly scoped to
 // intent='estimate_clarify'. The staleness rules themselves (closed-lead
 // statuses, answer-arrived detection) live in claimClarifyDispatch.
+// Clarify-only claim release: conditional on the claim still standing, so
+// it can never overwrite a concurrent reject's verdict back to pending
+// (the unlocked reject route can land at any moment; unconditional
+// releaseDraftClaim would resurrect it).
+async function releaseClarifyClaim(draftId, fields = {}) {
+  await db('message_drafts').where({ id: draftId })
+    .whereIn('status', ['approved', 'revised'])
+    .update({
+      status: 'pending',
+      approved_by: null,
+      approved_at: null,
+      ...fields,
+    }).catch(() => {});
+}
+
 async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
   if (draft.intent !== 'estimate_clarify') return { blocked: false };
   if (!isEnabled('estimateClarifyAsks')) {
-    await releaseDraftClaim(draft.id, releaseFields);
+    await releaseClarifyClaim(draft.id, releaseFields);
     res.status(409).json({
       error: 'Clarify asks are disabled (GATE_ESTIMATE_CLARIFY_ASKS is off) — draft left pending',
       code: 'CLARIFY_GATE_OFF',
@@ -382,7 +397,7 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
     return { blocked: true };
   }
   if (verdict.outcome !== 'send') {
-    await releaseDraftClaim(draft.id, releaseFields);
+    await releaseClarifyClaim(draft.id, releaseFields);
     res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
     return { blocked: true };
   }
@@ -643,7 +658,11 @@ router.put('/:id/approve', async (req, res, next) => {
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id);
+      // Unreachable for clarify drafts by construction (park requires a
+      // usable phone) — but if it ever fires, the release must still be
+      // reject-safe.
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
+      else await releaseDraftClaim(draft.id);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
     const sendPolicy = sendPolicyForDraft(draft, recipient);
@@ -774,7 +793,9 @@ router.put('/:id/revise', async (req, res, next) => {
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      // Same reject-safe release rule as the approve route.
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id, { revised_response: null, final_response: null });
+      else await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
     const sendPolicy = sendPolicyForDraft(draft, recipient);

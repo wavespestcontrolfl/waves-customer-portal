@@ -325,6 +325,32 @@ describe('handleClarifyReply', () => {
     expect(flags.answered_at).toBeUndefined();
   });
 
+  test('an admin claim winning mid-transaction never loses the reply — stamp-only fallback', async () => {
+    // Locked read saw 'pending'; the UNLOCKED route claim flipped it to
+    // 'approved' before the status-conditional retire — the fallback must
+    // stamp the flags so the dispatch decision (same lock) sees the answer.
+    // Lead-less on purpose: with no CRM row updated, the flags stamp is the
+    // ONLY record of the answer.
+    mockState.existingDraft = {
+      id: 'pending-1',
+      customer_id: null,
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    mockState.updateResults = [0]; // conditional pending-branch write loses
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'mosquito treatment please' });
+    expect(result.handled).toBe(true);
+    const draftWrites = mockState.updates.filter((u) => u.table === 'message_drafts');
+    expect(draftWrites).toHaveLength(2);
+    const fallback = draftWrites[1].payload;
+    expect(fallback.status).toBeUndefined();
+    expect(fallback.draft_response).toBeUndefined();
+    const flags = JSON.parse(fallback.flags);
+    expect(flags.answer_recorded).toEqual(['specific_service']);
+    expect(flags.answered_at).toBeTruthy();
+  });
+
   test('chit-chat never records as the service — the classifier is the bar', async () => {
     mockState.existingDraft = AWAITING(['specific_service']);
     const result = await handleClarifyReply({ phone: '9415550142', body: 'thanks, sounds good' });
@@ -401,6 +427,27 @@ describe('recordClarifyAnswer', () => {
     expect(update.draft_response).toContain('service address');
     expect(update.draft_response).not.toContain('which service');
     expect(JSON.parse(update.flags).missing).toEqual(['street_address']);
+  });
+
+  test('an admin claim winning mid-transaction never loses the answer — stamp-only fallback', async () => {
+    // The reply's locked read saw 'pending', but the UNLOCKED route claim
+    // flipped it to 'approved' first: the status-conditional rewrite matches
+    // zero rows and MUST fall back to a flags-only stamp so the dispatch
+    // decision (under the same lock) still sees the answer.
+    mockState.existingDraft = {
+      id: 'pending-1',
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    mockState.updateResults = [0]; // conditional pending-branch write loses
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['specific_service'] });
+    expect(result.recorded).toBe(true);
+    expect(mockState.updates).toHaveLength(2);
+    const fallback = mockState.updates[1].payload;
+    expect(fallback.status).toBeUndefined();
+    expect(fallback.draft_response).toBeUndefined();
+    expect(JSON.parse(fallback.flags).answered_at).toBeTruthy();
   });
 
   test('a CLAIMED-unsent ask (mid-approval) records stamp-only — copy and status untouched', async () => {
