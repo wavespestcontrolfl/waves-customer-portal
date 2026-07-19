@@ -5834,10 +5834,20 @@ function PropertyTab({ customer }) {
         })
         .catch((err) => {
           console.error('[PropertyTab] save failed', err);
-          // Revert optimistic UI to last confirmed server state so the user
-          // isn't misled into thinking gate codes / pet info persisted.
+          // Revert to the last confirmed server state so the user isn't
+          // misled into thinking gate codes / pet info persisted — but
+          // PRESERVE any field the customer has edited SINCE this save left
+          // (still in pendingRef, awaiting its own flush). A blanket revert
+          // to lastSavedRef hid those newer edits while the queued flush
+          // would still persist them — the exact hidden-save footgun this
+          // wave is closing. Newer optimistic values win over the baseline.
           if (lastSavedRef.current) {
-            setPrefs(lastSavedRef.current);
+            const pendingKeys = Object.keys(pendingRef.current || {});
+            setPrefs(prev => {
+              const merged = { ...lastSavedRef.current };
+              for (const k of pendingKeys) merged[k] = prev[k];
+              return merged;
+            });
           }
           setSaveStatus('error');
         });
@@ -11773,8 +11783,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [location, setLocation] = useState('');
   const [photos, setPhotos] = useState([]); // array of { preview, data }
   // FileReader is async — submitting while a selection is still being read
-  // silently sent the request WITHOUT the photo. Submit blocks on this flag.
-  const [photoProcessing, setPhotoProcessing] = useState(false);
+  // silently sent the request WITHOUT the photo. A COUNTER, not a boolean:
+  // two overlapping handlePhoto calls each read files, and a boolean cleared
+  // by the first-finishing batch would unblock submit while the second is
+  // still reading. photoProcessing is derived (> 0) so submit/picker stay
+  // blocked until every in-flight read settles.
+  const [photoReadCount, setPhotoReadCount] = useState(0);
+  const photoProcessing = photoReadCount > 0;
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submittedNote, setSubmittedNote] = useState('');
@@ -11924,12 +11939,12 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
       ? `${rejectedCount === 1 ? 'One photo was' : `${rejectedCount} photos were`} skipped — photos must be JPG, PNG, WebP, or HEIC and under 5 MB each.`
       : '');
     if (!usable.length) return;
-    setPhotoProcessing(true);
+    setPhotoReadCount(c => c + 1);
     try {
       const nextPhotos = (await Promise.all(usable.map(readPhotoFile))).filter(Boolean);
       setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
     } finally {
-      setPhotoProcessing(false);
+      setPhotoReadCount(c => Math.max(0, c - 1));
     }
   };
 
@@ -12397,10 +12412,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <button
                       type="button"
                       onClick={isNativeApp() ? handleNativePhoto : () => fileRef.current?.click()}
+                      disabled={photoProcessing}
                       style={{
                         minHeight: 92,
                         borderRadius: 8,
-                        cursor: 'pointer',
+                        cursor: photoProcessing ? 'wait' : 'pointer',
                         border: '1px dashed #93C5FD',
                         background: '#F8FCFE',
                         color: B.glassNavy,
@@ -12411,10 +12427,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         gap: 6,
                         fontFamily: FONTS.heading,
                         fontWeight: 850,
+                        opacity: photoProcessing ? 0.6 : 1,
                       }}
                     >
                       <Icon name="camera" size={22} strokeWidth={2} />
-                      <span style={{ fontSize: 14 }}>Add photos</span>
+                      <span style={{ fontSize: 14 }}>{photoProcessing ? 'Adding…' : 'Add photos'}</span>
                       <span style={{ fontSize: 12, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
                     </button>
                   )}
