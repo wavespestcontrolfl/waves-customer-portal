@@ -428,6 +428,9 @@ function PortalStatePanel({
   tone = 'brand',
   eyebrow,
   title,
+  // 'h1' when the panel IS the whole tab (loading/error early returns) so the
+  // page keeps a heading; leave 'div' for panels inline under the tab's own h1.
+  titleAs: TitleTag = 'div',
   message,
   children,
   actionLabel,
@@ -456,8 +459,8 @@ function PortalStatePanel({
           {eyebrow}
         </div>
       )}
-      <div style={{
-        marginTop: eyebrow ? 5 : 14,
+      <TitleTag style={{
+        margin: `${eyebrow ? 5 : 14}px 0 0`,
         fontSize: 20,
         fontWeight: 850,
         color: PORTAL_SHELL.text,
@@ -465,7 +468,7 @@ function PortalStatePanel({
         lineHeight: 1.2,
       }}>
         {title}
-      </div>
+      </TitleTag>
       {message && (
         <div style={{
           margin: '7px auto 0',
@@ -4441,6 +4444,7 @@ function BillingTab({ customer }) {
       <PortalStatePanel
         icon="card"
         eyebrow="Billing"
+        titleAs="h1"
         title="Loading billing"
         message="Checking your balance, saved methods, autopay status, and payment history."
       />
@@ -4453,6 +4457,7 @@ function BillingTab({ customer }) {
         icon="warning"
         tone="danger"
         eyebrow="Billing"
+        titleAs="h1"
         title="Could not load billing"
         message={loadError}
         actionLabel="Try Again"
@@ -5948,6 +5953,7 @@ function PropertyTab({ customer }) {
       <PortalStatePanel
         icon="house"
         eyebrow="My Property"
+        titleAs="h1"
         title="Loading property info"
         message="Checking your gate, pets, scheduling, HOA, and service-day notes."
       />
@@ -5959,6 +5965,7 @@ function PropertyTab({ customer }) {
         icon="warning"
         tone="danger"
         eyebrow="My Property"
+        titleAs="h1"
         title="Unable to load preferences"
         message={loadError || 'Refresh the portal and try again.'}
         actionLabel="Try Again"
@@ -8724,9 +8731,9 @@ function MyPlanTab({ customer, focusService }) {
   if (planStatus !== 'ready') {
     return (
       <section role={planStatus === 'error' ? 'alert' : undefined} data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
-        <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
           {planStatus === 'loading' ? 'Loading your plan…' : 'We couldn’t load your plan'}
-        </div>
+        </h1>
         {planStatus === 'error' && (
           <>
             <div style={{ marginTop: 6, color: muted, fontSize: 14 }}>Your plan is still on file. This looks temporary.</div>
@@ -10244,6 +10251,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <PortalStatePanel
         icon="gift"
         eyebrow="Referrals"
+        titleAs="h1"
         title="Loading referrals"
         message="Checking your referral link, credits, and recent invites."
       />
@@ -10256,6 +10264,7 @@ function ReferTab({ customer, onSwitchTab }) {
         icon="warning"
         tone="danger"
         eyebrow="Referrals"
+        titleAs="h1"
         title="Could not load referrals"
         message={loadError}
         actionLabel="Try Again"
@@ -11003,6 +11012,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       <PortalStatePanel
         icon="document"
         eyebrow="Documents"
+        titleAs="h1"
         title="Loading documents"
         message="Checking agreements, inspection reports, insurance certificates, and compliance paperwork."
       />
@@ -11015,6 +11025,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         icon="warning"
         tone="danger"
         eyebrow="Documents"
+        titleAs="h1"
         title="Could not load documents"
         message={loadError}
         actionLabel="Try Again"
