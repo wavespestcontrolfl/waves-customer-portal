@@ -291,7 +291,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // account menu). Inset so the rounded sheet floats over the scene
           // and clears the notch + bottom tab bar. Admin: unchanged white
           // full-screen panel (no glass theme mounted on /admin).
-          <div ref={attachPanelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
             top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
@@ -432,7 +432,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // Desktop: admin keeps the flush right-edge drawer; customer gets a
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
-          <div ref={attachPanelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,

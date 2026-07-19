@@ -4039,6 +4039,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
+const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
+
 function BillingTab({ customer }) {
   const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
@@ -4116,13 +4118,16 @@ function BillingTab({ customer }) {
         if (seq !== cardsSeqRef.current) return;
         setCards(cardData.cards || []);
         if (autopayData !== undefined) setAutopay(autopayData);
+        // Only this exact message: a newer unrelated error set while this
+        // refresh was in flight must survive.
+        setStripeError(prev => (prev === CARD_REFRESH_MISS_MSG ? '' : prev));
       })
       .catch(err => {
         console.error(err);
         // Swallowing this as success closed the modal over a stale list —
         // the save itself succeeded, so surface the refresh miss honestly
         // instead of failing the action.
-        if (seq === cardsSeqRef.current) setStripeError('Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.');
+        if (seq === cardsSeqRef.current) setStripeError(CARD_REFRESH_MISS_MSG);
       });
   };
 
@@ -12442,7 +12447,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   id="portal-request-photos"
                   name="requestPhotos"
                   type="file"
-                  accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+                  accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
                   capture="environment"
                   multiple
                   onChange={handlePhoto}
