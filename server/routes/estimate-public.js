@@ -6943,6 +6943,28 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         delete shape.isRecurringCustomer;
       }
     }
+    // Clearing the flags alone is not enough: the discount is already BAKED
+    // INTO the stored result/totals from save-time, and buildPricingBundle's
+    // v1 path (readV1Shape) + normalizeOneTimeBreakdown serve those stored
+    // prices verbatim — the lapsed member could still view and accept the
+    // member price. Reprice in-memory from the sanitized replay inputs with
+    // non-member identity (empty deps = no priors, no recurring forcing; the
+    // engine still auto-derives the perk from a cart that itself buys a
+    // recurring service). When no trustworthy reprice is possible (legacy row
+    // with no replayable engine input, or an engine error), fail CLOSED:
+    // membershipLapsedRequote makes resolveEstimateQuoteRequirement mark the
+    // bundle quote-required on every path, so accept/deposit refuse instead
+    // of charging the stale member price.
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    if (reprice.recomputed) {
+      estData.result = reprice.serverResult;
+      estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
+      estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
+      estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
+    } else {
+      estData.membershipLapsedRequote = true;
+    }
     invalidateSendSnapshotPricingBundle(estData);
     estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
     // The runtime pricing cache key ignores estimate_data content, so bust it
@@ -11198,6 +11220,13 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const retiredTreeShrubRequote = retiredTreeShrubRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  // A lapsed member whose stored member-priced result could not be repriced
+  // (reconcileFrozenMembershipSnapshot found no replayable engine input) must
+  // not self-serve accept the stale member price — fail closed to a manual
+  // quote.
+  const membershipLapsedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.membershipLapsedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -11206,7 +11235,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialRiskTypeReview
     || commercialLowConfidenceSiteQuote
     || retiredLawnRequote
-    || retiredTreeShrubRequote;
+    || retiredTreeShrubRequote
+    || membershipLapsedRequote;
 
   return {
     quoteRequired,
@@ -11217,7 +11247,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
-        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)),
+        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
     items: quoteRequiredItems,
   };
 }
