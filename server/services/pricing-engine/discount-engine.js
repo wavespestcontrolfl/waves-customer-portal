@@ -200,20 +200,26 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
 // annual a cent above the actual list price for a quote sitting exactly at
 // the floor (which would silently defeat the Math.min(lifted, originalAnnual)
 // cap and report the floor as applied at a price below it).
-function pestProgramFloorPerVisit(freqMult) {
+// Optional floorPerVisit override: saved-estimate replays thread the floor
+// the quote was priced with (pricingMetadata.pestProgramFloorPerVisit) so a
+// live pest_base.floor change never re-prices a sent quote (pre-push codex
+// P0, round 9 on #2827). Default: the live DB-synced PEST.floor.
+function pestProgramFloorPerVisit(freqMult, floorPerVisit) {
   const fm = Number(freqMult);
   if (!Number.isFinite(fm) || fm <= 0) return null;
-  return roundMoney(Number(PEST.floor) * fm);
+  const base = Number(floorPerVisit ?? PEST.floor);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  return roundMoney(base * fm);
 }
 
-function pestProgramFloorAnnual(freqMult, visitsPerYear) {
-  const perVisit = pestProgramFloorPerVisit(freqMult);
+function pestProgramFloorAnnual(freqMult, visitsPerYear, floorPerVisit) {
+  const perVisit = pestProgramFloorPerVisit(freqMult, floorPerVisit);
   const visits = Number(visitsPerYear);
   if (perVisit === null || !Number.isFinite(visits) || visits <= 0) return null;
   return roundMoney(perVisit * visits);
 }
 
-function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
+function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0, floorContext = {}) {
   const service = serviceQuote?.service;
   let annualCostAllIn = null;
   let marginFloor = Number(GLOBAL.MARGIN_FLOOR);
@@ -232,7 +238,11 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
     // signal reports the comparison even while enforcement is disarmed
     // (codex P2 on #2827); only the lift below is gated on the DB kill
     // switch (pricing_config pest_base.enforce_floor_post_discount).
-    programFloorAnnual = pestProgramFloorAnnual(serviceQuote.freqMult, serviceQuote.visitsPerYear);
+    programFloorAnnual = pestProgramFloorAnnual(
+      serviceQuote.freqMult,
+      serviceQuote.visitsPerYear,
+      floorContext.pestProgramFloorPerVisit,
+    );
   } else {
     return {
       finalAnnual: roundMoney(finalAnnual),
@@ -264,8 +274,13 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   // saved engine total matches what estimate-public clamps the public/accept
   // reprice to off the stamped floor metadata (never above the original
   // undiscounted price; a legacy below-floor base stays merely undiscounted).
+  // Arm state resolves caller-first: saved-estimate replays thread the arm
+  // state the quote was priced with (pre-push codex P0, round 9 on #2827).
+  const pestFloorArmed = typeof floorContext.pestProgramFloorArmed === 'boolean'
+    ? floorContext.pestProgramFloorArmed
+    : PEST.enforceFloorPostDiscount === true;
   const needsFloorLift =
-    PEST.enforceFloorPostDiscount &&
+    pestFloorArmed &&
     programFloorAnnual !== null &&
     candidateAnnual < programFloorAnnual;
 

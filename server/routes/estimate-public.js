@@ -10117,22 +10117,109 @@ function isAdminIp(ip) {
 // Derive engine inputs from stored estimate_data. Admin-UI estimates
 // carry { inputs, result, ... } (v1 client-engine shape). IB-sourced
 // estimates carry { engineInputs, engineResult }. Either works.
-function extractEngineInputs(estData) {
+// Raw stored inputs, no replay injection — the signal readers
+// (estimateLawnFloorArmed) use this to avoid recursing through the
+// injection below, which itself consults those readers.
+function rawEngineInputs(estData) {
   if (!estData || typeof estData !== 'object') return null;
-  const base = (estData.engineInputs && typeof estData.engineInputs === 'object')
+  return (estData.engineInputs && typeof estData.engineInputs === 'object')
     ? estData.engineInputs
     : (estData.inputs && typeof estData.inputs === 'object')
       ? estData.inputs
       : null;
+}
+
+function extractEngineInputs(estData) {
+  const base = rawEngineInputs(estData);
   if (!base) return null;
+  // Saved floor-state replay (pre-push codex P0, round 9 on #2827): every
+  // caller re-runs generateEstimate under the CURRENT mutable globals, so
+  // the estimate's saved floor state (pricingMetadata stamps, or legacy row
+  // evidence) is threaded back in as input-level overrides — a global
+  // re-arm/disarm between save and view must not re-price the replay.
+  // Injected at the INPUT level only: explicit services.* signals stored in
+  // the inputs still win inside the engine's own resolution, and a silent
+  // estimate (no stamp, no evidence) injects nothing and replays live.
+  const out = { ...base, ...savedFloorReplayOverrides(estData) };
   // Existing-customer reprice: replay the prior qualifying services persisted at
   // save so any public recompute (bundle CTA, frequency slider) keeps the
   // COMBINED WaveGuard tier instead of reverting to this estimate's services
   // alone. Shallow copy so the stored object isn't mutated.
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
-    return { ...base, priorQualifyingServices: estData.priorQualifyingServices };
+    out.priorQualifyingServices = estData.priorQualifyingServices;
   }
-  return base;
+  return out;
+}
+
+// Input-level floor overrides for an engine replay of this stored estimate.
+// Only keys with an actual saved signal are set (absence = replay live).
+function savedFloorReplayOverrides(estData) {
+  const overrides = {};
+  const lawnArm = estimateLawnFloorArmed(estData);
+  if (typeof lawnArm === 'boolean') overrides.useLawnCostFloor = lawnArm;
+  const minSignal = require('../services/estimate-converter').estimateLawnProgramMinimumSignal(estData);
+  if (minSignal != null) overrides.lawnProgramMinimumMonthly = minSignal;
+  const pest = estimatePestFloorSignal(estData);
+  if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
+  if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  return overrides;
+}
+
+// Saved pest post-discount floor state: pricingMetadata stamps first, then
+// legacy row evidence — armed-era rows carry the floor metadata itself
+// (server tiers: programFloorPerVisit/programFloorAnnual; client-fallback
+// rows: floorPa/floorAnn, per-visit derived through the cadence discount).
+// armed stays null (inject nothing) when the estimate is silent.
+const CLIENT_PEST_CADENCE_DISC = { 4: 1.0, 6: 0.85, 12: 0.7 };
+function estimatePestFloorSignal(estData = {}) {
+  const armStamp = estData?.result?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.result?.routingMetadata?.pestProgramFloorArmed;
+  const perVisitStamp = estData?.result?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.result?.routingMetadata?.pestProgramFloorPerVisit;
+  if (typeof armStamp === 'boolean') {
+    const stampedPerVisit = Number(perVisitStamp);
+    return {
+      armed: armStamp,
+      perVisit: Number.isFinite(stampedPerVisit) && stampedPerVisit > 0 ? stampedPerVisit : null,
+    };
+  }
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const rows = [];
+  if (Array.isArray(result?.results?.pestTiers)) rows.push(...result.results.pestTiers);
+  if (result?.results?.pest && typeof result.results.pest === 'object') rows.push(result.results.pest);
+  const lineItemSources = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+  ];
+  for (const li of lineItemSources) {
+    if ((li?.service || '') !== 'pest_control') continue;
+    rows.push(li);
+    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
+  }
+  let armed = null;
+  let perVisit = null;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const direct = Number(row.programFloorPerVisit);
+    if (Number.isFinite(direct) && direct > 0) {
+      armed = true;
+      perVisit = Math.max(perVisit ?? 0, direct);
+      continue;
+    }
+    const floorPa = Number(row.floorPa);
+    if (Number.isFinite(floorPa) && floorPa > 0) {
+      armed = true;
+      const disc = CLIENT_PEST_CADENCE_DISC[Number(row.apps)] ?? null;
+      if (disc) perVisit = Math.max(perVisit ?? 0, Math.round((floorPa / disc) * 100) / 100);
+    } else if (Number(row.programFloorAnnual) > 0 || Number(row.floorAnn) > 0) {
+      armed = true;
+    }
+  }
+  return { armed, perVisit };
 }
 
 function canVaryPestFrequency(engineInputs) {
@@ -12672,6 +12759,7 @@ function estimateLawnFloorArmed(estData = {}) {
   // GLOBAL switch armed without any explicit per-request flag (a later
   // global flip must not change how a sent quote replays).
   const stamped = estData?.result?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.engineResult?.pricingMetadata?.lawnCostFloorArmed
     ?? estData?.pricingMetadata?.lawnCostFloorArmed
     ?? estData?.result?.routingMetadata?.lawnCostFloorArmed;
   if (typeof stamped === 'boolean') return stamped;
@@ -12683,7 +12771,7 @@ function estimateLawnFloorArmed(estData = {}) {
   if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
     return !!reqOptions.useLawnCostFloor;
   }
-  const engineInputs = extractEngineInputs(estData) || {};
+  const engineInputs = rawEngineInputs(estData) || {};
   const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
   return stored == null ? null : !!stored;
 }

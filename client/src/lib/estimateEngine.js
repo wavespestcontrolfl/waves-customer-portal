@@ -1460,6 +1460,10 @@ export function calculateEstimate(inputs) {
       const n = Number(LAWN_PRICING_V2.programMinimumMonthly);
       return Number.isFinite(n) && n > 0 ? n : 0;
     })(),
+    // Pest floor state mirrors the server engine's stamps so replay
+    // resolution reads one shape everywhere.
+    pestProgramFloorArmed: PEST_BASE.enforceFloorPostDiscount === true,
+    pestProgramFloorPerVisit: PEST_BASE.floorPerVisit,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {

@@ -880,7 +880,12 @@ function legacyLawnProgramMinimumMonthly(estimateData = {}) {
   const rows = [];
   if (Array.isArray(result?.results?.lawn)) rows.push(...result.results.lawn);
   if (result?.lawnMeta && typeof result.lawnMeta === 'object') rows.push(result.lawnMeta);
-  for (const li of (Array.isArray(result?.lineItems) ? result.lineItems : [])) {
+  const lineItemSources = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    // Admin V2 saves persist the raw engine result separately.
+    ...(Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : []),
+  ];
+  for (const li of lineItemSources) {
     if ((li?.service || '') !== 'lawn_care') continue;
     rows.push(li);
     if (Array.isArray(li.tiers)) rows.push(...li.tiers);
@@ -909,14 +914,23 @@ function legacyLawnProgramMinimumMonthly(estimateData = {}) {
   return inferred;
 }
 
-function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+// Signal-only variant: stamp → legacy row evidence → NULL (no live-global
+// fallback). estimate-public's engine-input replay uses this to decide
+// whether to thread a saved minimum into generateEstimate — a silent
+// estimate must replay under the live global, not a frozen copy of it.
+function estimateLawnProgramMinimumSignal(estimateData = {}) {
   const stamped = estimateData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.engineResult?.pricingMetadata?.lawnProgramMinimumMonthly
     ?? estimateData?.pricingMetadata?.lawnProgramMinimumMonthly
     ?? estimateData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
   const stampedN = Number(stamped);
   if (stamped != null && Number.isFinite(stampedN) && stampedN >= 0) return stampedN;
-  const legacy = legacyLawnProgramMinimumMonthly(estimateData);
-  if (legacy != null) return legacy;
+  return legacyLawnProgramMinimumMonthly(estimateData);
+}
+
+function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  const signal = estimateLawnProgramMinimumSignal(estimateData);
+  if (signal != null) return signal;
   const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
   return Number.isFinite(live) && live > 0 ? live : 0;
 }
@@ -2460,6 +2474,7 @@ module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
 module.exports.resolveLawnProgramMinimumMonthlyForEstimate = resolveLawnProgramMinimumMonthlyForEstimate;
+module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;

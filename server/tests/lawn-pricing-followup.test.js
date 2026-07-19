@@ -1246,6 +1246,62 @@ describe('lawn pricing production follow-up', () => {
     }
   });
 
+  test('input-level floor overrides replay a saved estimate under its own state, not the live globals', () => {
+    // estimate-public's engine-input replay threads the saved stamps back in
+    // (pre-push codex P0, round 9 on #2827): a quote saved under a re-armed
+    // $50 minimum reprices clamped even though the global is 0…
+    const replayArmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      lawnProgramMinimumMonthly: 50,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const lawn = replayArmed.lineItems.find((li) => li.service === 'lawn_care');
+    expect(lawn.monthly).toBeGreaterThanOrEqual(50);
+    expect(replayArmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(50);
+
+    // …and a quote saved DISARMED replays unclamped after a global re-arm
+    // (explicit 0 beats the live value).
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+    try {
+      const replayDisarmed = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        lawnProgramMinimumMonthly: 0,
+        services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      const disarmedLawn = replayDisarmed.lineItems.find((li) => li.service === 'lawn_care');
+      expect(disarmedLawn.monthly).toBeLessThan(50);
+      expect(replayDisarmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(0);
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
+  test('pest floor arm + per-visit value replay input-first and stamp into pricingMetadata', () => {
+    // Saved-armed replay under a disarmed global: the tier rows carry the
+    // floor metadata at the SAVED per-visit value, and the stamps record it.
+    const replayArmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      pestProgramFloorArmed: true,
+      pestProgramFloorPerVisit: 79,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const pest = replayArmed.lineItems.find((li) => li.service === 'pest_control');
+    const quarterly = (pest.tiers || []).find((t) => t.frequency === 'quarterly');
+    expect(quarterly.programFloorPerVisit).toBeCloseTo(79, 2);
+    expect(replayArmed.pricingMetadata.pestProgramFloorArmed).toBe(true);
+
+    // Disarmed default: no floor metadata on tiers, stamp records disarmed.
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const disarmedPest = disarmed.lineItems.find((li) => li.service === 'pest_control');
+    expect((disarmedPest.tiers || []).find((t) => t.frequency === 'quarterly').programFloorPerVisit)
+      .toBeUndefined();
+    expect(disarmed.pricingMetadata.pestProgramFloorArmed).toBe(false);
+  });
+
   test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });

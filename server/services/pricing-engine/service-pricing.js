@@ -1408,6 +1408,12 @@ function pricePestControl(property, options = {}) {
     modifiers = {},
   } = options;
 
+  // Post-discount floor arm: caller override first (saved-estimate replays
+  // — pre-push codex P0, round 9 on #2827), then the live DB-synced flag.
+  const pestFloorArmedResolved = typeof options.pestProgramFloorArmed === 'boolean'
+    ? options.pestProgramFloorArmed
+    : PEST.enforceFloorPostDiscount === true;
+
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
   const frequencyMeta = normalizePestFrequency(requestedFrequencyInput);
@@ -1496,8 +1502,12 @@ function pricePestControl(property, options = {}) {
     // Post-discount program floor for this cadence. Emitted only while
     // enforcement is on: estimates generated with the floor keep it for the
     // life of the stored payload (snapshot semantics); flipping the DB kill
-    // switch stops NEW estimates from carrying it.
-    const floorAnn = PEST.enforceFloorPostDiscount ? pestProgramFloorAnnual(fm, v) : null;
+    // switch stops NEW estimates from carrying it. Arm state and floor value
+    // resolve caller-first (saved-estimate replays — pre-push codex P0,
+    // round 9 on #2827), then the live constants.
+    const floorAnn = pestFloorArmedResolved
+      ? pestProgramFloorAnnual(fm, v, options.pestProgramFloorPerVisit)
+      : null;
     return {
       frequency: freqKey,
       freq: v,
@@ -1505,7 +1515,7 @@ function pricePestControl(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       ...(floorAnn !== null ? {
-        programFloorPerVisit: pestProgramFloorPerVisit(fm),
+        programFloorPerVisit: pestProgramFloorPerVisit(fm, options.pestProgramFloorPerVisit),
         programFloorAnnual: floorAnn,
         programFloorMonthly: Math.round(floorAnn / 12 * 100) / 100,
       } : {}),
@@ -1914,7 +1924,14 @@ function priceLawnCare(property, options = {}) {
   // at least this per month regardless of track/size/cadence. Annual is the
   // source of truth; ceil to a whole-dollar-per-app multiple like the cost
   // floor so perApp stays clean.
-  const programMinimumMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  // Caller override first (saved-estimate replays thread the minimum the
+  // quote was priced with — pre-push codex P0, round 9 on #2827; 0 = an
+  // explicit disarmed save), then the live DB-synced constant.
+  const programMinimumMonthly = options.programMinimumMonthly != null
+    && Number.isFinite(Number(options.programMinimumMonthly))
+    && Number(options.programMinimumMonthly) >= 0
+    ? Number(options.programMinimumMonthly)
+    : Number(LAWN_PRICING_V2.programMinimumMonthly);
   const programMinimumAnnual = applyProgramMinimum
     && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
     ? Math.round(programMinimumMonthly * 12 * 100) / 100
