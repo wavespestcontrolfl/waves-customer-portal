@@ -100,13 +100,40 @@ async function main() {
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
 
+  // Cohort boundary: rows are attributed by MODEL, so after a route change
+  // a previous primary's rows could masquerade as current-route executions
+  // (the gemini kill switch is the sharp case — historical 2.5-pro rows are
+  // NOT executions of the restored route). Auto-bound the cohort to the
+  // contiguous run since the newest row produced by a model OUTSIDE the
+  // current route; pass --since <ISO date> to override for flips where the
+  // old primary remains in the route (e.g. it became the new fallback).
+  const sinceIdx = process.argv.indexOf('--since');
+  let cohortSince = sinceIdx >= 0 ? new Date(process.argv[sinceIdx + 1]) : null;
+  if (cohortSince && Number.isNaN(cohortSince.getTime())) {
+    console.error(`--since is not a parseable date: ${process.argv[sinceIdx + 1]}`);
+    process.exit(1);
+  }
+  if (!cohortSince) {
+    const lastForeign = await baseQuery()
+      .whereNotIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
+      .max('created_at as t')
+      .first();
+    cohortSince = lastForeign?.t ? new Date(lastForeign.t) : null;
+    if (cohortSince) {
+      console.log(`Cohort auto-bounded to rows after ${cohortSince.toISOString()} (last row from a model outside the current route). Override with --since.`);
+    }
+  }
+  const boundedRouteRows = cohortSince
+    ? allRouteRows.filter((r) => new Date(r.created_at) > cohortSince)
+    : allRouteRows;
+
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
   // whose fallback has zero assessed rows. The fallback cohort is reported
   // separately below and is never silently folded into the gate.
   const fallbackModel = CURRENT_ROUTE_MODELS.find((m) => m !== CURRENT_PRIMARY) || null;
-  const fallbackRows = fallbackModel ? allRouteRows.filter((r) => r.ai_extraction_model === fallbackModel) : [];
-  const rows = allRouteRows.filter((r) => r.ai_extraction_model === CURRENT_PRIMARY);
+  const fallbackRows = fallbackModel ? boundedRouteRows.filter((r) => r.ai_extraction_model === fallbackModel) : [];
+  const rows = boundedRouteRows.filter((r) => r.ai_extraction_model === CURRENT_PRIMARY);
 
   const staleExcluded = totalAttempted - allRouteRows.length;
   console.log(`Current extractor route: primary=${CURRENT_PRIMARY} fallback=${fallbackModel || 'n/a'} prompt=${CURRENT_PROMPT_VERSION}`);
@@ -130,7 +157,7 @@ async function main() {
   // From the WHOLE route — semantic scoring iterates allRouteRows, so a
   // fallback-produced call needs its real v1 outcome too, not a default
   // v1DidCreate=false.
-  const sids = allRouteRows.map((r) => r.twilio_call_sid).filter(Boolean);
+  const sids = boundedRouteRows.map((r) => r.twilio_call_sid).filter(Boolean);
   const appts = sids.length
     ? await db('scheduled_services')
         .where((q) => sids.forEach((s) => q.orWhere('notes', 'like', `%Call SID: ${s}%`)))
@@ -156,7 +183,7 @@ async function main() {
   // extractions are exactly what production routes from during primary
   // failures, so they must clear the same checks. Reliability accounting
   // (statusCounts / validCount / schema-pass) stays primary-scoped.
-  for (const r of allRouteRows) {
+  for (const r of boundedRouteRows) {
     const isPrimaryRow = r.ai_extraction_model === CURRENT_PRIMARY;
     if (isPrimaryRow) {
       statusCounts[r.v2_extraction_status || 'null'] = (statusCounts[r.v2_extraction_status || 'null'] || 0) + 1;
@@ -265,7 +292,7 @@ async function main() {
   // rows stamp the primary), so the denominator must add failed fallback
   // attempts — derived from the per-leg failure lists the extractor persists
   // in ai_extraction_validation_errors on failed rows.
-  const failedFallbackAttempts = allRouteRows.filter((r) => {
+  const failedFallbackAttempts = boundedRouteRows.filter((r) => {
     if (r.v2_extraction_status === 'valid' || r.ai_extraction_model !== CURRENT_PRIMARY) return false;
     const errs = parseJson(r.ai_extraction_validation_errors);
     return Array.isArray(errs) && errs.some((e) => e && e.model === fallbackModel);
