@@ -1,0 +1,52 @@
+// @vitest-environment jsdom
+// P1-6: the public estimate view must be token-scoped — a :token change
+// remounts the page so no reservation / Stripe intent / CTA / success state
+// survives an A→B navigation, and a slow /data fetch for A can't render A's
+// PII under B's URL. The remount wrapper (key={token}) is what enforces this.
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, render, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+let currentToken = 'token-A';
+vi.mock('react-router-dom', () => ({
+  useParams: () => ({ token: currentToken }),
+  useSearchParams: () => [new URLSearchParams(''), vi.fn()],
+}));
+vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
+
+import EstimateViewPage from './EstimateViewPage';
+
+function dataUrlTokens(fetchMock) {
+  return fetchMock.mock.calls
+    .map(([url]) => String(url))
+    .map((u) => u.match(/\/estimates\/([^/]+)\/data/))
+    .filter(Boolean)
+    .map((m) => m[1]);
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  currentToken = 'token-A';
+});
+
+describe('EstimateViewPage token scoping', () => {
+  it('refetches for the new token and mounts a fresh instance when :token changes', async () => {
+    // 404 short-circuits the load cleanly (the "link isn't valid" screen).
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(<EstimateViewPage />);
+    await waitFor(() => expect(dataUrlTokens(fetchMock)).toContain('token-A'));
+
+    // Navigate to a different estimate token on the SAME route.
+    currentToken = 'token-B';
+    rerender(<EstimateViewPage />);
+
+    // The remount re-runs the load effect for B — proving a fresh instance
+    // (the stale A instance is unmounted; its state/late resolve can't surface).
+    await waitFor(() => expect(dataUrlTokens(fetchMock)).toContain('token-B'));
+  });
+});

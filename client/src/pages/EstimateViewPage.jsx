@@ -3519,7 +3519,21 @@ export function ServiceSection({
 // and every path back to them clears the reservation first.
 const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
 
+// Remount the estimate view whenever the bearer :token changes, so NO state
+// survives an A→B navigation: reservation, the live Stripe deposit / card-hold
+// / recurring-card / inline-card intents (and their setup-intent id refs), the
+// CTA phase, the success/accept result, the selected slot, and every child
+// component's own state. React reuses this instance when only the :token param
+// changes, so without the remount those atoms carry A's held reservation and
+// payment intents into B. It also neutralizes a slow /:token/data fetch: a
+// response for A that resolves after navigating to B lands on the unmounted
+// old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
 export default function EstimateViewPage() {
+  const { token } = useParams();
+  return <EstimateViewPageInner key={token || 'no-token'} />;
+}
+
+function EstimateViewPageInner() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
