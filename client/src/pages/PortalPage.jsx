@@ -318,18 +318,6 @@ function SectionHeading({ children }) {
   return <div style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT, fontFamily: FONTS.serif, letterSpacing: 0, lineHeight: 1.15 }}>{children}</div>;
 }
 
-const VISUALLY_HIDDEN = {
-  position: 'absolute',
-  width: 1,
-  height: 1,
-  padding: 0,
-  margin: -1,
-  overflow: 'hidden',
-  clip: 'rect(0, 0, 0, 0)',
-  whiteSpace: 'nowrap',
-  border: 0,
-};
-
 const ESTIMATE_BG = CUSTOMER_SURFACE.page;
 const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
 const ESTIMATE_BORDER_STRONG = CUSTOMER_SURFACE.borderStrong;
@@ -440,6 +428,9 @@ function PortalStatePanel({
   tone = 'brand',
   eyebrow,
   title,
+  // 'h1' when the panel IS the whole tab (loading/error early returns) so the
+  // page keeps a heading; leave 'div' for panels inline under the tab's own h1.
+  titleAs: TitleTag = 'div',
   message,
   children,
   actionLabel,
@@ -468,8 +459,8 @@ function PortalStatePanel({
           {eyebrow}
         </div>
       )}
-      <div style={{
-        marginTop: eyebrow ? 5 : 14,
+      <TitleTag style={{
+        margin: `${eyebrow ? 5 : 14}px 0 0`,
         fontSize: 20,
         fontWeight: 850,
         color: PORTAL_SHELL.text,
@@ -477,7 +468,7 @@ function PortalStatePanel({
         lineHeight: 1.2,
       }}>
         {title}
-      </div>
+      </TitleTag>
       {message && (
         <div style={{
           margin: '7px auto 0',
@@ -499,7 +490,7 @@ function PortalStatePanel({
   );
 }
 
-function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }) {
+function PortalInlineState({ icon = 'document', title, message, tone = 'brand', actionLabel, onAction }) {
   return (
     <div style={{
       padding: 16,
@@ -517,6 +508,20 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }
       <div>
         <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>{title}</div>
         {message && <div style={{ marginTop: 3, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{message}</div>}
+        {actionLabel && onAction && (
+          <button
+            type="button"
+            onClick={onAction}
+            style={{
+              marginTop: 8, padding: '7px 12px', borderRadius: 8,
+              border: `1px solid ${B.glassNavy}`, background: 'none',
+              color: B.glassNavy, fontSize: 14, fontWeight: 850,
+              cursor: 'pointer', fontFamily: FONTS.body,
+            }}
+          >
+            {actionLabel}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1482,11 +1487,16 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // cron skips resolver-non-monthly rows, so the summary must not advertise
   // a monthly plan charge for them (Codex r10).
   const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
+  // 'loading' | 'ready' | 'error' — the At-a-Glance tile must not fall back
+  // to a "Monthly rate" label before the mode resolves (false for
+  // per-visit/per-application customers), nor forever when the load fails.
+  const [billingModeStatus, setBillingModeStatus] = useState('loading');
   useEffect(() => {
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
-    }).catch(() => {});
+      setBillingModeStatus('ready');
+    }).catch(() => setBillingModeStatus('error'));
   }, []);
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
@@ -2036,7 +2046,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
                   : billingMode === 'per_visit' || billingMode === 'one_time' || (billingMode === null && resolvedNonMonthly)
                     ? { label: 'Billing', value: 'Per visit', sub: tierDiscountSub }
-                    : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
+                    : billingModeStatus !== 'ready'
+                      ? {
+                          label: 'Billing',
+                          value: billingModeStatus === 'loading' ? '...' : '—',
+                          sub: billingModeStatus === 'error' ? 'Unavailable right now' : tierDiscountSub,
+                        }
+                      : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -2264,6 +2280,11 @@ function ServicesTab() {
   const [servicesOffset, setServicesOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lightbox, setLightbox] = useState(null);
+  // Dialog contract for the photo lightbox: focus trap, Escape closes, AT
+  // announces a modal — it was a click-only overlay keyboard users couldn't
+  // open or leave.
+  useLockBodyScroll(!!lightbox);
+  const lightboxRef = useModalFocus(!!lightbox, () => setLightbox(null));
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
@@ -2316,16 +2337,34 @@ function ServicesTab() {
     loadServices();
   }, [loadServices]);
 
+  // Latest-request-per-service: expand → collapse → re-expand can overlap two
+  // getService calls, and a stale FAILURE resolving after a newer SUCCESS
+  // would clobber good data with the error state. Only the most recent
+  // request for a given id may write its result.
+  const detailSeqRef = useRef({});
+  const loadServiceDetail = (svcId) => {
+    const seq = (detailSeqRef.current[svcId] || 0) + 1;
+    detailSeqRef.current[svcId] = seq;
+    // Clear any failure sentinel so the loading state shows during a retry.
+    setDetailMap(prev => (prev[svcId]?.loadError ? { ...prev, [svcId]: undefined } : prev));
+    api.getService(svcId)
+      .then(d => { if (detailSeqRef.current[svcId] === seq) setDetailMap(prev => ({ ...prev, [svcId]: d })); })
+      .catch(err => {
+        console.error('Failed to load service details', err);
+        // Sentinel the failure: an absent entry rendered "Loading photos"
+        // forever with no error and no retry path.
+        if (detailSeqRef.current[svcId] === seq) setDetailMap(prev => ({ ...prev, [svcId]: { loadError: true } }));
+      });
+  };
+
   const toggleExpand = (svc) => {
     const next = expanded === svc.id ? null : svc.id;
     setExpanded(next);
     // The list payload carries a reduced product projection (no rate or
     // amount) — hydrate the full record once per row so the expanded table
     // and photos render the stored data instead of dashes.
-    if (next && !detailMap[svc.id]) {
-      api.getService(svc.id)
-        .then(d => setDetailMap(prev => ({ ...prev, [svc.id]: d })))
-        .catch(err => console.error('Failed to load service details', err));
+    if (next && (!detailMap[svc.id] || detailMap[svc.id].loadError)) {
+      loadServiceDetail(svc.id);
     }
   };
 
@@ -2595,8 +2634,9 @@ function ServicesTab() {
                 // Hydrated full record (rate/amount columns + photos); the
                 // reduced list projection is the fallback while it loads.
                 const detail = detailMap[s.id];
-                const rowProducts = detail?.products?.length ? detail.products : (s.products || []);
-                const rowPhotos = detail ? (detail.photos || []) : null;
+                const detailFailed = detail?.loadError === true;
+                const rowProducts = (!detailFailed && detail?.products?.length) ? detail.products : (s.products || []);
+                const rowPhotos = (detail && !detailFailed) ? (detail.photos || []) : null;
                 return (
                   <div key={s.id} style={{
                     ...card,
@@ -2749,7 +2789,15 @@ function ServicesTab() {
                             <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
-                            {!rowPhotos ? (
+                            {detailFailed ? (
+                              <PortalInlineState
+                                icon="warning"
+                                title="Couldn't load photos"
+                                message="The photos for this visit didn't load."
+                                actionLabel="Try again"
+                                onAction={() => loadServiceDetail(s.id)}
+                              />
+                            ) : !rowPhotos ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="Loading photos"
@@ -2765,7 +2813,13 @@ function ServicesTab() {
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
                                 {rowPhotos.map((p) => (
                                   <div key={p.id}
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`View photo${p.caption ? `: ${p.caption}` : p.type ? `: ${p.type}` : ''}`}
                                     onClick={() => setLightbox(p)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLightbox(p); }
+                                    }}
                                     style={{
                                       position: 'relative', cursor: 'pointer', borderRadius: 8, overflow: 'hidden',
                                       border: '1px solid #E7E2D7', aspectRatio: '1 / 1', background: subtle,
@@ -2914,7 +2968,7 @@ function ServicesTab() {
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999,
             display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, cursor: 'pointer',
           }}>
-          <div onClick={(e) => e.stopPropagation()}
+          <div ref={lightboxRef} role="dialog" aria-modal="true" aria-label={lightbox.caption || lightbox.type || 'Service photo'} onClick={(e) => e.stopPropagation()}
             style={{ position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
             <img src={lightbox.url} alt={lightbox.caption || 'service photo'}
               style={{ maxWidth: '95vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: 10, background: '#000' }} />
@@ -2924,7 +2978,7 @@ function ServicesTab() {
                 {lightbox.caption}
               </div>
             )}
-            <button onClick={() => setLightbox(null)}
+            <button type="button" aria-label="Close photo" onClick={() => setLightbox(null)}
               style={{
                 position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
                 border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
@@ -3102,11 +3156,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   // One-tap shortcut: route every appointment update to the given channel
   // (used for the "Traveling? Get appointment updates by email" toggle).
+  // Locks EVERY appointment key for the duration (and refuses to start while
+  // any individual update is in flight): an unlocked bulk PUT racing an
+  // individual channel change committed in arbitrary order, leaving the UI
+  // and the stored reminder channel different until reload.
   const handleAllAppointmentChannels = async (value) => {
+    if (APPOINTMENT_CHANNEL_KEYS.some(k => prefsLocked[k])) return;
     if (APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === value)) return;
     const prevById = {};
     const updates = {};
-    APPOINTMENT_CHANNEL_KEYS.forEach(k => { prevById[k] = prefs[k] || 'sms'; updates[k] = value; });
+    const locks = {};
+    APPOINTMENT_CHANNEL_KEYS.forEach(k => { prevById[k] = prefs[k] || 'sms'; updates[k] = value; locks[k] = true; });
+    setPrefsLocked(prev => ({ ...prev, ...locks }));
     setPrefs(prev => ({ ...prev, ...updates }));
     try {
       await api.updateNotificationPrefs(updates);
@@ -3114,6 +3175,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       setPrefs(prev => ({ ...prev, ...prevById }));
       showCustomerAlert('Could not update delivery preference. Please try again.');
       console.error(err);
+    } finally {
+      const unlocks = {};
+      APPOINTMENT_CHANNEL_KEYS.forEach(k => { unlocks[k] = false; });
+      setPrefsLocked(prev => ({ ...prev, ...unlocks }));
     }
   };
 
@@ -3634,15 +3699,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             </div>
             {customer.email ? (() => {
               const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
+              const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
               return (
                 <button
                   onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
+                  disabled={anySaving}
                   style={{
                     marginTop: 12, padding: '8px 14px', borderRadius: 999,
                     border: `1px solid ${allEmail ? B.glassNavy : '#D8D0C0'}`,
                     background: allEmail ? B.glassNavy : '#fff',
                     color: allEmail ? '#fff' : B.glassNavy,
-                    fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                    fontSize: 14, fontWeight: 800, cursor: anySaving ? 'wait' : 'pointer',
+                    opacity: anySaving ? 0.6 : 1,
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                   }}
                 >
@@ -3872,6 +3940,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             <button
                               type="button"
                               onClick={() => handlePropertyContactRemove(property.id, idx)}
+                              disabled={!!prefsLocked[contactLockKey]}
                               style={{
                                 border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
                                 fontSize: 12, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
@@ -3886,6 +3955,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.firstName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
                             placeholder="First name"
+                            disabled={!!prefsLocked[contactLockKey]}
                             autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
                           />
@@ -3893,6 +3963,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.lastName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
                             placeholder="Last name"
+                            disabled={!!prefsLocked[contactLockKey]}
                             autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
                           />
@@ -3902,6 +3973,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.phone || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
                             placeholder="Phone number"
+                            disabled={!!prefsLocked[contactLockKey]}
                             type="tel"
                             inputMode="tel"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
@@ -3910,6 +3982,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.email || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
                             placeholder="Email address"
+                            disabled={!!prefsLocked[contactLockKey]}
                             type="email"
                             inputMode="email"
                             autoCapitalize="none"
@@ -3922,6 +3995,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <button
                         type="button"
                         onClick={() => handlePropertyContactAdd(property.id)}
+                        disabled={!!prefsLocked[contactLockKey]}
                         style={{
                           border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px',
                           background: 'none', cursor: 'pointer', marginBottom: 10,
@@ -3968,6 +4042,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
+const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
+
 function BillingTab({ customer }) {
   const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
@@ -4023,9 +4099,43 @@ function BillingTab({ customer }) {
   const cardMountRef = useRef(null);
   const processedSetupReturnRef = useRef(false);
 
-  const refreshCards = () => api.getCards().then(d => setCards(d.cards || [])).catch(console.error);
+  // Monotonic sequence over card/autopay freshness: the setup-return save's
+  // refreshCards() races the mount loadBilling() — a slow PRE-SAVE response
+  // resolving last would overwrite the just-saved card list / Auto Pay
+  // state with stale data. Only the latest-issued fetch may write them.
+  const cardsSeqRef = useRef(0);
+
+  const refreshCards = () => {
+    const seq = ++cardsSeqRef.current;
+    // Refresh cards AND Auto Pay together: a save/default/remove can enroll
+    // or move Auto Pay server-side, and bumping the sequence here suppresses
+    // the older loadBilling()'s autopay write — so the LATEST refresh must
+    // own both or the banner keeps a stale "Auto Pay off". Autopay is
+    // best-effort (its own AutopayCard remounts via autopayRefreshKey); a
+    // getAutopay miss leaves the prior banner rather than erroring the save.
+    return Promise.all([
+      api.getCards(),
+      api.getAutopay().catch(() => undefined),
+    ])
+      .then(([cardData, autopayData]) => {
+        if (seq !== cardsSeqRef.current) return;
+        setCards(cardData.cards || []);
+        if (autopayData !== undefined) setAutopay(autopayData);
+        // Only this exact message: a newer unrelated error set while this
+        // refresh was in flight must survive.
+        setStripeError(prev => (prev === CARD_REFRESH_MISS_MSG ? '' : prev));
+      })
+      .catch(err => {
+        console.error(err);
+        // Swallowing this as success closed the modal over a stale list —
+        // the save itself succeeded, so surface the refresh miss honestly
+        // instead of failing the action.
+        if (seq === cardsSeqRef.current) setStripeError(CARD_REFRESH_MISS_MSG);
+      });
+  };
 
   const loadBilling = useCallback(() => {
+    const cardsSeq = ++cardsSeqRef.current;
     setLoading(true);
     setLoadError('');
     // /api/billing pages at ≤100 rows — follow the cursor to the end so the
@@ -4052,8 +4162,12 @@ function BillingTab({ customer }) {
         // `|| []` (same as loadSchedule): a shape-drifted 200 must not put
         // undefined where payments.filter/cards.map render — the Billing tab
         // has no error boundary and would white-screen.
-        setPayments(payData.payments || []); setBalance(balData); setCards(cardData.cards || []);
-        setAutopay(autopayData);
+        setPayments(payData.payments || []); setBalance(balData);
+        // Cards/autopay only when still the freshest fetch (see cardsSeqRef).
+        if (cardsSeq === cardsSeqRef.current) {
+          setCards(cardData.cards || []);
+          setAutopay(autopayData);
+        }
         setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
@@ -4330,6 +4444,7 @@ function BillingTab({ customer }) {
       <PortalStatePanel
         icon="card"
         eyebrow="Billing"
+        titleAs="h1"
         title="Loading billing"
         message="Checking your balance, saved methods, autopay status, and payment history."
       />
@@ -4342,6 +4457,7 @@ function BillingTab({ customer }) {
         icon="warning"
         tone="danger"
         eyebrow="Billing"
+        titleAs="h1"
         title="Could not load billing"
         message={loadError}
         actionLabel="Try Again"
@@ -5155,7 +5271,9 @@ function BillingTab({ customer }) {
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{p.description}</div>
               <div style={{ fontSize: 12, color: muted, marginTop: 3 }}>
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
+                {/* ACH rows store card_brand null — label by methodType so a
+                    bank payment never reads "Card ending in …". */}
+                {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
               </div>
               {p.status === 'failed' && (
                 <button type="button" onClick={() => {
@@ -5689,14 +5807,18 @@ function PropertyTab({ customer }) {
   }, [loadPropertyPreferences]);
 
   // Save any pending debounced edits NOW, with the current property's token.
-  // A rejected save re-queues the fields so nothing is silently dropped.
   // Every PUT this starts is tracked in inFlightPropertyPrefSaves until it
   // settles, so switch/logout can await saves whose component is gone.
   // Saves chain through saveQueueRef so overlapping flushes reach the server
   // in edit order — a slow older PUT can't land after (and overwrite) a newer
-  // value, and lastSavedRef only ever advances. The payload is read at
-  // execution time, not enqueue time, so fields re-queued by a failed save
-  // merge UNDER any newer edits instead of resurrecting stale values.
+  // value, and lastSavedRef only ever advances. A REJECTED save RE-QUEUES its
+  // fields (merged UNDER any newer edits) so nothing is dropped — the
+  // switch-flush path (flushBeforeSwitch) has no other retry surface, and
+  // selectProperty keeps the property open on failure. The original
+  // hidden-save footgun (a queue diverging from a reverted UI) is avoided by
+  // NOT reverting the optimistic UI on failure: the edits stay visible AND
+  // stay queued, so a later flush that finally persists them can't surprise
+  // the customer with values the UI had hidden.
   const flushAllPendingSaves = useCallback(() => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
@@ -5721,6 +5843,9 @@ function PropertyTab({ customer }) {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
         } catch (err) {
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left
+          // wins) so the next flush retries these without clobbering fresher
+          // input. The UI is not reverted, so queue and screen agree.
           pendingRef.current = { ...toSave, ...pendingRef.current };
           throw err;
         }
@@ -5748,11 +5873,12 @@ function PropertyTab({ customer }) {
         })
         .catch((err) => {
           console.error('[PropertyTab] save failed', err);
-          // Revert optimistic UI to last confirmed server state so the user
-          // isn't misled into thinking gate codes / pet info persisted.
-          if (lastSavedRef.current) {
-            setPrefs(lastSavedRef.current);
-          }
+          // Do NOT revert the optimistic UI: the failed fields are re-queued
+          // (flushAllPendingSaves) and will retry, so the screen and the
+          // queue agree on the customer's entered values. Reverting here
+          // would recreate the divergence (UI shows old, queue holds new)
+          // that let a later flush silently persist hidden values. Just
+          // surface the failure.
           setSaveStatus('error');
         });
     }, 1000);
@@ -5827,6 +5953,7 @@ function PropertyTab({ customer }) {
       <PortalStatePanel
         icon="house"
         eyebrow="My Property"
+        titleAs="h1"
         title="Loading property info"
         message="Checking your gate, pets, scheduling, HOA, and service-day notes."
       />
@@ -5838,6 +5965,7 @@ function PropertyTab({ customer }) {
         icon="warning"
         tone="danger"
         eyebrow="My Property"
+        titleAs="h1"
         title="Unable to load preferences"
         message={loadError || 'Refresh the portal and try again.'}
         actionLabel="Try Again"
@@ -8177,6 +8305,20 @@ function MyPlanTab({ customer, focusService }) {
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
   const [expandedService, setExpandedService] = useState(focusService || null);
+  // Deep-link hygiene: ?tab=plan&service=… pre-expands a row, but once the
+  // customer manually toggles rows the link has been consumed — drop the
+  // param (no history entry) so a refresh doesn't reopen a collapsed row.
+  const toggleExpandedService = (next) => {
+    setExpandedService(next);
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('service')) {
+        url.searchParams.delete('service');
+        const qs = url.searchParams.toString();
+        window.history.replaceState(window.history.state, '', `${url.pathname}${qs ? `?${qs}` : ''}${url.hash}`);
+      }
+    } catch { /* URL cleanup is cosmetic */ }
+  };
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
@@ -8589,9 +8731,9 @@ function MyPlanTab({ customer, focusService }) {
   if (planStatus !== 'ready') {
     return (
       <section role={planStatus === 'error' ? 'alert' : undefined} data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
-        <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
           {planStatus === 'loading' ? 'Loading your plan…' : 'We couldn’t load your plan'}
-        </div>
+        </h1>
         {planStatus === 'error' && (
           <>
             <div style={{ marginTop: 6, color: muted, fontSize: 14 }}>Your plan is still on file. This looks temporary.</div>
@@ -8717,7 +8859,7 @@ function MyPlanTab({ customer, focusService }) {
                   }}>
                     <button
                       type="button"
-                      onClick={() => setExpandedService(expanded ? null : svc.id)}
+                      onClick={() => toggleExpandedService(expanded ? null : svc.id)}
                       aria-expanded={expanded}
                       style={{
                         border: 'none',
@@ -9468,15 +9610,20 @@ function ServiceTracker() {
     api.getWeather().then(setWeather).catch(() => {});
   }, [fetchTracker]);
 
+  // 'none' | step number — derived so the interval effect keys on the PHASE,
+  // not the tracker object identity (which changes on every poll).
+  const trackerPhase = tracker ? tracker.currentStep : 'none';
   useEffect(() => {
     // Poll from step 1 (Scheduled) too — nothing else updates this
     // component, so a portal left open before dispatch would otherwise stay
     // stuck at Scheduled through confirmation and en-route. Only terminal
-    // states stop the refresh loop.
-    if (!tracker || tracker.currentStep >= 7) return;
-    const interval = setInterval(fetchTracker, 15000);
+    // states stop the refresh loop. A NULL tracker (no active visit yet)
+    // keeps polling at a relaxed cadence: with no interval at all, a visit
+    // going en-route after page load never appeared without a reload.
+    if (trackerPhase !== 'none' && trackerPhase >= 7) return;
+    const interval = setInterval(fetchTracker, trackerPhase === 'none' ? 60000 : 15000);
     return () => clearInterval(interval);
-  }, [tracker?.currentStep, fetchTracker]);
+  }, [trackerPhase, fetchTracker]);
 
   const lastReportedAt = tracker?.techPosition?.lastReportedAt || tracker?.techPosition?.updatedAt;
   const lastUpdated = useLastUpdated(lastReportedAt);
@@ -10104,6 +10251,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <PortalStatePanel
         icon="gift"
         eyebrow="Referrals"
+        titleAs="h1"
         title="Loading referrals"
         message="Checking your referral link, credits, and recent invites."
       />
@@ -10116,6 +10264,7 @@ function ReferTab({ customer, onSwitchTab }) {
         icon="warning"
         tone="danger"
         eyebrow="Referrals"
+        titleAs="h1"
         title="Could not load referrals"
         message={loadError}
         actionLabel="Try Again"
@@ -10863,6 +11012,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       <PortalStatePanel
         icon="document"
         eyebrow="Documents"
+        titleAs="h1"
         title="Loading documents"
         message="Checking agreements, inspection reports, insurance certificates, and compliance paperwork."
       />
@@ -10875,6 +11025,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         icon="warning"
         tone="danger"
         eyebrow="Documents"
+        titleAs="h1"
         title="Could not load documents"
         message={loadError}
         actionLabel="Try Again"
@@ -11667,6 +11818,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
   const [photos, setPhotos] = useState([]); // array of { preview, data }
+  // FileReader is async — submitting while a selection is still being read
+  // silently sent the request WITHOUT the photo. A COUNTER, not a boolean:
+  // two overlapping handlePhoto calls each read files, and a boolean cleared
+  // by the first-finishing batch would unblock submit while the second is
+  // still reading. photoProcessing is derived (> 0) so submit/picker stay
+  // blocked until every in-flight read settles.
+  const [photoReadCount, setPhotoReadCount] = useState(0);
+  const photoProcessing = photoReadCount > 0;
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submittedNote, setSubmittedNote] = useState('');
@@ -11784,9 +11943,26 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     setLocation(prev => prev === val ? '' : val);
   };
 
+  // Some browsers report an empty file.type for HEIC/HEIF, and FileReader
+  // then emits data:;base64,… with no mime — which the server's data-URL
+  // prefix check rejects wholesale. Rebuild the prefix from the extension so
+  // the accepted-but-typeless file still uploads with a valid mime.
+  const EXT_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif' };
+  const mimeFromName = (name) => EXT_MIME[String(name || '').split('.').pop().toLowerCase()] || null;
+
   const readPhotoFile = (file) => new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name });
+    reader.onload = (ev) => {
+      let dataUrl = ev.target.result;
+      if (typeof dataUrl === 'string' && dataUrl.startsWith('data:;base64,')) {
+        const mime = file.type || mimeFromName(file.name);
+        // No inferable image mime → drop it (filtered below) rather than
+        // send a body the server will reject.
+        if (!mime) return resolve(null);
+        dataUrl = `data:${mime};base64,${dataUrl.slice('data:;base64,'.length)}`;
+      }
+      resolve({ preview: dataUrl, data: dataUrl, name: file.name });
+    };
     // A corrupt/unreadable file fires error/abort instead of load — settle
     // with null so one bad image can't hang Promise.all (and the photo
     // picker) forever; nulls are filtered out below.
@@ -11795,12 +11971,38 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     reader.readAsDataURL(file);
   });
 
+  // Mirror the server's photo rules HERE (request-photo-validation.js:
+  // jpeg/png/webp/heic + 5MB decoded): the picker accepted GIFs and
+  // oversized files that the backend later rejected wholesale, after the
+  // customer had already left the form. An empty file.type passes through —
+  // some browsers report none for HEIC and the server re-validates by the
+  // data-URL mime anyway.
+  const PHOTO_TYPE_RE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
+  const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+
   const handlePhoto = async (e) => {
-    const files = Array.from(e.target.files || []).slice(0, photosRemaining);
-    if (!files.length) return;
-    const nextPhotos = (await Promise.all(files.map(readPhotoFile))).filter(Boolean);
-    setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
+    const all = Array.from(e.target.files || []);
     e.target.value = '';
+    if (!all.length) return;
+    const usable = all
+      // Accept by mime when present; when empty (HEIC on some browsers),
+      // require a recognized extension so readPhotoFile can rebuild the
+      // data-URL prefix — an empty type with no usable extension would
+      // upload as data:;base64 and be server-rejected.
+      .filter(f => (f.type ? PHOTO_TYPE_RE.test(f.type) : !!mimeFromName(f.name)) && f.size <= MAX_PHOTO_BYTES)
+      .slice(0, photosRemaining);
+    const rejectedCount = all.length - usable.length;
+    setSubmitError(rejectedCount > 0
+      ? `${rejectedCount === 1 ? 'One photo was' : `${rejectedCount} photos were`} skipped — photos must be JPG, PNG, WebP, or HEIC and under 5 MB each.`
+      : '');
+    if (!usable.length) return;
+    setPhotoReadCount(c => c + 1);
+    try {
+      const nextPhotos = (await Promise.all(usable.map(readPhotoFile))).filter(Boolean);
+      setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
+    } finally {
+      setPhotoReadCount(c => Math.max(0, c - 1));
+    }
   };
 
   // Native iOS shell: use the Capacitor camera/photo picker instead of the
@@ -11809,11 +12011,18 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   // file input so the photo tile never silently does nothing. User cancel = no-op.
   const handleNativePhoto = async () => {
     if (photosRemaining <= 0) return;
-    const result = await captureCameraPhoto();
-    if (result.photo) {
-      setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
-    } else if (result.unavailable) {
-      fileRef.current?.click();
+    // Hold the busy counter across native capture too — on iPad the photo
+    // sheet is a popover, so Submit stays tappable mid-capture.
+    setPhotoReadCount(c => c + 1);
+    try {
+      const result = await captureCameraPhoto();
+      if (result.photo) {
+        setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
+      } else if (result.unavailable) {
+        fileRef.current?.click();
+      }
+    } finally {
+      setPhotoReadCount(c => Math.max(0, c - 1));
     }
   };
 
@@ -11825,6 +12034,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     e?.preventDefault();
     if (!category || !description.trim()) {
       setSubmitError('Choose a request type and add a short description so the team has enough context.');
+      return;
+    }
+    if (photoProcessing) {
+      setSubmitError('One moment — your photo is still being added.');
       return;
     }
     setSubmitting(true);
@@ -12252,7 +12465,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   id="portal-request-photos"
                   name="requestPhotos"
                   type="file"
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
                   capture="environment"
                   multiple
                   onChange={handlePhoto}
@@ -12263,10 +12476,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <button
                       type="button"
                       onClick={isNativeApp() ? handleNativePhoto : () => fileRef.current?.click()}
+                      disabled={photoProcessing}
                       style={{
                         minHeight: 92,
                         borderRadius: 8,
-                        cursor: 'pointer',
+                        cursor: photoProcessing ? 'wait' : 'pointer',
                         border: '1px dashed #93C5FD',
                         background: '#F8FCFE',
                         color: B.glassNavy,
@@ -12277,10 +12491,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         gap: 6,
                         fontFamily: FONTS.heading,
                         fontWeight: 850,
+                        opacity: photoProcessing ? 0.6 : 1,
                       }}
                     >
                       <Icon name="camera" size={22} strokeWidth={2} />
-                      <span style={{ fontSize: 14 }}>Add photos</span>
+                      <span style={{ fontSize: 14 }}>{photoProcessing ? 'Adding…' : 'Add photos'}</span>
                       <span style={{ fontSize: 12, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
                     </button>
                   )}
@@ -12539,19 +12754,6 @@ const MORE_TABS = [
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
-const TAB_TITLES = {
-  dashboard: 'Customer Dashboard',
-  plan: 'My Plan',
-  visits: 'Visits',
-  billing: 'Billing',
-  // Neutral: this static title can't see the server's reward figure, so it
-  // must not claim earnings the program may not currently pay.
-  refer: 'Refer a Neighbor',
-  documents: 'Documents',
-  property: 'My Property',
-  learn: 'Learn and Stay Informed',
-};
-
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
 function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
@@ -13754,7 +13956,8 @@ export default function PortalPage() {
           that are programmatically focusable — without it the skip link
           scrolls but Tab keeps walking the header. */}
       <main id="portal-main" tabIndex={-1} style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
-        {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
+        {/* No shell-level h1: every non-dashboard tab renders its own visible
+            h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
             Home · Plan · Visits · Billing · Refer · Documents · My Property ·
             Learn — renders as a glass card right above the Waves AI bar

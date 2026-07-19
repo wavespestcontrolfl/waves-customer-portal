@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import useModalFocus from '../hooks/useModalFocus';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
 import api from '../utils/api';
@@ -188,6 +189,17 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setOpen(!open);
   };
 
+  // Full dialog contract via the shared hook: move focus into the panel,
+  // trap Tab/Shift+Tab inside it, close on Escape, and restore focus to the
+  // bell on close (same as the other portal dialogs). Merge its ref with the
+  // existing panelRef (used for outside-click detection) since only one of
+  // the mobile/desktop panels renders at a time.
+  const dialogFocusRef = useModalFocus(open, () => setOpen(false));
+  const attachPanelRef = (node) => {
+    panelRef.current = node;
+    dialogFocusRef.current = node;
+  };
+
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
     // write (expired token the refresh couldn't save) must not clear badges.
@@ -279,7 +291,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // account menu). Inset so the rounded sheet floats over the scene
           // and clears the notch + bottom tab bar. Admin: unchanged white
           // full-screen panel (no glass theme mounted on /admin).
-          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
             top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
@@ -420,7 +432,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // Desktop: admin keeps the flush right-edge drawer; customer gets a
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
-          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
