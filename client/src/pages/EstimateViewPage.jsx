@@ -3781,7 +3781,7 @@ function EstimateViewPageInner() {
     setAddServiceRequestState({ status: 'idle', message: '' });
   }, [token, addServiceOffer?.serviceKey]);
 
-  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+  const loadEstimate = useCallback(async ({ preserveSelection = false, signal } = {}) => {
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
     // skeleton — a failed refresh used to leave the skeleton up forever
@@ -3800,7 +3800,7 @@ function EstimateViewPageInner() {
       const staffToken = localStorage.getItem('waves_admin_token');
       if (staffToken) fetchOpts = { headers: { Authorization: `Bearer ${staffToken}` } };
     }
-    const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
+    const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, { ...fetchOpts, signal });
     if (r.status === 404) {
       const notFoundBody = await r.json().catch(() => ({}));
       setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
@@ -3820,6 +3820,12 @@ function EstimateViewPageInner() {
     setNotFound(false);
     setExtensionEligible(false);
     const body = await r.json();
+    // Aborted mid-flight (the caller navigated to a different :token and this
+    // instance is unmounting): stop before ANY side effect. React drops
+    // setState on the unmounted tree, but setGlassDefault mutates MODULE-GLOBAL
+    // state that would otherwise survive the remount and make the new token's
+    // page render this (stale) token's glass-copy mode.
+    if (signal?.aborted) return;
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
     // page. The marketing copy stays category-scoped server-side; the old
@@ -3863,16 +3869,21 @@ function EstimateViewPageInner() {
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
 
-  // Fetch on mount
+  // Fetch on mount. AbortController so a token change (which remounts this
+  // component) aborts the in-flight /data request — otherwise a late response
+  // for the previous token would still run loadEstimate's global side effects
+  // (setGlassDefault) after unmount. An AbortError is swallowed (not a load
+  // error) since the abort is deliberate.
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
-    loadEstimate().catch(() => {
-      if (!cancelled) {
+    loadEstimate({ signal: controller.signal }).catch((err) => {
+      if (!cancelled && err?.name !== 'AbortError') {
         setLoadError(true);
         setLoading(false);
       }
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [loadEstimate]);
 
   // Rebuild add-on defaults when the customer changes frequency — but

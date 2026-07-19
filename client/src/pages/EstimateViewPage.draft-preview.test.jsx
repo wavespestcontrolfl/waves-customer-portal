@@ -133,7 +133,10 @@ describe('EstimateViewPage staff draft preview', () => {
     expect(screen.queryByText('Draft preview — not sent to the customer yet')).not.toBeInTheDocument();
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).not.toContain('adminPreview');
-    expect(opts).toBeUndefined();
+    // The mount abort signal always rides along; "untouched" means no auth
+    // header and no preview param — assert those specifically.
+    expect(opts?.headers).toBeUndefined();
+    expect(opts?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('exports the banner as a standalone component', () => {

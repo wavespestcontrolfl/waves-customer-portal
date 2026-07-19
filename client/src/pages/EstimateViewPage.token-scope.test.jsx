@@ -49,4 +49,27 @@ describe('EstimateViewPage token scoping', () => {
     // (the stale A instance is unmounted; its state/late resolve can't surface).
     await waitFor(() => expect(dataUrlTokens(fetchMock)).toContain('token-B'));
   });
+
+  it('aborts the in-flight fetch for the old token on a token change (no late global side effects)', async () => {
+    // Token A's response never resolves during the test; capture its signal.
+    const signalsByToken = {};
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const token = String(url).match(/\/estimates\/([^/]+)\/data/)?.[1];
+      signalsByToken[token] = opts.signal;
+      if (token === 'token-A') return new Promise(() => {}); // pending forever
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(<EstimateViewPage />);
+    await waitFor(() => expect(signalsByToken['token-A']).toBeInstanceOf(AbortSignal));
+    expect(signalsByToken['token-A'].aborted).toBe(false);
+
+    // Navigate to B while A is still in flight → A's fetch must be aborted, so
+    // a late A resolve can't run loadEstimate's global setGlassDefault side effect.
+    currentToken = 'token-B';
+    rerender(<EstimateViewPage />);
+
+    await waitFor(() => expect(signalsByToken['token-A'].aborted).toBe(true));
+  });
 });
