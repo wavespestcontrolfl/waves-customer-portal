@@ -54,7 +54,15 @@ const PROPOSAL_DRAFT_EXPIRY_DAYS = 30;
 // Any dollar figure in the composed brief means the model priced something —
 // the one thing this lane must never do. Reject the whole brief (the
 // deterministic scaffold takes over) rather than trying to scrub it.
-const DOLLAR_FIGURE_RE = /\$\s*\d|\b\d+(?:[.,]\d+)?\s*(?:dollars|usd)\b/i;
+// Shorthand counts: "1200/mo" and "1,200 per month" are prices without a
+// currency marker — brief text is copied into proposal line descriptions,
+// which reach the customer-facing PDF once the operator saves.
+const DOLLAR_FIGURE_RE = new RegExp([
+  String.raw`\$\s*\d`,
+  String.raw`\b\d+(?:[.,]\d+)?\s*(?:dollars|usd)\b`,
+  String.raw`\b\d[\d,]*(?:\.\d+)?\s*\/\s*(?:mo|month|wk|week|yr|year|visit|service|treatment|application)\b`,
+  String.raw`\b\d[\d,]*(?:\.\d+)?\s+(?:per|a|each)\s+(?:month|year|week|quarter|visit|service|application|treatment)\b`,
+].join('|'), 'i');
 
 const MAX_BRIEF_LIST_ITEMS = 12;
 const MAX_SCAFFOLD_BUILDINGS = 12;
@@ -214,12 +222,27 @@ async function composeProspectBrief({ intent, propertyFacts, facts, context, rea
 
 const SERVICE_LABELS = {
   pest: 'Pest control',
+  oneTimePest: 'One-time pest treatment',
   lawn: 'Lawn care',
+  oneTimeLawn: 'One-time lawn treatment',
+  lawnPestControl: 'Lawn insect knockdown',
+  treeShrub: 'Tree & shrub',
   mosquito: 'Mosquito',
-  termite: 'Termite',
-  rodent: 'Rodent',
-  treeAndShrub: 'Tree & shrub',
+  oneTimeMosquito: 'One-time mosquito treatment',
+  termite: 'Termite monitoring',
+  flea: 'Flea & tick',
+  bedBug: 'Bed bug treatment',
+  rodentBait: 'Rodent bait stations',
+  stinging: 'Stinging insect treatment',
 };
+
+// Intent keys the composer vocabulary defines as SINGLE treatments, not
+// recurring programs (incl. lawnPestControl — "ONE-TIME lawn insect
+// knockdown"). A fallback scaffold line stamped monthly for these would
+// invite the operator to price a one-off as a recurring proposal.
+const ONE_TIME_SERVICE_KEYS = new Set([
+  'oneTimePest', 'oneTimeLawn', 'oneTimeMosquito', 'lawnPestControl', 'bedBug', 'stinging',
+]);
 
 function serviceLabel(key) {
   return SERVICE_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
@@ -248,8 +271,8 @@ function buildProposalScaffold({ intent, brief, facts }) {
   const programs = (brief?.servicePrograms || []).length
     ? brief.servicePrograms
     : Object.keys(intent.services || {}).map((key) => ({
-      name: `${serviceLabel(key)} program`,
-      cadence: 'monthly',
+      name: ONE_TIME_SERVICE_KEYS.has(key) ? serviceLabel(key) : `${serviceLabel(key)} program`,
+      cadence: ONE_TIME_SERVICE_KEYS.has(key) ? 'one_time' : 'monthly',
       scope: 'scope and pricing after walkthrough',
     }));
   const lineItems = (programs.length ? programs : [{
@@ -295,14 +318,24 @@ async function maybeBuildCommercialProposalDraft({
       return { created: false, skipped: 'no_address' };
     }
 
-    const facts = parcelFacts(propertyRecord, parcelView);
-    const brief = await composeProspectBrief({ intent, propertyFacts, facts, context, reasons });
-    const scaffold = buildProposalScaffold({ intent, brief, facts });
-
     // Shared with the residential draft path — one phone-resolution and one
     // duplicate-conflict rule set, so the two lanes can never drift.
     const { resolveDraftCustomerPhone, conflictingOpenEstimate } = require('./draft-builder');
     const customerPhone = resolveDraftCustomerPhone(intent, context);
+
+    // Cheap duplicate probe BEFORE the high-stakes composition: the in-lock
+    // check below stays authoritative, but a repeat call/text about an
+    // already-open estimate must not spend the 90s brief budget on a
+    // scaffold the guard will discard.
+    const preOpen = await listOpenEstimatesByPhone(customerPhone);
+    const preConflict = conflictingOpenEstimate(preOpen, intent.address);
+    if (preConflict) {
+      return { created: false, blocked: true, existingEstimateId: preConflict.id };
+    }
+
+    const facts = parcelFacts(propertyRecord, parcelView);
+    const brief = await composeProspectBrief({ intent, propertyFacts, facts, context, reasons });
+    const scaffold = buildProposalScaffold({ intent, brief, facts });
 
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + PROPOSAL_DRAFT_EXPIRY_DAYS * 86400000);
@@ -374,9 +407,12 @@ async function maybeBuildCommercialProposalDraft({
         customer_email: (context?.leadIsForThisCall && context?.lead?.email)
           || (!context?.customerPhoneAmbiguous && context?.customer?.email)
           || null,
-        customer_id: (context?.customer?.id && !context?.customerPhoneAmbiguous)
-          ? context.customer.id
-          : null,
+        // NEVER pre-link a phone-matched profile: proposal-win creates the
+        // separate commercial profile ONLY when customer_id is absent — a
+        // property manager calling from a number tied to an existing
+        // (often residential) account would otherwise be promoted/invoiced
+        // onto that account instead of the new commercial profile.
+        customer_id: null,
         // Price columns deliberately untouched: NULL, never 0. notes stays
         // NULL — estimates.notes is CUSTOMER-VISIBLE.
         token,

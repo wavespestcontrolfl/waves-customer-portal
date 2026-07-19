@@ -246,6 +246,37 @@ describe('maybeBuildCommercialProposalDraft', () => {
     expect(mockState.updates).toContainEqual({ table: 'leads', payload: { estimate_id: 'est-1' } });
   });
 
+  test('a phone-matched customer profile is NEVER pre-linked (proposal-win owns profile creation)', async () => {
+    const outcome = await maybeBuildCommercialProposalDraft(buildArgs({
+      context: CONTEXT({ customer: { id: 'cust-existing', email: 'res@example.com' }, customerPhoneAmbiguous: false }),
+    }));
+    expect(outcome.created).toBe(true);
+    // Contact info may ride along, but the FK stays null — the win path
+    // creates the separate commercial profile only when customer_id is
+    // absent, and a phone-matched residential account must not be
+    // promoted/invoiced in its place.
+    expect(mockState.inserts[0].payload.customer_id).toBeNull();
+  });
+
+  test('an open estimate suppresses the scaffold BEFORE the brief LLM spend', async () => {
+    mockListOpen.mockResolvedValue([{ id: 'open-1', address: '500 Example Commons Blvd, Testville, FL 34200' }]);
+    const outcome = await maybeBuildCommercialProposalDraft(buildArgs());
+    expect(outcome).toMatchObject({ created: false, blocked: true, existingEstimateId: 'open-1' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('one-time intent keys scaffold as one_time lines, never monthly', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, failures: [] });
+    await maybeBuildCommercialProposalDraft(buildArgs({
+      intent: INTENT({ services: { pest: { frequency: 'monthly' }, lawnPestControl: {}, oneTimeMosquito: {} } }),
+    }));
+    const data = JSON.parse(mockState.inserts[0].payload.estimate_data);
+    const byDesc = Object.fromEntries(data.proposal.buildings[0].lineItems.map((li) => [li.description, li.frequency]));
+    expect(byDesc['Pest control program — scope and pricing after walkthrough']).toBe('monthly');
+    expect(byDesc['Lawn insect knockdown — scope and pricing after walkthrough']).toBe('one_time');
+    expect(byDesc['One-time mosquito treatment — scope and pricing after walkthrough']).toBe('one_time');
+  });
+
   test('a dollar figure ANYWHERE in the brief rejects the whole brief (scaffold survives)', async () => {
     const priced = GOOD_BRIEF();
     priced.servicePrograms[0].scope = 'around $1,200 per month for the breezeways';
@@ -326,11 +357,17 @@ describe('brief contract', () => {
     expect(validateBrief(b)).toBe('contains_dollar_figure');
   });
 
-  test('dollar regex catches spelled variants but not bare numbers', () => {
+  test('dollar regex catches spelled and shorthand variants but not bare numbers', () => {
     expect(DOLLAR_FIGURE_RE.test('costs 1200 dollars')).toBe(true);
     expect(DOLLAR_FIGURE_RE.test('about 350 USD annually')).toBe(true);
     expect(DOLLAR_FIGURE_RE.test('$ 45')).toBe(true);
+    // Shorthand prices carry no currency marker but are still prices —
+    // brief text is copied into customer-facing line descriptions.
+    expect(DOLLAR_FIGURE_RE.test('around 1200/mo for the breezeways')).toBe(true);
+    expect(DOLLAR_FIGURE_RE.test('roughly 1,200 per month')).toBe(true);
+    expect(DOLLAR_FIGURE_RE.test('350 per visit')).toBe(true);
     expect(DOLLAR_FIGURE_RE.test('40 units across 3 buildings built in 1999')).toBe(false);
+    expect(DOLLAR_FIGURE_RE.test('25,000 sqft footprint, 12 visits a year included')).toBe(false);
   });
 });
 
