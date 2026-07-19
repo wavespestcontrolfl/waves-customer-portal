@@ -19,7 +19,7 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
-const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+const { loadExistingQualifyingServiceKeys, isActivePlanCustomer } = require('./waveguard-existing-services');
 const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
@@ -362,6 +362,19 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // payload) and the public/lead `engineInputs` (already a v1 engine input).
 // Returns { recomputed:true, source, serverResult, serverTotals } or
 // { recomputed:false, reason } so callers can fail open.
+// The identity/recurring fields the browser must never set on a
+// SERVER-authoritative estimate: they drive the WaveGuard tier and the
+// recurring-customer perk, which are earned on a verified customer_id. The
+// server re-derives them; these are stripped from both the transient recompute
+// input AND every stored replay shape so a later public reprice
+// (extractEngineInputs) can't restore a forged value.
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer'];
+function sanitizeClientIdentityFields(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
+  return obj;
+}
+
 async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   const generateEstimate = deps.generateEstimate || pricingEngine.generateEstimate;
   const needsSync = deps.needsSync || pricingEngine.needsSync;
@@ -398,15 +411,30 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
   if (!v1Input) return { recomputed: false, reason: 'NO_INPUTS' };
 
-  // Existing-customer reprice: when the estimate is linked to a customer with
-  // prior qualifying recurring services, fold them into the engine input so the
-  // WaveGuard tier (and thus the persisted, charged total) reflects the
-  // COMBINED tier — not just the services in this one estimate.
+  // SERVER-AUTHORITATIVE identity override. priorQualifyingServices (the
+  // WaveGuard tier input) and the recurring-customer flag (the 15% one-time
+  // perk) are EXISTING-CUSTOMER benefits that must be earned on a verified
+  // customer_id — never claimed by the browser. The replayed estimateData
+  // (engineRequest.options / engineInputs) is fully client-controlled, so on
+  // this SERVER-stamped path we overwrite them from the server-derived deps
+  // (loaded from body.customerId by the caller), UNCONDITIONALLY — including
+  // the empty/non-member case. Without this, a forged priorQualifyingServices
+  // lifted a lead's mosquito quote Bronze→Platinum, and a forged
+  // recurringCustomer:true stole the one-time perk.
   const priorQualifyingServices = Array.isArray(deps.priorQualifyingServices)
     ? deps.priorQualifyingServices
     : [];
-  if (priorQualifyingServices.length) {
-    v1Input = { ...v1Input, priorQualifyingServices };
+  // Strip the client-claimed identity/recurring flags, then set the
+  // server-authoritative values. priorQualifyingServices is set unconditionally
+  // (empty for a non-member); recurringCustomer is forced true ONLY for a
+  // verified active-plan customer or one with prior qualifying services.
+  // Everyone else is left to the engine's own cart-based auto-derivation
+  // (activeServiceKeys), so a bundle that itself buys a recurring service still
+  // legitimately earns the perk while a one-time-only lead cannot forge it.
+  v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  v1Input.priorQualifyingServices = priorQualifyingServices;
+  if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
+    v1Input.recurringCustomer = true;
   }
 
   try {
@@ -426,7 +454,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, recurringCustomer }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -443,7 +471,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, recurringCustomer });
   } catch (error) {
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
@@ -590,11 +618,20 @@ async function resolveEstimateWritePayload({
   // tier. Best-effort: a failure here must not block the save, it just means the
   // estimate prices on its own services as before.
   let priorQualifyingServices = [];
+  // Server-verified recurring-customer status (gates the 15% one-time perk).
+  // Fail-closed to false: a lookup miss/error charges as a non-member, never
+  // silently grants the perk — same posture as isActivePlanCustomer itself.
+  let recurringCustomer = false;
   if (body.customerId) {
     try {
       priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
     } catch (err) {
       logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+    }
+    try {
+      recurringCustomer = await isActivePlanCustomer(database, body.customerId);
+    } catch (err) {
+      logger.warn(`[admin-estimate] active-plan lookup skipped: ${err.message}`);
     }
   }
   const pricing = await resolveServerAuthoritativePricing({
@@ -604,6 +641,7 @@ async function resolveEstimateWritePayload({
     now,
     recompute,
     priorQualifyingServices,
+    recurringCustomer,
   });
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
@@ -620,6 +658,21 @@ async function resolveEstimateWritePayload({
     trustedEstimateData.priorQualifyingServices = priorQualifyingServices;
   } else {
     delete trustedEstimateData.priorQualifyingServices;
+  }
+  // Strip the client-claimed identity/recurring flags from every STORED replay
+  // shape (engineInputs + engineRequest.options). extractEngineInputs replays
+  // from engineInputs on the public reprice, so a forged
+  // priorQualifyingServices / recurringCustomer left in the stored blob would
+  // otherwise be restored at accept/charge time even though the initial save
+  // is stamped SERVER. The authoritative combined-tier value lives in the
+  // top-level trustedEstimateData.priorQualifyingServices set above (which
+  // extractEngineInputs re-injects), and recurring status re-derives from those
+  // priors + the cart on replay — so a member keeps the perk while a non-member
+  // cannot restore a forged one.
+  sanitizeClientIdentityFields(trustedEstimateData.engineInputs);
+  sanitizeClientIdentityFields(trustedEstimateData.inputs);
+  if (trustedEstimateData.engineRequest && typeof trustedEstimateData.engineRequest === 'object') {
+    sanitizeClientIdentityFields(trustedEstimateData.engineRequest.options);
   }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
@@ -1053,4 +1106,5 @@ module.exports = {
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
   compareClientToServer,
+  sanitizeClientIdentityFields,
 };

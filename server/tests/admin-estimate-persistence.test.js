@@ -837,6 +837,45 @@ describe('admin estimate persistence', () => {
     ]));
   });
 
+  test('P1-2: forged priorQualifyingServices/recurringCustomer are stripped from the STORED engineInputs (no replay restore)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+    });
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: null, // a lead → server-derived priors are empty
+        // A forged blob claiming existing-customer priors + the recurring perk.
+        estimateData: {
+          engineInputs: {
+            homeSqFt: 2000, lotSqFt: 10000, services: { mosquito: { tier: 'monthly12' } },
+            priorQualifyingServices: ['pest_control', 'lawn_care', 'tree_shrub'],
+            recurringCustomer: true,
+            isRecurringCustomer: true,
+          },
+          result: { total: 125 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const estimateInsert = inserts.find((e) => e.table === 'estimates');
+    expect(estimateInsert).toBeTruthy();
+    const stored = JSON.parse(estimateInsert.row.estimate_data);
+    // extractEngineInputs replays from engineInputs on the public reprice — the
+    // forged identity fields must be gone so accept/charge can't restore them.
+    expect(stored.engineInputs.priorQualifyingServices).toBeUndefined();
+    expect(stored.engineInputs.recurringCustomer).toBeUndefined();
+    expect(stored.engineInputs.isRecurringCustomer).toBeUndefined();
+    // And no forged top-level combined-tier value survives for a non-member.
+    expect(stored.priorQualifyingServices).toBeUndefined();
+  });
+
   test('rejects a new estimate when the linked prior estimate is still active', async () => {
     const { database, updates, inserts } = makeDatabase({
       lead: {

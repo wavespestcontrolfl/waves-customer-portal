@@ -1071,7 +1071,15 @@ function generateEstimate(input) {
     const result = priceGermanRoachInitial({
       urgency: opts.urgency || 'NONE',
       afterHours: !!opts.afterHours,
-      isRecurringCustomer: !!opts.isRecurringCustomer,
+      // Use the estimate's CANONICAL recurring-customer status (derived above
+      // from prior qualifying services / an explicit flag / in-cart recurring
+      // services), NOT the per-line nested opts flag. The nested flag was a
+      // separate, directly-consumed input that a client could forge on the
+      // SERVER-authoritative persistence path to steal this line's 15% perk
+      // without being a recurring customer. Deriving it here keeps the line
+      // consistent with the rest of the estimate: a member / prior-services /
+      // in-cart-recurring customer still earns it; a one-time-only lead cannot.
+      isRecurringCustomer,
     });
     lineItems.push(result);
   }
