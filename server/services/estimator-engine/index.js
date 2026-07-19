@@ -143,11 +143,14 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
-  const link = estimateId
-    ? '/admin/estimates'
-    : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications');
+  // Callers may pass a specific link (the proposal builder deep-link);
+  // otherwise derive the historical default from what the bell references.
+  link = link
+    || (estimateId
+      ? '/admin/estimates'
+      : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications'));
   const metadata = {
     callSid,
     ...(threadKey ? { smsThreadKey: threadKey } : {}),
@@ -260,6 +263,8 @@ const CALL_ORIGIN = {
     errorBody: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
     blockedTitle: 'Quote promised on call — estimate already open',
     blockedBody: (label) => `${label}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+    proposalTitle: 'Commercial prospect on call — proposal scaffold ready',
+    proposalBody: (label) => `${label}: commercial relationship quote — prospect research and an unpriced proposal scaffold are drafted. Price it in the proposal builder.`,
   },
 };
 
@@ -309,21 +314,41 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         // the generic quote-promised bells suppressed behind the gate, that
         // would leave a silent draft forever. notify() dedupes internally,
         // so this is a no-op when the bell already rang.
-        const existingLane = (() => {
+        const existingMeta = (() => {
           try {
             const data = typeof existing.estimate_data === 'string'
               ? JSON.parse(existing.estimate_data) : existing.estimate_data;
-            return data?.estimatorEngine?.lane || 'yellow';
-          } catch { return 'yellow'; }
+            return {
+              lane: data?.estimatorEngine?.lane || 'yellow',
+              commercialProposal: data?.estimatorEngine?.commercialProposal === true,
+            };
+          } catch { return { lane: 'yellow', commercialProposal: false }; }
         })();
+        if (existingMeta.commercialProposal) {
+          // A proposal scaffold recovered on re-entry must keep its proposal
+          // semantics: the generic draft bell would read "$0/mo" (the row is
+          // deliberately unpriced) and link the estimates list instead of
+          // the proposal builder.
+          await notify({
+            call: context.call,
+            context,
+            lane: existingMeta.lane,
+            quotePromised,
+            estimateId: existing.id,
+            link: `/admin/estimates/${existing.id}/proposal`,
+            title: CALL_ORIGIN.strings.proposalTitle,
+            body: CALL_ORIGIN.strings.proposalBody(callerLabel(null, context)),
+          });
+          return result;
+        }
         await notify({
           call: context.call,
           context,
-          lane: existingLane,
+          lane: existingMeta.lane,
           quotePromised,
           estimateId: existing.id,
-          title: `AI estimate draft ${existingLane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
-          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingLane).toUpperCase()}). Review in admin/estimates and send.`,
+          title: `AI estimate draft ${existingMeta.lane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
+          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingMeta.lane).toUpperCase()}). Review in admin/estimates and send.`,
         });
         return result;
       }
@@ -515,7 +540,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const draftable = intent.decision === 'draft'
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
-    const { lane, reasons } = (engineResult || !draftable)
+    const { lane, reasons, causes = [] } = (engineResult || !draftable)
       ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
@@ -525,6 +550,71 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (dryRun) return result;
 
     if (lane === LANES.RED) {
+      // Commercial/HOA proposal lane (GATE_ESTIMATOR_COMMERCIAL_PROPOSALS,
+      // default OFF): the relationship-quote red produces a prospect
+      // research brief + unpriced proposal scaffold instead of a bell-only
+      // dead end. Routed on classifyLane's machine-readable CAUSE, not the
+      // raw commercial predicate — a commercial property that redded for an
+      // unrelated reason (no line items, pricing failure) must keep the
+      // standard red + clarify path. Strictly fail-soft — any miss (gate
+      // off, no address, duplicate block, insert failure) falls through to
+      // the standard red path below, so the owed-quote bell can never be
+      // lost to this lane.
+      try {
+        const { commercialProposalsEnabled, maybeBuildCommercialProposalDraft } = require('./commercial-proposal');
+        if (commercialProposalsEnabled() && causes.includes('commercial_relationship_quote')) {
+          const proposalOutcome = await maybeBuildCommercialProposalDraft({
+            intent,
+            propertyFacts,
+            parcelView: effectiveSignals.parcelView,
+            propertyRecord: effectiveSignals.propertyRecord,
+            context,
+            origin,
+            model,
+            reasons,
+          });
+          if (proposalOutcome?.created) {
+            result.created = true;
+            result.estimateId = proposalOutcome.estimateId;
+            result.commercialProposal = true;
+            // Unconditional like the created-draft bell below — an artifact
+            // now exists either way; the scaffold deep-links the builder.
+            await notify({
+              call: context.call,
+              context,
+              lane,
+              quotePromised,
+              threadKey,
+              estimateId: proposalOutcome.estimateId,
+              link: `/admin/estimates/${proposalOutcome.estimateId}/proposal`,
+              title: S.proposalTitle,
+              body: S.proposalBody(callerLabel(intent, context)),
+            });
+            return result;
+          }
+          if (proposalOutcome?.blocked) {
+            // Mirror the created-draft blocked path below: an open estimate
+            // already covers this prospect, and the generic red "send it
+            // manually" bell would prompt the operator to build a duplicate.
+            result.blocked = true;
+            if (quotePromised) {
+              await notify({
+                call: context.call,
+                context,
+                lane,
+                quotePromised,
+                threadKey,
+                estimateId: proposalOutcome.existingEstimateId || null,
+                title: S.blockedTitle,
+                body: S.blockedBody(callerLabel(intent, context)),
+              });
+            }
+            return result;
+          }
+        }
+      } catch (proposalErr) {
+        logger.warn(`[estimator-engine] commercial proposal lane failed (red bell takes over): ${proposalErr.message}`);
+      }
       if (quotePromised) {
         await notify({
           call: context.call,

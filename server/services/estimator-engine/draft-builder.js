@@ -38,6 +38,15 @@ const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
 // buildings over 10k sqft are relationship quotes, not auto-drafts.
 const COMMERCIAL_FOOTPRINT_RED_SQFT = 10000;
 
+// The commercial relationship-quote red, as a named predicate: classifyLane
+// consumes it for the lane decision, and the pipeline re-tests it to route
+// this specific red into the commercial proposal lane (gated) instead of the
+// bell-only dead end. One predicate so the two sites can never drift.
+function isCommercialRelationshipRed({ intent, propertyFacts }) {
+  return intent?.is_commercial === true
+    && positive(propertyFacts?.home?.value) > COMMERCIAL_FOOTPRINT_RED_SQFT;
+}
+
 const COMPS_MIN_SAMPLES = 3;
 const COMPS_BAND_LOW = 0.5;
 const COMPS_BAND_HIGH = 2.0;
@@ -402,8 +411,16 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (!moneyLines.length) {
     return { lane: LANES.RED, reasons: [`nothing auto-priceable: ${manualLines.map((l) => l.manualReviewReasons?.[0] || l.reason || l.service).join('; ')}`] };
   }
-  if (intent.is_commercial && positive(propertyFacts?.home?.value) > COMMERCIAL_FOOTPRINT_RED_SQFT) {
-    return { lane: LANES.RED, reasons: [`commercial building over ${COMMERCIAL_FOOTPRINT_RED_SQFT.toLocaleString()} sqft — relationship quote, not an auto-draft`] };
+  if (isCommercialRelationshipRed({ intent, propertyFacts })) {
+    // The machine-readable cause routes ONLY this red into the commercial
+    // proposal lane. Other red causes on a commercial property (no line
+    // items, pricing failure) must keep the standard red + clarify path —
+    // matching the raw predicate downstream would swallow them.
+    return {
+      lane: LANES.RED,
+      reasons: [`commercial building over ${COMMERCIAL_FOOTPRINT_RED_SQFT.toLocaleString()} sqft — relationship quote, not an auto-draft`],
+      causes: ['commercial_relationship_quote'],
+    };
   }
   if (!positive(totals?.monthly) && !positive(totals?.annual) && !positive(totals?.oneTime)) {
     return { lane: LANES.RED, reasons: ['engine produced zero totals'] };
@@ -738,5 +755,8 @@ module.exports = {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
+  isCommercialRelationshipRed,
+  conflictingOpenEstimate,
+  resolveDraftCustomerPhone,
   _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone },
 };
