@@ -366,13 +366,14 @@ async function handleClarifyReply({ phone, body }) {
         this.where(function pendingOpen() {
           this.where('status', 'pending').whereNull('sent_at');
         }).orWhere(function claimedUnsent() {
-          // Mid-approval (claimed, dispatch not yet decided): the answer
-          // still records — stamp-only, never touching the claimed row's
-          // copy or status. No stale send can result: the dispatch decision
-          // (claimClarifyDispatch) re-reads these flags under the same
-          // clarify lock and rewrites/retires the question before stamping
-          // sent_at, so this bookkeeping either lands before the decision
-          // (and is honored) or after the stamp (sent-ask answer).
+          // Mid-approval (claimed): the answer still records — stamp-only,
+          // never touching the claimed row's copy or status. No stale send
+          // can result: the dispatch decision (claimClarifyDispatch)
+          // re-reads these flags under the same clarify lock and
+          // rewrites/retires the question before committing, so this
+          // bookkeeping either lands before the decision (and is honored)
+          // or after it (the answer is recorded; at worst it crosses the
+          // in-flight SMS, and the record prevents any re-ask).
           this.whereIn('status', ['approved', 'revised']).whereNull('sent_at');
         }).orWhere(function sentRecent() {
           this.whereNotNull('sent_at')
@@ -608,20 +609,32 @@ const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate'
  * already flipped status to 'approved'/'revised'), made ATOMICALLY under the
  * same per-phone clarify lock every reply/park writer holds. Inside one
  * locked transaction: fresh re-read of the draft, CRM staleness checks,
- * partial-answer rewrite, and — when the draft is sendable — the sent_at
- * stamp that commits it to dispatch. Serializing the DECISION (not the
- * Twilio HTTP call) closes the claim→dispatch race: a reply landing before
- * the lock commits is seen by the fresh re-read and rewrites/retires the
- * question; a reply landing after sees sent_at and books as an answer to a
- * sent ask. The only residue left is an SMS physically crossing a reply on
- * the carrier network, which no server-side ordering can remove.
+ * partial-answer rewrite, and a claimed-status-conditional write that
+ * atomically verifies the claim still stands. Serializing the DECISION (not
+ * the Twilio HTTP call) closes the claim→dispatch race: a reply landing
+ * before the lock commits is seen by the fresh re-read and rewrites/retires
+ * the question; a reply landing after is stamp-only bookkeeping against the
+ * claimed row (handleClarifyReply's claimed-unsent branch) — either way no
+ * already-answered question dispatches. The only residue is an SMS
+ * physically crossing a reply on the carrier network, which no server-side
+ * ordering can remove.
  *
- * Outcomes: {outcome:'send', body, flags} (sent_at stamped — the caller MUST
- * dispatch or reconcile via reopenClarifyAfterFailedSend); {outcome:
- * 'retired', message} (status already moved to rejected here);
- * {outcome:'rewritten'} (isRevision only — copy rewritten to the remainder,
- * claim release is the caller's step); {outcome:'error'} (transient — fail
- * closed, nothing written).
+ * sent_at is PROVIDER-CONFIRMED state and is deliberately NOT written here —
+ * only finalizeDraftSend stamps it, after a real send. A process crash
+ * between this decision and the provider call therefore leaves an ordinary
+ * claimed row (never a falsely-sent one): the open-slot unique index still
+ * holds the phone's slot, the 7-day cooldown never keys on a send that
+ * didn't happen, and recovery is the same stuck-claim surface every other
+ * draft lane has.
+ *
+ * Outcomes: {outcome:'send', body, flags} (decision committed — the caller
+ * dispatches this body, and failures reconcile via
+ * reopenClarifyAfterFailedSend); {outcome:'retired', message} (stale — where
+ * the staleness is OURS the status moved to rejected here; a concurrent
+ * reject's verdict is respected without a write); {outcome:'rewritten'}
+ * (isRevision only — copy rewritten to the remainder, claim release is the
+ * caller's step); {outcome:'error'} (transient — fail closed, nothing
+ * written).
  */
 async function claimClarifyDispatch({ draft, isRevision = false }) {
   const digits = digitsFromClarifyRef(draft && draft.source_ref);
@@ -646,9 +659,15 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
       if (!['approved', 'revised'].includes(fresh.status)) {
         return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
       }
+      // Already provider-confirmed sent (unreachable via the pending-only
+      // claim, defensive) — never dispatch twice, and never relabel a
+      // delivered ask as rejected.
+      if (fresh.sent_at) {
+        return { outcome: 'retired', message: 'Clarify draft already dispatched.' };
+      }
       // A consumed ask (every item answered while the claim was in flight)
-      // or an already-dispatched row must never send again.
-      if (fresh.sent_at || flags.answered_at || !missing.length) {
+      // must never send.
+      if (flags.answered_at || !missing.length) {
         return retire('Clarify draft retired — the customer already provided the missing details.');
       }
       // Sequential CRM reads — one trx = one connection, no Promise.all.
@@ -716,25 +735,24 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
           }
           return { outcome: 'rewritten' };
         }
-        const stamped = await trx('message_drafts')
+        const applied = await trx('message_drafts')
           .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
           .update({
             draft_response: rewritten,
             flags: JSON.stringify(rewrittenFlags),
-            sent_at: new Date(),
           });
-        if (!stamped) {
+        if (!applied) {
           return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
         }
         return { outcome: 'send', body: rewritten, flags: rewrittenFlags };
       }
-      // Sendable as-is — the sent_at stamp IS the commitment: from this
-      // commit on, replies route as answers to a sent ask, parks fall under
-      // the recent-sent cooldown, and no writer rewrites the copy.
-      const stamped = await trx('message_drafts')
+      // Sendable as-is. The approved_at refresh is not data anyone reads —
+      // it is the conditional write that atomically re-verifies the claim
+      // (zero rows = a reject won after our read; nothing may dispatch).
+      const applied = await trx('message_drafts')
         .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
-        .update({ sent_at: new Date() });
-      if (!stamped) {
+        .update({ approved_at: new Date() });
+      if (!applied) {
         return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
       }
       return {
@@ -751,15 +769,15 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
 
 /**
  * Reconcile a clarify draft whose provider send FAILED after
- * claimClarifyDispatch stamped sent_at. Under the clarify lock: if the ask
- * was consumed meanwhile (a reply routed against the "sent" row), retire it;
- * if a rival open clarify parked for the phone (cooldown exceptions permit
- * this), retire ours — reopening would violate the one-open-per-phone
- * unique index; otherwise reopen to pending with sent_at cleared. A stale
- * sent_at MUST not survive here — the 7-day cooldown keys on it and would
- * suppress real asks after a send that never happened. dispatchedMissing is
- * the missing set the outbound copy asked for: if a reply shrank the set
- * while the row read as sent, the reopened copy is recomposed to match.
+ * claimClarifyDispatch committed the decision. Under the clarify lock: a
+ * concurrent reject's status is respected (never resurrected to pending);
+ * an ask consumed meanwhile (a reply's stamp-only bookkeeping) retires; a
+ * rival open clarify for the phone retires ours — reopening would violate
+ * the one-open-per-phone unique index; otherwise reopen to pending.
+ * sent_at is cleared on every path as pure defense — the decision no longer
+ * writes it, so it should already be null here. dispatchedMissing is the
+ * missing set the outbound copy asked for: if a reply shrank the set during
+ * the send window, the reopened copy is recomposed to match.
  */
 async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null, releaseFields = {} }) {
   try {

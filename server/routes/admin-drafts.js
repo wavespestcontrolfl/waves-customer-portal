@@ -356,11 +356,13 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
     return { blocked: true };
   }
 
-  // The staleness re-read, partial-answer rewrite, and sent_at stamp all
-  // commit atomically under the per-phone clarify lock (the same lock every
-  // reply/park writer holds) — see claimClarifyDispatch. From the 'send'
-  // outcome on, the draft reads as SENT: a Twilio failure downstream MUST
-  // reconcile via releaseFailedSendClaim, never plain releaseDraftClaim.
+  // The staleness re-read, partial-answer rewrite, and claim re-verification
+  // all commit atomically under the per-phone clarify lock (the same lock
+  // every reply/park writer holds) — see claimClarifyDispatch. sent_at
+  // stays provider-confirmed (finalizeDraftSend stamps it after a real
+  // send). From the 'send' outcome on, the decision is committed: failures
+  // downstream MUST reconcile via releaseFailedSendClaim, never plain
+  // releaseDraftClaim.
   const { claimClarifyDispatch } = require('../services/estimate-clarify-asks');
   const verdict = await claimClarifyDispatch({ draft, isRevision });
   if (verdict.outcome === 'retired') {
@@ -393,9 +395,12 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
 }
 
 // Post-guard failure release. A clarify draft past its dispatch decision
-// carries a sent_at stamp — plain releaseDraftClaim would strand it looking
-// sent (poisoning the 7-day cooldown) and could collide with the one-open-
-// per-phone unique index, so it reconciles under the clarify lock instead.
+// must reconcile UNDER the clarify lock — plain releaseDraftClaim is
+// unconditional, so it could resurrect a concurrently rejected draft and it
+// can't honor answers a reply recorded during the send window. If the
+// locked reconciliation itself fails, the draft is deliberately LEFT
+// CLAIMED (the same stuck-claim surface every draft lane has on a
+// double-failure) rather than force-released blind.
 async function releaseFailedSendClaim(draft, clarifyGuard, releaseFields = {}) {
   if (draft.intent === 'estimate_clarify' && clarifyGuard?.dispatchCommitted) {
     const { reopenClarifyAfterFailedSend } = require('../services/estimate-clarify-asks');
@@ -404,10 +409,9 @@ async function releaseFailedSendClaim(draft, clarifyGuard, releaseFields = {}) {
       dispatchedMissing: clarifyGuard.dispatchedMissing,
       releaseFields,
     });
-    if (result.reopened || result.retired) return;
-    // Reconciliation itself failed (transient DB error): best-effort clear of
-    // the stamp so the cooldown can't key on a send that never happened.
-    await releaseDraftClaim(draft.id, { ...releaseFields, sent_at: null });
+    if (!result.reopened && !result.retired) {
+      logger.warn(`[admin-drafts] clarify failed-send reconciliation unavailable — draft ${draft.id} left claimed for manual recovery`);
+    }
     return;
   }
   await releaseDraftClaim(draft.id, releaseFields);
@@ -633,10 +637,11 @@ router.put('/:id/approve', async (req, res, next) => {
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
 
-    // From here to the provider call a clarify draft already carries its
-    // dispatch stamp — any throw must reconcile, or the row reads falsely
-    // sent for the 7-day cooldown. Non-clarify drafts keep the legacy
-    // behavior (claim left in place on a lookup throw).
+    // From here to the provider call a clarify draft's dispatch decision is
+    // already committed — any throw must reconcile under the clarify lock
+    // so recorded answers and concurrent rejects are honored. Non-clarify
+    // drafts keep the legacy behavior (claim left in place on a lookup
+    // throw).
     let recipient;
     let sendPolicy;
     try {

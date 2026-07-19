@@ -429,7 +429,7 @@ describe('claimClarifyDispatch', () => {
     ...overrides,
   });
 
-  test('sendable as-is: stamps sent_at under the lock and returns the stored copy', async () => {
+  test('sendable as-is: atomically re-verifies the claim and returns the stored copy — sent_at stays provider-confirmed', async () => {
     mockState.firstQueue = [freshRow()];
     const verdict = await claimClarifyDispatch({ draft: DRAFT });
     expect(verdict.outcome).toBe('send');
@@ -437,7 +437,9 @@ describe('claimClarifyDispatch', () => {
     expect(verdict.flags.missing).toEqual(['street_address']);
     expect(mockState.updates).toHaveLength(1);
     expect(mockState.updates[0].table).toBe('message_drafts');
-    expect(mockState.updates[0].payload).toEqual({ sent_at: expect.any(Date) });
+    // The claim-conditional write must never pre-stamp sent_at — a crash
+    // before the provider call would otherwise read as delivered.
+    expect(mockState.updates[0].payload).toEqual({ approved_at: expect.any(Date) });
   });
 
   test('an ask consumed mid-claim (reply stamped answered_at) retires instead of sending', async () => {
@@ -450,14 +452,15 @@ describe('claimClarifyDispatch', () => {
     ]);
   });
 
-  test('an already-stamped row never dispatches twice', async () => {
+  test('a provider-confirmed sent row never dispatches twice — and is never relabeled rejected', async () => {
     mockState.firstQueue = [freshRow({ sent_at: new Date() })];
     const verdict = await claimClarifyDispatch({ draft: DRAFT });
     expect(verdict.outcome).toBe('retired');
-    expect(mockState.updates[0].payload).toEqual({ status: 'rejected' });
+    expect(verdict.message).toContain('already dispatched');
+    expect(mockState.updates).toHaveLength(0);
   });
 
-  test('partial answer in CRM state rewrites the copy to the remainder, then stamps', async () => {
+  test('partial answer in CRM state rewrites the copy to the remainder before dispatch', async () => {
     mockState.firstQueue = [
       freshRow({}, { missing: ['street_address', 'specific_service'], lead_id: 'lead-1' }),
       { id: 'lead-1', status: 'new', address: '123 Main St', service_interest: null, first_name: 'Pat' },
@@ -469,11 +472,11 @@ describe('claimClarifyDispatch', () => {
     expect(verdict.flags.missing).toEqual(['specific_service']);
     const payload = mockState.updates[0].payload;
     expect(payload.draft_response).toBe(expected);
-    expect(payload.sent_at).toEqual(expect.any(Date));
+    expect(payload.sent_at).toBeUndefined();
     expect(JSON.parse(payload.flags).missing).toEqual(['specific_service']);
   });
 
-  test('partial answer on a REVISION rewrites but never stamps — the owner must re-review', async () => {
+  test('partial answer on a REVISION rewrites but never dispatches — the owner must re-review', async () => {
     mockState.firstQueue = [
       freshRow({}, { missing: ['street_address', 'specific_service'], lead_id: 'lead-1' }),
       { id: 'lead-1', status: 'new', address: '123 Main St', service_interest: null, first_name: 'Pat' },
@@ -520,9 +523,9 @@ describe('claimClarifyDispatch', () => {
     expect(mockState.updates).toHaveLength(0);
   });
 
-  test('a reject interleaving between the fresh read and the stamp aborts the dispatch', async () => {
+  test('a reject interleaving between the fresh read and the claim re-verification aborts the dispatch', async () => {
     mockState.firstQueue = [freshRow()];
-    mockState.updateResults = [0]; // conditional stamp matches zero rows
+    mockState.updateResults = [0]; // conditional claim write matches zero rows
     const verdict = await claimClarifyDispatch({ draft: DRAFT });
     expect(verdict.outcome).toBe('retired');
     expect(verdict.message).toContain('no longer claimed');

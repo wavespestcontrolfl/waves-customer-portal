@@ -13,8 +13,9 @@
  *    claim released with the revision cleared, 'error' → 503 + release
  *  - every post-decision failure (recipient missing, provider throw, blocked
  *    send) reconciles via reopenClarifyAfterFailedSend — NEVER plain
- *    releaseDraftClaim, which would strand the sent_at stamp and poison the
- *    7-day cooldown
+ *    releaseDraftClaim, whose unconditional pending-write could resurrect a
+ *    concurrently rejected draft; if reconciliation itself fails the draft
+ *    is left claimed rather than blind-released
  *  - non-clarify drafts never touch the clarify service
  */
 
@@ -218,7 +219,25 @@ describe('approve — clarify dispatch wiring', () => {
     expect(claimClarifyDispatch).not.toHaveBeenCalled();
   });
 
-  test('a provider throw after the stamp reconciles via reopen, never plain release', async () => {
+  test('reconciliation unavailable → the draft is left claimed, never blind-released', async () => {
+    enqueue('message_drafts', { returning: [clarifyDraft()] });
+    claimClarifyDispatch.mockResolvedValue({
+      outcome: 'send', body: 'Q?', flags: CLARIFY_FLAGS,
+    });
+    sendCustomerMessage.mockRejectedValue(new Error('twilio down'));
+    reopenClarifyAfterFailedSend.mockResolvedValue({ reopened: false, retired: false });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/approve`, { method: 'PUT' });
+      expect(res.status).toBe(500);
+    });
+
+    // No unconditional release — a concurrent reject must never be
+    // resurrected by the fallback path.
+    expect(updates.filter((u) => u.table === 'message_drafts')).toHaveLength(1); // the claim only
+  });
+
+  test('a provider throw after the committed decision reconciles via reopen, never plain release', async () => {
     enqueue('message_drafts', { returning: [clarifyDraft()] });
     claimClarifyDispatch.mockResolvedValue({
       outcome: 'send', body: 'Q?', flags: CLARIFY_FLAGS,
@@ -240,7 +259,7 @@ describe('approve — clarify dispatch wiring', () => {
     expect(updates.filter((u) => u.table === 'message_drafts')).toHaveLength(1);
   });
 
-  test('a recipient-lookup throw AFTER the stamp reconciles via reopen', async () => {
+  test('a recipient-lookup throw after the committed decision reconciles via reopen', async () => {
     // sms_log_id forces resolveDraftRecipient onto a db read we can fail.
     enqueue('message_drafts', { returning: [clarifyDraft({ sms_log_id: 'sms-1' })] });
     enqueue('sms_log', { error: new Error('db connection lost') });
