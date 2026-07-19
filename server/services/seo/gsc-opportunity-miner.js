@@ -1195,7 +1195,19 @@ class GscOpportunityMiner {
          ON CONFLICT (dedupe_key) DO UPDATE
            SET score = EXCLUDED.score,
                score_breakdown = EXCLUDED.score_breakdown,
-               signal_metadata = EXCLUDED.signal_metadata,
+               -- Preserve the runner's one-shot gate_retry marker across the
+               -- wholesale metadata refresh: a first hard-gate failure defers
+               -- the row with feedback recorded here, and the morning miner
+               -- runs BEFORE the engine — dropping the marker would turn the
+               -- intended single feedback-informed redraft into repeated
+               -- blind first attempts. jsonb_exists(), not the ? operator
+               -- (knex reads ? as a binding placeholder).
+               signal_metadata = CASE
+                 WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
+                 THEN EXCLUDED.signal_metadata
+                      || jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')
+                 ELSE EXCLUDED.signal_metadata
+               END,
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,

@@ -73,4 +73,32 @@ describe('service closeout requirements', () => {
     expect(result.requiresCustomerNotice).toBe(false);
     expect(result.source).toBe('manual');
   });
+
+  test('lawn + tree & shrub combo resolves identically under inference and the migrated columns (audit 2026-07-18)', () => {
+    // The combo row shipped with bare column defaults (source inferred_v1),
+    // so the feed inferred at read time; migration 20260719100000 writes the
+    // inference-correct values column-authoritatively (combined_lane_v1).
+    // Both regimes must agree — the migration changes provenance, never
+    // requirements.
+    const comboRow = { id: 'svc_combo', name: 'Lawn + Tree & Shrub', category: 'lawn_care' };
+    const inferred = normalizeRequirements({
+      ...comboRow,
+      requires_application_log: false,
+      required_photo_count: 0,
+      requires_customer_notice: false,
+      closeout_requirements_source: 'inferred_v1',
+    });
+    const migrated = normalizeRequirements({
+      ...comboRow,
+      requires_application_log: true,
+      required_photo_count: 2,
+      requires_customer_notice: true,
+      closeout_requirements_source: 'combined_lane_v1',
+    });
+    for (const shape of [inferred, migrated]) {
+      expect(shape.requiresApplicationLog).toBe(true);
+      expect(shape.requiredPhotoCount).toBe(2);
+      expect(shape.requiresCustomerNotice).toBe(true);
+    }
+  });
 });

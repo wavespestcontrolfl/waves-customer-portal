@@ -68,13 +68,22 @@ function isPriceChangeNoticePath(reqPath = '') {
   return /^\/price-change\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
 }
 
+// Public contract-signing shell (/contract/<token>) — the token is a bearer
+// credential (contracts-public.js accepts 32–160 chars) and the page renders
+// the customer's name, payment-method label, and agreement terms. The API
+// layer already sends the full noStore header set; this covers the SPA HTML
+// document itself, which previously shipped with none of them.
+function isContractPath(reqPath = '') {
+  return /^\/contract\/[A-Za-z0-9_-]{32,160}\/?$/.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -91,4 +100,5 @@ module.exports = {
   isCardPath,
   isSecureCardPath,
   isPriceChangeNoticePath,
+  isContractPath,
 };

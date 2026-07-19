@@ -15,7 +15,7 @@ const logger = require('./logger');
 const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'portal_autopay_enable', 'portal_set_default']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().

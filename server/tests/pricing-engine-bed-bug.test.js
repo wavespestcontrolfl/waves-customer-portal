@@ -8,6 +8,7 @@ jest.mock('../models/db', () => {
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

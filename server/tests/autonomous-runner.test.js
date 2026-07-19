@@ -357,7 +357,7 @@ describe('rewrite_title_meta live adapter', () => {
     }
   });
 
-  test('parks a rewrite_title_meta whose brief target is a protected money page', async () => {
+  test('skips a rewrite_title_meta whose brief target is a protected money page (by-design refusal, not review)', async () => {
     // Regression guard: an in-place editor (rewrite_title_meta) resolves its
     // target from the brief (target_url) even when the opp carries no page_url,
     // so the protected-page guard sees the page the handler would actually edit.
@@ -373,6 +373,7 @@ describe('rewrite_title_meta live adapter', () => {
         }),
         complete: jest.fn().mockResolvedValue(true),
         pendingReview: jest.fn().mockResolvedValue(true),
+        skip: jest.fn().mockResolvedValue(true),
         release: jest.fn().mockResolvedValue(true),
       };
       const briefBuilder = {
@@ -406,7 +407,11 @@ describe('rewrite_title_meta live adapter', () => {
         { db: expect.any(Function) },
       );
       expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_prot', 'protected_page:money_page', { claimToken: claimedAt });
+      // By-design protection is a refusal, not an exception — it must skip
+      // silently, never occupy the human review queue (owner directive
+      // 2026-07-18: review queue is exceptions-only).
+      expect(queue.skip).toHaveBeenCalledWith('opp_meta_prot', 'protected_page:money_page', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
       else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
@@ -1069,6 +1074,7 @@ describe('protected-page guard', () => {
         claimed_at: claimedAt,
       }),
       pendingReview: jest.fn().mockResolvedValue(true),
+      skip: jest.fn().mockResolvedValue(true),
       release: jest.fn().mockResolvedValue(true),
     };
     const briefBuilder = { compose: jest.fn() };
@@ -1091,7 +1097,10 @@ describe('protected-page guard', () => {
     expect(result.reviewer_notes).toContain('/pest-control-sarasota-fl/');
     expect(briefBuilder.compose).not.toHaveBeenCalled();
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
+    // By-design money-page protection skips silently — the review queue is
+    // exceptions-only; only a protected-check ERROR still parks (see below).
+    expect(queue.skip).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 
   test('a thrown protected-page check fails closed and is tagged is_error (not a routine skip)', async () => {

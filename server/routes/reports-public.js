@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -140,6 +140,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -268,10 +269,11 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
-  // nextAppointment is LIVE-VIEW ONLY: cached PDFs / static renders are
-  // content-key-insensitive snapshots, and a reschedule after render would
-  // leave a stale appointment time fossilized in the downloadable document.
-  if (mode !== 'live') delete data.nextAppointment;
+  // nextAppointment + the V2 snapshot's nextVisit are LIVE-VIEW ONLY — the
+  // shared helper documents why and also covers the queued PDF renderer,
+  // which builds its payload outside this function (audit 2026-07-18 P2 +
+  // codex r2).
+  if (mode !== 'live') stripLiveOnlyScheduleFields(data);
 
   // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
   // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a
@@ -1212,8 +1214,11 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // Treatment-zone key component: gate flips and re-traces change the
+      // key so cached PDFs re-render with/without the traced map.
+      const tzSignature = await treatmentZonePdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1267,7 +1272,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

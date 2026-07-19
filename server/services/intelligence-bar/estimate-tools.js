@@ -1659,7 +1659,9 @@ async function createPendingEstimate(input) {
 
   const { estimate } = creationResult;
 
-  logger.info(`[intelligence-bar:estimates] Agent created draft ${estimate.id} for ${customerName}`);
+  // ID-only (AGENTS.md PII-in-logs): the customer's full name stays out of
+  // the log stream; the draft row itself carries the identity.
+  logger.info(`[intelligence-bar:estimates] Agent created draft ${estimate.id}`);
 
   const customerViewUrl = await shortenOrPassthrough(
     `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,

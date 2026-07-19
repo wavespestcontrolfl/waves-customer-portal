@@ -818,6 +818,64 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
 
+    // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): a blocked
+    // readiness verdict carries the machine-readable missing items — park
+    // an approval-gated clarifying SMS so the question goes out only on the
+    // owner's click. 'disabled' (global automation gate off) never asks.
+    if (estimateAutomationReadiness?.status === 'blocked'
+      && (estimateAutomationReadiness.missing || []).length) {
+      try {
+        const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
+        const clarifyMissing = estimateAutomationReadiness.missing;
+        const parkedAsk = await parkClarifyAsk({
+          missing: clarifyMissing,
+          phone: phoneFormatted,
+          firstName,
+          customerId: customer?.id || null,
+          leadId: leadRecord?.id || null,
+          estimateId: createdEstimateId,
+          source: 'lead_webhook_blocked',
+          // Self-submitted on Waves' quote form — the same basis the form's
+          // own SMS auto-reply already sends under.
+          channelProvenance: 'web_form',
+        });
+        // Address-only ask alignment: the webhook seeded
+        // lead_intake_status='awaiting_service' above, but this form already
+        // carries a concrete service — a customer answering the address
+        // question would hit the service classifier and be dropped. Advance
+        // the machine to awaiting_address ONLY when a usable ask actually
+        // exists (parked, merged, or cooldown-deduped against a live one) —
+        // an internal park error means no SMS is coming, and moving the
+        // state then would strand the reply. The SUBMITTED service label is
+        // stored as-is: the readiness gate already certified it concrete,
+        // and the intake shell's SERVICE_LABEL map falls back to the raw
+        // label for non-core services (Mosquito Control, Termite …) — a
+        // coarse pest/lawn re-bucket would erase what they asked for.
+        // Guarded UPDATE: only from the state this webhook just seeded.
+        // A live ADDRESS ask must actually exist: parked/merged/deduped
+        // outcomes carry `covers` — a cooldown against an unrelated
+        // service-only ask must not move the state.
+        const askExists = (parkedAsk?.parked === true
+          || ['merged_into_open_clarify', 'open_or_recent_clarify'].includes(parkedAsk?.skipped))
+          && Array.isArray(parkedAsk?.covers)
+          && parkedAsk.covers.includes('street_address');
+        if (askExists
+          && !clarifyMissing.includes('specific_service')
+          && customer?.id) {
+          await db('customers')
+            .where({ id: customer.id, lead_intake_status: 'awaiting_service' })
+            .update({
+              lead_intake_status: 'awaiting_address',
+              // varchar(32) column — an oversized label would throw AFTER
+              // the ask parked and strand the customer in awaiting_service.
+              lead_service_interest: String(serviceInterest || '').slice(0, 32),
+            });
+        }
+      } catch (askErr) {
+        logger.error(`Lead clarify ask failed: ${askErr.message}`);
+      }
+    }
+
     // Push + bell notification for admins. Deep-links the LEAD row; if lead
     // creation failed the customer id keeps a (degraded) bell rather than none.
     try {

@@ -10,6 +10,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
+const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const {
   MAX_PHOTOS,
   MAX_ENCODED_PHOTO_CHARS,
@@ -179,6 +180,30 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           createdAt: priorCancellation.created_at,
         },
       });
+    }
+
+    // A cancellation must have something to cancel. The client gates the
+    // Pause/Cancel controls, but the API accepts category 'cancellation' from
+    // any authenticated customer — without this guard an account with no
+    // recurring series, no upcoming visits and no billing (tier 'none',
+    // one-time history only) could still churn itself account-wide, and the
+    // processor's wind-down (autopay off, retries disarmed, churn stamps) is
+    // not reversible from the portal. The predicate is the SHARED
+    // hasCancellableWork verdict (cancellation-eligibility) — the same one
+    // /api/schedule serves to the Plan tab, so client and server can't
+    // drift. Deliberately NO repair re-run here: an ACTIVE account failing
+    // this check has nothing safe to re-process — re-running against a
+    // re-won customer with an old cancellation request would re-churn them;
+    // the partial-failure repair paths are the 60s dedupe above and the
+    // inactive-retry path, and a partial run already raised a review alert.
+    if (category === 'cancellation') {
+      if (!(await hasCancellableWork(req.customer.id))) {
+        return res.status(400).json({
+          error:
+            'There is no active plan, recurring service, or upcoming visit on this account to cancel. Please call our office if you need help with your account.',
+          code: 'nothing_to_cancel',
+        });
+      }
     }
 
     const [request] = await db('service_requests')
@@ -398,7 +423,9 @@ router.get('/', authenticate, async (req, res, next) => {
         'service_requests.urgency',
         'service_requests.location_on_property as locationOnProperty',
         'service_requests.status',
-        'service_requests.photos',
+        // photos intentionally omitted — up to 3×~6.7MB base64 strings per row
+        // (50-row default page ≈ 1GB worst case) that the portal list never
+        // renders. Anything that needs the attachments must fetch per-request.
         // admin_notes intentionally omitted — internal field, not customer-facing.
         'service_requests.created_at as createdAt',
         'service_requests.resolved_at as resolvedAt',

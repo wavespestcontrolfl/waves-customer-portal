@@ -421,6 +421,14 @@ const gates = {
   // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
   clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
 
+  // Estimate Clarify Asks — when automated quote drafting dead-ends on a
+  // machine-readable missing item (no address / no concrete service), park
+  // ONE clarifying SMS in /admin/drafts (intent 'estimate_clarify') for the
+  // owner's one-click approval. The writer never sends; the approve route
+  // re-checks this gate before putting anything on the wire. Off → dead
+  // ends keep today's operator-bell-only behavior.
+  estimateClarifyAsks: process.env.GATE_ESTIMATE_CLARIFY_ASKS === 'true',
+
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
   // Ads API. Off until the owner verifies campaign links + base budgets in
@@ -792,6 +800,15 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
+  // photo of the property; the traced path + snapshot replace the generic
+  // schematic on the customer's service report. Gates BOTH the tech capture
+  // routes (/api/tech/services/:id/treatment-zone) and the report payload's
+  // treatmentMap.traced block. Dev-open for local testing; dark in prod until
+  // Adam flips GATE_TREATMENT_ZONE_MAP=true. Kill switch: unset the var —
+  // reports instantly fall back to the schematic; stored rows are untouched.
+  treatmentZoneMap: isProd ? process.env.GATE_TREATMENT_ZONE_MAP === 'true' : true,
 };
 
 function isEnabled(gate) {

@@ -155,7 +155,7 @@ async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun }) {
  * `skipIntentGate` is for callers that already established quote intent
  * (the lead-intake state machine, where the customer picked a service).
  */
-async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = false, dryRun = false }) {
+async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false }) {
   const digits = last10(phone);
   const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
   try {
@@ -174,7 +174,9 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
     // requests (different property included) pass once the window clears;
     // within it, the standing bell already tells the operator a quote is
     // owed on this phone.
-    if (!dryRun) {
+    // skipCooldown: a clarify-reply resume carries NEW information the
+    // customer just supplied — the anti-repeat cooldown must not eat it.
+    if (!dryRun && !skipCooldown) {
       const SMS_DRAFT_COOLDOWN_MS = 10 * 60 * 1000;
       const db = require('../../models/db');
       const recentRun = await db('notifications')

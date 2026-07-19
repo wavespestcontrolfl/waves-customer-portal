@@ -74,6 +74,22 @@ describe('lead estimate auto-send policy', () => {
     })).toEqual({ eligible: true, reason: null });
   });
 
+  test('DEFAULT config parks measurements-defaulted drafts — synthetic sqft must never auto-send unreviewed', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+
+    // The fixture's quote priced off the synthetic 2,000/8,000 sqft defaults
+    // (review: property_measurements_defaulted). With no explicit allow-list
+    // override, that draft parks for a human pass instead of sending.
+    expect(leadEstimateAutoSendEligibility(generatedEstimate(), {
+      now,
+      delayMinutes: 5,
+    })).toMatchObject({
+      eligible: false,
+      reason: 'disallowed_review_reasons',
+      review: ['property_measurements_defaulted'],
+    });
+  });
+
   test('blocks manual-review, premature, and disallowed-review estimates', () => {
     const now = new Date('2026-05-26T12:00:00.000Z');
 
@@ -93,7 +109,9 @@ describe('lead estimate auto-send policy', () => {
 
     expect(leadEstimateAutoSendEligibility(generatedEstimate({
       created_at: new Date(now.getTime() - 2 * 60 * 1000).toISOString(),
-    }), { now, delayMinutes: 5 })).toMatchObject({
+      // Explicit allow so this case exercises the DELAY branch — the fixture's
+      // measurements-defaulted review reason is no longer allowed by default.
+    }), { now, delayMinutes: 5, allowedReviewReasons: ['property_measurements_defaulted'] })).toMatchObject({
       eligible: false,
       reason: 'delay_not_elapsed',
     });
@@ -217,7 +235,7 @@ describe('lead estimate auto-send policy', () => {
 
     expect(leadEstimateAutoSendAuditRow(generatedEstimate({
       created_at: new Date(now.getTime() - 2 * 60 * 1000).toISOString(),
-    }), { now, delayMinutes: 5 })).toMatchObject({
+    }), { now, delayMinutes: 5, allowedReviewReasons: ['property_measurements_defaulted'] })).toMatchObject({
       action: 'waiting',
       wouldSend: false,
       eligibility: { eligible: false, reason: 'delay_not_elapsed' },
@@ -226,7 +244,7 @@ describe('lead estimate auto-send policy', () => {
     expect(leadEstimateAutoSendAuditRow(generatedEstimate({
       customer_phone: null,
       customer_email: null,
-    }), { now })).toMatchObject({
+    }), { now, allowedReviewReasons: ['property_measurements_defaulted'] })).toMatchObject({
       action: 'blocked',
       wouldSend: false,
       eligibility: { eligible: false, reason: 'missing_delivery_contact' },

@@ -238,6 +238,7 @@ async function buildCallContext(callLogId) {
   // The processor's own shared-phone/slot/address disambiguation already ran
   // — when it resolved a customer for this call, that beats a phone rematch.
   let customerMatch = { customer: null, ambiguous: false };
+  let resolvedLoadFailed = false;
   if (call.customer_id) {
     try {
       const resolved = await db('customers')
@@ -247,14 +248,36 @@ async function buildCallContext(callLogId) {
         .where({ id: call.customer_id })
         .whereNull('deleted_at')
         .first();
-      if (resolved) customerMatch = { customer: resolved, ambiguous: false };
+      if (resolved) {
+        customerMatch = { customer: resolved, ambiguous: false };
+      } else {
+        // The processor DID resolve a customer but the row is gone (deleted
+        // or stale reference). A phone rematch could select another
+        // shared-line profile or price the known caller as a prospect —
+        // same exposure as a thrown query, so it fails closed the same way.
+        resolvedLoadFailed = true;
+        logger.warn(`[estimator-engine] resolved customer ${call.customer_id} not found — failing closed`);
+      }
     } catch (err) {
+      // The processor DID resolve a customer; a failed load means we cannot
+      // honor that resolution — falling through to a phone rematch here
+      // would price a known customer as whoever the phone happens to match.
+      resolvedLoadFailed = true;
       logger.warn(`[estimator-engine] resolved-customer load failed: ${err.message}`);
     }
   }
 
-  if (!customerMatch.customer) {
+  if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
+  }
+  // Fail CLOSED on lookup failure, exactly like the SMS-origin path: a
+  // failed query is not a no-match — an existing member could be hiding
+  // behind the error, and continuing would quote them as a new prospect
+  // (dropping membership discounts/fee waivers) while loading phone-scoped
+  // history whose shared-line safety cannot be established. The red-lane
+  // bell in maybeDraftEstimateForCall owns the manual path.
+  if (resolvedLoadFailed || customerMatch.unavailable) {
+    return { error: 'customer_lookup_unavailable', call };
   }
   const customer = customerMatch.customer;
 
@@ -342,6 +365,11 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
   return {
     call: null,
     transcript,
+    // The joined transcript is for the composer PROMPT; evidence
+    // verification needs the per-message boundaries or a fabricated quote
+    // could pass by stitching words across two texts (verifyEvidenceQuotes
+    // prefers transcriptRecords when present).
+    transcriptRecords: smsThread.map((m) => m.body),
     extraction: null,
     // 'none' keeps the lane classifier's non-enriched flag — an SMS draft
     // can never land green, which is the right floor for text-only evidence.

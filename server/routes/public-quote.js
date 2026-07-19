@@ -19,7 +19,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
-const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, splitStreetLineUnit } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const { isHoneypotTripped } = require('../utils/lead-abuse');
@@ -138,6 +138,27 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
       specItems: manualQuoteLines,
     },
   };
+}
+
+// Unit-suffixed address on a multi-unit parcel: county parcel data has no
+// per-unit footprint, so the enrichment (and therefore the engine input)
+// describes the WHOLE building — sqft, footprint, lot, commercial
+// classification. Auto-pricing that quoted a 32-unit condo's resident
+// $498/mo for quarterly pest (Unit 408, 2026-07-17). Force the same
+// site-confirmed manual-quote contract as the low-confidence commercial
+// path instead of showing a building-scale price for one door. Requires
+// BOTH signals: a unit line on the address AND parcel unitCount > 1 — a
+// bare unit line (no enrichment) or a multi-unit parcel with no unit
+// (a genuine whole-building/association request, #2721) prices normally.
+function unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress = {}, enrichedProps = {}) {
+  if (!(Number(enrichedProps.unitCount) > 1)) return false;
+  if (String(normalizedAddress.line2 || '').trim()) return true;
+  // Free-form submissions keep the unit INLINE in line1 when no dedicated
+  // unit field was supplied ("123 Main St Apt 4" normalizes with an empty
+  // line2) — reuse the normalizer's splitter so that input path can't
+  // bypass the guard and show the building-scale price (Codex PR r1).
+  const inline = splitStreetLineUnit(String(normalizedAddress.line1 || ''));
+  return Boolean(inline && String(inline.unit || '').trim());
 }
 
 // Per-application price for the wizard result screen (owner request,
@@ -752,14 +773,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lowConfidenceForcesSiteQuote = commercialLowConfidenceRequiresSiteQuote({
       engineResult: { lineItems: estimate?.lineItems || [] },
     });
+    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
-    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote;
+    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
     const quoteRequiredReason = manualQuoteLine?.reason
-      || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null);
+      || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
+      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -1124,7 +1147,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         commercialDisclaimer: commercialDisclaimer || undefined,
       };
       if (quoteRequired) {
-        estimateDataObj.result = buildQuoteRequiredEstimateResult(estimate, manualQuoteLines);
+        // A quoteRequired draft with NO engine manual line (the unit-on-
+        // multi-unit-parcel / low-confidence forces) must still persist a
+        // quote-required spec item: the public estimate resolver derives
+        // quote-required from the line items, so an empty specItems list
+        // would let a staff-sent draft present the suppressed building-scale
+        // price as acceptable again (Codex PR r1).
+        const specLines = manualQuoteLines.length ? manualQuoteLines : [{
+          service: serviceInterest || 'Service quote',
+          quoteRequired: true,
+          reason: quoteRequiredReason || 'manual_quote_required',
+        }];
+        estimateDataObj.result = buildQuoteRequiredEstimateResult(estimate, specLines);
       }
       const existingEst = await db('estimates')
         .where({ source: 'quote_wizard', status: 'draft' })
@@ -1453,9 +1487,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: lowConfidenceForcesSiteQuote && !manualQuoteLine
-          ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
-          : 'Commercial properties require a manual quote. The Waves team has been notified.',
+        message: quoteRequiredReason === 'unit_in_multi_unit_building'
+          ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
+          : lowConfidenceForcesSiteQuote && !manualQuoteLine
+            ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
+            : 'Commercial properties require a manual quote. The Waves team has been notified.',
       });
     }
 
@@ -1624,4 +1660,5 @@ module.exports._internals = {
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
+  unitOnMultiUnitParcelForcesSiteQuote,
 };

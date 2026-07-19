@@ -283,6 +283,31 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
 // aeo_gap FAQ/FAQPage additions are stripped too.
 const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
 
+// A prior draft of this opportunity was rejected by a HARD content gate and
+// the runner deferred it for exactly one feedback-informed redraft
+// (autonomous-runner._gateFailRetryOrSkip). Translate the recorded findings
+// into binding writer directives; known codes get a corrective instruction,
+// unknown ones fall back to the gate's own finding text. Rides in
+// voice_constraints.retry_directives (persisted jsonb → returned intact by
+// the writer agent's get_content_brief tool).
+const GATE_RETRY_INSTRUCTIONS = {
+  HARDCODED_PRICE: 'Do NOT write any specific dollar amount or price anywhere in the draft — link /pest-control-calculator/ wherever cost comes up.',
+  FAQ_BLOCKED_SERVICE: 'Do NOT include an FAQ section or FAQ-style Q&A for this service — FAQ treatment is policy-blocked for it. Cover the material as normal prose sections instead.',
+  DISALLOWED_EXTERNAL_LINK: 'Only link external domains from the approved source list already cited in the brief/facts pack; remove every other external link.',
+  COMPARISON_DISPARAGEMENT: 'Remove all negative or disparaging language about named businesses; comparisons must be neutral and factual.',
+  COMPARISON_UNCLASSIFIED_OPTION: 'Every comparison-table option must be either a generic category (no business names) or a competitor from the curated allowlist — replace unlisted names with generic categories.',
+};
+
+function buildRetryDirectives(gateRetry) {
+  const findings = Array.isArray(gateRetry?.findings) ? gateRetry.findings : [];
+  const directives = findings.map((f) => GATE_RETRY_INSTRUCTIONS[f.code]
+    || `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`);
+  return [
+    'PREVIOUS ATTEMPT REJECTED by hard content gates. This is the final attempt — the draft is discarded (never published, never reviewed) if any of these repeat:',
+    ...Array.from(new Set(directives)),
+  ];
+}
+
 function stripFaqRequirements({ requiredSections, schemaTypes }) {
   return {
     requiredSections: requiredSections.filter((s) => !FAQ_SECTION_RE.test(String(s || ''))),
@@ -711,9 +736,13 @@ class ContentBriefBuilder {
         service: opportunity.service || null,
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
-      voice_constraints: operatorOverlay
-        ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
-        : layered.voiceConstraints,
+      voice_constraints: (() => {
+        const base = operatorOverlay
+          ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
+          : layered.voiceConstraints;
+        const gateRetry = opportunity.signal_metadata?.gate_retry;
+        return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+      })(),
 
       publish_window: nextWeekday9amET().toISOString(),
       human_review_required: decision.human_review_required,
@@ -843,4 +872,5 @@ module.exports._internals = {
   applyListicleTreatment,
   isListicleQuery,
   stripFaqRequirements,
+  buildRetryDirectives,
 };

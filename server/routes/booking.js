@@ -1588,7 +1588,10 @@ async function createSelfBooking(payload = {}) {
         // underbill — bookingVisits is 4 or nothing.
         const willSeedQuarterlyPestSeries = !isOneTimeBookingSource(source)
           && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
-          && bookedServiceKey === 'pest_control';
+          && bookedServiceKey === 'pest_control'
+          // Mirror the seeding gate's signed-service bind (see below): the
+          // pricing divisor must track the series that is actually created.
+          && RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
         const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
         // Pay-at-visit prices from the quote→book handoff estimate
         // (pricing_estimate_id) — deliberately SEPARATE from the identity
@@ -1938,9 +1941,19 @@ async function createSelfBooking(payload = {}) {
     // never seed future visits that would have no plan and no per-visit price to bill).
     // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
     // independently of WaveGuard plan state.
+    // Bind seeding to the SIGNED service, not just the client label. The
+    // slot_sig HMAC above proved `serviceKey` was the service actually
+    // OFFERED, whereas resolvedServiceType comes from the unsigned
+    // quoted_service_label — so a crafted label of "pest control" on a
+    // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
+    // Both must independently map to pest_control (a legit quarterly pest
+    // booking signs pest and labels pest, so this only tightens the gate).
+    const signedServiceKeyIsPest =
+      RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
+      && signedServiceKeyIsPest
       && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     if (shouldSeedQuarterlyPestFollowUps) {
       try {

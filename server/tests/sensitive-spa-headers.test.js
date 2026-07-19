@@ -7,6 +7,7 @@ const {
   isEstimatePath,
   isSecureCardPath,
   isPriceChangeNoticePath,
+  isContractPath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -156,5 +157,31 @@ describe('sensitive SPA document headers', () => {
     expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN.toUpperCase()}`)).toBe(true);
     expect(isPriceChangeNoticePath('/price-change/not-a-real-token')).toBe(false);
     expect(isPriceChangeNoticePath('/api/public/price-change/0123456789abcdef0123456789abcdef')).toBe(false);
+  });
+});
+
+describe('contract signing shell (/contract/<token>)', () => {
+  const CONTRACT_TOKEN = 'c'.repeat(64);
+
+  test('marks contract bearer pages noindex, no-referrer, and no-store', () => {
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/contract/${CONTRACT_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes only token-shaped contract paths (32–160 chars, matching contracts-public)', () => {
+    expect(isContractPath(`/contract/${CONTRACT_TOKEN}`)).toBe(true);
+    expect(isContractPath(`/contract/${CONTRACT_TOKEN}/`)).toBe(true);
+    expect(isContractPath(`/contract/${'a'.repeat(32)}`)).toBe(true);
+    expect(isContractPath(`/contract/${'a'.repeat(160)}`)).toBe(true);
+    expect(isContractPath(`/contract/${'a'.repeat(31)}`)).toBe(false);
+    expect(isContractPath(`/contract/${'a'.repeat(161)}`)).toBe(false);
+    expect(isContractPath('/contract/')).toBe(false);
+    expect(isContractPath(`/contracts/${CONTRACT_TOKEN}`)).toBe(false);
+    expect(isContractPath(`/api/contracts/${CONTRACT_TOKEN}`)).toBe(false);
   });
 });
