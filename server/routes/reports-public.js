@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -268,10 +268,11 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
-  // nextAppointment is LIVE-VIEW ONLY: cached PDFs / static renders are
-  // content-key-insensitive snapshots, and a reschedule after render would
-  // leave a stale appointment time fossilized in the downloadable document.
-  if (mode !== 'live') delete data.nextAppointment;
+  // nextAppointment + the V2 snapshot's nextVisit are LIVE-VIEW ONLY — the
+  // shared helper documents why and also covers the queued PDF renderer,
+  // which builds its payload outside this function (audit 2026-07-18 P2 +
+  // codex r2).
+  if (mode !== 'live') stripLiveOnlyScheduleFields(data);
 
   // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
   // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a

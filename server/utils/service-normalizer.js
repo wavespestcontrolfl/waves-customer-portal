@@ -104,10 +104,20 @@ function normalizeServiceType(raw) {
  */
 function detectServiceCategory(serviceType) {
   const s = (serviceType || '').toLowerCase();
+  // Tree & shrub names that also mention fertilization/weeds ("Tree & Shrub
+  // Fertilization", "Tree & Shrub Weed & Feed") are still tree & shrub —
+  // the program includes fertilization and bed-weed work by definition.
+  // Lawn wins only on an actual lawn-surface token, and mosquito/termite
+  // combined names keep their own categories (audit 2026-07-18 P2: a
+  // 'Tree & Shrub Fertilization' visit completed as a LAWN record and
+  // skipped the typed tree & shrub report flow entirely).
+  const treeShrubToken = s.includes('tree') || s.includes('shrub') || s.includes('ornamental') || s.includes('palm') || s.includes('arborjet');
+  const lawnSurfaceToken = s.includes('lawn') || s.includes('turf') || s.includes('sod') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat');
+  if (treeShrubToken && !lawnSurfaceToken && !s.includes('mosquito') && !s.includes('termite') && !s.includes('wdo')) return 'tree_shrub';
   if (s.includes('lawn') || s.includes('turf') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
   if (s.includes('mosquito')) return 'mosquito';
   if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona')) return 'termite';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet')) return 'tree_shrub';
+  if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet') || s.includes('ornamental')) return 'tree_shrub';
   if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole')) return 'rodent';
   if (s.includes('callback') || s.includes('re-treat')) return 'callback';
   return 'pest';

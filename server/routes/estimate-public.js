@@ -8020,6 +8020,18 @@ router.put('/:token/accept', async (req, res, next) => {
         reason: 'retired_lawn_cadence_selection',
       });
     }
+    // Retired Tree & Shrub cadence backstop (v4.5 six-visit mandate; audit
+    // 2026-07-18 P2): the 9-visit Enhanced / 12-visit Premium tiers are
+    // retired — pricing normalizes them to Standard, but a stale sent
+    // estimate still renders its stored enhanced row and accepting it books
+    // a retired-cadence program at pre-reprice prices. Mirrors the lawn
+    // backstop above.
+    if (!treatAsOneTime && recurringTreeShrubRowAtRetiredCadence(acceptedEstDataForPricing)) {
+      return res.status(409).json({
+        error: 'This estimate’s tree & shrub plan uses a retired schedule — pick one of the current plan options, or call Waves and we’ll refresh your quote.',
+        reason: 'retired_tree_shrub_cadence_selection',
+      });
+    }
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
@@ -8313,6 +8325,20 @@ router.put('/:token/accept', async (req, res, next) => {
             trx,
           });
           reservationCommitted = true;
+          // T&S tier accepts: stamp the accepted tier's catalog identity
+          // (see treeShrubTierCatalogStamp — codex P2 r2: this fresh-slotId
+          // path was missed by the r1 fix).
+          if (committedAppointment?.id) {
+            const tierStamp = await treeShrubTierCatalogStamp(trx, {
+              selectedFrequency,
+              estData: acceptedEstDataForPricing,
+              rowServiceType: committedAppointment.service_type,
+            });
+            if (tierStamp) {
+              await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+              Object.assign(committedAppointment, tierStamp);
+            }
+          }
           if (committedAppointment?.id) {
             acceptedAppointmentsToRegister.push(committedAppointment);
           }
@@ -8352,6 +8378,19 @@ router.put('/:token/accept', async (req, res, next) => {
               trx,
             });
             reservationCommitted = true;
+            // T&S tier accepts: stamp the accepted tier's catalog identity
+            // (see treeShrubTierCatalogStamp).
+            if (committedAppointment?.id) {
+              const tierStamp = await treeShrubTierCatalogStamp(trx, {
+                selectedFrequency,
+                estData: acceptedEstDataForPricing,
+                rowServiceType: committedAppointment.service_type,
+              });
+              if (tierStamp) {
+                await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+                Object.assign(committedAppointment, tierStamp);
+              }
+            }
             if (committedAppointment?.id) {
               acceptedAppointmentsToRegister.push(committedAppointment);
             }
@@ -8378,6 +8417,15 @@ router.put('/:token/accept', async (req, res, next) => {
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
           }
+          // T&S tier accepts adopting an existing (non-held) appointment:
+          // stamp the accepted tier's catalog identity (see
+          // treeShrubTierCatalogStamp).
+          const adoptedTierStamp = await treeShrubTierCatalogStamp(trx, {
+            selectedFrequency,
+            estData: acceptedEstDataForPricing,
+            rowServiceType: existingAppointmentRow.service_type,
+          });
+          if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])
@@ -10954,6 +11002,32 @@ function retiredLawnRequoteNeeded(estData = null) {
   return recurringKeys.includes('lawn_care');
 }
 
+// Tree & Shrub twin of retiredLawnRequoteNeeded (codex P1 r4): the retired
+// 9x Enhanced / 12x Premium T&S condition must be part of the SHARED quote
+// requirement, not only the accept-time 409 — /data (canAccept),
+// /deposit-intent, and /recurring-card-intent all read this gate, and an
+// accept-only check would let a stale estimate collect a deposit or save a
+// card before PUT /accept rejects (deposit mirror contract). Estimates that
+// still render a current (light/standard) tier card keep self-serve accept —
+// selecting one restamps the row and passes the accept backstop.
+function retiredTreeShrubRequoteNeeded(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats?.ts) ? resultStats.ts : [];
+  const tierKeys = rows
+    .map((row) => treeShrubTierKey(row))
+    .filter((key) => ['light', 'standard', 'enhanced', 'premium'].includes(key));
+  if (tierKeys.length) {
+    if (tierKeys.some((key) => key === 'light' || key === 'standard')) return false;
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    return (recurringSvcList || []).map(recurringServiceKey).includes('tree_shrub');
+  }
+  // No tier rows (legacy/mixed shape): a stored row explicitly at a retired
+  // cadence requotes up front. Cadence-less legacy rows keep self-serve —
+  // the converter schedules them at the current bi-monthly program.
+  return recurringTreeShrubRowAtRetiredCadence(estData);
+}
+
 // Does the estimate STORE a recurring lawn price below the program minimum?
 // The React view re-clamps stored rows at render (clampLawnLadderEntry), but
 // the legacy SSR page derives its hero/billing figures straight from the
@@ -11015,6 +11089,39 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
+// Retired T&S tiers = anything that isn't the 6x Standard mandate or the 4x
+// Light downsell (v4.5). Detection mirrors the accept restamp: a selected
+// Enhanced card restamps the row to the tree_shrub_6week key, older stored
+// rows carry a 9/12 visit count or 6-week wording.
+function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
+  if (!estDataLike || typeof estDataLike !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'tree_shrub') return false;
+    const key = String(svc?.serviceKey || svc?.service_key || '').trim();
+    if (key === 'tree_shrub_6week') return true;
+    // Explicit cadence FIELDS first — the converter reads these before any
+    // visit count or display text (explicitServiceCadence), so a crafted
+    // row like { frequency: 'monthly' } with no visit count would schedule
+    // the retired 12x Premium cadence while passing the checks below
+    // (codex P2 r1). Only the two live tiers' patterns are acceptable;
+    // field-less legacy rows fall through to the visit/text checks.
+    const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
+      .map((value) => normalizeRecurringPattern(value))
+      .find(Boolean) || null;
+    if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
+    // Same alias set the converter's visitsPerYearForRecurringService reads
+    // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
+    const visits = Number(
+      svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
+    );
+    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
+    const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
+    return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
+  });
+}
+
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown
     || (estData ? normalizeOneTimeBreakdown(estData) : null);
@@ -11050,6 +11157,9 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const retiredLawnRequote = retiredLawnRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  const retiredTreeShrubRequote = retiredTreeShrubRequoteNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -11057,7 +11167,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialProposal
     || commercialRiskTypeReview
     || commercialLowConfidenceSiteQuote
-    || retiredLawnRequote;
+    || retiredLawnRequote
+    || retiredTreeShrubRequote;
 
   return {
     quoteRequired,
@@ -11067,7 +11178,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
-        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)),
+        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
+        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -12528,9 +12640,13 @@ function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
   if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
-  // 'enhanced' (9x) is retired but kept here so previously-saved estimates that
-  // still carry an Enhanced row render unchanged (legacy estimates aren't re-priced).
+  // 'enhanced' (9x) and 'premium' (12x) are retired but kept here so
+  // previously-saved estimates that still carry those rows render unchanged
+  // (legacy estimates aren't re-priced) AND the shared quote gate can see
+  // them as retired tiers (codex P1 r5: a Premium-only ladder produced an
+  // empty tierKeys set and slipped the requote gate).
   if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
+  if (raw.includes('premium') || raw === '12' || raw === '12x') return 'premium';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -13391,12 +13507,65 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
   return row;
 }
 
+// Catalog identity for a T&S tier accept adopting a reserved/existing
+// scheduled row. commitReservation canonicalizes rows to the generic
+// reservation label with no service_id, so without this stamp typed-profile
+// resolution falls back to the generic report and the WaveGuard plan sync
+// misreads a Light (4x) accept as the bimonthly program (codex P2 r1/r2 —
+// ALL THREE adoption paths must stamp: fresh slotId reservation, held
+// existing appointment, and the direct-update branch). Returns null for
+// non-T&S rows; seeded follow-ups copy service_id from the parent.
+async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '' } = {}) {
+  // Only a row that IS the T&S visit gets stamped — in a split bundle
+  // (pest + T&S) the adopted slot can be the pest visit (codex P2 r5).
+  if (recurringServiceKey({ name: rowServiceType, service_type: rowServiceType }) !== 'tree_shrub') return null;
+  // Tier source 1: a directly-selected T&S tier card.
+  let serviceKey = null;
+  let serviceName = null;
+  if (selectedFrequency?.serviceCategory === 'tree_shrub') {
+    const meta = treeShrubTierRuntimeMeta(selectedFrequency.key);
+    if (meta) { serviceKey = meta.serviceKey; serviceName = meta.name; }
+  }
+  // Tier source 2 — split bundles: selectedFrequency is the pest/top-level
+  // card and the T&S tier choice rides serviceCadences, already applied to
+  // the accepted estimate data's recurring row, which carries the tier's
+  // real catalog key + restamped name (codex P2 r5).
+  if (!serviceKey && estData) {
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    const tsRow = (recurringSvcList || []).find((svc) => /^tree_shrub(_program|_quarterly|_6week)$/
+      .test(String(svc?.serviceKey || svc?.service_key || '').trim()));
+    if (tsRow) {
+      serviceKey = String(tsRow.serviceKey || tsRow.service_key).trim();
+      serviceName = tsRow.name || tsRow.label || tsRow.displayName || null;
+    }
+  }
+  if (!serviceKey) return null;
+  const stamp = serviceName ? { service_type: serviceName } : {};
+  const catalogRow = await trx('services')
+    .where({ service_key: serviceKey })
+    .first('id', 'name')
+    .catch(() => null);
+  if (catalogRow) {
+    stamp.service_id = catalogRow.id;
+    if (!stamp.service_type && catalogRow.name) stamp.service_type = catalogRow.name;
+  }
+  return Object.keys(stamp).length ? stamp : null;
+}
+
 function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {
   if (!Array.isArray(services)) return { services, changed: false };
   let changed = false;
   const nextServices = services.map((svc) => {
     const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
     if (!isTreeShrubServiceName(name)) return svc;
+    // isTreeShrubServiceName includes palm_injection (deliberate for the
+    // grouping helper), but a PALM recurring row is its own program — the
+    // tier rewrite must never replace it with the selected T&S tier row
+    // (audit 2026-07-18 P2). Substring match, not \bpalm\b: '_' is a word
+    // character, so a key-only row carrying 'palm_injection' would slip a
+    // word-boundary test (codex P2 r1); 'palmetto'-named rows are pest
+    // rows that should never be tier-rewritten either.
+    if (/palm/i.test(String(name || ''))) return svc;
     changed = true;
     return selectedTreeShrubServiceRow(svc, frequency);
   });
@@ -16372,6 +16541,10 @@ module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
+module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
+module.exports.retiredTreeShrubRequoteNeeded = retiredTreeShrubRequoteNeeded;
+module.exports.treeShrubTierCatalogStamp = treeShrubTierCatalogStamp;
+module.exports.rewriteTreeShrubRecurringServices = rewriteTreeShrubRecurringServices;
 module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;

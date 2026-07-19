@@ -1272,6 +1272,20 @@ function structuredCustomerConcern(structured = {}) {
   ).trim();
 }
 
+// LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
+// place: cached PDFs / static renders are content-key-insensitive snapshots,
+// and a reschedule after render would leave a stale appointment fossilized in
+// the downloadable document. Covers the top-level nextAppointment AND the V2
+// snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
+// (pdf-queue.js) builds its payload outside the route helper, so the strip
+// must be shared, not route-inlined (codex P2 2026-07-18).
+function stripLiveOnlyScheduleFields(data) {
+  if (!data || typeof data !== 'object') return data;
+  delete data.nextAppointment;
+  if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  return data;
+}
+
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
@@ -2958,6 +2972,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 module.exports = {
   buildReportV1Data,
   structuredCustomerConcern,
+  stripLiveOnlyScheduleFields,
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,

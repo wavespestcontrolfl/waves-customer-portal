@@ -14,6 +14,9 @@ const mockPestPressureVisibilitySignature = jest.fn((config) => `sig-${config.ke
 
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: mockBuildReportV1Data,
+  // Real implementation: pure, synchronous, and part of the render path
+  // (queued PDFs must never fossilize live-only schedule fields).
+  stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,

@@ -65,7 +65,11 @@ function buildTreeShrubInsightCards({
         ? 'Visible pest activity on some foliage, confirmed during the visit.'
         : 'Visible pest-pressure signals on some foliage (chewing, stippling, or residue).',
       whyItMatters: 'Catching pest pressure early keeps it from spreading across the planting.',
-      wavesAction: has('insecticide') || has('miticide')
+      // 'systemic' = classifyProduct's insect-family systemics (Merit/Safari
+      // etc.) — without it a systemic insecticide application read
+      // "Documented the area" while the treatment card listed the product
+      // (audit 2026-07-18, found extending the diagnosis-row gate).
+      wavesAction: has('insecticide') || has('miticide') || has('systemic')
         ? 'Treated the affected foliage today and built follow-up monitoring into the plan.'
         : 'Documented the area and will continue protective monitoring.',
       nextVisitPlan: 'Recheck the affected foliage next visit to confirm the signals are easing.',
