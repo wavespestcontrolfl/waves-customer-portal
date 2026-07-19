@@ -15,6 +15,9 @@ jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // Signature capture serializes with photo mutations/sends in a transaction;
+  // the mock trx dispatches through the same per-table map.
+  mock.transaction = jest.fn(async (cb) => cb(mock));
   return mock;
 });
 jest.mock('../config', () => ({
@@ -109,6 +112,7 @@ function chain(overrides = {}) {
     limit: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
@@ -203,11 +207,15 @@ describe('WDO signature content binding', () => {
     const project = wdoProject();
     const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
     const colInfo = chain();
+    // The save transaction locks the row (delivery-claim guard) before the
+    // signature write and hashes the photo set inside the same lock.
+    const lockRead = chain({ forUpdate: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ delivery_status: null }) });
     const sigUpdate = chain();
-    const projectQueries = [projectRead, colInfo, sigUpdate];
+    const projectQueries = [projectRead, colInfo, lockRead, sigUpdate];
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([]) });
       if (table === 'activity_log') return activityLog;
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -245,7 +253,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const staleUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, staleUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, staleUpdate, projectRefetch]; // lock read, edit, in-trx staleness write, refetch
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -289,7 +297,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const spareUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, spareUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, spareUpdate]; // chain() = PUT trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -328,7 +336,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const unstaleUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, unstaleUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, unstaleUpdate, projectRefetch]; // lock read, edit, in-trx staleness write, refetch
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -737,7 +745,7 @@ describe('WDO signature content binding', () => {
     const projectRead = chain({ first: jest.fn().mockResolvedValue(signed) });
     const colInfo = chain();
     const clearUpdate = chain();
-    const projectQueries = [projectRead, colInfo, clearUpdate];
+    const projectQueries = [projectRead, colInfo, chain(), clearUpdate]; // chain() = DELETE trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();

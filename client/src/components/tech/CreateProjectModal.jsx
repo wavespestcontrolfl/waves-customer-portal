@@ -467,6 +467,10 @@ export default function CreateProjectModal({
   // Keep its own lock so no sign-step exit can unmount either request.
   const [completionBusy, setCompletionBusy] = useState(false);
   const [completionAction, setCompletionAction] = useState(null);
+  // Mobile parity with the admin drawer's "Hold report until invoice is paid"
+  // checkbox — the sheet previously FORCED the hold whenever it was available,
+  // with no way to send invoice + report together. Default ON (same as admin).
+  const [mobileHoldReport, setMobileHoldReport] = useState(true);
   // Escape follows the same exit contract as the scrim and close button: on
   // the sign step it must route through finishSignStep so the parent still
   // learns about the saved project.
@@ -1164,7 +1168,20 @@ export default function CreateProjectModal({
     setFindings(prev => {
       const next = { ...prev };
       for (const [key, value] of Object.entries(lastApplied)) {
-        if (hasMeaningfulValue(value) && next[key] === value) next[key] = '';
+        if (!hasMeaningfulValue(value)) continue;
+        if (next[key] === value) { next[key] = ''; continue; }
+        // A composite the tech APPENDED to (customer contact + a typed realtor
+        // email) no longer exact-matches, but the previous customer's
+        // name/phone/email is still embedded in the text — strip the applied
+        // substring and keep the tech's additions. Another person's contact
+        // line must never carry onto the next customer's FDACS report.
+        const current = String(next[key] ?? '');
+        if (typeof value === 'string' && current.includes(value)) {
+          next[key] = current
+            .replace(value, '')
+            .replace(/^[\s;,·]+|[\s;,·]+$/g, '')
+            .replace(/\s{2,}/g, ' ');
+        }
       }
       return next;
     });
@@ -1945,20 +1962,20 @@ export default function CreateProjectModal({
                 : signStep.requiresSignature === false
                   ? allowInvoiceCompletion
                     ? savedCard
-                      ? signStep.reportHoldAvailable
+                      ? signStep.reportHoldAvailable && mobileHoldReport
                         ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and keep the certificate locked until payment.`
                         : `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and certificate together.`
-                      : signStep.reportHoldAvailable
+                      : signStep.reportHoldAvailable && mobileHoldReport
                         ? 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
                         : 'Applicator attestation saved — send the invoice and certificate now.'
                     : 'Applicator attestation saved — ready for office invoice delivery.'
                   : signStep.signature?.signed
                     ? allowInvoiceCompletion
                       ? savedCard
-                        ? signStep.reportHoldAvailable
+                        ? signStep.reportHoldAvailable && mobileHoldReport
                           ? `Signed — charge ${savedCardLabel} now, or send the invoice and keep the report locked until payment.`
                           : `Signed — charge ${savedCardLabel} now, or send the invoice and report together.`
-                        : signStep.reportHoldAvailable
+                        : signStep.reportHoldAvailable && mobileHoldReport
                           ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
                           : 'Signed — send the invoice and report now.'
                       : 'Signed — saved for office review and invoice delivery.'
@@ -2064,10 +2081,27 @@ export default function CreateProjectModal({
               && !reportOnlyCompletion
               && !signStep.cardCompletion?.charged
               && !signStep.cardCompletion?.blocked
+              && !signStep.invoiceDelivery
+              && signStep.reportHoldAvailable
+              && (signStep.requiresSignature === false || signStep.signature?.signed) && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: P.muted, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={mobileHoldReport}
+                  onChange={e => setMobileHoldReport(e.target.checked)}
+                  disabled={signBusy || completionBusy}
+                />
+                Hold {signStep.requiresSignature === false ? 'certificate' : 'report'} until invoice is paid
+              </label>
+            )}
+            {allowInvoiceCompletion
+              && !reportOnlyCompletion
+              && !signStep.cardCompletion?.charged
+              && !signStep.cardCompletion?.blocked
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
               <button
                 type="button"
-                onClick={() => sendInvoiceAndFinish()}
+                onClick={() => sendInvoiceAndFinish(!mobileHoldReport)}
                 disabled={signBusy || completionBusy}
                 style={{
                   minHeight: 52,
@@ -2087,7 +2121,7 @@ export default function CreateProjectModal({
                   ? signStep.invoiceDelivery ? 'Finishing service…' : 'Sending invoice…'
                   : signStep.invoiceDelivery
                     ? 'Finish service'
-                    : signStep.reportHoldAvailable
+                    : signStep.reportHoldAvailable && mobileHoldReport
                       ? `Send invoice & hold ${signStep.requiresSignature === false ? 'certificate' : 'report'}`
                       : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
               </button>

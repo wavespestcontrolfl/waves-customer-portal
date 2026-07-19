@@ -852,8 +852,11 @@ describe('manual /send vs in-flight release (Codex P2)', () => {
       expect(res.status).toBe(200);
       expect(body.sent).toBe(true);
       const projectUpdates = updates.projects || [];
-      // Atomic claim first (same claim the sweep takes)…
-      expect(projectUpdates[0].report_hold_status).toBe('releasing');
+      // Shared delivery claim first — taken BEFORE the hold claim so the
+      // hold claim's updated_at refresh can't defeat its staleness window…
+      expect(projectUpdates[0].delivery_status).toBe('sending');
+      // …then the atomic hold claim (same claim the sweep takes)…
+      expect(projectUpdates.some((u) => u.report_hold_status === 'releasing')).toBe(true);
       // …then the delivered flip to released with the manual source.
       const released = projectUpdates.find((u) => u.report_hold_status === 'released');
       expect(released).toBeTruthy();

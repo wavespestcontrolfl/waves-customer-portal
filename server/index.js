@@ -973,6 +973,41 @@ httpServer.listen(PORT, () => {
       setInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
+    // WDO report attention sweep — exception-based bell for reports stalled
+    // BEFORE send (inspection never closed out, signed-but-unsent drafts,
+    // holds failing release). Quiet when clean; gated + cross-replica
+    // serialized inside the sweep itself. Every 6h with an early first run
+    // so a fresh deploy surfaces existing stalls the same morning.
+    {
+      const runWdoAttentionSweep = async () => {
+        try {
+          const { runWdoReportAttentionSweep } = require('./services/wdo-report-attention');
+          await runWdoReportAttentionSweep();
+        } catch (err) {
+          logger.error(`[wdo-report-attention] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runWdoAttentionSweep, 2 * 60 * 1000).unref();
+      setInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
+    }
+
+    // Orphaned-photo reclaim — drains project_photo_delete_orphaned
+    // tombstones (DB-first photo deletes whose post-commit S3 delete
+    // failed). Ungated hygiene: only touches objects whose DB rows the
+    // operator already deleted; serialized inside the sweep.
+    {
+      const runPhotoOrphanReclaim = async () => {
+        try {
+          const { reclaimOrphanedPhotoObjects } = require('./services/photo-orphan-reclaim');
+          await reclaimOrphanedPhotoObjects();
+        } catch (err) {
+          logger.error(`[photo-orphan-reclaim] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runPhotoOrphanReclaim, 3 * 60 * 1000).unref();
+      setInterval(runPhotoOrphanReclaim, 6 * 60 * 60 * 1000).unref();
+    }
+
     // Call recordings are processed by the every-5-minute scheduler.js
     // cron (recoverMissingRecentRecordings + processAllPending). Running
     // this interval alongside it duplicated the work (harmless only
