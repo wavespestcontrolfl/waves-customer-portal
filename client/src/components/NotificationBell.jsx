@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import useModalFocus from '../hooks/useModalFocus';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
 import api from '../utils/api';
@@ -188,20 +189,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setOpen(!open);
   };
 
-  // Escape closes the panel and returns focus to the bell — outside-click
-  // alone left keyboard users with no way to dismiss it.
-  const bellButtonRef = useRef(null);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        setOpen(false);
-        bellButtonRef.current?.focus();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open]);
+  // Full dialog contract via the shared hook: move focus into the panel,
+  // trap Tab/Shift+Tab inside it, close on Escape, and restore focus to the
+  // bell on close (same as the other portal dialogs). Merge its ref with the
+  // existing panelRef (used for outside-click detection) since only one of
+  // the mobile/desktop panels renders at a time.
+  const dialogFocusRef = useModalFocus(open, () => setOpen(false));
+  const attachPanelRef = (node) => {
+    panelRef.current = node;
+    dialogFocusRef.current = node;
+  };
 
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
@@ -261,7 +258,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
-      <button ref={bellButtonRef} onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
+      <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
         padding: 8, fontSize: 20, color: isDark ? '#64748B' : colors.text, minWidth: 44, minHeight: 44,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -294,7 +291,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // account menu). Inset so the rounded sheet floats over the scene
           // and clears the notch + bottom tab bar. Admin: unchanged white
           // full-screen panel (no glass theme mounted on /admin).
-          <div ref={panelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
             top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
@@ -435,7 +432,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // Desktop: admin keeps the flush right-edge drawer; customer gets a
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
-          <div ref={panelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,

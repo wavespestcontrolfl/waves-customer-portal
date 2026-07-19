@@ -5801,13 +5801,14 @@ function PropertyTab({ customer }) {
   // settles, so switch/logout can await saves whose component is gone.
   // Saves chain through saveQueueRef so overlapping flushes reach the server
   // in edit order — a slow older PUT can't land after (and overwrite) a newer
-  // value, and lastSavedRef only ever advances. A REJECTED save drops its
-  // fields instead of re-queueing them: the error handler reverts the UI to
-  // the last confirmed state, and a hidden retry queue diverging from what
-  // the customer sees meant a later unrelated edit could silently save
-  // gate/pet values the UI no longer displayed. The failure is visible
-  // (saveStatus 'error'); re-editing re-queues naturally, and fields edited
-  // while the failed PUT was in flight are already back in pendingRef.
+  // value, and lastSavedRef only ever advances. A REJECTED save RE-QUEUES its
+  // fields (merged UNDER any newer edits) so nothing is dropped — the
+  // switch-flush path (flushBeforeSwitch) has no other retry surface, and
+  // selectProperty keeps the property open on failure. The original
+  // hidden-save footgun (a queue diverging from a reverted UI) is avoided by
+  // NOT reverting the optimistic UI on failure: the edits stay visible AND
+  // stay queued, so a later flush that finally persists them can't surprise
+  // the customer with values the UI had hidden.
   const flushAllPendingSaves = useCallback(() => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
@@ -5828,8 +5829,16 @@ function PropertyTab({ customer }) {
         const toSave = { ...pendingRef.current };
         if (!Object.keys(toSave).length) return;
         pendingRef.current = {};
-        const result = await api.updatePropertyPreferences(toSave);
-        if (result && result.preferences) lastSavedRef.current = result.preferences;
+        try {
+          const result = await api.updatePropertyPreferences(toSave);
+          if (result && result.preferences) lastSavedRef.current = result.preferences;
+        } catch (err) {
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left
+          // wins) so the next flush retries these without clobbering fresher
+          // input. The UI is not reverted, so queue and screen agree.
+          pendingRef.current = { ...toSave, ...pendingRef.current };
+          throw err;
+        }
       });
     saveQueueRef.current = save;
     inFlightPropertyPrefSaves.add(save);
@@ -5854,21 +5863,12 @@ function PropertyTab({ customer }) {
         })
         .catch((err) => {
           console.error('[PropertyTab] save failed', err);
-          // Revert to the last confirmed server state so the user isn't
-          // misled into thinking gate codes / pet info persisted — but
-          // PRESERVE any field the customer has edited SINCE this save left
-          // (still in pendingRef, awaiting its own flush). A blanket revert
-          // to lastSavedRef hid those newer edits while the queued flush
-          // would still persist them — the exact hidden-save footgun this
-          // wave is closing. Newer optimistic values win over the baseline.
-          if (lastSavedRef.current) {
-            const pendingKeys = Object.keys(pendingRef.current || {});
-            setPrefs(prev => {
-              const merged = { ...lastSavedRef.current };
-              for (const k of pendingKeys) merged[k] = prev[k];
-              return merged;
-            });
-          }
+          // Do NOT revert the optimistic UI: the failed fields are re-queued
+          // (flushAllPendingSaves) and will retry, so the screen and the
+          // queue agree on the customer's entered values. Reverting here
+          // would recreate the divergence (UI shows old, queue holds new)
+          // that let a later flush silently persist hidden values. Just
+          // surface the failure.
           setSaveStatus('error');
         });
     }, 1000);
