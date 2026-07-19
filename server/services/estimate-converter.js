@@ -880,6 +880,10 @@ function legacyLawnProgramMinimumMonthly(estimateData = {}) {
   const rows = [];
   if (Array.isArray(result?.results?.lawn)) rows.push(...result.results.lawn);
   if (result?.lawnMeta && typeof result.lawnMeta === 'object') rows.push(result.lawnMeta);
+  // v1 saves nest the selected-lawn provenance at results.lawnMeta.
+  if (result?.results?.lawnMeta && typeof result.results.lawnMeta === 'object') {
+    rows.push(result.results.lawnMeta);
+  }
   const lineItemSources = [
     ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
     // Admin V2 saves persist the raw engine result separately.

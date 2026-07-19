@@ -142,6 +142,34 @@ describe("applyServerPestPricingConfig — live pest floor re-arm in the fallbac
     // give-back at this configured value, unlike the $89 case above.
     expect(est.recurring.pestProgramFloorApplied).toBe(false);
   });
+
+  it("the list-price bottom follows the configured pest_base.floor (codex P2 round 10 #2827)", () => {
+    // Server basePrice = Math.max(PEST.floor, base + adj) with PEST.floor
+    // db-synced — the fallback bottom must move with it, floor armed or
+    // not. 800 sf townhome bottoms at $89 by default; a $95 floor lifts it.
+    const townhome = {
+      homeSqFt: 800,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: "townhome_end",
+      shrubDensity: "LIGHT",
+      treeDensity: "LIGHT",
+      landscapeComplexity: "SIMPLE",
+      svcPest: true,
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    };
+    const defaultBottom = calculateEstimate(townhome);
+    expect(defaultBottom.results.pestTiers.find((t) => t.apps === 4).pa).toBeCloseTo(89, 2);
+
+    applyServerPestPricingConfig({ floor: 95 });
+    const lifted = calculateEstimate(townhome);
+    expect(lifted.results.pestTiers.find((t) => t.apps === 4).pa).toBeCloseTo(95, 2);
+    // One-time pest anchors on the same quarterly base — it moves too.
+    const ot = lifted.oneTime?.items?.find?.((i) => i.service === "one_time_pest")
+      ?? (lifted.results.oneTime || []).find?.((i) => i.service === "one_time_pest");
+    if (ot) expect(Number(ot.price ?? ot.amount)).toBeGreaterThanOrEqual(Math.round(95 * 2.2));
+  });
 });
 
 describe("fallback lawn margin visibility — report-only WaveGuard breach warning", () => {

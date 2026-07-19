@@ -186,6 +186,14 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     }, { lawnCostFloorArmed: true });
     // pest 54 ; lawn held at its base 66.75 → 120.75
     expect(aboveBase.monthly).toBe(120.75);
+    // …and the per-treatment DISPLAY (drives the first-application invoice)
+    // is capped the same way — never lifted to a floor above the authored
+    // line (codex P2 round 10 on #2827).
+    const lawnTreatment = (aboveBase.perServiceTreatments || [])
+      .find((row) => (row.service || '').includes('lawn'));
+    if (lawnTreatment && lawnTreatment.displayPrice != null) {
+      expect(lawnTreatment.displayPrice).toBeLessThanOrEqual(89);
+    }
 
     // Disarmed (default): the same reporting field moves nothing.
     const disarmed = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {

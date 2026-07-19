@@ -1957,7 +1957,7 @@ function generateEstimate(input) {
       // signals are independent of the enforcement kill switch (codex P2 on
       // #2827); only the WaveGuard lift in applyMarginGuard re-arms with it.
       if (item.service === 'pest_control') {
-        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
+        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear, pestProgramFloorPerVisitResolved);
         if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
           item.manualPestFloorWarning = true;
           manualMarginWarnings.push({

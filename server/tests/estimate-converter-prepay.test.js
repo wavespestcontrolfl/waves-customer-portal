@@ -150,6 +150,19 @@ describe('estimate converter annual prepay amount', () => {
       },
     })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
 
+    // Legacy V1 saves nest the selected-lawn provenance at results.lawnMeta
+    // — the evidence scan must reach it (codex P2 round 10 on #2827).
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          results: { lawnMeta: { programMinimumApplied: true, programMinimumMonthly: 50 } },
+          lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }],
+        },
+      },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
     // Legacy pre-stamp quote saved while the minimum was armed: the row's
     // own evidence (programMinimumApplied) carries the $50 floor, so the
     // prepay protection holds even though the global is now disarmed and no

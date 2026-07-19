@@ -15020,12 +15020,24 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   // applySelectedTierToServiceRow); options.lawnFloorMonthly carries the
   // selected/default row's floor for the untouched v1.services rows.
   const lawnCostFloorArmed = options.lawnCostFloorArmed === true;
-  const lawnFloorMonthlyFor = (svc) => Math.max(
-    programMinMonthly > 0 ? programMinMonthly : 0,
-    lawnCostFloorArmed
-      ? (Number(svc?.lawnFloorMonthly ?? lawnRowFloorMonthly(svc) ?? options.lawnFloorMonthly) || 0)
-      : 0,
-  );
+  // Effective monthly floor for a lawn row. Two legs, two semantics
+  // (mirroring generateEstimate's guards): the program minimum lifts even
+  // above the authored base (it IS the billed minimum); the armed margin
+  // floor is capped at the row's own pre-discount monthly — a floor above
+  // the authored price makes the line undiscountable, never re-prices it
+  // (that cap applies to the per-treatment display too, which drives the
+  // first-application invoice — codex P2 round 10 on #2827).
+  const lawnFloorMonthlyFor = (svc) => {
+    const baseMonthly = Number(svc?.mo ?? svc?.monthly) || 0;
+    let marginFloorMonthly = 0;
+    if (lawnCostFloorArmed) {
+      marginFloorMonthly = Number(svc?.lawnFloorMonthly ?? lawnRowFloorMonthly(svc) ?? options.lawnFloorMonthly) || 0;
+      if (marginFloorMonthly > 0 && baseMonthly > 0) {
+        marginFloorMonthly = Math.min(baseMonthly, marginFloorMonthly);
+      }
+    }
+    return Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
+  };
   // pestTier may be null if pest isn't in this estimate. In that case
   // the frequency entry shows the recurring total regardless of freq key
   // (lawn-only / mosquito-only estimates — slider position doesn't
@@ -15067,20 +15079,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     // must not pull the lawn component below the floor. Guard on n > 0 so a
     // missing/zero lawn row is never inflated to the minimum.
     if (n > 0 && recurringServiceKey(svc) === 'lawn_care') {
-      let lifted = after;
-      // Program minimum lifts even above the authored base — it IS the
-      // billed minimum (existing behavior).
-      if (programMinMonthly > 0 && lifted < programMinMonthly) lifted = programMinMonthly;
-      // The armed margin floor never raises above the pre-discount line —
-      // a floor above the authored price merely makes the line
-      // undiscountable (same rule as generateEstimate's guards).
-      if (lawnCostFloorArmed) {
-        const marginFloorMonthly = Number(svc?.lawnFloorMonthly ?? lawnRowFloorMonthly(svc) ?? options.lawnFloorMonthly) || 0;
-        if (marginFloorMonthly > 0 && lifted < marginFloorMonthly) {
-          lifted = Math.max(lifted, Math.min(n, marginFloorMonthly));
-        }
-      }
-      return lifted;
+      const floorMonthly = lawnFloorMonthlyFor(svc);
+      if (floorMonthly > 0 && after < floorMonthly) return floorMonthly;
     }
     return after;
   };

@@ -487,7 +487,7 @@ describe('deprecated client estimator pricing drift guards', () => {
 
   test('one-time pest mirrors the server: quarterly base × 2.2, floored at $199', () => {
     // Must match server/services/pricing-engine ONE_TIME.pest model (pure multiple).
-    expect(source).toContain('const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));');
+    expect(source).toContain('const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));');
     expect(source).toContain('let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));');
     expect(source).toContain('if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;');
     expect(source).toContain("service: 'one_time_pest'");

@@ -1845,7 +1845,12 @@ export function calculateEstimate(inputs) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     const adj = pestBaseAdjustment(fpEff);
-    const pp = Math.max(89, 117 + adj);
+    // List-price bottom follows the LIVE configured floor — the server's
+    // basePrice is Math.max(PEST.floor, PEST.base + adj) with PEST.floor
+    // db-bridge-synced from pest_base.floor, so a tuned floor must move the
+    // fallback's bottom cell too or preview/persisted totals drift from the
+    // server recompute (codex P2 round 10 on #2827). Default 89 unchanged.
+    const pp = Math.max(PEST_BASE.floorPerVisit, 117 + adj);
     const roachAddOn = 0;
     R.pestTiers = [];
     pestFrequencyTiers.forEach(ft => {
@@ -2104,7 +2109,7 @@ export function calculateEstimate(inputs) {
     // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
     // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
     // (+1, whole-dollar prices), matching the server engine.
-    const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
+    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));
     let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({
