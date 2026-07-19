@@ -87,21 +87,26 @@ function isFreshTechStatusTimestamp(updatedAt) {
 }
 
 function formatScheduledTracker(service, tech, customer) {
-  // A no-show is an operational-status flip (admin-dispatch) that does NOT
-  // move track_state, so derive the customer-facing state from status —
-  // otherwise a job no-showed mid-en_route keeps reporting state 'en_route'
-  // / currentStep 3, which streams live tech GPS (enrichScheduledWithTechStatus)
-  // and drives the 15s client poll (PortalPage). Terminalize it (step 7,
-  // same as cancelled) so both stop. Mirrors track-public.js.
-  const isNoShow = service?.status === 'no_show';
-  const currentStep = isNoShow ? 7 : stepForTrackState(service?.track_state);
+  // Terminal OPERATIONAL statuses win over track_state: no_show, cancelled
+  // and skipped are admin-dispatch status flips that don't always move the
+  // track_state ENUM (several cancellation paths change status without
+  // cancelling tracking, and completion tracking is best-effort after
+  // commit). Keying off a stale track_state='en_route' kept reporting
+  // currentStep 3, which streams live tech GPS (enrichScheduledWithTechStatus)
+  // and drives the 15s client poll (PortalPage). Terminalize (step 7) so
+  // both stop. Mirrors track-public.js.
+  let terminalState = null;
+  if (service?.status === 'no_show') terminalState = 'no_show';
+  else if (service?.status === 'cancelled' || service?.status === 'skipped') terminalState = 'cancelled';
+  else if (service?.status === 'completed') terminalState = 'complete';
+  const currentStep = terminalState ? 7 : stepForTrackState(service?.track_state);
   const custLat = parseFiniteCoordinate(customer?.latitude);
   const custLng = parseFiniteCoordinate(customer?.longitude);
   const serviceSummary = service.service_customer_visible === false ? null : service.service_description || null;
   const trackTokenLive = !!service.track_view_token && isTrackTokenLive(service.track_token_expires_at);
   return {
     id: service.id,
-    state: isNoShow ? 'no_show' : (service.track_state || 'scheduled'),
+    state: terminalState || service.track_state || 'scheduled',
     trackToken: trackTokenLive ? service.track_view_token : null,
     trackUrl: trackTokenLive ? `/track/${service.track_view_token}` : null,
     enRouteAt: service.en_route_at || null,
@@ -359,6 +364,7 @@ router._test = {
   buildCanonicalScheduledServiceQuery,
   canonicalQueryOptions,
   isFreshTechStatusTimestamp,
+  formatScheduledTracker,
 };
 
 module.exports = router;
