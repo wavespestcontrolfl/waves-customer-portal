@@ -194,6 +194,14 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
   it("stamps the disarmed arm state on every fallback result", () => {
     const est = calculateEstimate(lawnInput());
     expect(est.pricingMetadata.lawnCostFloorArmed).toBe(false);
+    expect(est.pricingMetadata.lawnProgramMinimumMonthly).toBe(0);
+  });
+
+  it("stamps the re-armed program minimum so view/accept replays the save (pre-push codex P0 round 9)", () => {
+    applyServerLawnPricingConfig({ programMinimumMonthly: 50 });
+    const est = calculateEstimate(lawnInput());
+    expect(est.error).toBeUndefined();
+    expect(est.pricingMetadata.lawnProgramMinimumMonthly).toBe(50);
   });
 });
 

@@ -1222,6 +1222,30 @@ describe('lawn pricing production follow-up', () => {
     expect(armed.pricingMetadata.lawnCostFloorArmed).toBe(true);
   });
 
+  test('the engine stamps its resolved program minimum into pricingMetadata', () => {
+    // Same replay rule as the arm stamp (pre-push codex P0, round 9): the
+    // minimum that priced the run rides the result, so view/accept and the
+    // converter's prepay protection clamp a sent quote at ITS minimum, not
+    // whatever the global holds at render time.
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(disarmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(0);
+
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+    try {
+      const armed = generateEstimate(baseInput({
+        measuredTurfSf: 4500,
+        services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      }));
+      expect(armed.pricingMetadata.lawnProgramMinimumMonthly).toBe(50);
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
   test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });

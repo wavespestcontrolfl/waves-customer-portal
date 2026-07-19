@@ -1440,6 +1440,16 @@ export function calculateEstimate(inputs) {
     // matching the server engine's pricingMetadata stamp (codex P2 round 9
     // on #2827).
     lawnCostFloorArmed: LAWN_PRICING_V2.useLawnCostFloor === true,
+    // Resolved program minimum for THIS run (0 = disarmed) — same replay
+    // rule: estimate-public and the converter clamp/protect a saved fallback
+    // quote at the minimum it was priced with, never the live global at
+    // render time (pre-push codex P0, round 9). This also makes the
+    // config-refresh fail-open self-consistent: whatever value priced the
+    // quote is the value view/accept replays.
+    lawnProgramMinimumMonthly: (() => {
+      const n = Number(LAWN_PRICING_V2.programMinimumMonthly);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    })(),
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {

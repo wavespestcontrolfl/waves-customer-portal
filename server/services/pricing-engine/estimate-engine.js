@@ -488,6 +488,15 @@ function generateEstimate(input) {
     services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
       ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
   );
+  // Lawn program minimum resolved once per run — the same live value the
+  // pricers and discount guards read during THIS request (0 = disarmed).
+  // Stamped into pricingMetadata below so view/accept replays clamp at the
+  // minimum the quote was actually priced with, not whatever the global is
+  // at render time (pre-push codex P0, round 9 on #2827).
+  const lawnProgramMinimumMonthlyResolved = (() => {
+    const n = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
   const commercialSubtype = commercialSubtypeFromInput(input, services);
   // Risk-type CADENCE (owner-locked): the commercial business-type bucket drives
   // pest/rodent visits-per-year. NULL/unrecognized → nulls, so the pricers keep
@@ -606,6 +615,11 @@ function generateEstimate(input) {
     // (estimate-public estimateLawnFloorArmed reads it first; codex P2
     // round 8 on #2827).
     lawnCostFloorArmed,
+    // Resolved program minimum for THIS run — same replay rule as the arm
+    // state: a later global re-arm/disarm must never re-price a sent quote
+    // (estimate-public lawnProgramMinimumMonthlyFor reads it first;
+    // pre-push codex P0, round 9).
+    lawnProgramMinimumMonthly: lawnProgramMinimumMonthlyResolved,
     ...(inputPricingMetadata.skippedDuplicateRoachLine
       ? {
           skippedDuplicateRoachLine: true,

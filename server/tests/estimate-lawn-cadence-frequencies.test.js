@@ -643,6 +643,31 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     }
   });
 
+  test('the result pricingMetadata program-minimum stamp beats the global value in both directions', () => {
+    // Stamped $50 + global 0: a quote saved while the minimum was re-armed
+    // keeps its clamp after the global returns to 0 — the customer accepts
+    // exactly what was saved (pre-push codex P0, round 9 on #2827)…
+    const stamped = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: { pricingMetadata: { lawnProgramMinimumMonthly: 50 } },
+    });
+    expect(Object.fromEntries(stamped.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(50, 2);
+
+    // …and a quote stamped disarmed (0) is never clamped UP by a later
+    // global re-arm.
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+    try {
+      const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+        result: { pricingMetadata: { lawnProgramMinimumMonthly: 0 } },
+      });
+      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+        .toBeCloseTo(49.5, 2);
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
   test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
     // Pre-disarm saves never persisted the flag (the engine armed by
     // default) — the evidence is the enforcement stamps on the stored rows.

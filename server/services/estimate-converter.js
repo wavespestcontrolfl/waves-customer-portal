@@ -857,7 +857,19 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 // dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
 // lineItems) and dedupes by key so a lawn line is only protected once.
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
-  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  // Per-estimate snapshot first (pre-push codex P0, round 9 on #2827): the
+  // engine stamps the resolved program minimum into pricingMetadata, and the
+  // prepay protection must shield the SAME floor the estimate was priced and
+  // accepted with — a later global re-arm/disarm must not change what an
+  // outstanding quote bills. Stampless (pre-stamp) estimates keep the live
+  // global, matching estimate-public's fallback.
+  const stamped = estimateData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
+  const stampedN = Number(stamped);
+  const minMonthly = stamped != null && Number.isFinite(stampedN) && stampedN >= 0
+    ? stampedN
+    : Number(LAWN_PRICING_V2.programMinimumMonthly);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {

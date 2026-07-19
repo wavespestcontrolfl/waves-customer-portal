@@ -10941,7 +10941,7 @@ function retiredLawnRequoteNeeded(estData = null) {
 // accept path actually bills. Those links go to the requote state on the SSR
 // page instead; the React flow is unaffected (it renders the clamped ladder).
 function storedLawnRowBelowProgramFloor(estData = null) {
-  const minMonthly = lawnProgramMinimumMonthly();
+  const minMonthly = lawnProgramMinimumMonthlyFor(estData);
   if (!(minMonthly > 0) || !estData || typeof estData !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estData);
   return (recurringSvcList || []).some((svc) => {
@@ -12625,6 +12625,31 @@ function lawnProgramMinimumMonthly() {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+// Per-estimate program-minimum SNAPSHOT (pre-push codex P0, round 9 on
+// #2827): the engine (and the client fallback engine) stamp the RESOLVED
+// programMinimumMonthly into pricingMetadata on every pricing run, so
+// view/accept re-clamps a saved quote at the minimum it was actually priced
+// with — a later global re-arm/disarm must never make the saved, displayed,
+// and accepted totals disagree (a quote saved under a re-armed $50 minimum
+// keeps its clamp after the global returns to 0, and a quote saved disarmed
+// is never clamped UP by a later re-arm). Estimates without a stamp
+// (pre-stamp saves) fall back to the live global — their existing behavior.
+function lawnProgramMinimumMonthlyFor(estData) {
+  const stamped = estData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estData?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
+  const n = Number(stamped);
+  if (stamped != null && Number.isFinite(n) && n >= 0) return n;
+  return lawnProgramMinimumMonthly();
+}
+
+// Normalize an explicitly threaded per-estimate minimum; callers that were
+// not handed one keep the live global (legacy behavior).
+function threadedProgramMinMonthly(value) {
+  const n = Number(value);
+  return value != null && Number.isFinite(n) && n >= 0 ? n : lawnProgramMinimumMonthly();
+}
+
 function isRetiredLawnTierKey(tierKey) {
   return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
 }
@@ -12686,8 +12711,8 @@ function lawnRowsShowFloorEnforcement(rows) {
 // per-app never disagree, the pre-discount anchor never drops below the net
 // price, and the reported manual discount shrinks to what the floor actually
 // let through (never display savings the price doesn't reflect).
-function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual, marginFloorArmed }) {
-  const programMinMonthly = lawnProgramMinimumMonthly();
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual, marginFloorArmed, programMinMonthly: programMinMonthlyIn }) {
+  const programMinMonthly = threadedProgramMinMonthly(programMinMonthlyIn);
   // Margin-floor leg armed only with the cost-floor machinery (owner ruling
   // 2026-07-17: floors report, never enforce). Stored and engine rows carry
   // minimumCollectedAnnualPrice/costFloorAnnual on EVERY quote for margin
@@ -12783,24 +12808,24 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
 // selection always stays (it IS the quoted plan — hiding it would silently
 // re-price the customer), and the ladder never empties — if every tier
 // floors, keep the highest-application one (most value at the same price).
-function isFlooredLawnLadderEntry(entry = {}) {
+function isFlooredLawnLadderEntry(entry = {}, programMinMonthly) {
   if (entry.flooredAtMinimum === true) return true;
   // Snapshots/caches frozen before the flag existed carry no flooredAtMinimum —
   // recompute from the price itself: a lawn tier sitting AT (or below) the
   // program minimum is floor-pinned by definition (the floor is a hard lower
   // bound, so an at-floor price is either clamped or coincidentally exact —
   // both read as "the floor is the price" to the customer).
-  const minMonthly = lawnProgramMinimumMonthly();
+  const minMonthly = threadedProgramMinMonthly(programMinMonthly);
   const monthly = Number(entry.monthly);
   return minMonthly > 0 && Number.isFinite(monthly) && monthly > 0 && monthly <= minMonthly;
 }
 
-function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null) {
+function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null, programMinMonthly) {
   const list = Array.isArray(entries) ? entries : [];
   const isProtected = (entry) => entry.recommended === true
     || entry.selected === true
     || (protectedKeys instanceof Set && protectedKeys.has(String(entry.key || '').toLowerCase()));
-  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry) || isProtected(entry));
+  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry, programMinMonthly) || isProtected(entry));
   if (kept.length) return kept;
   if (!list.length) return list;
   const best = list.reduce((a, b) => (
@@ -12843,11 +12868,12 @@ function storedLawnTierKeysForEstimate(estData = {}) {
 function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
   let next = payload;
   const protectedKeys = storedLawnTierKeysForEstimate(estData);
+  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
 
   const topLevel = Array.isArray(payload.frequencies) ? payload.frequencies : [];
   const lawnTopLevel = topLevel.filter((f) => f?.serviceCategory === 'lawn_care');
   if (lawnTopLevel.length) {
-    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys));
+    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys, programMinMonthly));
     const hidden = lawnTopLevel.filter((f) => !kept.has(f));
     if (hidden.length) {
       next = {
@@ -12878,7 +12904,7 @@ function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
         if (!isLawnTierLadder(section)) {
           return section;
         }
-        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys);
+        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys, programMinMonthly);
         if (kept.length === section.frequencies.length) return section;
         return {
           ...section,
@@ -12925,6 +12951,9 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   const marginFloorArmed = perEstimateFloorArmed != null
     ? perEstimateFloorArmed
     : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
+  // Program minimum resolved once per estimate for the same reason: every
+  // cadence row clamps at the minimum THIS quote was priced with.
+  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -12971,6 +13000,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
           ?? row.costFloorAnnual,
         ),
         marginFloorArmed,
+        programMinMonthly,
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -14120,7 +14150,7 @@ const NON_PEST_RESULT_ROWS = {
 // serviceKey -> { tierKey -> { mo, ann, pa, v, recommended, selected } } from the
 // stored tier rows. These are PRE-discount per-tier prices; shapeFromV1 applies
 // the discounts when it recomputes the bundle total for a given combination.
-function nonPestTierBaseMap(resultStats = {}) {
+function nonPestTierBaseMap(resultStats = {}, programMinMonthly) {
   const out = {};
   for (const [serviceKey, [rowsKey, tierKeyFn]] of Object.entries(NON_PEST_RESULT_ROWS)) {
     const rows = Array.isArray(resultStats?.[rowsKey]) ? resultStats[rowsKey] : [];
@@ -14140,7 +14170,7 @@ function nonPestTierBaseMap(resultStats = {}) {
       // clamp the combo base so shapeFromV1 never sums a below-floor lawn
       // component (its per-service discount hook re-clamps post-WaveGuard).
       if (serviceKey === 'lawn_care') {
-        const minMonthly = lawnProgramMinimumMonthly();
+        const minMonthly = threadedProgramMinMonthly(programMinMonthly);
         if (minMonthly > 0 && mo != null && mo < minMonthly) {
           mo = minMonthly;
           ann = roundMonthly(mo * 12);
@@ -14199,11 +14229,11 @@ function serviceCadenceComboKey(selection = {}) {
 // covers it. Per-service combos require a pest axis: the billing cadence /
 // interval is driven by the pest cadence, so a no-pest bundle must NOT inherit a
 // placeholder pest cadence (it would mis-resolve billing to quarterly/per-app).
-function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } = {}) {
+function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false, programMinMonthly } = {}) {
   if (!v1 || !Array.isArray(v1.services)) return null;
   const hasPest = Array.isArray(v1.pestTiers) && v1.pestTiers.length > 0;
   if (!hasPest) return null;
-  const tierBaseMap = nonPestTierBaseMap(resultStats);
+  const tierBaseMap = nonPestTierBaseMap(resultStats, programMinMonthly);
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
   const selectableNonPest = recurringKeys.filter(
     (k) => tierBaseMap[k] && Object.keys(tierBaseMap[k]).length > 1,
@@ -14230,7 +14260,7 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
   }
 
   return combos.map(({ pest, selection }) => {
-    const entry = comboPricingEntry(v1, pest.ladder, pest.pestTier, prefs, tierBaseMap, selection, { pestOnly });
+    const entry = comboPricingEntry(v1, pest.ladder, pest.pestTier, prefs, tierBaseMap, selection, { pestOnly, programMinMonthly });
     return {
       key: serviceCadenceComboKey(selection),
       selection,
@@ -14260,7 +14290,7 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   const d = recurringServiceReceivesTierDiscount(recurringService) ? (Number(recurringDiscount) || 0) : 0;
   // Lawn program minimum re-clamps AFTER the WaveGuard % — a Platinum 20% on
   // a floor-priced lawn section must not sell below the floor.
-  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthly() : 0;
+  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthlyFor(estData) : 0;
   const repriced = entries.map((e) => {
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
@@ -14865,6 +14895,9 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
 }
 
 function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
+  // Per-estimate program minimum threaded via options (pre-push codex P0,
+  // round 9); an unthreaded caller keeps the live global.
+  const programMinMonthly = threadedProgramMinMonthly(options.programMinMonthly);
   // pestTier may be null if pest isn't in this estimate. In that case
   // the frequency entry shows the recurring total regardless of freq key
   // (lawn-only / mosquito-only estimates — slider position doesn't
@@ -14906,8 +14939,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     // must not pull the lawn component below the floor. Guard on n > 0 so a
     // missing/zero lawn row is never inflated to the minimum.
     if (n > 0 && recurringServiceKey(svc) === 'lawn_care') {
-      const minMonthly = lawnProgramMinimumMonthly();
-      if (minMonthly > 0 && after < minMonthly) return minMonthly;
+      if (programMinMonthly > 0 && after < programMinMonthly) return programMinMonthly;
     }
     return after;
   };
@@ -14935,10 +14967,9 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   let manualDiscountSuppressed = false;
   const lawnFloorProtectedMonthly = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
     if (recurringServiceKey(svc) !== 'lawn_care') return sum;
-    const minMonthly = lawnProgramMinimumMonthly();
-    if (!(minMonthly > 0)) return sum;
+    if (!(programMinMonthly > 0)) return sum;
     const after = discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
-    return after > 0 ? sum + Math.min(after, minMonthly) : sum;
+    return after > 0 ? sum + Math.min(after, programMinMonthly) : sum;
   }, 0);
   if (manualDiscountMonthly > 0 && lawnFloorProtectedMonthly > 0) {
     const manualHeadroomMonthly = Math.max(0, roundMonthly(pestMoAfter + nonPestMoAfter - monthlyOff - lawnFloorProtectedMonthly));
@@ -15036,9 +15067,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       // the plan itself charges.
       if (displayPrice != null && recurringServiceKey(svc) === 'lawn_care'
         && Number.isFinite(visits) && visits > 0) {
-        const minMonthly = lawnProgramMinimumMonthly();
-        if (minMonthly > 0) {
-          displayPrice = Math.max(displayPrice, roundMonthly((minMonthly * 12) / visits));
+        if (programMinMonthly > 0) {
+          displayPrice = Math.max(displayPrice, roundMonthly((programMinMonthly * 12) / visits));
         }
       }
       // Monthly figures ride along on every row so flat-monthly services
@@ -15145,8 +15175,8 @@ function pricingBundleHasStaleTermiteRow(bundle = {}) {
   return combos.some((c) => rowStale(c?.perServiceTreatments));
 }
 
-function pricingBundleViolatesLawnPolicy(bundle = {}) {
-  const minMonthly = lawnProgramMinimumMonthly();
+function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
+  const minMonthly = threadedProgramMinMonthly(programMinMonthly);
   const belowFloor = (monthly) => minMonthly > 0
     && Number.isFinite(monthly) && monthly > 0 && monthly < minMonthly - 0.005;
   // A lawn row at a retired visit cadence violates the policy even when its
@@ -15307,7 +15337,7 @@ async function buildPricingBundle(estimate) {
     // lawn-identifiable element at all can't be policy-checked — those
     // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
     // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle)
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
     && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
     // Pre-split termite snapshots (no monthly on the flat-monthly row) and
     // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
@@ -15337,10 +15367,11 @@ async function buildPricingBundle(estimate) {
   const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
+    const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
     const frequencies = [];
     for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
       const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
-      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice }));
+      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice, programMinMonthly }));
     }
 
     // If no pest at all, drop the pest-cadence entries. Service-specific
@@ -15430,7 +15461,7 @@ async function buildPricingBundle(estimate) {
     // buildPricingServices only exposes own-cadence section ladders when the
     // backing combo pricing is present — the two never desync across snapshot /
     // engine / recompute paths.
-    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice });
+    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice, programMinMonthly });
     const payload = finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',

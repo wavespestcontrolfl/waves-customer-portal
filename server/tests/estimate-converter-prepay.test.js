@@ -134,6 +134,22 @@ describe('estimate converter annual prepay amount', () => {
       estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 600 }] } },
     })).toEqual({ amount: 570, discount: 30, rate: 0.05 });
 
+    // Per-estimate snapshot (pre-push codex P0, round 9 on #2827): a quote
+    // whose result carries the re-armed $50 minimum stamp keeps its $600
+    // protected slice even though the GLOBAL minimum is disarmed — the
+    // prepay 5% only spends the above-floor room ($660 - $600 = $60 → $3),
+    // billing exactly what the saved quote promised.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          pricingMetadata: { lawnProgramMinimumMonthly: 50 },
+          lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }],
+        },
+      },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
     // A stale pre-floor engine line item must never shrink the protection
     // Mixed stored sources (stale $408 line item + accepted $600 recurring
     // row): with the lawn program minimum DISARMED (owner ruling
