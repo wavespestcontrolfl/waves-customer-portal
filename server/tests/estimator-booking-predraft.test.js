@@ -182,7 +182,11 @@ describe('maybePreDraftForBooking — filters', () => {
 
 describe('maybePreDraftForBooking — call delegation', () => {
   test('a phone-booked assessment rides the FULL engine call context and gets the booking linkage merged ATOMICALLY', async () => {
-    mockState.firstQueue = [BOOKING({ source_call_log_id: 'call-7' })];
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      BOOKING({ source_call_log_id: 'call-7' }), // post-run linkage guard re-read
+    ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
@@ -199,6 +203,30 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockState.updates[0].payload.estimate_data.__raw[1]).toEqual(['svc-1']);
     expect(mockState.whereRaws.some((w) => w.table === 'estimates'
       && w.args[0].includes("'scheduled_service_id') is null"))).toBe(true);
+  });
+
+  test('a booking that died before the delegation starts never runs the engine', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7', status: 'cancelled' }), // authoritative re-read
+    ];
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, skipped: 'booking_terminal' });
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('a booking that died DURING the engine run keeps the draft but never links the dead visit', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation re-read: alive
+      BOOKING({ source_call_log_id: 'call-7', status: 'cancelled' }), // post-run: dead
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
+    const result = await maybePreDraftForBooking('svc-1');
+    // The quote was promised on the CALL — the draft stands; only the
+    // schedule linkage must not point at a dead row.
+    expect(result.drafted).toBe(true);
+    expect(mockState.updates).toHaveLength(0);
   });
 });
 

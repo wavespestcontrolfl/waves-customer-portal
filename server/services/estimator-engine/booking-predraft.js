@@ -109,6 +109,17 @@ async function maybePreDraftForBooking(scheduledServiceId) {
     if (booking.source_call_log_id) {
       // Full engine context exists — transcript, extraction, property
       // pipeline. Its per-call/per-phone dedupe makes re-entry safe.
+      // Authoritative re-read at the last moment before the (minutes-long)
+      // composer run: this hook can start well after the initial status
+      // read (the call processor sequences it behind the quote lane's
+      // engine promise), and a booking that died meanwhile must not start
+      // a delegation run at all.
+      const freshBooking = await db('scheduled_services').where({ id: booking.id }).first();
+      if (!freshBooking || TERMINAL_BOOKING_STATUSES.has(String(freshBooking.status || ''))) {
+        return { drafted: false, skipped: 'booking_terminal' };
+      }
+      if (freshBooking.source_estimate_id) return { drafted: false, skipped: 'estimate_born' };
+
       const { maybeDraftEstimateForCall } = require('./index');
       const outcome = await maybeDraftEstimateForCall({
         callLogId: booking.source_call_log_id,
@@ -118,8 +129,23 @@ async function maybePreDraftForBooking(scheduledServiceId) {
         // The engine stamps its call linkage but not the booking's — merge
         // scheduled_service_id so the draft gets the exact schedule badge
         // and the booking-link collision guard sees it (existing linkage,
-        // e.g. call-pipeline stitching, is never clobbered).
-        await linkEstimateToBooking(outcome.estimateId, booking.id);
+        // e.g. call-pipeline stitching, is never clobbered). The visit can
+        // also die DURING the composer run: re-check before stitching so a
+        // dead visit is never linked. The draft itself deliberately stands
+        // either way — the quote was promised on the CALL, and cancelling
+        // the visit does not cancel the caller's pricing request; only the
+        // booking linkage (schedule badge + per-booking idempotency key)
+        // must not point at a dead row.
+        const postRun = await db('scheduled_services').where({ id: booking.id }).first();
+        const postRunDead = !postRun || TERMINAL_BOOKING_STATUSES.has(String(postRun.status || ''));
+        if (!postRunDead) {
+          await linkEstimateToBooking(outcome.estimateId, booking.id);
+        } else {
+          logger.info('[booking-predraft] booking went terminal during engine run — draft kept, linkage skipped', {
+            scheduledServiceId: booking.id,
+            estimateId: outcome.estimateId,
+          });
+        }
       }
       return {
         drafted: outcome?.created === true,
