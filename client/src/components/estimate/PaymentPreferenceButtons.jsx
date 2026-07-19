@@ -201,7 +201,7 @@ export default function PaymentPreferenceButtons({
             : oneTimeBooking ? 'Book + send invoice' : 'Accept + send invoice'}
         </button>
 
-        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {heldForSiteConfirmation
             ? 'No payment now — your Waves account manager confirms the exact price on a quick site visit, then sends your first invoice.'
             : fineprint}
@@ -236,7 +236,7 @@ export default function PaymentPreferenceButtons({
           {holdRequired ? 'Add a card to hold your appointment' : 'Book + pay on service day'}
         </button>
 
-        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {holdRequired
             ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
             : fineprint}
@@ -334,7 +334,7 @@ export default function PaymentPreferenceButtons({
         )}
       </div>
 
-      <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
         {fineprint}
       </div>
     </div>

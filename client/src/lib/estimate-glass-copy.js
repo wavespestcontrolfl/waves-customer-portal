@@ -10,6 +10,7 @@
  * decision) — glass is the only customer theme, so the per-link escape hatch
  * back to the pre-glass page no longer exists.
  */
+import { useSyncExternalStore } from 'react';
 import { etDateString } from './timezone';
 
 // Estimate glass COPY release — category-scoped server-side. NOTE: only the
@@ -17,14 +18,35 @@ import { etDateString } from './timezone';
 // on every estimate. The server sends glassDefault per eligible category and
 // EstimateViewPage calls setGlassDefault() from the /data payload before the
 // loaded UI renders.
+//
+// MODULE-GLOBAL state read during render: without a subscription, a flag
+// change (e.g. token B loading glassDefault:false after token A's true — the
+// global survives the key={token} remount) never schedules a re-render, so
+// components paint torn glass/plain copy. setGlassDefault notifies
+// subscribers; EstimateViewPage subscribes ONCE at the tree root via
+// useGlassCopyActive (no memo boundaries below it), which keeps every
+// descendant's glassCopyActive() read consistent.
 let glassDefaultReleased = false;
+const glassDefaultSubscribers = new Set();
 
 export function setGlassDefault(on) {
-  glassDefaultReleased = on === true;
+  const next = on === true;
+  if (next === glassDefaultReleased) return;
+  glassDefaultReleased = next;
+  for (const notify of [...glassDefaultSubscribers]) notify();
 }
 
 export function glassCopyActive() {
   return glassDefaultReleased;
+}
+
+export function subscribeGlassDefault(listener) {
+  glassDefaultSubscribers.add(listener);
+  return () => glassDefaultSubscribers.delete(listener);
+}
+
+export function useGlassCopyActive() {
+  return useSyncExternalStore(subscribeGlassDefault, glassCopyActive, glassCopyActive);
 }
 
 // ── Service-agnostic strings ────────────────────────────────────────────────

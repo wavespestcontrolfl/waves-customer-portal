@@ -60,6 +60,7 @@ import {
   glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
+  useGlassCopyActive,
   GLASS_COPY,
 } from '../lib/estimate-glass-copy';
 import {
@@ -3559,6 +3560,12 @@ export default function EstimateViewPage() {
 
 function EstimateViewPageInner() {
   const { token } = useParams();
+  // Root subscription to the module-global glass-copy flag: a change
+  // (setGlassDefault from a /data load) re-renders this tree, so every
+  // descendant's render-time glassCopyActive() read stays consistent — no
+  // memo boundaries exist below. Without this, a flag flip never scheduled a
+  // re-render and siblings painted torn glass/plain copy.
+  useGlassCopyActive();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -3607,6 +3614,8 @@ function EstimateViewPageInner() {
   // Every phase transition goes through setCtaPhase below, keeping the ref
   // in lockstep on all submit/exit paths.
   const ctaPhaseRef = useRef('configure');
+  // Serializes add-on toggle PUT+reload sequences (see onToggleAddOn).
+  const addOnMutationChainRef = useRef(Promise.resolve());
   const setCtaPhase = useCallback((phase) => {
     ctaPhaseRef.current = phase;
     setCtaPhaseState(phase);
@@ -3971,26 +3980,41 @@ function EstimateViewPageInner() {
       if (nextForSection.has(key)) nextForSection.delete(key); else nextForSection.add(key);
       return { ...prev, [sectionKey]: nextForSection };
     });
-    try {
-      const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: nextChecked }),
-      });
-      if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
-      await loadEstimate({ preserveSelection: true });
-      // The toggles sit below the schedule card — jump back up so the
-      // customer sees the price adjust (owner directive).
-      scrollToPriceSection();
-    } catch (err) {
-      setError(err.message);
-      setSelectedAddOns((prev) => {
-        const current = prev[sectionKey] || new Set();
-        const nextForSection = new Set(current);
-        if (nextChecked) nextForSection.delete(key); else nextForSection.add(key);
-        return { ...prev, [sectionKey]: nextForSection };
-      });
-    }
+    // The optimistic flip above stays immediate; the PUT + reload SEQUENCE is
+    // serialized through the chain ref so two rapid toggles order
+    // deterministically — un-sequenced, an earlier toggle's reload could win
+    // and the displayed price/discount would reflect an add-on set the
+    // switches no longer show.
+    const run = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: nextChecked }),
+        });
+        if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
+        await loadEstimate({ preserveSelection: true });
+        // The toggles sit below the schedule card — jump back up so the
+        // customer sees the price adjust (owner directive).
+        scrollToPriceSection();
+      } catch (err) {
+        setError(err.message);
+        setSelectedAddOns((prev) => {
+          const current = prev[sectionKey] || new Set();
+          const nextForSection = new Set(current);
+          if (nextChecked) nextForSection.delete(key); else nextForSection.add(key);
+          return { ...prev, [sectionKey]: nextForSection };
+        });
+        // Resync the displayed price to server truth: the PUT may have
+        // landed despite the error surfacing here (e.g. a network blip after
+        // the server applied), and the old revert-only path left the price
+        // showing a set the server no longer prices.
+        await loadEstimate({ preserveSelection: true }).catch(() => {});
+      }
+    };
+    const chained = addOnMutationChainRef.current.then(run, run);
+    addOnMutationChainRef.current = chained;
+    await chained;
   }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
