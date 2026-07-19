@@ -101,6 +101,8 @@ function smsOrigin(threadKey) {
       errorBody: 'A text thread asked for a quote but the estimator engine hit an error. Reply with pricing manually.',
       blockedTitle: 'Quote asked by text — estimate already open',
       blockedBody: (label) => `${label}: a text thread asked for a quote, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+      proposalTitle: 'Commercial prospect by text — proposal scaffold ready',
+      proposalBody: (label) => `${label}: commercial relationship quote from a text thread — prospect research and an unpriced proposal scaffold are drafted. Price it in the proposal builder.`,
     },
   };
 }
