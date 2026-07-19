@@ -39,7 +39,11 @@ const MIN_FALLBACK_ROWS = 5;
 // CALL_EXTRACTION_MODEL is the OpenAI leg's override ONLY — under a
 // gemini/anthropic rollback a lingering OpenAI override must not make this
 // gate evaluate the wrong cohort.
-const ROUTE_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+const RAW_ROUTE_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+const ROUTE_PROVIDER = ['openai', 'anthropic', 'gemini'].includes(RAW_ROUTE_PROVIDER) ? RAW_ROUTE_PROVIDER : 'openai';
+if (ROUTE_PROVIDER !== RAW_ROUTE_PROVIDER) {
+  console.error(`CALL_EXTRACTION_PROVIDER "${RAW_ROUTE_PROVIDER}" is not openai|anthropic|gemini — mirroring the processor's openai fallback.`);
+}
 const ROUTE_MODEL_FOR = {
   openai: process.env.CALL_EXTRACTION_MODEL || 'gpt-5.6-sol',
   anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC,
@@ -121,6 +125,12 @@ async function main() {
     cohortSince = lastForeign?.t ? new Date(lastForeign.t) : null;
     if (cohortSince) {
       console.log(`Cohort auto-bounded to rows after ${cohortSince.toISOString()} (last row from a model outside the current route). Override with --since.`);
+    } else {
+      // A role flip WITHIN the same model pair (primary↔fallback swap) is
+      // mechanically indistinguishable by stamps — only the operator knows
+      // the flip time. Say so loudly instead of pretending the cohort is
+      // clean.
+      console.log('⚠️  No cohort boundary found. If you swapped primary/fallback WITHIN the current model pair, historical rows are misattributed — re-run with --since <flip time> before trusting this verdict.');
     }
   }
   const boundedRouteRows = cohortSince

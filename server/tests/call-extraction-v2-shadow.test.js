@@ -132,6 +132,22 @@ describe('v2 extraction function (extractCallDataV2)', () => {
     expect(CALL_EXTRACTION_ROUTE.fallback.provider).not.toBe(CALL_EXTRACTION_ROUTE.primary.provider);
   });
 
+  test('a typo\'d provider fails OPEN to the openai default, never bricks the route', () => {
+    jest.resetModules();
+    const saved = process.env.CALL_EXTRACTION_PROVIDER;
+    process.env.CALL_EXTRACTION_PROVIDER = 'gemnii';
+    try {
+      const fresh = require('../services/call-recording-processor');
+      const route = fresh._test.CALL_EXTRACTION_ROUTE;
+      expect(route.primary.provider).toBe('openai');
+      expect(route.fallback.provider).toBe('anthropic');
+    } finally {
+      if (saved === undefined) delete process.env.CALL_EXTRACTION_PROVIDER;
+      else process.env.CALL_EXTRACTION_PROVIDER = saved;
+      jest.resetModules();
+    }
+  });
+
   test('gemini kill switch ignores a lingering OpenAI model override', () => {
     jest.resetModules();
     const saved = { p: process.env.CALL_EXTRACTION_PROVIDER, m: process.env.CALL_EXTRACTION_MODEL };

@@ -129,7 +129,16 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // OpenAI leg only, MODEL_CALL_EXTRACTION_ANTHROPIC = the Claude leg,
 // GEMINI_EXTRACTION_MODEL = the Gemini leg), so a lingering OpenAI model
 // override can never ride along into another provider during a rollback.
-const CALL_EXTRACTION_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+// A typo'd provider must not brick the route (unknown provider → dispatch
+// rejects every leg → not_run → every call held for triage). Fail OPEN to
+// the bake-off-winning default with a loud error, never fail closed.
+const RAW_EXTRACTION_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+const CALL_EXTRACTION_PROVIDER = ['openai', 'anthropic', 'gemini'].includes(RAW_EXTRACTION_PROVIDER)
+  ? RAW_EXTRACTION_PROVIDER
+  : 'openai';
+if (CALL_EXTRACTION_PROVIDER !== RAW_EXTRACTION_PROVIDER) {
+  logger.error(`[call-proc-v2] CALL_EXTRACTION_PROVIDER "${RAW_EXTRACTION_PROVIDER}" is not openai|anthropic|gemini — using openai`);
+}
 const CALL_EXTRACTION_MODEL_FOR = {
   openai: process.env.CALL_EXTRACTION_MODEL || 'gpt-5.6-sol',
   anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC,
