@@ -1433,6 +1433,13 @@ export function calculateEstimate(inputs) {
     warnings: [],
     manualReviewReasons: [],
     skippedServices: [],
+    // Resolved floor arm state for THIS fallback pricing run. The save path
+    // persists the result at estimate_data.result, so estimate-public's
+    // estimateLawnFloorArmed reads the stamp and view/accept clamps exactly
+    // as the quote was priced even if the global switch flips later —
+    // matching the server engine's pricingMetadata stamp (codex P2 round 9
+    // on #2827).
+    lawnCostFloorArmed: LAWN_PRICING_V2.useLawnCostFloor === true,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {
@@ -2809,10 +2816,22 @@ export function calculateEstimate(inputs) {
   // WaveGuard % gives back whatever would cut the lawn slice below the
   // floor, and the manual discount below is capped at the non-lawn room
   // plus lawn's above-floor headroom.
-  const lawnFloorAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
+  const lawnProgramMinAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
     && Number(LAWN_PRICING_V2.programMinimumMonthly) > 0
     ? Math.round(Number(LAWN_PRICING_V2.programMinimumMonthly) * 12 * 100) / 100
     : 0;
+  // Re-armed cost floor guards POST-DISCOUNT too (codex P2 round 9 on
+  // #2827): selection only lifts a row whose floor exceeds market, but a
+  // market-priced row still may not DISCOUNT below its own 35% cost floor
+  // while the switch is armed — mirroring the server's WaveGuard/manual
+  // caps so this fallback save matches what estimate-public re-clamps at
+  // view/accept. Disarmed default: 0, guard falls back to the program
+  // minimum alone.
+  const lawnCostFloorAnnualGuard = LAWN_PRICING_V2.useLawnCostFloor === true
+    && Number.isFinite(Number(selectedRecurringLawn?.costFloorAnnual))
+    ? Math.round(Number(selectedRecurringLawn.costFloorAnnual) * 100) / 100
+    : 0;
+  const lawnFloorAnnualGuard = Math.max(lawnProgramMinAnnualGuard, lawnCostFloorAnnualGuard);
   let lawnFloorProtectedAfterWg = 0;
   if (lawnFloorAnnualGuard > 0) {
     let wgGiveBack = 0;
@@ -2890,7 +2909,7 @@ export function calculateEstimate(inputs) {
   // quotes still light up the Pricing Review Notes panel when the WaveGuard
   // percent drops collected margin under the 35% review floor (codex P2
   // round 8 on #2827). Same 1e-4 at-floor tolerance as the server.
-  if (selectedRecurringLawn && wd > 0) {
+  if (selectedRecurringLawn) {
     const lawnAnn = Number(selectedRecurringLawn.ann);
     const lawnCostTotal = Number(selectedRecurringLawn.costs?.total);
     if (Number.isFinite(lawnAnn) && lawnAnn > 0 && Number.isFinite(lawnCostTotal)) {
@@ -2899,16 +2918,38 @@ export function calculateEstimate(inputs) {
         lawnAfterWg = Math.max(lawnAfterWg, Math.min(lawnAnn, lawnFloorAnnualGuard));
       }
       lawnAfterWg = Math.round(lawnAfterWg * 100) / 100;
-      const lawnMargin = lawnAfterWg > 0 ? (lawnAfterWg - lawnCostTotal) / lawnAfterWg : -1;
-      if (lawnMargin < 0.35 - 1e-4) {
+      const wgMargin = lawnAfterWg > 0 ? (lawnAfterWg - lawnCostTotal) / lawnAfterWg : -1;
+      if (wd > 0 && wgMargin < 0.35 - 1e-4) {
         marginWarnings.push({
           service: 'lawn_care',
           type: 'waveguard_discount_below_margin_floor',
-          margin: Math.round(lawnMargin * 1000) / 1000,
+          margin: Math.round(wgMargin * 1000) / 1000,
           marginFloor: 0.35,
           finalAnnual: lawnAfterWg,
-          message: `Lawn Care: WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the 35% review floor) — price stands as discounted.`,
+          message: `Lawn Care: WaveGuard discount drops collected margin to ${(wgMargin * 100).toFixed(1)}% (below the 35% review floor) — price stands as discounted.`,
         });
+      }
+      // Manual discounts too (codex P2 round 9): the aggregate manual cut is
+      // unattributed, so lawn's share is proportional over the discountable
+      // recurring base — a lawn-only quote takes the full cut. Mirrors the
+      // server's warn-only manual_discount_below_margin_floor entries; the
+      // review-notes collector already renders this type.
+      if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
+        const lawnManualCut = manualDiscountAmount
+          * (Math.min(lawnAfterWg, manualDiscountableRecurringAnnual) / manualDiscountableRecurringAnnual);
+        const lawnFinalAnnual = Math.round((lawnAfterWg - lawnManualCut) * 100) / 100;
+        const manualMargin = lawnFinalAnnual > 0 ? (lawnFinalAnnual - lawnCostTotal) / lawnFinalAnnual : -1;
+        if (manualMargin < 0.35 - 1e-4) {
+          marginWarnings.push({
+            service: 'lawn_care',
+            type: 'manual_discount_below_margin_floor',
+            margin: Math.round(manualMargin * 1000) / 1000,
+            marginFloor: 0.35,
+            finalAnnual: lawnFinalAnnual,
+            manualDiscountShare: Math.round(lawnManualCut * 100) / 100,
+            message: `Lawn Care: manual discount drops collected margin to ${(manualMargin * 100).toFixed(1)}% (below the 35% review floor). Nothing was capped — raise the line if it reads too thin.`,
+          });
+        }
       }
     }
   }

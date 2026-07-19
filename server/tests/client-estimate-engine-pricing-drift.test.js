@@ -213,13 +213,19 @@ describe('deprecated client estimator pricing drift guards', () => {
   test('mirrors the DISARMED pest post-discount program floor (owner ruling 2026-07-17)', () => {
     // Server: PEST.enforceFloorPostDiscount defaults false and applyMarginGuard
     // is report-only, so new estimates carry NO floor metadata and the pooled
-    // WaveGuard discount applies in full. The mirror must (a) not stamp
-    // floorPa/floorAnn/floorMo on stored pest tier rows, and (b) keep the
-    // pestProgramFloorApplied field in the return shape (always false) so
-    // stored-payload consumers don't lose it.
-    expect(source).not.toContain('const floorPa = Math.round(89 * ft.disc * 100) / 100;');
-    expect(source).not.toContain('const floorAnn = Math.round(floorPa * ft.f * 100) / 100;');
-    expect(source).toContain('const pestProgramFloorApplied = false;');
+    // WaveGuard discount applies in full. The floor MACHINERY is retained for
+    // the live pest_base re-arm (stamp + give-back restored behind the flag,
+    // matching the server's re-armed lift), so the mirror must (a) default the
+    // arm switch off in code, (b) gate the floorPa/floorAnn/floorMo tier stamp
+    // and the WaveGuard give-back on that switch — never stamp or lift while
+    // disarmed — and (c) keep the pestProgramFloorApplied field in the return
+    // shape (false while disarmed) so stored-payload consumers don't lose it.
+    expect(source).toContain('const PEST_BASE = { enforceFloorPostDiscount: false };');
+    expect(source).toContain('const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true');
+    expect(source).toContain('if (PEST_BASE.enforceFloorPostDiscount === true');
+    expect(source).toContain('let pestProgramFloorApplied = false;');
+    // The stamp arithmetic exists ONLY inside the flag-gated tier block.
+    expect((source.match(/const floorPa = Math\.round\(89 \* ft\.disc \* 100\) \/ 100;/g) || []).length).toBe(1);
   });
 
   test('client fallback applies the full WaveGuard percent at the list bottom (floors disarmed 2026-07-17)', () => {

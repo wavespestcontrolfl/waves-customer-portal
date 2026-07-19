@@ -148,6 +148,53 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
     );
     expect(warning).toBeUndefined();
   });
+
+  it("surfaces the manual-discount lawn warning on a lawn-only fallback quote (codex P2 round 9 #2827)", () => {
+    // No WaveGuard (single service) — a 40% owner-entered manual discount
+    // on the thin 12,000 sqft standard cell drops collected margin far
+    // below 35%. Nothing caps it; the warn-only entry mirrors the server's
+    // manual_discount_below_margin_floor and renders a review note.
+    const est = calculateEstimate(lawnInput({
+      measuredTurfSf: 12000,
+      lawnFreq: "6",
+      manualDiscount: { type: "PERCENT", value: 40 },
+    }));
+    expect(est.error).toBeUndefined();
+    const warning = (est.recurring.marginWarnings || []).find(
+      (w) => w.service === "lawn_care" && w.type === "manual_discount_below_margin_floor",
+    );
+    expect(warning).toBeTruthy();
+    expect(warning.margin).toBeLessThan(0.35);
+    const notes = collectMarginReviewNotes(est);
+    expect(notes.some((n) => n.includes("Lawn Care") && n.includes("manual discount"))).toBe(true);
+  });
+
+  it("re-armed: a market-priced lawn row still cannot DISCOUNT below its cost floor (codex P2 round 9 #2827)", () => {
+    // 3,000 sqft 9x: market $564 sits ABOVE the $531.09 floor, so selection
+    // is untouched — but Silver 10% would land at $507.60. The armed
+    // post-discount guard gives back the overshoot and holds the lawn slice
+    // at its floor, matching the server caps and the public-ladder
+    // re-clamp (save == accept). At-floor = no breach warning.
+    applyServerLawnPricingConfig({ useLawnCostFloor: true });
+    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 3000 }));
+    expect(est.error).toBeUndefined();
+    const nine = est.results.lawn.find((t) => t.v === 9);
+    expect(nine.costFloorApplied).toBe(false);
+    expect(nine.ann).toBeGreaterThan(nine.costFloorAnnual);
+    const pestAfter = Math.round(est.results.pest.ann * 0.9 * 100) / 100;
+    expect(est.recurring.annualAfterDiscount - pestAfter).toBeCloseTo(nine.costFloorAnnual, 1);
+    const warning = (est.recurring.marginWarnings || []).find(
+      (w) => w.type === "waveguard_discount_below_margin_floor",
+    );
+    expect(warning).toBeUndefined();
+    // The resolved arm state rides the result for view/accept parity.
+    expect(est.pricingMetadata.lawnCostFloorArmed).toBe(true);
+  });
+
+  it("stamps the disarmed arm state on every fallback result", () => {
+    const est = calculateEstimate(lawnInput());
+    expect(est.pricingMetadata.lawnCostFloorArmed).toBe(false);
+  });
 });
 
 describe("collectMarginReviewNotes — report-only low-margin signals for the estimator panel", () => {

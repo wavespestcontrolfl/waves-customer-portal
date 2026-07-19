@@ -203,8 +203,14 @@ exports.down = async function down(knex) {
   for (const configKey of Object.keys(FLOOR_KEYS)) {
     const row = await readConfigData(knex, configKey);
     if (!row.exists) continue;
-    const original = backup[configKey] && typeof backup[configKey] === 'object'
-      ? backup[configKey]
+    // A backup snapshot of NULL is an explicit record that the row did not
+    // exist pre-migration (it was created afterwards) — restore the
+    // ORIGINAL ABSENCE of the floor keys ({} deletes them all) rather than
+    // re-arming the documented defaults. Only a genuinely MISSING backup
+    // row falls back to the pre-ruling values (codex P2 round 9).
+    const snapshot = backupRow ? backup[configKey] : undefined;
+    const original = backupRow
+      ? (snapshot && typeof snapshot === 'object' ? snapshot : {})
       : FALLBACK_ORIGINALS[configKey];
     const next = { ...row.data };
     const oldSlice = {};
