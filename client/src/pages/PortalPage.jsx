@@ -12000,11 +12000,18 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   // file input so the photo tile never silently does nothing. User cancel = no-op.
   const handleNativePhoto = async () => {
     if (photosRemaining <= 0) return;
-    const result = await captureCameraPhoto();
-    if (result.photo) {
-      setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
-    } else if (result.unavailable) {
-      fileRef.current?.click();
+    // Hold the busy counter across native capture too — on iPad the photo
+    // sheet is a popover, so Submit stays tappable mid-capture.
+    setPhotoReadCount(c => c + 1);
+    try {
+      const result = await captureCameraPhoto();
+      if (result.photo) {
+        setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
+      } else if (result.unavailable) {
+        fileRef.current?.click();
+      }
+    } finally {
+      setPhotoReadCount(c => Math.max(0, c - 1));
     }
   };
 
