@@ -633,31 +633,27 @@ router.put('/:id/approve', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res);
     if (campaignGuard.blocked) return;
 
-    // Gate recheck for clarify-ask drafts only.
-    const clarifyGuard = await guardClarifySend(draft, res);
-    if (clarifyGuard.blocked) return;
-
-    // From here to the provider call a clarify draft's dispatch decision is
-    // already committed — any throw must reconcile under the clarify lock
-    // so recorded answers and concurrent rejects are honored. Non-clarify
-    // drafts keep the legacy behavior (claim left in place on a lookup
-    // throw).
-    let recipient;
-    let sendPolicy;
-    try {
-      recipient = await resolveDraftRecipient(draft);
-      sendPolicy = sendPolicyForDraft(draft, recipient);
-    } catch (resolveErr) {
-      if (clarifyGuard?.dispatchCommitted) await releaseFailedSendClaim(draft, clarifyGuard);
-      throw resolveErr;
-    }
+    // Recipient + policy resolve BEFORE the clarify decision: both are
+    // decision-invariant (toPhone, provenance, and estimate linkage never
+    // change in the decision), and failures here happen pre-commitment — a
+    // plain claim release suffices, nothing to reconcile.
+    const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseFailedSendClaim(draft, clarifyGuard);
+      await releaseDraftClaim(draft.id);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
+
+    // Clarify dispatch decision runs LAST — there is no await between its
+    // commit and the provider call below, so a reply can only land fully
+    // before the decision (honored under the lock: rewrite/retire/abort)
+    // or race the already-in-flight SMS, which no server-side ordering can
+    // remove.
+    const clarifyGuard = await guardClarifySend(draft, res);
+    if (clarifyGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
@@ -769,29 +765,21 @@ router.put('/:id/revise', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
     if (campaignGuard.blocked) return;
 
-    // Gate recheck for clarify-ask drafts only.
-    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
-    if (clarifyGuard.blocked) return;
-
-    // Same stamp-reconciliation contract as the approve route — see there.
-    let recipient;
-    let sendPolicy;
-    try {
-      recipient = await resolveDraftRecipient(draft);
-      sendPolicy = sendPolicyForDraft(draft, recipient);
-    } catch (resolveErr) {
-      if (clarifyGuard?.dispatchCommitted) {
-        await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
-      }
-      throw resolveErr;
-    }
+    // Same order contract as the approve route: recipient + policy are
+    // decision-invariant and resolve pre-commitment; the clarify decision
+    // runs LAST with no await between its commit and the provider call.
+    const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
+
+    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
+    if (clarifyGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({

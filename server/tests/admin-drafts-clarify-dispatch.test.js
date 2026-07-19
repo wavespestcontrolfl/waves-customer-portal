@@ -259,25 +259,20 @@ describe('approve — clarify dispatch wiring', () => {
     expect(updates.filter((u) => u.table === 'message_drafts')).toHaveLength(1);
   });
 
-  test('a recipient-lookup throw after the committed decision reconciles via reopen', async () => {
+  test('recipient resolution runs BEFORE the decision — a lookup throw leaves nothing to reconcile', async () => {
     // sms_log_id forces resolveDraftRecipient onto a db read we can fail.
     enqueue('message_drafts', { returning: [clarifyDraft({ sms_log_id: 'sms-1' })] });
     enqueue('sms_log', { error: new Error('db connection lost') });
-    claimClarifyDispatch.mockResolvedValue({
-      outcome: 'send', body: 'Q?', flags: CLARIFY_FLAGS,
-    });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-9/approve`, { method: 'PUT' });
       expect(res.status).toBe(500);
     });
 
+    // The decision never ran, so there is no committed dispatch to unwind.
+    expect(claimClarifyDispatch).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(reopenClarifyAfterFailedSend).toHaveBeenCalledWith({
-      draftId: 'draft-9',
-      dispatchedMissing: ['street_address'],
-      releaseFields: {},
-    });
+    expect(reopenClarifyAfterFailedSend).not.toHaveBeenCalled();
   });
 
   test('a blocked send (sent:false) also reconciles via reopen', async () => {
