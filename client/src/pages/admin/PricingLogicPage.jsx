@@ -258,6 +258,24 @@ export function MarginCalculator() {
           </select>{" "}
         </label>{" "}
       </div>
+      {/* The server labels margins by the ENGINE-derived tier for the bundle
+          it actually priced. If a min_services retune makes that diverge
+          from the selection, say so — never let the operator read gold
+          margins under a silver label. */}
+      {margins?.waveguardTier && (
+        <div
+          style={{
+            fontSize: 12,
+            fontFamily: ROBOTO,
+            color: margins.waveguardTierMismatch ? D.amber : D.muted,
+            marginBottom: 12,
+          }}
+        >
+          {margins.waveguardTierMismatch
+            ? `Engine priced this bundle as ${margins.waveguardTier.toUpperCase()} (requested ${String(margins.waveguardTierRequested || tier).toUpperCase()}) — tier thresholds are out of line with the engine; margins below are ${margins.waveguardTier.toUpperCase()} margins.`
+            : `Margins priced at ${margins.waveguardTier.toUpperCase()} tier discounts.`}
+        </div>
+      )}
       {margins?.services && (
         <div style={{ overflowX: "auto" }}>
           {" "}
