@@ -6332,8 +6332,10 @@ const CallRecordingProcessor = {
     // the engine upgrades that bell in place with the draft when it finishes.
     // Non-blocking by contract — a drafting failure must never break call
     // processing or eat the promise.
+    let estimatorEngineLaunchedForCall = false;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
+      estimatorEngineLaunchedForCall = true;
       // Fire-and-forget: the DEEP composer + property pipeline can take
       // minutes, and the scheduling/confirmation work below must not wait on
       // a drafting pass. The engine's own dedupe guards make re-entry safe
@@ -7481,7 +7483,11 @@ const CallRecordingProcessor = {
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+            // Keep scheduledServiceId (same rule as the outbound branch
+            // above): the schedule row EXISTS — dropping the id made the
+            // downstream approved-but-unbooked audit read this as a skipped
+            // booking, and starves the assessment pre-draft hook.
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -7761,7 +7767,12 @@ const CallRecordingProcessor = {
     // seeds a draft through the FULL engine call context. Self-filtering
     // (non-assessment bookings return skipped), idempotent via the engine's
     // per-call dedupe, fire-and-forget — never blocks call processing.
-    if (appointmentResult?.scheduledServiceId) {
+    // Skipped when the quote lane already launched the engine for this call
+    // above: a second concurrent launch would run the paid composer/property
+    // pipeline twice and could bell a misleading duplicate-block — and that
+    // launch already covers the call (the pipeline stitches the booking
+    // linkage itself when one call produces both rows).
+    if (appointmentResult?.scheduledServiceId && !estimatorEngineLaunchedForCall) {
       try {
         const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
         if (bookingPreDraftsEnabled()) {
