@@ -666,13 +666,27 @@ async function resolveEstimateWritePayload({
   // otherwise be restored at accept/charge time even though the initial save
   // is stamped SERVER. The authoritative combined-tier value lives in the
   // top-level trustedEstimateData.priorQualifyingServices set above (which
-  // extractEngineInputs re-injects), and recurring status re-derives from those
-  // priors + the cart on replay — so a member keeps the perk while a non-member
-  // cannot restore a forged one.
+  // extractEngineInputs re-injects); recurring status re-derives from those
+  // priors + the cart on replay — so a non-member cannot restore a forged one.
   sanitizeClientIdentityFields(trustedEstimateData.engineInputs);
   sanitizeClientIdentityFields(trustedEstimateData.inputs);
   if (trustedEstimateData.engineRequest && typeof trustedEstimateData.engineRequest === 'object') {
     sanitizeClientIdentityFields(trustedEstimateData.engineRequest.options);
+  }
+  // Persist the SERVER-verified recurring-customer status into the stored
+  // engineInputs so a public reprice reapplies the perk a verified active-plan
+  // member earned at save — even when they hold NO WaveGuard-qualifying prior
+  // services (so priorQualifyingServices is empty and can't carry it, and the
+  // cart alone wouldn't re-derive it). Written AFTER the sanitize so it is the
+  // server value, never a replayed client claim; only for a verified member,
+  // so a non-member's replay still can't gain the perk.
+  if (repricedAtServer && recurringCustomer) {
+    if (trustedEstimateData.engineInputs && typeof trustedEstimateData.engineInputs === 'object') {
+      trustedEstimateData.engineInputs.recurringCustomer = true;
+    }
+    if (trustedEstimateData.inputs && typeof trustedEstimateData.inputs === 'object') {
+      trustedEstimateData.inputs.recurringCustomer = true;
+    }
   }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects

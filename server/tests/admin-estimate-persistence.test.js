@@ -13,7 +13,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -30,6 +30,7 @@ function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
         first: async () => {
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;
+          if (table === 'customers' && customer && clause.id === customer.id) return customer;
           return null;
         },
         update(patch) {
@@ -64,9 +65,11 @@ function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
   trx.raw = (sql) => sql;
 
   return {
-    database: {
+    // Mirror real knex: callable as db(table) for direct reads (customer /
+    // qualifying-services lookups) AND carrying .transaction for the write path.
+    database: Object.assign((table) => trx(table), {
       transaction: async (callback) => callback(trx),
-    },
+    }),
     updates,
     inserts,
     getEstimate: () => storedEstimate,
@@ -874,6 +877,66 @@ describe('admin estimate persistence', () => {
     expect(stored.engineInputs.isRecurringCustomer).toBeUndefined();
     // And no forged top-level combined-tier value survives for a non-member.
     expect(stored.priorQualifyingServices).toBeUndefined();
+  });
+
+  test('P1-2: a verified active-plan member with NO qualifying priors keeps recurring status on the STORED replay', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      // Active WaveGuard member (Silver tier) — but their plan services aren't
+      // WaveGuard-qualifying, so loadExistingQualifyingServiceKeys returns [].
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver' },
+    });
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { oneTimePest: {} } },
+          result: { total: 125 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const estimateInsert = inserts.find((e) => e.table === 'estimates');
+    const stored = JSON.parse(estimateInsert.row.estimate_data);
+    // The server-verified recurring status is persisted so the public reprice
+    // (extractEngineInputs → base engineInputs) reapplies the member perk even
+    // though priorQualifyingServices is empty for this member.
+    expect(stored.engineInputs.recurringCustomer).toBe(true);
+  });
+
+  test('P1-2: a NON-member does not gain a recurring flag in the stored engineInputs', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-lead', active: true, waveguard_tier: null, monthly_rate: 0 }, // no plan → not a member
+    });
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-lead',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { oneTimePest: {} }, recurringCustomer: true },
+          result: { total: 125 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const stored = JSON.parse(inserts.find((e) => e.table === 'estimates').row.estimate_data);
+    // The forged client recurringCustomer was stripped and NOT re-added for a
+    // non-member — no perk survives to replay.
+    expect(stored.engineInputs.recurringCustomer).toBeUndefined();
   });
 
   test('rejects a new estimate when the linked prior estimate is still active', async () => {
