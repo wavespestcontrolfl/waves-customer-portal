@@ -148,6 +148,7 @@ describe('maybePreDraftForBooking — filters', () => {
     mockState.firstQueue = [
       BOOKING({ service_id: null }),
       CUSTOMER,
+      BOOKING({ service_id: null }), // in-lock re-read
       null, // per-booking idempotency probe
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -159,6 +160,7 @@ describe('maybePreDraftForBooking — filters', () => {
       BOOKING({ service_type: 'Consultation (legacy)' }),
       { id: 'catalog-1', service_key: 'lawn_inspection', name: 'Waves Assessment' },
       CUSTOMER,
+      BOOKING({ service_type: 'Consultation (legacy)' }), // in-lock re-read
       null,
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -205,6 +207,7 @@ describe('maybePreDraftForBooking — shell path', () => {
     mockState.firstQueue = [
       BOOKING({ service_address_line1: '456 Palm Ave', service_address_city: 'Sarasota' }),
       CUSTOMER,
+      BOOKING({ service_address_line1: '456 Palm Ave', service_address_city: 'Sarasota' }), // in-lock re-read
       null, // idempotency probe
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -241,7 +244,7 @@ describe('maybePreDraftForBooking — shell path', () => {
   });
 
   test('falls back to the customer address when the booking has none', async () => {
-    mockState.firstQueue = [BOOKING(), CUSTOMER, null];
+    mockState.firstQueue = [BOOKING(), CUSTOMER, BOOKING(), null];
     await maybePreDraftForBooking('svc-1');
     expect(mockState.inserts[0].payload.address).toBe('123 Main St');
   });
@@ -250,6 +253,7 @@ describe('maybePreDraftForBooking — shell path', () => {
     mockState.firstQueue = [
       BOOKING(),
       CUSTOMER,
+      BOOKING(), // in-lock re-read
       { id: 'est-existing' }, // idempotency probe finds the prior pre-draft
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -258,7 +262,7 @@ describe('maybePreDraftForBooking — shell path', () => {
   });
 
   test('an open estimate on the phone blocks the shell — shared duplicate guard', async () => {
-    mockState.firstQueue = [BOOKING(), CUSTOMER, null];
+    mockState.firstQueue = [BOOKING(), CUSTOMER, BOOKING(), null];
     mockBlockDuplicate.mockResolvedValue({ existingEstimateId: 'est-open', existingStatus: 'sent' });
     const result = await maybePreDraftForBooking('svc-1');
     expect(result).toEqual({ drafted: false, skipped: 'duplicate_open_estimate', estimateId: 'est-open' });
@@ -269,6 +273,7 @@ describe('maybePreDraftForBooking — shell path', () => {
     mockState.firstQueue = [
       BOOKING(),
       { ...CUSTOMER, phone: null },
+      BOOKING(), // in-lock re-read
       null, // idempotency probe
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -277,6 +282,28 @@ describe('maybePreDraftForBooking — shell path', () => {
     // cannot both pass the idempotency probe.
     expect(mockState.raws).toHaveLength(1);
     expect(mockState.raws[0][1]).toEqual(['booking_predraft', 'svc-1']);
+  });
+
+  test('a booking cancelled while waiting on the lock never seeds a draft (in-lock recheck)', async () => {
+    mockState.firstQueue = [
+      BOOKING(),
+      CUSTOMER,
+      BOOKING({ status: 'cancelled' }), // went terminal before the lock section ran
+    ];
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, skipped: 'booking_terminal' });
+    expect(mockState.inserts).toHaveLength(0);
+  });
+
+  test('a booking that became estimate-born while waiting on the lock never re-drafts', async () => {
+    mockState.firstQueue = [
+      BOOKING(),
+      CUSTOMER,
+      BOOKING({ source_estimate_id: 'est-born' }), // in-lock re-read
+    ];
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, skipped: 'estimate_born' });
+    expect(mockState.inserts).toHaveLength(0);
   });
 
   test('a missing customer skips cleanly', async () => {

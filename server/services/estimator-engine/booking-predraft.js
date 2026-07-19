@@ -182,6 +182,17 @@ async function maybePreDraftForBooking(scheduledServiceId) {
       });
 
     const result = await runUnderLock(async (trx) => {
+      // The pre-lock status read is stale by now if the booking was
+      // cancelled/rescheduled (or became estimate-born) while this detached
+      // worker waited on the lock — a draft must never seed off a dead
+      // visit. The in-lock re-read is authoritative.
+      const freshBooking = await trx('scheduled_services').where({ id: booking.id }).first();
+      if (!freshBooking) return { drafted: false, skipped: 'booking_not_found' };
+      if (TERMINAL_BOOKING_STATUSES.has(String(freshBooking.status || ''))) {
+        return { drafted: false, skipped: 'booking_terminal' };
+      }
+      if (freshBooking.source_estimate_id) return { drafted: false, skipped: 'estimate_born' };
+
       // Per-booking idempotency: the tagger hook replays (admin
       // regenerate-brief), and the duplicate guard alone stops covering us
       // once the first draft closes. Keyed on the top-level

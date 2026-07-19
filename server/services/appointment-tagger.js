@@ -70,7 +70,7 @@ class AppointmentTagger {
     try {
       const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
       if (bookingPreDraftsEnabled()) {
-        maybePreDraftForBooking(scheduledServiceId).catch((err) => {
+        void maybePreDraftForBooking(scheduledServiceId).catch((err) => {
           logger.warn(`[appointment-tagger] booking pre-draft failed for ${scheduledServiceId}: ${err.message}`);
         });
       }

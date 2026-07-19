@@ -1335,7 +1335,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     try {
       const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('../services/estimator-engine/booking-predraft');
       if (bookingPreDraftsEnabled()) {
-        maybePreDraftForBooking(appt.id).catch((err) => {
+        void maybePreDraftForBooking(appt.id).catch((err) => {
           logger.warn(`[leads] booking pre-draft failed for appointment ${appt.id}: ${err.message}`);
         });
       }

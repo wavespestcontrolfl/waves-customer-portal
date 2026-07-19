@@ -6580,6 +6580,10 @@ const CallRecordingProcessor = {
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      // Declared OUTSIDE the try so the catch can see whether a schedule row
+      // was already inserted when a later confirmation/SMS step threw — the
+      // insert-first contract means the booking can be real even on error.
+      let scheduledServiceId = null;
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
@@ -6682,8 +6686,8 @@ const CallRecordingProcessor = {
           // the SMS first and inserted the schedule row afterward — if the
           // insert threw, the customer received "your appointment is booked"
           // for an appointment that never landed on the schedule. Now: insert
-          // first, send only if it succeeded.
-          let scheduledServiceId = null;
+          // first, send only if it succeeded. (scheduledServiceId itself is
+          // declared above the outer try so the catch keeps the booked id.)
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
@@ -7711,7 +7715,11 @@ const CallRecordingProcessor = {
         }
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
-        appointmentResult = { error: err.message };
+        // The schedule row can already exist (insert-first contract): a
+        // confirmation/SMS failure must not erase its id — the
+        // approved-but-unbooked audit would read a real booking as skipped
+        // and the assessment pre-draft hook below would starve.
+        appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
       }
     }
 
@@ -7779,7 +7787,7 @@ const CallRecordingProcessor = {
         const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
         if (bookingPreDraftsEnabled()) {
           const preDraftBookingId = appointmentResult.scheduledServiceId;
-          (estimatorEnginePromise || Promise.resolve())
+          void (estimatorEnginePromise || Promise.resolve())
             .catch(() => {})
             .then(() => maybePreDraftForBooking(preDraftBookingId))
             .then((outcome) => {
