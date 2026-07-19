@@ -403,6 +403,27 @@ describe('recordClarifyAnswer', () => {
     expect(JSON.parse(update.flags).missing).toEqual(['street_address']);
   });
 
+  test('a CLAIMED-unsent ask (mid-approval) records stamp-only — copy and status untouched', async () => {
+    // Lead intake captures the item after the route claim but before the
+    // dispatch decision: the bookkeeping must land so the decision's locked
+    // re-read (which runs after this commit) rewrites or retires the
+    // question instead of sending it stale.
+    mockState.existingDraft = {
+      id: 'claimed-1',
+      status: 'approved',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['street_address', 'specific_service'] }),
+    };
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] });
+    expect(result.recorded).toBe(true);
+    const update = mockState.updates[0].payload;
+    expect(update.status).toBeUndefined();
+    expect(update.draft_response).toBeUndefined();
+    const flags = JSON.parse(update.flags);
+    expect(flags.missing).toEqual(['specific_service']);
+    expect(flags.answer_recorded).toEqual(['street_address']);
+  });
+
   test('irrelevant items or no awaiting ask record nothing', async () => {
     expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
     mockState.existingDraft = {

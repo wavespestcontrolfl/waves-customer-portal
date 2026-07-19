@@ -553,6 +553,12 @@ async function recordClarifyAnswer({ phone, items = [] }) {
         .where(function pendingOrRecentlySent() {
           this.where(function pendingOpen() {
             this.where('status', 'pending').whereNull('sent_at');
+          }).orWhere(function claimedUnsent() {
+            // Mid-approval rows count too — same contract as
+            // handleClarifyReply: the stamp-only branch below records the
+            // answer without touching the claimed row's copy or status, and
+            // the dispatch decision's locked re-read honors it.
+            this.whereIn('status', ['approved', 'revised']).whereNull('sent_at');
           }).orWhere(function sentRecent() {
             this.whereNotNull('sent_at')
               .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
