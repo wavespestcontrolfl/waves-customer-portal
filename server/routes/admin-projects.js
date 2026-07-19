@@ -3043,8 +3043,11 @@ function normalizeInvoiceLineItemsForPdf(lineItems) {
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   // Hoisted so the outer catch can release the send claim on an unexpected
   // throw — otherwise a crash mid-send would 409 every later attempt for
-  // 10 minutes (the claim's stale-recovery window).
+  // 10 minutes (the claim's stale-recovery window). The manual hold revert
+  // is hoisted with it and MUST run first in the catch: it is fenced on the
+  // claim token, which the send-claim revert clears.
   let revertSendClaimOnError = null;
+  let revertManualHoldClaimOnError = null;
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -3201,6 +3204,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
     };
+    revertManualHoldClaimOnError = revertManualHoldClaim;
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -3506,6 +3510,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
   } catch (err) {
+    // Hold revert FIRST — it is fenced on the claim token, which the
+    // send-claim revert below clears.
+    if (revertManualHoldClaimOnError) await revertManualHoldClaimOnError().catch(() => {});
     if (revertSendClaimOnError) await revertSendClaimOnError().catch(() => {});
     next(err);
   }
