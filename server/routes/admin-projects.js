@@ -3187,11 +3187,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       manualHoldClaim = true;
     }
     // Return the manual claim to 'held' on any abort so the sweep can retry
-    // and a later manual send isn't blocked behind a stale claim.
+    // and a later manual send isn't blocked behind a stale claim. Fenced on
+    // the delivery claim token: after a stale takeover the 'releasing' row
+    // may belong to a NEWER claimant, and resetting THEIR claim to 'held'
+    // would let the release sweep deliver concurrently with them. Losing the
+    // fence leaves the row for the sweep's 10-minute recovery — the safe
+    // direction. (Call sites revert the hold BEFORE the send claim so the
+    // token is still present when this runs.)
     const revertManualHoldClaim = async () => {
       if (!manualHoldClaim) return;
       await db('projects')
-        .where({ id: project.id, report_hold_status: 'releasing' })
+        .where({ id: project.id, report_hold_status: 'releasing', delivery_claim_token: sendClaimToken })
         .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
     };
@@ -3241,8 +3247,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
-      await revertSendClaim();
       await revertManualHoldClaim();
+      await revertSendClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -3253,8 +3259,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
-      await revertSendClaim();
       await revertManualHoldClaim();
+      await revertSendClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
@@ -3272,8 +3278,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           sentByTechId: req.technicianId || null,
         });
       } catch (e) {
-        await revertSendClaim();
         await revertManualHoldClaim();
+        await revertSendClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
       }
@@ -3281,15 +3287,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const channels = {};
 
-    // Ownership recheck immediately before the external sends: the token
-    // fences every DB write, but a stalled request that resumes after a
-    // takeover could otherwise still EMAIL — and resend keys don't collide
-    // across owners, so the provider wouldn't dedupe the pair. Rechecking
-    // here shrinks that window from build-time (PDF render, archive) to
-    // milliseconds.
+    // Ownership recheck + LEASE RENEWAL immediately before the external
+    // sends: the token fences every DB write, but a stalled request that
+    // resumes after a takeover could otherwise still EMAIL — and resend keys
+    // don't collide across owners, so the provider wouldn't dedupe the pair.
+    // Re-stamping updated_at here restarts the 10-minute takeover window at
+    // the moment delivery begins, so the build phase (PDF render, archive)
+    // can no longer eat the lease out from under the provider calls.
     const stillOwned = await db('projects')
       .where({ id: project.id, delivery_claim_token: sendClaimToken })
-      .first('id');
+      .update({ updated_at: db.fn.now() });
     if (!stillOwned) {
       await revertManualHoldClaim();
       logger.error(`[projects] send superseded before delivery for ${project.id} — claim taken over; nothing emailed by this request`);
@@ -3443,6 +3450,13 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // Nothing went out — return the manual claim so the sweep (or a retry
+    // of this endpoint) can deliver later. BEFORE the finalize: the finalize
+    // clears the delivery claim token this revert is fenced on.
+    if (manualHoldClaim && !delivered) {
+      await revertManualHoldClaim();
+    }
+
     // Fenced finalize: only the request that still owns the claim may write
     // the outcome. Zero rows = a stale takeover superseded this request —
     // the emails above already went out, but the row's state belongs to the
@@ -3453,12 +3467,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       .update(deliveryUpdate);
     if (!finalized) {
       logger.error(`[projects] send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
-    }
-
-    // Nothing went out — return the manual claim so the sweep (or a retry
-    // of this endpoint) can deliver later.
-    if (manualHoldClaim && !delivered && finalized) {
-      await revertManualHoldClaim();
     }
 
     const sendAction = delivered
@@ -4220,8 +4228,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   let heldReportClaim = null;
   const revertHeldReportClaimOnAbort = async () => {
     if (!heldReportClaim) return;
+    // Fenced on the delivery claim token (same reasoning as /send's manual
+    // hold revert): after a stale takeover the 'releasing' row may belong to
+    // a newer claimant — resetting THEIRS to 'held' would let the release
+    // sweep deliver concurrently. No provable ownership → leave the row for
+    // the sweep's 10-minute recovery. Call sites run this BEFORE the
+    // delivery-claim revert so the token is still present.
+    if (!deliveryClaim?.token) { heldReportClaim = null; return; }
     await db('projects')
-      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing' })
+      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing', delivery_claim_token: deliveryClaim.token })
       .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
       .catch((err) => logger.warn(`[projects] combined-send hold claim revert failed for ${heldReportClaim.projectId}: ${err.message}`));
     heldReportClaim = null;
@@ -4722,12 +4737,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const firstName = customer.first_name || 'there';
     const channels = {};
 
-    // Ownership recheck immediately before the external sends (same contract
-    // as /send): the token fences DB writes, but a stalled request resuming
-    // after a takeover could otherwise still email/text the customer.
+    // Ownership recheck + lease renewal immediately before the external
+    // sends (same contract as /send): re-stamping updated_at restarts the
+    // takeover window at the moment delivery begins.
     const stillOwned = await db('projects')
       .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
-      .first('id');
+      .update({ updated_at: db.fn.now() });
     if (!stillOwned) {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
@@ -5144,6 +5159,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
+    // Hold revert BEFORE the delivery-claim revert — the hold revert is
+    // fenced on the delivery token, which the claim revert clears.
+    await revertHeldReportClaimOnAbort();
     // Return the shared project delivery claim too (guarded: only reverts a
     // row still parked at 'sending', so a post-delivery throw can't clobber
     // the final delivery_status).
