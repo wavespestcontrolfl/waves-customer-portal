@@ -308,6 +308,23 @@ describe('lane classification', () => {
     expect(reasons).toEqual([]);
   });
 
+  test('composer phone that diverges from the verified caller ID parks yellow with the number surfaced', () => {
+    const args = cleanArgs();
+    args.context.phone = '+19415550000';
+    args.intent.customer_phone = '+19415551234';
+    const { lane, reasons } = classifyLane(args);
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.some((r) => r.includes('different contact number') && r.includes('+19415551234'))).toBe(true);
+  });
+
+  test('same number in different formatting adds no divergence reason', () => {
+    const args = cleanArgs();
+    args.context.phone = '(941) 000-0000';
+    const { lane, reasons } = classifyLane(args);
+    expect(lane).toBe(LANES.GREEN);
+    expect(reasons).toEqual([]);
+  });
+
   test('composer skip is red', () => {
     const args = cleanArgs();
     args.intent = { ...baseIntent(), decision: 'skip', skip_reason: 'rodent trapping is manual-scope' };
@@ -947,5 +964,76 @@ describe('review fixes', () => {
     // source, and both fields come from it alone.
     context.leadIsForThisCall = false;
     expect(idxPriv.addressFromContext(context)).toBe('123 Example St, FL 34999');
+  });
+});
+
+// ── Estimator audit hardening: draft phone trust + evidence record boundaries ──
+describe('resolveDraftCustomerPhone (transport-verified number outranks the composer)', () => {
+  const { resolveDraftCustomerPhone } = draftPriv;
+
+  test('verified caller ID wins over a divergent composer number', () => {
+    expect(resolveDraftCustomerPhone(
+      { customer_phone: '+19415551234' },
+      { phone: '+19415550000' },
+    )).toBe('+19415550000');
+  });
+
+  test('composer number is the fallback only when the transport has no usable number', () => {
+    expect(resolveDraftCustomerPhone({ customer_phone: '+19415551234' }, { phone: null })).toBe('+19415551234');
+    expect(resolveDraftCustomerPhone({ customer_phone: '+19415551234' }, {})).toBe('+19415551234');
+    // Twilio's ANONYMOUS sentinel is not a usable transport number.
+    expect(resolveDraftCustomerPhone({ customer_phone: '+19415551234' }, { phone: 'anonymous' })).toBe('+19415551234');
+  });
+
+  test('no usable number on either side resolves null (call-scoped lock path)', () => {
+    expect(resolveDraftCustomerPhone({ customer_phone: '555' }, { phone: 'unknown' })).toBe(null);
+    expect(resolveDraftCustomerPhone({}, {})).toBe(null);
+  });
+});
+
+describe('verifyEvidenceQuotes — per-record haystacks (no stitching across sources)', () => {
+  const { verifyEvidenceQuotes } = draftPriv;
+  const context = {
+    transcript: 'Caller: I need quarterly pest control for my house on Example Street.',
+    smsThread: [{ body: 'Also can you send the estimate today please' }],
+  };
+
+  test('a verbatim quote inside one record verifies', () => {
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'quarterly pest control for my house' }] }, context))
+      .toEqual({ total: 1, unverified: 0 });
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'send the estimate today' }] }, context))
+      .toEqual({ total: 1, unverified: 0 });
+  });
+
+  test('a quote stitched across the transcript/SMS boundary does NOT verify', () => {
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'Example Street. Also can you send' }] }, context))
+      .toEqual({ total: 1, unverified: 1 });
+  });
+
+  test('a quote stitched across two SMS records does NOT verify', () => {
+    const twoSms = { transcript: '', smsThread: [{ body: 'alpha budget is fine' }, { body: 'beta works for tuesday' }] };
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'is fine beta works' }] }, twoSms))
+      .toEqual({ total: 1, unverified: 1 });
+  });
+});
+
+describe('verifyEvidenceQuotes — SMS-origin per-message records (transcriptRecords)', () => {
+  const { verifyEvidenceQuotes } = draftPriv;
+  // buildSmsThreadContext joins the whole thread into `transcript` for the
+  // composer prompt and supplies transcriptRecords for verification.
+  const smsContext = {
+    transcript: '[Customer] can you treat my lawn for weeds\n[Customer] the gate code is 4321 by the way',
+    transcriptRecords: ['can you treat my lawn for weeds', 'the gate code is 4321 by the way'],
+    smsThread: [],
+  };
+
+  test('a quote inside ONE message verifies', () => {
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'treat my lawn for weeds' }] }, smsContext))
+      .toEqual({ total: 1, unverified: 0 });
+  });
+
+  test('a quote stitched across two messages does NOT verify, even though the joined transcript contains it', () => {
+    expect(verifyEvidenceQuotes({ evidence: [{ quote: 'for weeds the gate code' }] }, smsContext))
+      .toEqual({ total: 1, unverified: 1 });
   });
 });

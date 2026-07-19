@@ -5,23 +5,29 @@ let mockContextLead = null;
 let mockContextCallRows = [];
 let mockContextSidCallRow = null;
 let mockContextOtherLeads = [];
+let mockLinkedCustomerRow = null;
+let mockOtherCustomerOnPhone = null;
 
 jest.mock('../models/db', () => {
   const db = (table) => {
     const builder = {
       _leftJoin: false,
+      _whereRaw: false,
       leftJoin() { this._leftJoin = true; return this; },
       select() { return this; },
       where() { return this; },
       whereNull() { return this; },
       whereNot() { return this; },
-      whereRaw() { return this; },
+      whereRaw() { this._whereRaw = true; return this; },
       orderBy() { return this; },
       limit() { return this; },
       modify(fn) { fn(this); return this; },
       async first() {
         if (table === 'leads') return this._leftJoin ? mockContextLead : null;
         if (table === 'call_log') return mockContextSidCallRow;
+        // The linked-customer load queries by id; the other-owner probe is
+        // the only customers query using whereRaw (last-10 match).
+        if (table === 'customers') return this._whereRaw ? mockOtherCustomerOnPhone : mockLinkedCustomerRow;
         return null;
       },
       catch() { return this; },
@@ -229,6 +235,70 @@ describe('phone customer lookup failure', () => {
     expect(context.customer_account.recognized).toBe(false);
     expect(context.customer_account.match_method).toBeNull();
     expect(context.customer_account.service_context_unavailable).toBeUndefined();
+  });
+});
+
+describe('linked customer on a phone another customer also owns', () => {
+  const LINKED = {
+    id: 'customer-linked', first_name: 'Pat', last_name: 'Linked',
+    phone: '9415550100', email: null, address_line1: '1 St', city: 'Bradenton',
+    state: 'FL', zip: '34208', pipeline_stage: 'active_customer',
+    waveguard_tier: 'Silver', lawn_type: null, property_sqft: null,
+    lot_sqft: null, property_type: null, company_name: null,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockContextLead = {
+      id: 'lead-1', customer_id: 'customer-linked', estimate_id: null,
+      first_name: 'Pat', last_name: 'Linked', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [{
+      id: 'call-9', twilio_call_sid: 'CA-phone-history', direction: 'inbound',
+      duration_seconds: 60, transcription: 'phone-matched call', created_at: '2026-07-01',
+    }];
+    mockContextOtherLeads = [];
+    mockLinkedCustomerRow = LINKED;
+    mockOtherCustomerOnPhone = null;
+  });
+
+  afterAll(() => {
+    mockLinkedCustomerRow = null;
+    mockOtherCustomerOnPhone = null;
+  });
+
+  test('another customer row on the number suppresses phone-scoped history but keeps the linked identity', async () => {
+    mockOtherCustomerOnPhone = { id: 'customer-other' };
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    // Identity stays recognized — the link is authoritative.
+    expect(context.customer_account).toEqual(expect.objectContaining({
+      recognized: true,
+      customer_id: 'customer-linked',
+      match_method: 'linked_customer_id',
+    }));
+    // But the OTHER account's comms must not enter this lead's evidence pack.
+    expect(context.customer_phone_shared_with_other_customer).toBe(true);
+    expect(context.sms_thread).toEqual([]);
+    expect(context.prior_estimates).toEqual([]);
+    expect(context.calls).toEqual([]);
+    expect(mockLoadSmsThread).not.toHaveBeenCalled();
+    expect(mockLoadPriorEstimates).not.toHaveBeenCalled();
+  });
+
+  test('an exclusively-owned number keeps loading phone-scoped history (regression)', async () => {
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.customer_phone_shared_with_other_customer).toBe(false);
+    expect(context.customer_account.match_method).toBe('linked_customer_id');
+    expect(context.sms_thread).toEqual([{ body: 'phone-scoped text' }]);
+    expect(context.calls).toHaveLength(1);
+    expect(mockLoadSmsThread).toHaveBeenCalled();
+    expect(mockLoadPriorEstimates).toHaveBeenCalled();
   });
 });
 

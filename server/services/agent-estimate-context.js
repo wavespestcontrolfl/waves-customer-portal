@@ -203,14 +203,42 @@ async function resolveCustomer(lead, extraction, phoneKey) {
         .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city',
           'state', 'zip', 'pipeline_stage', 'waveguard_tier', 'lawn_type', 'property_sqft',
           'lot_sqft', 'property_type', 'company_name');
+      // A confident linked identity does NOT make the phone exclusive: the
+      // phone-scoped history loads (SMS thread, prior estimates, phone-matched
+      // calls) are keyed on phoneKey, so if ANOTHER customer row owns the same
+      // number (household member, property-manager account) that customer's
+      // communications would enter this lead's evidence pack — and the
+      // external model context. Identity stays recognized; only phone-scoped
+      // history gets suppressed by the caller.
+      let phoneSharedWithOtherCustomer = false;
+      if (linked && phoneKey) {
+        const digits = last10(phoneKey);
+        if (digits) {
+          try {
+            const other = await db('customers')
+              .whereNot('id', linked.id)
+              .whereNull('deleted_at')
+              .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+              .first('id');
+            phoneSharedWithOtherCustomer = !!other;
+          } catch (err) {
+            // Fail closed: unknown shared-line status suppresses phone
+            // history rather than risking another customer's comms leaking.
+            logger.warn(`[agent-estimate] shared-phone customer check failed: ${err.message}`);
+            phoneSharedWithOtherCustomer = true;
+          }
+        }
+      }
       return {
         customer: linked || null,
         ambiguous: false,
         unavailable: !linked,
+        phoneSharedWithOtherCustomer,
       };
     } catch (err) {
       logger.warn(`[agent-estimate] linked customer load failed: ${err.message}`);
-      return { customer: null, ambiguous: false, unavailable: true };
+      // Exclusivity can't be established either — suppress phone history.
+      return { customer: null, ambiguous: false, unavailable: true, phoneSharedWithOtherCustomer: true };
     }
   }
   if (!phoneKey) return { customer: null, ambiguous: false, unavailable: false };
@@ -267,16 +295,19 @@ async function buildAgentEstimateContext(leadId) {
     customer,
     ambiguous: customerAmbiguous,
     unavailable: customerLookupUnavailable,
+    phoneSharedWithOtherCustomer = false,
   } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
-  // Phone-scoped history fails closed on BOTH suppression signals: another
-  // lead on the number (sharedPhone) or multiple customer rows on the number
-  // (customerAmbiguous). Either way the thread/estimates may belong to a
-  // different person and must not enter this lead's evidence pack.
-  const phoneHistorySuppressed = sharedPhone || customerAmbiguous;
+  // Phone-scoped history fails closed on EVERY suppression signal: another
+  // lead on the number (sharedPhone), multiple customer rows on the number
+  // (customerAmbiguous), or a linked customer whose number another customer
+  // row also owns (phoneSharedWithOtherCustomer). Either way the
+  // thread/estimates may belong to a different person and must not enter
+  // this lead's evidence pack.
+  const phoneHistorySuppressed = sharedPhone || customerAmbiguous || phoneSharedWithOtherCustomer;
   // Phone-matched call rows are equally cross-contaminated on an ambiguous
-  // number; keep only calls tied to THIS lead (its twilio_call_sid or its own
-  // transcript summary).
-  const calls = customerAmbiguous
+  // or other-customer-shared number; keep only calls tied to THIS lead (its
+  // twilio_call_sid or its own transcript summary).
+  const calls = (customerAmbiguous || phoneSharedWithOtherCustomer)
     ? rawCalls.filter((call) => (
       (lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid)
       || String(call.id).startsWith('lead-summary:')
@@ -408,6 +439,10 @@ async function buildAgentEstimateContext(leadId) {
     is_existing_customer: profileIsExisting,
     shared_phone_history_suppressed: sharedPhone,
     ambiguous_customer_history_suppressed: customerAmbiguous,
+    // Linked identity is confident, but another customer row owns the same
+    // number — phone-scoped history is suppressed above so the other
+    // account's comms stay out of this lead's evidence pack.
+    customer_phone_shared_with_other_customer: phoneSharedWithOtherCustomer,
     prior_estimates: priorEstimates,
     current_estimate: currentEstimate ? {
       id: currentEstimate.id,
