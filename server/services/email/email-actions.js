@@ -111,6 +111,27 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     serviceInterest: intake.serviceInterest,
   }));
   if (!readiness.ready) {
+    // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): a usable phone is
+    // guaranteed at this point, so the missing items are askable by SMS.
+    // Skipped entirely when the global automation gate disabled readiness —
+    // that switch means no automated lead outreach drafting at all.
+    if (!readiness.disabled) {
+      try {
+        const { parkClarifyAsk } = require('../estimate-clarify-asks');
+        await parkClarifyAsk({
+          missing: readiness.missing || [],
+          phone,
+          firstName: lead.first_name,
+          leadId: lead.id,
+          source: 'email_inquiry_not_ready',
+          // Phone was extracted from an email body — the approve route
+          // asserts NO consent for it; the messaging validator decides.
+          channelProvenance: 'email',
+        });
+      } catch (e) {
+        logger.warn(`[email-actions] clarify ask failed: ${e.message}`);
+      }
+    }
     return {
       created: false,
       skipped: readiness.disabled ? 'automation_disabled' : 'not_ready',

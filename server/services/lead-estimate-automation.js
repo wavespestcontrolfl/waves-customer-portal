@@ -29,6 +29,10 @@ function hasConcreteServiceInterest(serviceInterest) {
   if (/\bconsultation\b/.test(text)) return false;
   if (/\bnot\s+sure\b/.test(text)) return false;
   if (/\b(other services?|something else)\b/.test(text)) return false;
+  // The email-lead default label ('General inquiry') is a placeholder, not
+  // a service — treating it as concrete both let unpriceable form leads
+  // through readiness and instantly retired clarify asks at approval.
+  if (/\bgeneral (inquiry|question)\b/.test(text)) return false;
   return true;
 }
 
