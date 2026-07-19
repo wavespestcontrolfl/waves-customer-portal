@@ -84,12 +84,28 @@ router.put('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Service preferences not yet available' });
     }
 
-    const previous = await readPrefs(req.customerId);
-    const next = normalize({ ...previous, ...patch });
-
-    await db('customers').where({ id: req.customerId }).update({
-      service_preferences: JSON.stringify(next),
-      updated_at: new Date(),
+    // Row-locked read-modify-write: two concurrent single-key PUTs
+    // (interior toggled while exterior is still saving) each read the
+    // pre-image and wrote the WHOLE blob, so the second commit silently
+    // reverted the first's key — changing future work-order safety
+    // instructions. FOR UPDATE serializes them on the customer row.
+    let previous;
+    let next;
+    await db.transaction(async (trx) => {
+      const row = await trx('customers')
+        .select('service_preferences')
+        .where({ id: req.customerId })
+        .forUpdate()
+        .first();
+      const raw = typeof row?.service_preferences === 'string'
+        ? JSON.parse(row.service_preferences || '{}')
+        : (row?.service_preferences || {});
+      previous = normalize(raw);
+      next = normalize({ ...previous, ...patch });
+      await trx('customers').where({ id: req.customerId }).update({
+        service_preferences: JSON.stringify(next),
+        updated_at: new Date(),
+      });
     });
 
     // Figure out which keys actually flipped (for the admin notification body)

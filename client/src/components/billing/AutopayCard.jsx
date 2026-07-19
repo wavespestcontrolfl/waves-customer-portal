@@ -60,6 +60,7 @@ import {
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import useModalFocus from '../../hooks/useModalFocus';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -173,19 +174,27 @@ export default function AutopayCard({ onStateChange }) {
   const mountRef = useRef(null);
   const processedReturnRef = useRef(false);
 
-  const load = () =>
-    api.getAutopay()
+  // Monotonic sequence: the setup-return effect's load() races the mount
+  // load() — a slow pre-save response resolving last would repaint the card
+  // with stale Auto Pay state. Only the latest-issued load may write.
+  const loadSeqRef = useRef(0);
+  const load = () => {
+    const seq = ++loadSeqRef.current;
+    return api.getAutopay()
       .then((d) => {
+        if (seq !== loadSeqRef.current) return;
         setData(d);
         setSelectedCard(d.autopay_payment_method_id || '');
         setSelectedDay(d.billing_day || 1);
         onStateChange?.(d);
       })
       .catch((e) => {
+        if (seq !== loadSeqRef.current) return;
         setErr(e.message || 'Failed to load autopay');
         onStateChange?.({ state: 'unknown', loadError: true });
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (seq === loadSeqRef.current) setLoading(false); });
+  };
 
   useEffect(() => { load(); }, []);
 
@@ -719,6 +728,10 @@ function Modal({ title, children, onClose }) {
   // Mounted only while open, so lock unconditionally — the page behind the
   // scrim shouldn't scroll on iOS while the dialog is up.
   useLockBodyScroll(true);
+  // Dialog contract for keyboard/AT users: focus is trapped, Escape closes,
+  // and the overlay announces as a modal — click-the-scrim alone left
+  // keyboard users stranded behind an unlabeled layer.
+  const dialogRef = useModalFocus(true, onClose);
   // Portaled to <body>: under glass the host card carries backdrop-filter
   // (and a hover transform), which turns it into the containing block for
   // position:fixed children — the scrim would cover only the card.
@@ -727,7 +740,7 @@ function Modal({ title, children, onClose }) {
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
-      <div data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,
