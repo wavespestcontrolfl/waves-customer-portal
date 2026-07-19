@@ -44,9 +44,10 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
-  // #2866 added this to the route's destructure — an in-place field strip
-  // for non-live modes; a no-op keeps this suite's fixtures untouched.
-  stripLiveOnlyScheduleFields: jest.fn(),
+  // #2866 routed print modes through the shared schedule-field strip; keep
+  // the REAL implementation (pdf-cache-config precedent) so this suite keeps
+  // exercising the route's actual print path instead of stubbing it out.
+  stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),
