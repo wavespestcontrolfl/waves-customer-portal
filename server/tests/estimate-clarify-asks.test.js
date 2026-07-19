@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
     const builder = {
       where() { return builder; },
       whereIn() { return builder; },
+      whereNot() { return builder; },
       whereNull() { return builder; },
       whereNotNull() { return builder; },
       orWhere() { return builder; },
@@ -24,7 +25,7 @@ jest.mock('../models/db', () => {
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
-        return 1;
+        return mockState.updateResults.length ? mockState.updateResults.shift() : 1;
       },
       insert: (payload) => ({
         returning: async () => {
@@ -76,17 +77,26 @@ jest.mock('../services/sms-service-intent', () => ({
     : null),
 }));
 
+// Keeps the dispatch-decision tests deterministic without loading the real
+// lead-estimate-automation module graph.
+jest.mock('../services/lead-estimate-automation', () => ({
+  hasConcreteServiceInterest: (value) => ['pest', 'lawn', 'mosquito', 'termite'].includes(String(value || '')),
+}));
+
 const {
   parkClarifyAsk,
   handleClarifyReply,
   recordClarifyAnswer,
+  claimClarifyDispatch,
+  clarifyPreDispatchCheck,
+  reopenClarifyAfterFailedSend,
   clarifyAsksEnabled,
   _private,
 } = require('../services/estimate-clarify-asks');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -316,6 +326,35 @@ describe('handleClarifyReply', () => {
     expect(flags.answered_at).toBeUndefined();
   });
 
+  test('an admin claim winning mid-transaction never loses the reply — stamp-only fallback', async () => {
+    // Locked read saw 'pending'; the UNLOCKED route claim flipped it to
+    // 'approved' before the status-conditional retire — the fallback must
+    // stamp the flags so the dispatch decision (same lock) sees the answer.
+    // Lead-less on purpose: with no CRM row updated, the flags stamp is the
+    // ONLY record of the answer.
+    mockState.existingDraft = {
+      id: 'pending-1',
+      customer_id: null,
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    mockState.updateResults = [0]; // conditional pending-branch write loses
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'mosquito treatment please' });
+    expect(result.handled).toBe(true);
+    const draftWrites = mockState.updates.filter((u) => u.table === 'message_drafts');
+    expect(draftWrites).toHaveLength(2);
+    const fallback = draftWrites[1].payload;
+    expect(fallback.status).toBeUndefined();
+    expect(fallback.draft_response).toBeUndefined();
+    const flags = JSON.parse(fallback.flags);
+    expect(flags.answer_recorded).toEqual(['specific_service']);
+    expect(flags.answered_at).toBeTruthy();
+    // Copy untouched on a claimed row → the mismatch must be marked so the
+    // dispatch decision recomposes instead of sending the old text.
+    expect(flags.copy_stale).toBe(true);
+  });
+
   test('chit-chat never records as the service — the classifier is the bar', async () => {
     mockState.existingDraft = AWAITING(['specific_service']);
     const result = await handleClarifyReply({ phone: '9415550142', body: 'thanks, sounds good' });
@@ -394,6 +433,51 @@ describe('recordClarifyAnswer', () => {
     expect(JSON.parse(update.flags).missing).toEqual(['street_address']);
   });
 
+  test('an admin claim winning mid-transaction never loses the answer — stamp-only fallback', async () => {
+    // The reply's locked read saw 'pending', but the UNLOCKED route claim
+    // flipped it to 'approved' first: the status-conditional rewrite matches
+    // zero rows and MUST fall back to a flags-only stamp so the dispatch
+    // decision (under the same lock) still sees the answer.
+    mockState.existingDraft = {
+      id: 'pending-1',
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    mockState.updateResults = [0]; // conditional pending-branch write loses
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['specific_service'] });
+    expect(result.recorded).toBe(true);
+    expect(mockState.updates).toHaveLength(2);
+    const fallback = mockState.updates[1].payload;
+    expect(fallback.status).toBeUndefined();
+    expect(fallback.draft_response).toBeUndefined();
+    const fallbackFlags = JSON.parse(fallback.flags);
+    expect(fallbackFlags.answered_at).toBeTruthy();
+    expect(fallbackFlags.copy_stale).toBe(true);
+  });
+
+  test('a CLAIMED-unsent ask (mid-approval) records stamp-only — copy and status untouched', async () => {
+    // Lead intake captures the item after the route claim but before the
+    // dispatch decision: the bookkeeping must land so the decision's locked
+    // re-read (which runs after this commit) rewrites or retires the
+    // question instead of sending it stale.
+    mockState.existingDraft = {
+      id: 'claimed-1',
+      status: 'approved',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['street_address', 'specific_service'] }),
+    };
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] });
+    expect(result.recorded).toBe(true);
+    const update = mockState.updates[0].payload;
+    expect(update.status).toBeUndefined();
+    expect(update.draft_response).toBeUndefined();
+    const flags = JSON.parse(update.flags);
+    expect(flags.missing).toEqual(['specific_service']);
+    expect(flags.answer_recorded).toEqual(['street_address']);
+    expect(flags.copy_stale).toBe(true);
+  });
+
   test('irrelevant items or no awaiting ask record nothing', async () => {
     expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
     mockState.existingDraft = {
@@ -403,6 +487,319 @@ describe('recordClarifyAnswer', () => {
     };
     expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
     expect(mockState.updates).toHaveLength(0);
+  });
+});
+
+describe('claimClarifyDispatch', () => {
+  const DRAFT = { id: 'draft-1', source_ref: 'clarify:9415550142' };
+  const freshRow = (overrides = {}, flags = {}) => ({
+    id: 'draft-1',
+    source_ref: 'clarify:9415550142',
+    customer_id: null,
+    status: 'approved',
+    sent_at: null,
+    draft_response: 'Original question?',
+    final_response: null,
+    flags: JSON.stringify({ missing: ['street_address'], toPhone: '+19415550142', ...flags }),
+    ...overrides,
+  });
+
+  test('sendable as-is: atomically re-verifies the claim and returns the stored copy — sent_at stays provider-confirmed', async () => {
+    mockState.firstQueue = [freshRow()];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('send');
+    expect(verdict.body).toBe('Original question?');
+    expect(verdict.flags.missing).toEqual(['street_address']);
+    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates[0].table).toBe('message_drafts');
+    // The claim-conditional write must never pre-stamp sent_at — a crash
+    // before the provider call would otherwise read as delivered.
+    expect(mockState.updates[0].payload).toEqual({ approved_at: expect.any(Date) });
+  });
+
+  test('an ask consumed mid-claim (reply stamped answered_at) retires instead of sending', async () => {
+    mockState.firstQueue = [freshRow({}, { missing: [], answered_at: '2026-07-19T00:00:00Z' })];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('already provided');
+    expect(mockState.updates).toEqual([
+      { table: 'message_drafts', payload: { status: 'rejected' } },
+    ]);
+  });
+
+  test('a provider-confirmed sent row never dispatches twice — and is never relabeled rejected', async () => {
+    mockState.firstQueue = [freshRow({ sent_at: new Date() })];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('already dispatched');
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('partial answer in CRM state rewrites the copy to the remainder before dispatch', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { missing: ['street_address', 'specific_service'], lead_id: 'lead-1' }),
+      { id: 'lead-1', status: 'new', address: '123 Main St', service_interest: null, first_name: 'Pat' },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('send');
+    const expected = _private.composeClarifyBody({ missing: ['specific_service'], firstName: 'Pat' });
+    expect(verdict.body).toBe(expected);
+    expect(verdict.flags.missing).toEqual(['specific_service']);
+    const payload = mockState.updates[0].payload;
+    expect(payload.draft_response).toBe(expected);
+    expect(payload.sent_at).toBeUndefined();
+    expect(JSON.parse(payload.flags).missing).toEqual(['specific_service']);
+  });
+
+  test('partial answer on a REVISION rewrites, releases the claim in the same conditional write, and never dispatches', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { missing: ['street_address', 'specific_service'], lead_id: 'lead-1' }),
+      { id: 'lead-1', status: 'new', address: '123 Main St', service_interest: null, first_name: 'Pat' },
+    ];
+    const verdict = await claimClarifyDispatch({
+      draft: DRAFT,
+      isRevision: true,
+      releaseFields: { revised_response: null, final_response: null },
+    });
+    expect(verdict.outcome).toBe('rewritten');
+    expect(mockState.updates).toHaveLength(1);
+    const payload = mockState.updates[0].payload;
+    expect(payload.sent_at).toBeUndefined();
+    expect(payload.draft_response)
+      .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: 'Pat' }));
+    // The claim release rides the SAME status-conditional write — a separate
+    // unconditional release could resurrect a concurrent reject.
+    expect(payload.status).toBe('pending');
+    expect(payload.approved_by).toBeNull();
+    expect(payload.revised_response).toBeNull();
+    expect(payload.final_response).toBeNull();
+  });
+
+  test('a closed lead retires the draft', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { lead_id: 'lead-1' }),
+      { id: 'lead-1', status: 'unresponsive', address: null, service_interest: null },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('lead is closed');
+  });
+
+  test('a linked estimate that moved past draft retires the draft', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { estimate_id: 'est-1' }),
+      { id: 'est-1', status: 'sent', sent_at: '2026-07-18T00:00:00Z', address: null },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('moved past draft');
+  });
+
+  test('an unparseable source_ref fails closed without writing anything', async () => {
+    const verdict = await claimClarifyDispatch({ draft: { id: 'draft-1', source_ref: 'not-a-clarify-ref' } });
+    expect(verdict.outcome).toBe('error');
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('copy_stale (stamp-only writer shrank the ask) forces a recompose even when CRM shows nothing new', async () => {
+    // A reply answered street_address while the row was claimed: missing is
+    // already shrunk, the stored copy still asks both questions, and the
+    // customer-only linkage means no lead row exists for the CRM recheck.
+    mockState.firstQueue = [
+      freshRow(
+        { draft_response: 'Old two-question copy?' },
+        { missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true },
+      ),
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('send');
+    const expected = _private.composeClarifyBody({ missing: ['specific_service'], firstName: null });
+    expect(verdict.body).toBe(expected);
+    expect(verdict.flags.copy_stale).toBeUndefined();
+    const payload = mockState.updates[0].payload;
+    expect(payload.draft_response).toBe(expected);
+    expect(JSON.parse(payload.flags).copy_stale).toBeUndefined();
+  });
+
+  test('copy_stale on a REVISION bounces to re-review — the owner typed against the old copy', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true }),
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT, isRevision: true });
+    expect(verdict.outcome).toBe('rewritten');
+    expect(mockState.updates[0].payload.status).toBe('pending');
+  });
+
+  test('a draft the unlocked reject route already resolved is respected — no write, no send', async () => {
+    mockState.firstQueue = [freshRow({ status: 'rejected' })];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('no longer claimed');
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a reject interleaving between the fresh read and the claim re-verification aborts the dispatch', async () => {
+    mockState.firstQueue = [freshRow()];
+    mockState.updateResults = [0]; // conditional claim write matches zero rows
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('no longer claimed');
+  });
+});
+
+describe('clarifyPreDispatchCheck', () => {
+  const PARAMS = {
+    draftId: 'draft-1',
+    sourceRef: 'clarify:9415550142',
+    dispatchedMissing: ['street_address'],
+  };
+  const claimedRow = (flags = {}, overrides = {}) => ({
+    id: 'draft-1',
+    status: 'approved',
+    sent_at: null,
+    flags: JSON.stringify({ missing: ['street_address'], ...flags }),
+    ...overrides,
+  });
+
+  test('claim standing and ask unchanged → ok', async () => {
+    mockState.firstQueue = [claimedRow()];
+    expect(await clarifyPreDispatchCheck(PARAMS)()).toEqual({ ok: true });
+  });
+
+  test('an answer recorded while validators ran aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({ missing: [], answered_at: '2026-07-19T00:00:00Z' })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('a partial answer (missing set changed since dispatch) aborts the send', async () => {
+    const check = clarifyPreDispatchCheck({ ...PARAMS, dispatchedMissing: ['street_address', 'specific_service'] });
+    mockState.firstQueue = [claimedRow({ missing: ['specific_service'], answer_recorded: ['street_address'] })];
+    const verdict = await check();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('a concurrent reject aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({}, { status: 'rejected' })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('copy_stale set after the decision aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({ copy_stale: true })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('an unparseable ref fails closed without a db read', async () => {
+    const verdict = await clarifyPreDispatchCheck({ ...PARAMS, sourceRef: 'nope' })();
+    expect(verdict.ok).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+});
+
+describe('reopenClarifyAfterFailedSend', () => {
+  const stampedRow = (flags = {}) => ({
+    id: 'draft-1',
+    source_ref: 'clarify:9415550142',
+    status: 'approved',
+    sent_at: new Date(),
+    draft_response: 'Original question?',
+    flags: JSON.stringify({ missing: ['street_address'], toPhone: '+19415550142', ...flags }),
+  });
+
+  test('reopens to pending with the stamp cleared; unchanged copy is preserved', async () => {
+    // first() order: row (pre-lock), fresh (locked), rival probe (none).
+    mockState.firstQueue = [stampedRow(), stampedRow(), null];
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: 'draft-1',
+      dispatchedMissing: ['street_address'],
+    });
+    expect(result).toEqual({ reopened: true, retired: false });
+    const payload = mockState.updates[0].payload;
+    expect(payload.status).toBe('pending');
+    expect(payload.sent_at).toBeNull();
+    expect(payload.approved_by).toBeNull();
+    expect(payload.approved_at).toBeNull();
+    // Missing set unchanged since dispatch — the parked copy (greeting and
+    // all) must survive the round trip.
+    expect(payload.draft_response).toBeUndefined();
+  });
+
+  test('a reply that shrank the ask mid-flight recomposes the reopened copy', async () => {
+    const shrunk = stampedRow({ missing: ['specific_service'], answer_recorded: ['street_address'] });
+    mockState.firstQueue = [shrunk, shrunk, null];
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: 'draft-1',
+      dispatchedMissing: ['street_address', 'specific_service'],
+    });
+    expect(result.reopened).toBe(true);
+    expect(mockState.updates[0].payload.draft_response)
+      .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: null }));
+  });
+
+  test('copy_stale reopens with a recomposed copy and the marker cleared', async () => {
+    const stale = stampedRow({ missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true });
+    mockState.firstQueue = [stale, stale, null];
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: 'draft-1',
+      dispatchedMissing: ['specific_service'], // same set — the MARKER drives the recompose
+    });
+    expect(result.reopened).toBe(true);
+    const payload = mockState.updates[0].payload;
+    expect(payload.draft_response)
+      .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: null }));
+    expect(JSON.parse(payload.flags).copy_stale).toBeUndefined();
+  });
+
+  test('an ask fully consumed while the row read as sent retires with the stamp cleared', async () => {
+    const consumed = stampedRow({ missing: [], answered_at: '2026-07-19T00:00:00Z' });
+    mockState.firstQueue = [consumed, consumed];
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates[0].payload).toEqual({ status: 'rejected', sent_at: null });
+  });
+
+  test('a rival open clarify (cooldown-exception park) supersedes — ours retires, index intact', async () => {
+    mockState.firstQueue = [stampedRow(), stampedRow(), { id: 'draft-2', status: 'pending', sent_at: null }];
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates[0].payload.status).toBe('rejected');
+    expect(mockState.updates[0].payload.sent_at).toBeNull();
+  });
+
+  test('a draft rejected during the send window keeps its status — only the false stamp clears', async () => {
+    const rejected = stampedRow();
+    rejected.status = 'rejected';
+    mockState.firstQueue = [rejected, rejected];
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates[0].payload).toEqual({ sent_at: null });
+  });
+
+  test('a reject interleaving after the fresh read wins — reopen falls back to clearing the stamp', async () => {
+    mockState.firstQueue = [stampedRow(), stampedRow(), null];
+    mockState.updateResults = [0]; // conditional reopen matches zero rows
+    const result = await reopenClarifyAfterFailedSend({ draftId: 'draft-1', dispatchedMissing: ['street_address'] });
+    expect(result).toEqual({ reopened: false, retired: true });
+    expect(mockState.updates).toHaveLength(2);
+    expect(mockState.updates[1].payload).toEqual({ sent_at: null });
+  });
+
+  test('revision releaseFields ride along on reopen', async () => {
+    mockState.firstQueue = [stampedRow(), stampedRow(), null];
+    await reopenClarifyAfterFailedSend({
+      draftId: 'draft-1',
+      dispatchedMissing: ['street_address'],
+      releaseFields: { revised_response: null, final_response: null },
+    });
+    expect(mockState.updates[0].payload.revised_response).toBeNull();
+    expect(mockState.updates[0].payload.final_response).toBeNull();
   });
 });
 

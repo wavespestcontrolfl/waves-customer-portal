@@ -366,11 +366,14 @@ async function handleClarifyReply({ phone, body }) {
         this.where(function pendingOpen() {
           this.where('status', 'pending').whereNull('sent_at');
         }).orWhere(function claimedUnsent() {
-          // Mid-approval (claimed, not yet dispatched): the answer still
-          // records — stamp-only, never touching the claimed row's copy or
-          // status. Residual: the already-approved question may still
-          // deliver inside the seconds-wide claim→dispatch window; the
-          // recorded answer prevents any re-ask after it.
+          // Mid-approval (claimed): the answer still records — stamp-only,
+          // never touching the claimed row's copy or status. No stale send
+          // can result: the dispatch decision (claimClarifyDispatch)
+          // re-reads these flags under the same clarify lock and
+          // rewrites/retires the question before committing, so this
+          // bookkeeping either lands before the decision (and is honored)
+          // or after it (the answer is recorded; at worst it crosses the
+          // in-flight SMS, and the record prevents any re-ask).
           this.whereIn('status', ['approved', 'revised']).whereNull('sent_at');
         }).orWhere(function sentRecent() {
           this.whereNotNull('sent_at')
@@ -476,20 +479,36 @@ async function handleClarifyReply({ phone, body }) {
       }
 
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
-      const answeredFlags = JSON.stringify({
+      const answeredFlagsObj = {
         ...freshFlags,
         missing: remaining,
         answer_recorded: [...(Array.isArray(freshFlags.answer_recorded) ? freshFlags.answer_recorded : []), ...recorded],
         ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      });
+      };
+      const answeredFlags = JSON.stringify(answeredFlagsObj);
+      // Stamp-only writes on a CLAIMED-unsent row shrink missing without
+      // touching the copy — copy_stale marks that mismatch so the dispatch
+      // decision recomposes (and the pre-dispatch check aborts) instead of
+      // sending the old multi-question text.
+      const stampOnlyFlags = JSON.stringify({ ...answeredFlagsObj, copy_stale: true });
       if (!fresh.sent_at && fresh.status === 'pending') {
         // Answered before approval: rewrite the pending copy to the
         // remainder or retire it outright (status-guarded — a claim wins).
-        await trx('message_drafts')
+        const applied = await trx('message_drafts')
           .where({ id: fresh.id, status: 'pending' })
           .update(remaining.length
             ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
+        if (!applied) {
+          // The UNLOCKED admin claim flipped pending→approved after our
+          // read — the answer must not be silently lost. Stamp the flags
+          // against the now-claimed row (status untouched); the dispatch
+          // decision runs under this same lock afterward and honors them.
+          await trx('message_drafts').where({ id: fresh.id }).update({ flags: stampOnlyFlags });
+        }
+      } else if (!fresh.sent_at) {
+        // Claimed-unsent: copy untouched by design, so mark it stale.
+        await trx('message_drafts').where({ id: fresh.id }).update({ flags: stampOnlyFlags });
       } else {
         await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
       }
@@ -550,6 +569,12 @@ async function recordClarifyAnswer({ phone, items = [] }) {
         .where(function pendingOrRecentlySent() {
           this.where(function pendingOpen() {
             this.where('status', 'pending').whereNull('sent_at');
+          }).orWhere(function claimedUnsent() {
+            // Mid-approval rows count too — same contract as
+            // handleClarifyReply: the stamp-only branch below records the
+            // answer without touching the claimed row's copy or status, and
+            // the dispatch decision's locked re-read honors it.
+            this.whereIn('status', ['approved', 'revised']).whereNull('sent_at');
           }).orWhere(function sentRecent() {
             this.whereNotNull('sent_at')
               .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
@@ -566,21 +591,34 @@ async function recordClarifyAnswer({ phone, items = [] }) {
       const recorded = missing.filter((item) => items.includes(item));
       if (!recorded.length) return { recorded: false };
       const remaining = missing.filter((item) => !recorded.includes(item));
-      const answeredFlags = JSON.stringify({
+      const answeredFlagsObj = {
         ...flags,
         missing: remaining,
         answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
         ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      });
+      };
+      const answeredFlags = JSON.stringify(answeredFlagsObj);
+      // Same copy_stale contract as handleClarifyReply: a stamp-only write
+      // on a claimed-unsent row leaves the copy behind the missing set.
+      const stampOnlyFlags = JSON.stringify({ ...answeredFlagsObj, copy_stale: true });
       if (!awaiting.sent_at && awaiting.status === 'pending') {
         // Answered before approval: rewrite the pending copy down to the
         // remainder, or retire it outright when nothing remains. Guarded on
         // status — a claim landing before the lock wins.
-        await trx('message_drafts')
+        const applied = await trx('message_drafts')
           .where({ id: awaiting.id, status: 'pending' })
           .update(remaining.length
             ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
+        if (!applied) {
+          // The UNLOCKED admin claim won the race after our read — fall
+          // back to stamp-only so the answer reaches the claimed row and
+          // the dispatch decision (under this same lock) honors it.
+          await trx('message_drafts').where({ id: awaiting.id }).update({ flags: stampOnlyFlags });
+        }
+      } else if (!awaiting.sent_at) {
+        // Claimed-unsent: copy untouched by design, so mark it stale.
+        await trx('message_drafts').where({ id: awaiting.id }).update({ flags: stampOnlyFlags });
       } else {
         await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
       }
@@ -592,10 +630,334 @@ async function recordClarifyAnswer({ phone, items = [] }) {
   }
 }
 
+function digitsFromClarifyRef(sourceRef) {
+  const match = /^clarify:(\d{10})$/.exec(String(sourceRef || ''));
+  return match ? match[1] : null;
+}
+
+// Statuses the staleness recheck retires with — kept byte-identical to the
+// pre-lock guard so operator-facing 409 copy doesn't churn.
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
+
+/**
+ * The dispatch decision for a CLAIMED clarify draft (admin approve/revise
+ * already flipped status to 'approved'/'revised'), made ATOMICALLY under the
+ * same per-phone clarify lock every reply/park writer holds. Inside one
+ * locked transaction: fresh re-read of the draft, CRM staleness checks,
+ * partial-answer rewrite, and a claimed-status-conditional write that
+ * atomically verifies the claim still stands. Serializing the DECISION (not
+ * the Twilio HTTP call) closes the claim→dispatch race: a reply landing
+ * before the lock commits is seen by the fresh re-read and rewrites/retires
+ * the question; a reply landing after is stamp-only bookkeeping against the
+ * claimed row (handleClarifyReply's claimed-unsent branch) — either way no
+ * already-answered question dispatches. The only residue is an SMS
+ * physically crossing a reply on the carrier network, which no server-side
+ * ordering can remove.
+ *
+ * sent_at is PROVIDER-CONFIRMED state and is deliberately NOT written here —
+ * only finalizeDraftSend stamps it, after a real send. A process crash
+ * between this decision and the provider call therefore leaves an ordinary
+ * claimed row (never a falsely-sent one): the open-slot unique index still
+ * holds the phone's slot, the 7-day cooldown never keys on a send that
+ * didn't happen, and recovery is the same stuck-claim surface every other
+ * draft lane has.
+ *
+ * Outcomes: {outcome:'send', body, flags} (decision committed — the caller
+ * dispatches this body, and failures reconcile via
+ * reopenClarifyAfterFailedSend); {outcome:'retired', message} (stale — where
+ * the staleness is OURS the status moved to rejected here; a concurrent
+ * reject's verdict is respected without a write); {outcome:'rewritten'}
+ * (isRevision only — copy rewritten to the remainder AND the claim released
+ * to pending in the same conditional write, releaseFields applied);
+ * {outcome:'error'} (transient — fail closed, nothing written).
+ */
+async function claimClarifyDispatch({ draft, isRevision = false, releaseFields = {} }) {
+  const digits = digitsFromClarifyRef(draft && draft.source_ref);
+  if (!digits) return { outcome: 'error' };
+  try {
+    return await withClarifyLock(digits, async (trx) => {
+      const fresh = await trx('message_drafts').where({ id: draft.id }).first();
+      if (!fresh) {
+        return { outcome: 'retired', message: 'Clarify draft retired — it no longer exists.' };
+      }
+      let flags = {};
+      try {
+        flags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
+      } catch { flags = {}; }
+      const missing = Array.isArray(flags.missing) ? flags.missing : [];
+      const retire = async (message) => {
+        await trx('message_drafts').where({ id: fresh.id }).update({ status: 'rejected' });
+        return { outcome: 'retired', message };
+      };
+      // The admin reject route moves status WITHOUT the clarify lock — if it
+      // won the race, respect its verdict: no status write, no stamp.
+      if (!['approved', 'revised'].includes(fresh.status)) {
+        return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+      }
+      // Already provider-confirmed sent (unreachable via the pending-only
+      // claim, defensive) — never dispatch twice, and never relabel a
+      // delivered ask as rejected.
+      if (fresh.sent_at) {
+        return { outcome: 'retired', message: 'Clarify draft already dispatched.' };
+      }
+      // A consumed ask (every item answered while the claim was in flight)
+      // must never send.
+      if (flags.answered_at || !missing.length) {
+        return retire('Clarify draft retired — the customer already provided the missing details.');
+      }
+      // Sequential CRM reads — one trx = one connection, no Promise.all.
+      const lead = flags.lead_id
+        ? await trx('leads').where({ id: flags.lead_id }).whereNull('deleted_at').first()
+        : null;
+      const customer = fresh.customer_id
+        ? await trx('customers').where({ id: fresh.customer_id }).whereNull('deleted_at').first()
+        : null;
+      const estimate = flags.estimate_id
+        ? await trx('estimates').where({ id: flags.estimate_id }).first()
+        : null;
+      if (flags.lead_id && !lead) {
+        return retire('Clarify draft retired — the linked lead no longer exists.');
+      }
+      if (fresh.customer_id && !customer) {
+        return retire('Clarify draft retired — the linked customer no longer exists.');
+      }
+      if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
+        return retire('Clarify draft retired — the linked lead is closed.');
+      }
+      if (flags.estimate_id && !estimate) {
+        return retire('Clarify draft retired — the linked estimate no longer exists.');
+      }
+      if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
+        return retire('Clarify draft retired — the linked estimate already moved past draft.');
+      }
+      // Answer-arrived recheck against CRM state. The linked draft
+      // estimate's address counts — operators resolve missing addresses
+      // directly on the estimate row. ONLY the lead row answers a service
+      // ask: customers.lead_service_interest is leftover intake state.
+      const hasAddressNow = [lead?.address, customer?.address_line1, estimate?.address]
+        .some((value) => value && /\d/.test(String(value)));
+      const { hasConcreteServiceInterest } = require('./lead-estimate-automation');
+      const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
+      const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
+        || (item === 'specific_service' && !hasServiceNow));
+      if (!stillMissing.length) {
+        return retire('Clarify draft retired — the customer already provided the missing details.');
+      }
+      if (stillMissing.length < missing.length || flags.copy_stale === true) {
+        // Partial answer: never re-ask what the contact already supplied —
+        // rewrite the copy down to what's STILL missing. copy_stale forces
+        // this branch even when the missing set already matches: a
+        // stamp-only writer shrank missing on the claimed row WITHOUT
+        // touching the copy, so the stored text still asks the old
+        // multi-question form.
+        const rewritten = composeClarifyBody({
+          missing: stillMissing,
+          firstName: lead?.first_name || customer?.first_name || null,
+        });
+        const { copy_stale: _resolved, ...restFlags } = flags;
+        const rewrittenFlags = { ...restFlags, missing: stillMissing };
+        // Conditional writes: the unlocked reject route can still move the
+        // row between our read and this statement — READ COMMITTED re-checks
+        // the WHERE against the winner's row, so zero rows updated means the
+        // claim is gone and nothing may dispatch.
+        if (isRevision) {
+          // The owner's revision was typed against the stale multi-question
+          // copy — rewrite the stored draft, bounce the send, and release
+          // the claim IN THIS SAME conditional write (releaseFields clears
+          // the stale revision): a separate unconditional release outside
+          // the lock could resurrect a concurrently rejected draft. The
+          // queue now shows the single remaining question.
+          const rewrote = await trx('message_drafts')
+            .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+            .update({
+              draft_response: rewritten,
+              flags: JSON.stringify(rewrittenFlags),
+              status: 'pending',
+              approved_by: null,
+              approved_at: null,
+              ...releaseFields,
+            });
+          if (!rewrote) {
+            return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+          }
+          return { outcome: 'rewritten' };
+        }
+        const applied = await trx('message_drafts')
+          .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+          .update({
+            draft_response: rewritten,
+            flags: JSON.stringify(rewrittenFlags),
+          });
+        if (!applied) {
+          return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+        }
+        return { outcome: 'send', body: rewritten, flags: rewrittenFlags };
+      }
+      // Sendable as-is. The approved_at refresh is not data anyone reads —
+      // it is the conditional write that atomically re-verifies the claim
+      // (zero rows = a reject won after our read; nothing may dispatch).
+      const applied = await trx('message_drafts')
+        .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+        .update({ approved_at: new Date() });
+      if (!applied) {
+        return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
+      }
+      return {
+        outcome: 'send',
+        body: isRevision ? (fresh.final_response || fresh.draft_response) : fresh.draft_response,
+        flags,
+      };
+    });
+  } catch (err) {
+    logger.warn(`[estimate-clarify] dispatch decision failed: ${err.message}`);
+    return { outcome: 'error' };
+  }
+}
+
+/**
+ * Final abort point for a committed clarify dispatch, built for
+ * sendCustomerMessage's preDispatchCheck hook — the LAST await before the
+ * provider handoff. Under the clarify lock: verify the claim still stands
+ * and the asked items are still the ones the outbound copy asks for; any
+ * answer recorded while the send pipeline's own validators ran (or a
+ * concurrent reject) aborts the send, and the route's failed-send
+ * reconciliation then rewrites/retires the draft. Fail closed on error —
+ * an unverifiable ask must not go out.
+ */
+function clarifyPreDispatchCheck({ draftId, sourceRef, dispatchedMissing }) {
+  return async () => {
+    const digits = digitsFromClarifyRef(sourceRef);
+    if (!digits) {
+      return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'unparseable clarify source_ref' };
+    }
+    try {
+      return await withClarifyLock(digits, async (trx) => {
+        const fresh = await trx('message_drafts').where({ id: draftId }).first();
+        if (!fresh) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'clarify draft no longer exists' };
+        }
+        if (!['approved', 'revised'].includes(fresh.status)) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'clarify draft is no longer claimed' };
+        }
+        let flags = {};
+        try {
+          flags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
+        } catch { flags = {}; }
+        const missing = Array.isArray(flags.missing) ? flags.missing : [];
+        if (flags.answered_at || !missing.length) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered while the send was validating' };
+        }
+        const changed = flags.copy_stale === true
+          || (Array.isArray(dispatchedMissing)
+            && (dispatchedMissing.length !== missing.length
+              || missing.some((item) => !dispatchedMissing.includes(item))));
+        if (changed) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered part of this while the send was validating' };
+        }
+        return { ok: true };
+      });
+    } catch (err) {
+      return { ok: false, code: 'CLARIFY_RECHECK_FAILED', reason: err.message };
+    }
+  };
+}
+
+/**
+ * Reconcile a clarify draft whose provider send FAILED after
+ * claimClarifyDispatch committed the decision. Under the clarify lock: a
+ * concurrent reject's status is respected (never resurrected to pending);
+ * an ask consumed meanwhile (a reply's stamp-only bookkeeping) retires; a
+ * rival open clarify for the phone retires ours — reopening would violate
+ * the one-open-per-phone unique index; otherwise reopen to pending.
+ * sent_at is cleared on every path as pure defense — the decision no longer
+ * writes it, so it should already be null here. dispatchedMissing is the
+ * missing set the outbound copy asked for: if a reply shrank the set during
+ * the send window, the reopened copy is recomposed to match.
+ */
+async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null, releaseFields = {} }) {
+  try {
+    const row = await db('message_drafts').where({ id: draftId }).first();
+    const digits = digitsFromClarifyRef(row && row.source_ref);
+    if (!row || !digits) return { reopened: false, retired: false };
+    return await withClarifyLock(digits, async (trx) => {
+      const fresh = await trx('message_drafts').where({ id: draftId }).first();
+      if (!fresh) return { reopened: false, retired: false };
+      let flags = {};
+      try {
+        flags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
+      } catch { flags = {}; }
+      const missing = Array.isArray(flags.missing) ? flags.missing : [];
+      // A concurrent reject (unlocked route) already resolved the draft —
+      // respect its status, but the false stamp must still go: the 7-day
+      // cooldown would otherwise key on a send that never happened.
+      if (!['approved', 'revised'].includes(fresh.status)) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
+      if (flags.answered_at || !missing.length) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ status: 'rejected', sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
+      const rival = await trx('message_drafts')
+        .where({ intent: 'estimate_clarify', source_ref: fresh.source_ref })
+        .whereNot('id', fresh.id)
+        .whereIn('status', ['pending', 'approved', 'revised'])
+        .whereNull('sent_at')
+        .first();
+      if (rival) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ status: 'rejected', sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
+      const missingChanged = flags.copy_stale === true
+        || (Array.isArray(dispatchedMissing)
+          && (dispatchedMissing.length !== missing.length
+            || missing.some((item) => !dispatchedMissing.includes(item))));
+      const { copy_stale: _resolved, ...restFlags } = flags;
+      // Conditional on the claim still standing — a reject interleaving
+      // after the fresh read must not be resurrected to pending.
+      const reopened = await trx('message_drafts')
+        .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
+        .update({
+          status: 'pending',
+          approved_by: null,
+          approved_at: null,
+          sent_at: null,
+          // Recompose only when a reply shrank the ask mid-flight (or a
+          // stamp-only write left the copy behind the missing set) —
+          // otherwise the parked copy (with its greeting) is still exactly
+          // right. The recompose clears copy_stale: copy and flags match
+          // again.
+          ...(missingChanged
+            ? {
+              draft_response: composeClarifyBody({ missing, firstName: null }),
+              flags: JSON.stringify({ ...restFlags, missing }),
+            }
+            : {}),
+          ...releaseFields,
+        });
+      if (!reopened) {
+        await trx('message_drafts').where({ id: fresh.id })
+          .update({ sent_at: null, ...releaseFields });
+        return { reopened: false, retired: true };
+      }
+      return { reopened: true, retired: false };
+    });
+  } catch (err) {
+    logger.warn(`[estimate-clarify] failed-send reconciliation failed: ${err.message}`);
+    return { reopened: false, retired: false };
+  }
+}
+
 module.exports = {
   clarifyAsksEnabled,
   parkClarifyAsk,
   handleClarifyReply,
   recordClarifyAnswer,
+  claimClarifyDispatch,
+  clarifyPreDispatchCheck,
+  reopenClarifyAfterFailedSend,
   _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

@@ -136,9 +136,12 @@ async function sendCustomerMessage(input) {
     return { sent: false, blocked: true, code: 'UNKNOWN_POLICY', reason: err.message };
   }
 
-  // 3. Normalize recipient + clone input so downstream sees the canonical form
+  // 3. Normalize recipient + clone input so downstream sees the canonical
+  //    form. preDispatchCheck stays local — it is a caller closure, not
+  //    message state, and must not ride into providers/audit.
+  const { preDispatchCheck, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
-  const sendInput = { ...input, to: normalizedTo };
+  const sendInput = { ...inputRest, to: normalizedTo };
 
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
@@ -200,6 +203,45 @@ async function sendCustomerMessage(input) {
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
     };
+  }
+
+  // 6.5 Caller-supplied final recheck — the LAST await before the provider
+  //     handoff, so callers with race-sensitive sends (clarify asks: an
+  //     answer can arrive while the validators above run) get their
+  //     freshest possible abort point inside the canonical path. Fail
+  //     closed: a throwing check blocks the send.
+  if (typeof preDispatchCheck === 'function') {
+    let verdict;
+    try {
+      verdict = await preDispatchCheck();
+    } catch (err) {
+      verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message };
+    }
+    if (!verdict || verdict.ok !== true) {
+      const blocked = {
+        code: (verdict && verdict.code) || 'PRE_DISPATCH_CHECK_FAILED',
+        reason: (verdict && verdict.reason) || 'pre-dispatch check did not pass',
+      };
+      const audit = await persistAudit({
+        input: sendInput,
+        policy,
+        segmentMeta,
+        validatorsPassed,
+        validatorsFailed: ['pre_dispatch_check'],
+        blockedBy: blocked,
+        identityTrust: resolvedTrust,
+        providerOutcome: null,
+      });
+      return {
+        sent: false,
+        blocked: true,
+        code: blocked.code,
+        reason: blocked.reason,
+        auditLogId: audit.id,
+        segmentCount: segmentMeta.segmentCount,
+        encoding: segmentMeta.encoding,
+      };
+    }
   }
 
   // 7. Dispatch to provider
