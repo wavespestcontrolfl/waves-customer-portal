@@ -2334,16 +2334,23 @@ function ServicesTab() {
     loadServices();
   }, [loadServices]);
 
+  // Latest-request-per-service: expand → collapse → re-expand can overlap two
+  // getService calls, and a stale FAILURE resolving after a newer SUCCESS
+  // would clobber good data with the error state. Only the most recent
+  // request for a given id may write its result.
+  const detailSeqRef = useRef({});
   const loadServiceDetail = (svcId) => {
+    const seq = (detailSeqRef.current[svcId] || 0) + 1;
+    detailSeqRef.current[svcId] = seq;
     // Clear any failure sentinel so the loading state shows during a retry.
     setDetailMap(prev => (prev[svcId]?.loadError ? { ...prev, [svcId]: undefined } : prev));
     api.getService(svcId)
-      .then(d => setDetailMap(prev => ({ ...prev, [svcId]: d })))
+      .then(d => { if (detailSeqRef.current[svcId] === seq) setDetailMap(prev => ({ ...prev, [svcId]: d })); })
       .catch(err => {
         console.error('Failed to load service details', err);
         // Sentinel the failure: an absent entry rendered "Loading photos"
         // forever with no error and no retry path.
-        setDetailMap(prev => ({ ...prev, [svcId]: { loadError: true } }));
+        if (detailSeqRef.current[svcId] === seq) setDetailMap(prev => ({ ...prev, [svcId]: { loadError: true } }));
       });
   };
 
@@ -4095,8 +4102,21 @@ function BillingTab({ customer }) {
 
   const refreshCards = () => {
     const seq = ++cardsSeqRef.current;
-    return api.getCards()
-      .then(d => { if (seq === cardsSeqRef.current) setCards(d.cards || []); })
+    // Refresh cards AND Auto Pay together: a save/default/remove can enroll
+    // or move Auto Pay server-side, and bumping the sequence here suppresses
+    // the older loadBilling()'s autopay write — so the LATEST refresh must
+    // own both or the banner keeps a stale "Auto Pay off". Autopay is
+    // best-effort (its own AutopayCard remounts via autopayRefreshKey); a
+    // getAutopay miss leaves the prior banner rather than erroring the save.
+    return Promise.all([
+      api.getCards(),
+      api.getAutopay().catch(() => undefined),
+    ])
+      .then(([cardData, autopayData]) => {
+        if (seq !== cardsSeqRef.current) return;
+        setCards(cardData.cards || []);
+        if (autopayData !== undefined) setAutopay(autopayData);
+      })
       .catch(err => {
         console.error(err);
         // Swallowing this as success closed the modal over a stale list —
