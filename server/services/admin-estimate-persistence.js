@@ -686,6 +686,12 @@ async function resolveEstimateWritePayload({
     }
     if (trustedEstimateData.inputs && typeof trustedEstimateData.inputs === 'object') {
       trustedEstimateData.inputs.recurringCustomer = true;
+      // `inputs` is the admin builder's FORM snapshot: edit mode seeds the
+      // form from it and prices from the string toggle isRecurringCustomer
+      // (EstimateToolViewV2), not the engine boolean. Without this a member's
+      // reopened estimate shows the toggle "NO" and edit previews price as a
+      // non-member until the save's server recompute corrects it.
+      trustedEstimateData.inputs.isRecurringCustomer = 'YES';
     }
   }
   // Freeze the WaveGuard membership card onto the estimate, computed from the

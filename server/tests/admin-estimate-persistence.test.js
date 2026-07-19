@@ -895,6 +895,7 @@ describe('admin estimate persistence', () => {
         customerId: 'cust-member',
         estimateData: {
           engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { oneTimePest: {} } },
+          inputs: { homeSqFt: 2000, isRecurringCustomer: 'NO' },
           result: { total: 125 },
         },
       },
@@ -909,6 +910,11 @@ describe('admin estimate persistence', () => {
     // (extractEngineInputs → base engineInputs) reapplies the member perk even
     // though priorQualifyingServices is empty for this member.
     expect(stored.engineInputs.recurringCustomer).toBe(true);
+    // The builder form snapshot gets the STRING toggle value edit mode seeds
+    // from — a reopened member estimate must not show "NO" and price previews
+    // as a non-member (even a client-claimed "NO" yields to the server check).
+    expect(stored.inputs.isRecurringCustomer).toBe('YES');
+    expect(stored.inputs.recurringCustomer).toBe(true);
   });
 
   test('P1-2: a NON-member does not gain a recurring flag in the stored engineInputs', async () => {

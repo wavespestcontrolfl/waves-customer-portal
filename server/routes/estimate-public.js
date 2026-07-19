@@ -6912,18 +6912,37 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const estData = isString
       ? JSON.parse(estimate.estimate_data)
       : (estimate.estimate_data || null);
-    const snapshot = estData && estData.membershipSnapshot;
-    if (!snapshot || !snapshot.isExistingCustomer) return;
+    if (!estData) return;
+    const snapshot = estData.membershipSnapshot;
+    const frozenSnapshot = !!(snapshot && snapshot.isExistingCustomer);
+    // A SERVER-stamped recurring flag in the replay shapes (admin persistence
+    // writes it for a verified active-plan member — including one-time-only
+    // members with NO qualifying priors, whose snapshot may be absent) is
+    // itself a frozen membership artifact: extractEngineInputs() replays it on
+    // every reprice, so a lapsed member would keep the recurring perk forever
+    // if only the snapshot path triggered this reconcile.
+    const frozenRecurring = estData.engineInputs?.recurringCustomer === true
+      || estData.inputs?.recurringCustomer === true
+      || estData.inputs?.isRecurringCustomer === 'YES';
+    if (!frozenSnapshot && !frozenRecurring) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
     // Drop every frozen artifact derived from the stale "existing customer"
     // classification, not just the snapshot: priorQualifyingServices is
     // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), and sendSnapshot.pricingBundle is consulted by
-    // buildPricingBundle() before the runtime cache (returning the old bundle
-    // with no waivable setup fee). Leaving either behind lets the lead keep
-    // member pricing / undercharge even after the snapshot is gone.
+    // combined-tier discount), the recurring flags in the stored replay
+    // shapes re-grant the member perk the same way, and
+    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+    // the runtime cache (returning the old bundle with no waivable setup
+    // fee). Leaving any behind lets the lead keep member pricing /
+    // undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
     delete estData.priorQualifyingServices;
+    for (const shape of [estData.engineInputs, estData.inputs, estData.engineRequest?.options]) {
+      if (shape && typeof shape === 'object') {
+        delete shape.recurringCustomer;
+        delete shape.isRecurringCustomer;
+      }
+    }
     invalidateSendSnapshotPricingBundle(estData);
     estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
     // The runtime pricing cache key ignores estimate_data content, so bust it
