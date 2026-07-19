@@ -1490,13 +1490,16 @@ const SOURCE_ICON = {
   },
 };
 
-// Estimator-engine drafts carry their operator review material (lane,
-// reasons, evidence notes) in the list payload — it lives in estimate_data
-// because the notes COLUMN is customer-visible via the public endpoint.
-// This badge is the operator's pre-send surface for it.
-function EngineReviewBadge({ engine, onOpen }) {
-  if (!engine?.lane) return null;
-  const flagged = engine.lane !== "green";
+// Estimator-engine and ai_agent drafts carry their operator review material
+// (lane + reasons, or reasoning/assumptions/uncertainty) in the list payload —
+// it lives in estimate_data because the notes COLUMN is customer-visible via
+// the public endpoint. This badge is the operator's pre-send surface for it.
+function EngineReviewBadge({ engine, agentReview, onOpen }) {
+  if (!engine?.lane && !agentReview) return null;
+  const flagged = (engine?.lane && engine.lane !== "green")
+    || (agentReview?.uncertainty || []).length > 0
+    || (agentReview?.belowTargetServices || []).length > 0
+    || (agentReview?.unverifiedLineCount || 0) > 0;
   return (
     <button
       type="button"
@@ -1519,9 +1522,13 @@ function EngineReviewBadge({ engine, onOpen }) {
   );
 }
 
-function EngineReviewModal({ estimate, onClose }) {
+export function EngineReviewModal({ estimate, onClose }) {
   const engine = estimate.estimatorEngine || {};
-  const flagged = engine.lane !== "green";
+  const agentReview = estimate.agentDraftReview || null;
+  const flagged = (estimate.estimatorEngine && engine.lane !== "green")
+    || (agentReview?.uncertainty || []).length > 0
+    || (agentReview?.belowTargetServices || []).length > 0
+    || (agentReview?.unverifiedLineCount || 0) > 0;
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1594,7 +1601,74 @@ function EngineReviewModal({ estimate, onClose }) {
               </pre>
             </div>
           )}
-          {!engine.reviewNotes && !(engine.laneReasons || []).length && (
+          {agentReview?.reasoning && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Agent reasoning
+              </div>
+              <pre className="whitespace-pre-wrap font-sans text-13 text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
+                {agentReview.reasoning}
+              </pre>
+              {agentReview.sqftSource && (
+                <div className="text-12 text-ink-secondary mt-1">
+                  Sqft source:{" "}
+                  {agentReview.sqftSource === "property_lookup"
+                    ? "property lookup"
+                    : "operator input"}
+                </div>
+              )}
+            </div>
+          )}
+          {(agentReview?.assumptions || []).length > 0 && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Assumptions made
+              </div>
+              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
+                {agentReview.assumptions.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(agentReview?.uncertainty || []).length > 0 && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Uncertainty flags
+              </div>
+              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
+                {agentReview.uncertainty.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(agentReview?.belowTargetServices || []).length > 0 && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Below margin target
+              </div>
+              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
+                {agentReview.belowTargetServices.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(agentReview?.unverifiedLineCount || 0) > 0 && (
+            <div className="text-13 text-zinc-800">
+              Margin could not be verified on {agentReview.unverifiedLineCount}{" "}
+              priced line{agentReview.unverifiedLineCount === 1 ? "" : "s"} —
+              check the pricing audit before sending.
+            </div>
+          )}
+          {!engine.reviewNotes
+            && !(engine.laneReasons || []).length
+            && !agentReview?.reasoning
+            && !(agentReview?.assumptions || []).length
+            && !(agentReview?.uncertainty || []).length
+            && !(agentReview?.belowTargetServices || []).length
+            && !(agentReview?.unverifiedLineCount || 0) && (
             <div className="text-13 text-ink-secondary">
               No review material recorded for this draft.
             </div>
@@ -2195,9 +2269,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           }
                         />
                         <AutomationStatusBadge automation={e.automation} />
-                        {e.estimatorEngine && (
+                        {(e.estimatorEngine || e.agentDraftReview) && (
                           <EngineReviewBadge
                             engine={e.estimatorEngine}
+                            agentReview={e.agentDraftReview}
                             onOpen={() => setEngineReviewTarget(e)}
                           />
                         )}
@@ -3141,9 +3216,10 @@ export function MobileEstimateRow({
               onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
             <AutomationStatusBadge automation={estimate.automation} />
-            {estimate.estimatorEngine && (
+            {(estimate.estimatorEngine || estimate.agentDraftReview) && (
               <EngineReviewBadge
                 engine={estimate.estimatorEngine}
+                agentReview={estimate.agentDraftReview}
                 onOpen={() => onEngineReview?.(estimate)}
               />
             )}

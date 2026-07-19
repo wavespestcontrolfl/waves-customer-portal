@@ -192,29 +192,29 @@ Use for: "what grass is typical in this neighborhood?" before asking the operato
   },
   {
     name: 'create_pending_estimate',
-    description: `Write a draft estimate to the database. status='draft', source='ai_agent'. Structured notes are auto-generated from the inputs you pass — DO NOT pre-format the notes string yourself. Returns the new estimate's id and admin URL. ALWAYS confirm with the operator ("Draft this estimate? y/n") before calling.
-NEVER call this without first calling compute_estimate. NEVER call this if the engine returned zero or the scenario is outside scope — instead, report back to the operator that manual quoting is required.`,
+    description: `Write a draft estimate to the database. status='draft', source='ai_agent'. The server RE-RUNS compute_estimate from engineInputs (with leadId account context) and persists ITS totals — your engineResult is only a cross-check, and a mismatch refuses the write. reasoning/assumptions/uncertainty are stored as operator-only review material on the draft (never customer-visible). Returns the new estimate's id and admin URL. ALWAYS confirm with the operator ("Draft this estimate? y/n") before calling.
+NEVER call this without first calling compute_estimate. If compute_estimate errored or returned zero, report back that manual quoting is required instead of calling this.`,
     input_schema: {
       type: 'object',
       properties: {
+        leadId: { type: 'string', description: 'Lead UUID when this quote is for a loaded lead. REQUIRED whenever the customer already has services — the server reprice loads their account services and membership tier from it; omitting it prices standalone and the totals cross-check will refuse the write. Pass the SAME leadId you gave compute_estimate.' },
         customerName: { type: 'string', description: 'Full name (first + last)' },
         customerPhone: { type: 'string', description: 'Phone (any format — server normalizes)' },
         customerEmail: { type: 'string' },
         address: { type: 'string', description: 'Full street address with city + zip if known' },
-        engineInputs: { type: 'object', description: 'Exact inputs passed to compute_estimate (homeSqFt, lotSqFt, services, propertyType, etc.)' },
+        engineInputs: { type: 'object', description: 'Exact inputs passed to compute_estimate (homeSqFt, lotSqFt, services, propertyType, etc.) — the server reprices from these' },
         engineResult: {
           type: 'object',
-          description: 'Engine summary returned by compute_estimate (must include monthlyTotal, annualTotal, oneTimeTotal, waveguardTier)',
+          description: 'The totals compute_estimate returned, UNCHANGED — either its snake_case fields (monthly_total, annual_total, onetime_total) or camelCase equivalents. Cross-checked cents-exact against the server reprice; a mismatch (stale numbers, different leadId context) refuses the write',
           properties: {
             monthlyTotal: { type: 'number' },
             annualTotal: { type: 'number' },
             oneTimeTotal: { type: 'number' },
             waveguardTier: { type: 'string' },
           },
-          required: ['monthlyTotal', 'annualTotal'],
         },
         sqftSource: { type: 'string', enum: ['property_lookup', 'user_input'], description: 'Where the sqft came from' },
-        reasoning: { type: 'string', description: '1-3 sentences explaining why this estimate fits the situation' },
+        reasoning: { type: 'string', description: '1-3 sentences explaining why this estimate fits the situation (operator review only — never shown to the customer)' },
         assumptions: { type: 'array', items: { type: 'string' }, description: 'Things you inferred but did not confirm (empty array if none)' },
         uncertainty: { type: 'array', items: { type: 'string' }, description: 'Things you flagged as unsure (empty array if none)' },
       },
@@ -1258,7 +1258,11 @@ function verifyAgentEvidenceQuotes(evidence, context) {
   };
 }
 
-async function computeEstimate(input) {
+// `includeRawEngineResult` is an internal-caller option (createPendingEstimate
+// needs the raw engine lines for the membership snapshot) — it rides the
+// second ARGUMENT, never the model-visible input, so the model can't request
+// the raw payload.
+async function computeEstimate(input, { includeRawEngineResult = false } = {}) {
   const forbiddenError = forbiddenPricingInputError(input);
   if (forbiddenError) return { error: forbiddenError };
 
@@ -1275,7 +1279,13 @@ async function computeEstimate(input) {
   // Assert lot provenance: true only when a REAL lot was supplied, false when we
   // synthesized homeSqFt*4. Commercial mosquito reads this and stays a manual
   // quote rather than auto-pricing off the synthetic default.
-  const lotSizeMeasured = suppliedLotSqFt !== undefined;
+  // An explicit lotSizeMeasured:false survives replay: compute_estimate's own
+  // normalized engine_input carries the SYNTHESIZED lot with provenance false,
+  // and re-running it (the create_pending_estimate reprice) must not launder
+  // that synthetic lot into a measured one — commercial mosquito prices off
+  // this flag. An explicit true carries no forging surface (it only ever
+  // accompanies a supplied lot, which derives true anyway).
+  const lotSizeMeasured = input.lotSizeMeasured === false ? false : suppliedLotSqFt !== undefined;
   const suppliedStories = optionalBoundedNumber(input.stories, { min: 1, max: 20 });
   if (suppliedStories === null) return { error: 'stories must be 1-20 when provided' };
   const stories = suppliedStories || 1;
@@ -1395,6 +1405,7 @@ async function computeEstimate(input) {
       below_target_services: belowTargetLines.map((line) => line.service),
     },
     full_summary: summary,
+    ...(includeRawEngineResult ? { raw_engine_result: estimate } : {}),
   };
 }
 
@@ -1555,46 +1566,127 @@ async function getNeighborhoodGrassProfile({ postal_code: postalCode }) {
   };
 }
 
-function buildAgentNotes({ engineInputs, engineResult, sqftSource, reasoning, assumptions, uncertainty, address }) {
-  const ts = new Date().toISOString();
-  const services = engineInputs?.services
-    ? Object.entries(engineInputs.services).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('; ')
-    : '(none)';
-  const ass = (assumptions && assumptions.length) ? assumptions.map(a => `  - ${a}`).join('\n') : '  (none)';
-  const unc = (uncertainty && uncertainty.length) ? uncertainty.map(u => `  - ${u}`).join('\n') : '  (none)';
-  const tier = engineResult?.waveguardTier || engineResult?.waveguard_tier || '(none)';
-
-  return [
-    `[AI Agent Draft — ${ts}]`,
-    '',
-    'Inputs:',
-    `- Address: ${address}`,
-    `- Sqft: ${engineInputs?.homeSqFt} (source: ${sqftSource})`,
-    `- Lot sqft: ${engineInputs?.lotSqFt || '(default 4× home)'}`,
-    `- Stories: ${engineInputs?.stories || 1}`,
-    `- Property type: ${engineInputs?.propertyType || 'Single Family'}`,
-    `- Services: ${services}`,
-    '',
-    `Engine result: $${engineResult.monthlyTotal}/mo · $${engineResult.annualTotal}/yr · WaveGuard tier: ${tier}`,
-    '',
-    `Reasoning: ${reasoning || '(not provided)'}`,
-    '',
-    'Assumptions made:',
-    ass,
-    '',
-    'Uncertainty flags:',
-    unc,
-  ].join('\n');
-}
-
 async function createPendingEstimate(input) {
   const {
-    customerName, customerPhone, customerEmail, address,
-    engineInputs, engineResult, sqftSource, reasoning, assumptions = [], uncertainty = [],
+    leadId, customerName, customerPhone, customerEmail, address,
+    engineInputs, engineResult: claimedResult, sqftSource, reasoning, assumptions = [], uncertainty = [],
   } = input;
 
-  if (!customerName || !address || !engineResult || typeof engineResult.monthlyTotal !== 'number') {
-    return { error: 'Missing required fields: customerName, address, engineResult.monthlyTotal' };
+  if (!customerName || !address || !engineInputs || typeof engineInputs !== 'object') {
+    return { error: 'Missing required fields: customerName, address, engineInputs' };
+  }
+
+  // Bind the draft identity to the selected lead. leadId selects another
+  // account's services and membership tier for pricing, so the contact this
+  // draft is stored (and later sent) under must come from that SAME lead —
+  // a stale/mismatched leadId must not apply one customer's membership
+  // pricing to another customer's draft. The shared anchor rejects
+  // phone/email mismatches and makes the lead the recipient authority.
+  let contact = { customerName, customerPhone, customerEmail };
+  let leadAddressMismatch = false;
+  let pricedLeadCustomerId = null;
+  if (leadId) {
+    const leadResult = await loadAgentEstimateLead(leadId);
+    if (leadResult.error) return leadResult;
+    pricedLeadCustomerId = leadResult.lead.customer_id || null;
+    const anchored = anchorAgentEstimateContact({ customerName, customerPhone, customerEmail, address }, leadResult.lead);
+    if (anchored.error) return anchored;
+    contact = {
+      customerName: anchored.input.customerName,
+      customerPhone: anchored.input.customerPhone,
+      customerEmail: anchored.input.customerEmail,
+    };
+    leadAddressMismatch = anchored.input.contactVerification?.addressMismatch === true;
+  }
+
+  // SERVER REPRICE (estimator audit P1-8): never persist model-claimed
+  // dollars. The exact compute_estimate pipeline re-runs here — forbidden
+  // pricing-input guard, bounds validation, account-context reload from
+  // leadId (an EXISTING customer's services/tier must reprice at the
+  // combined account context, or expansion drafts overcharge), duplicate
+  // -service block, generateEstimate — and ITS totals are what get written.
+  const priced = await computeEstimate({ ...engineInputs, leadId, address }, { includeRawEngineResult: true });
+  if (priced.error) {
+    return {
+      error: `Draft not written — server reprice failed: ${priced.error}`,
+      ...(priced.customer_account ? { customer_account: priced.customer_account } : {}),
+    };
+  }
+
+  // A line the engine could not price must not ride in as $0 — the customer
+  // page would show/charge a total that silently omits it. Manual quote lane.
+  const unpricedLines = (Array.isArray(priced.line_items) ? priced.line_items : [])
+    .filter((line) => line.annual == null && line.one_time == null);
+  if (unpricedLines.length) {
+    return {
+      error: `Draft not written — the engine returned no price for: ${unpricedLines.map((line) => line.service).join(', ')}. These need manual quoting.`,
+    };
+  }
+
+  const monthly = Number(priced.monthly_total || 0);
+  const annual = Number(priced.annual_total || 0) || monthly * 12;
+  const onetime = Number(priced.onetime_total || 0);
+  const tier = priced.waveguard_tier || null;
+
+  // Cross-check EVERY claimed total against the server reprice, to the cent.
+  // A mismatch means stale/forged numbers OR a compute_estimate run with
+  // different account context (e.g. leadId omitted here after computing with
+  // it) — either way the operator conversation showed a price this draft
+  // would not hold, so refuse rather than silently write a different one.
+  // compute_estimate returns snake_case totals; accept either spelling so
+  // "pass the returned totals unchanged" works verbatim.
+  const claimedMonthly = Number(claimedResult?.monthlyTotal ?? claimedResult?.monthly_total);
+  const claimedAnnual = Number(claimedResult?.annualTotal ?? claimedResult?.annual_total);
+  const claimedOneTime = Number(claimedResult?.oneTimeTotal ?? claimedResult?.onetime_total ?? 0);
+  if (![claimedMonthly, claimedAnnual, claimedOneTime].every(Number.isFinite)) {
+    return { error: 'engineResult monthly/annual/one-time totals must be the exact numbers returned by compute_estimate' };
+  }
+  // Compare against the values that actually PERSIST (annual includes the
+  // monthly*12 fallback) — comparing to priced.annual_total alone would let a
+  // claimed 0 pass while the row silently stores the fallback amount.
+  const cents = (value) => Math.round(Number(value || 0) * 100);
+  if (cents(claimedMonthly) !== cents(monthly)
+    || cents(claimedAnnual) !== cents(annual)
+    || cents(claimedOneTime) !== cents(onetime)) {
+    return {
+      error: `Draft not written — your engineResult ($${claimedMonthly}/mo, $${claimedAnnual}/yr, $${claimedOneTime} one-time) does not match the server reprice ($${monthly}/mo, $${annual}/yr, $${onetime} one-time). Re-run compute_estimate with the SAME leadId you pass here and use its returned totals unchanged.`,
+    };
+  }
+
+  // Persist the pricing context the reprice actually used (mirrors
+  // create_agent_estimate_draft). Without it the public page replays
+  // generateEstimate from the identity-free engineInputs and re-derives
+  // membership only from estimate_data.priorQualifyingServices — an
+  // expansion draft would display/accept standalone totals that differ from
+  // the server-verified row.
+  const account = priced.customer_account || {};
+  const priorQualifyingServices = account.recognized
+    ? [...new Set((account.existing_service_keys || []).filter(Boolean))]
+    : [];
+  const recognizedCustomerId = account.recognized ? (account.customer_id || null) : null;
+  let membershipSnapshot = null;
+  if (recognizedCustomerId) {
+    try {
+      membershipSnapshot = await computeMembershipContext(db, {
+        customerId: recognizedCustomerId,
+        estData: {
+          lineItems: priced.raw_engine_result?.lineItems || [],
+          recurring: {
+            annualBeforeDiscount: Number(priced.full_summary?.recurringAnnualBeforeDiscount || 0),
+            annualAfterDiscount: Number(priced.full_summary?.recurringAnnualAfterDiscount || 0),
+          },
+        },
+      });
+    } catch (err) {
+      membershipSnapshot = null;
+    }
+    // A proven member persisted without their snapshot would show/charge
+    // new-customer terms ($99 setup + annual prepay) after a transient
+    // lookup failure — refuse instead (same posture as the agent-draft
+    // confirmed write).
+    if (!membershipSnapshot && priorQualifyingServices.length) {
+      return { error: 'Existing-member account context could not be loaded. Retry shortly — the draft was not written.' };
+    }
   }
 
   // Same token shape as POST /api/admin/estimates: 16 random bytes hex.
@@ -1604,44 +1696,144 @@ async function createPendingEstimate(input) {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
-  const monthly = Number(engineResult.monthlyTotal) || 0;
-  const annual = Number(engineResult.annualTotal) || monthly * 12;
-  const onetime = Number(engineResult.oneTimeTotal) || 0;
-  const tier = engineResult.waveguardTier || engineResult.waveguard_tier || null;
-
-  const notes = buildAgentNotes({ engineInputs, engineResult, sqftSource, reasoning, assumptions, uncertainty, address });
-
-  const serviceInterest = engineInputs?.services
-    ? Object.keys(engineInputs.services)
+  const serviceInterest = priced.engine_input?.services
+    ? Object.keys(priced.engine_input.services)
         .map(s => s.charAt(0).toUpperCase() + s.slice(1))
         .join(' + ')
     : null;
 
-  const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
-    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
+  const estimateData = {
+    // The server-validated engine input (bounded, forbidden keys rejected,
+    // identity-free) — the public replay reprices from this.
+    engineInputs: priced.engine_input,
+    // The SERVER-computed RAW engine result (never the model's claim), with
+    // its priced line items — acceptance/conversion reads the recurring
+    // lines from here (withSupplementedRecurringServices treats a present
+    // engineResult as authoritative and skips replay), so a totals-only
+    // object would convert with no services/schedule. Mirrors
+    // create_agent_estimate_draft's persisted shape.
+    engineResult: priced.raw_engine_result,
+    agentDraft: true,
+    ...(leadId ? { lead_id: leadId } : {}),
+    // The account context the reprice used: extractEngineInputs re-injects
+    // priorQualifyingServices on every public recompute, and the membership
+    // snapshot drives existing-customer treatment (waived setup fee, no
+    // annual prepay) — so display/accept match the server-verified totals.
+    ...(membershipSnapshot ? { membershipSnapshot } : {}),
+    ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
+    // Operator review material. NEVER the notes column — notes is
+    // customer-visible via the public /:token/data payload; this field is
+    // surfaced only to the admin pipeline (EstimatesPageV2 review modal).
+    agentDraftReview: {
+      createdAt: new Date().toISOString(),
+      sqftSource: sqftSource || null,
+      reasoning: reasoning || null,
+      assumptions: Array.isArray(assumptions) ? assumptions.filter(Boolean) : [],
+      uncertainty: [
+        ...(Array.isArray(uncertainty) ? uncertainty.filter(Boolean) : []),
+        ...(leadAddressMismatch
+          ? ['Quoted address does not match the selected lead’s address on file.']
+          : []),
+      ],
+      marginCheck: priced.margin_check || null,
+      pricingAuthority: 'SERVER',
+    },
+  };
+
+  const persist = async (trx) => {
+    let insertContact = contact;
+    if (leadId) {
+      // Lock + reload the lead INSIDE the persistence transaction (both
+      // paths — the phone advisory lock does not cover the lead row): the
+      // lead can close, move, or change customer linkage between pricing and
+      // this write, and two email-only calls would otherwise both insert
+      // because neither observes the other's link.
+      await trx('leads').where({ id: leadId }).forUpdate().select('id');
+      const locked = await loadAgentEstimateLead(leadId, trx);
+      if (locked.error) return locked;
+      if (String(locked.lead.customer_id || '') !== String(pricedLeadCustomerId || '')) {
+        return { error: 'The selected lead customer link changed after pricing. Refresh the lead and try again.' };
+      }
+      const reanchored = anchorAgentEstimateContact({ customerName, customerPhone, customerEmail, address }, locked.lead);
+      if (reanchored.error) return reanchored;
+      // The advisory lock (or the decision to run without one) was keyed on
+      // the pre-transaction phone — a changed phone means this sequence holds
+      // no lock for the number the row would store.
+      if (String(reanchored.input.customerPhone || '').replace(/\D/g, '')
+        !== String(contact.customerPhone || '').replace(/\D/g, '')) {
+        return { error: 'The selected lead phone changed after pricing. Refresh the lead and try again.' };
+      }
+      // A lead that NEWLY disagrees with the priced address moved properties
+      // after pricing — the engine result belongs to the old property, so a
+      // fresh reprice is required. A pre-existing mismatch already carries
+      // its review-material warning and keeps the write.
+      if (reanchored.input.contactVerification?.addressMismatch === true && !leadAddressMismatch) {
+        return { error: 'The selected lead address changed after pricing. Refresh the lead and try again.' };
+      }
+      insertContact = {
+        customerName: reanchored.input.customerName,
+        customerPhone: reanchored.input.customerPhone,
+        customerEmail: reanchored.input.customerEmail,
+      };
+      if (locked.lead.estimate_id) {
+        const existing = await trx('estimates').where({ id: locked.lead.estimate_id }).first();
+        if (existing && !existing.archived_at) {
+          return { error: 'This lead is already linked to an active estimate; it was not overwritten.' };
+        }
+      }
+    }
+
+    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(insertContact.customerPhone, { database: trx });
     if (duplicateBlock) return { duplicateBlock };
 
     const [estimate] = await trx('estimates').insert({
-      estimate_data: JSON.stringify({ engineInputs, engineResult, agentDraft: true }),
+      estimate_data: JSON.stringify(estimateData),
       address,
-      customer_name: customerName,
-      customer_phone: customerPhone || null,
-      customer_email: customerEmail || null,
+      customer_name: insertContact.customerName,
+      customer_phone: insertContact.customerPhone || null,
+      customer_email: insertContact.customerEmail || null,
+      // ONLY the recognition this reprice actually priced with — mirrors
+      // create_agent_estimate_draft (a lead.customer_id fallback could adopt
+      // an account the quote never accounted for).
+      customer_id: recognizedCustomerId,
       monthly_total: monthly,
       annual_total: annual,
       onetime_total: onetime,
       waveguard_tier: tier,
       token,
       expires_at: expiresAt,
-      notes,
+      // Reasoning/assumptions live in estimate_data.agentDraftReview — the
+      // notes COLUMN is customer-visible via the public endpoint.
+      notes: null,
       status: 'draft',
       source: 'ai_agent',
       service_interest: serviceInterest,
       category: 'RESIDENTIAL',
     }).returning(['id', 'token']);
 
+    // Link atomically with the insert so a concurrent serialized call
+    // observes the link and refuses instead of double-drafting.
+    if (leadId) {
+      await trx('leads').where({ id: leadId }).update({ estimate_id: estimate.id });
+    }
+
     return { estimate };
-  });
+  };
+
+  // withAutomatedEstimatePhoneLock runs the callback WITHOUT a transaction or
+  // advisory lock when there is no 10-digit phone key. The lead is now the
+  // recipient authority, so a phone-less lead must still serialize the
+  // duplicate-check-then-insert: open our own transaction — persist() takes
+  // the lead row lock as the duplicate key (mirrors the agent-draft writer).
+  // A walk-in with neither phone nor lead at least keeps the transaction wrap.
+  const phoneDigits = String(contact.customerPhone || '').replace(/\D/g, '');
+  const creationResult = phoneDigits.length >= 10
+    ? await withAutomatedEstimatePhoneLock(contact.customerPhone, persist)
+    : await db.transaction(persist);
+
+  // In-transaction lead revalidation can refuse (closed lead, changed
+  // linkage/phone, existing active estimate link) — surface that verbatim.
+  if (creationResult.error) return creationResult;
 
   if (creationResult.duplicateBlock) {
     const { duplicateBlock } = creationResult;
@@ -1681,7 +1873,9 @@ async function createPendingEstimate(input) {
     admin_preview_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}?adminPreview=1`,
     monthly_total: monthly,
     annual_total: annual,
-    note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send. To preview it yourself, use admin_preview_url (the customer link shows the draft in the old layout).',
+    onetime_total: onetime,
+    pricing_authority: 'SERVER',
+    note_for_admin: 'Draft created with server-verified pricing. Open admin/estimates → the AI Draft badge to review the reasoning before sending. To preview it yourself, use admin_preview_url (the customer link shows the draft in the old layout).',
   };
 }
 

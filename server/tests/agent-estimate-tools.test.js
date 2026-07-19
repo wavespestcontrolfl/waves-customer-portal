@@ -2841,3 +2841,378 @@ describe('Agent Estimate round-7 hardening', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 });
+
+// Estimator audit P1-8: create_pending_estimate must never persist
+// model-claimed dollars (server reprice is the authority, mismatch refuses)
+// and must never put agent reasoning into the customer-visible notes column.
+describe('create_pending_estimate server reprice (P1-8)', () => {
+  const PENDING_INPUT = {
+    leadId: 'lead-1',
+    customerName: 'Jordan Baker',
+    customerPhone: '9415550100',
+    customerEmail: 'road@example.com',
+    address: '100 Main St, Bradenton, FL 34205',
+    engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+    engineResult: { monthlyTotal: 54.17, annualTotal: 650, oneTimeTotal: 0 },
+    sqftSource: 'property_lookup',
+    reasoning: 'Quarterly pest fits the request and the home size.',
+    assumptions: ['Single story'],
+    uncertainty: [],
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+    // clearAllMocks keeps implementations set via mockResolvedValue in other
+    // tests — restore the module-scope defaults so context/membership state
+    // never leaks between cases.
+    mockBuildAgentEstimateContext.mockImplementation(async () => ({
+      is_existing_customer: false,
+      quote_form: { message_fields: [{ field: 'message', text: 'quarterly pest' }] },
+      calls: [],
+      sms_thread: [],
+      activities: [],
+    }));
+    mockComputeMembershipContext.mockImplementation(async () => null);
+  });
+
+  test('refuses to write when the claimed totals do not match the server reprice', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineResult: { monthlyTotal: 20, annualTotal: 240, oneTimeTotal: 0 },
+    });
+
+    expect(result.error).toMatch(/does not match the server reprice/i);
+    expect(result.error).toMatch(/54\.17/);
+    expect(writes).toEqual([]);
+  });
+
+  test('writes SERVER-computed totals, null notes, and operator review material in estimate_data', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.success).toBe(true);
+    expect(result.pricing_authority).toBe('SERVER');
+    expect(mockBuildAgentEstimateContext).toHaveBeenCalledWith('lead-1');
+
+    const insert = writes.find((w) => w.table === 'estimates' && w.op === 'insert');
+    expect(insert.payload.monthly_total).toBe(54.17);
+    expect(insert.payload.annual_total).toBe(650);
+    expect(insert.payload.onetime_total).toBe(0);
+    // The customer-visible notes column carries NO agent material.
+    expect(insert.payload.notes).toBeNull();
+
+    const estData = JSON.parse(insert.payload.estimate_data);
+    // Stored engineResult is the server recompute's RAW engine result (with
+    // priced line items for acceptance/conversion), not the model's claim.
+    expect(estData.engineResult.summary.recurringMonthlyAfterDiscount).toBe(54.17);
+    expect(estData.engineResult.lineItems).toEqual(ENGINE_RESULT.lineItems);
+    expect(estData.agentDraft).toBe(true);
+    // Review material lives in estimate_data for the admin pipeline only.
+    expect(estData.agentDraftReview).toEqual(expect.objectContaining({
+      reasoning: PENDING_INPUT.reasoning,
+      assumptions: ['Single story'],
+      sqftSource: 'property_lookup',
+      pricingAuthority: 'SERVER',
+    }));
+    expect(estData.agentDraftReview.marginCheck).toEqual(expect.objectContaining({
+      target_collected_margin: 0.35,
+    }));
+  });
+
+  test('a zero-price engine result refuses the write instead of storing the claim', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 0 },
+      lineItems: [],
+    });
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/zero price/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('an unpriced (quote-required) line refuses the write and names the service', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      lineItems: [
+        ...ENGINE_RESULT.lineItems,
+        { service: 'trenching', annualAfterDiscount: 0, price: 0 },
+      ],
+    });
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/no price for: trenching/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('forbidden pricing inputs in engineInputs refuse the write via the compute guard', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly', customPrice: 10 } } },
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(writes).toEqual([]);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a lead phone mismatch refuses the write before anything reprices', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      customerPhone: '9415559999',
+    });
+
+    expect(result.error).toMatch(/does not match the selected lead/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  test('an annual-total mismatch refuses the write (cents-exact, all three totals)', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineResult: { monthlyTotal: 54.17, annualTotal: 600, oneTimeTotal: 0 },
+    });
+
+    expect(result.error).toMatch(/does not match the server reprice/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('a non-numeric claimed total refuses the write instead of passing the NaN comparison', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineResult: { monthlyTotal: 54.17, annualTotal: 650, oneTimeTotal: 'abc' },
+    });
+
+    expect(result.error).toMatch(/must be the exact numbers/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('a recognized existing customer persists the pricing context the reprice used', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValue({
+      lead: { customer_id: 'customer-1' },
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['lawn_care'],
+        current_services: [{ key: 'lawn_care' }],
+      },
+    });
+    mockComputeMembershipContext.mockResolvedValue({ isExistingCustomer: true, tierLabel: 'Silver' });
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.success).toBe(true);
+    const insert = writes.find((w) => w.table === 'estimates' && w.op === 'insert');
+    // The row is bound to the recognized account the reprice priced with.
+    expect(insert.payload.customer_id).toBe('customer-1');
+    const estData = JSON.parse(insert.payload.estimate_data);
+    // The public replay re-injects these, so display/accept reprice at the
+    // same combined account context as the stored totals.
+    expect(estData.priorQualifyingServices).toEqual(['lawn_care']);
+    expect(estData.membershipSnapshot).toEqual(expect.objectContaining({ isExistingCustomer: true }));
+  });
+
+  test('a proven member whose membership snapshot cannot load refuses the write', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValue({
+      lead: { customer_id: 'customer-1' },
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['lawn_care'],
+        current_services: [{ key: 'lawn_care' }],
+      },
+    });
+    mockComputeMembershipContext.mockResolvedValue(null);
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/account context could not be loaded/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('an email-only lead (no phone) still serializes the write in a transaction with the lead row locked', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: null, email: 'road@example.com' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockDb.transaction.mockImplementation(async (cb) => cb(database));
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      customerPhone: undefined,
+    });
+
+    expect(result.success).toBe(true);
+    // No 10-digit phone key → the phone advisory lock is not the serializer;
+    // our own transaction (with the lead row lock) is.
+    expect(mockWithPhoneLock).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    const insert = writes.find((w) => w.table === 'estimates' && w.op === 'insert');
+    expect(insert.payload.customer_phone).toBeNull();
+    expect(insert.payload.customer_email).toBe('road@example.com');
+  });
+
+  test('the insert links leads.estimate_id atomically so a serialized second call can observe it', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.success).toBe(true);
+    const leadLink = writes.find((w) => w.table === 'leads' && w.op === 'update');
+    expect(leadLink.payload).toEqual({ estimate_id: 'estimate-1' });
+  });
+
+  test('a lead already linked to an active estimate refuses the write', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: 'estimate-9', phone: '9415550100', email: 'road@example.com' },
+      estimate: { id: 'estimate-9', status: 'sent', archived_at: null },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/already linked to an active estimate/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('a lead whose customer link changed between pricing and the locked write refuses', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+      lockedLead: { id: 'lead-1', customer_id: 'customer-9', estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/customer link changed after pricing/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('replaying compute_estimate\'s normalized engine_input keeps synthetic-lot provenance false', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      // compute_estimate synthesizes lotSqFt (4x home) and stamps
+      // lotSizeMeasured:false when no real lot was supplied — its returned
+      // engine_input carries BOTH, and the reprice must not flip provenance.
+      engineInputs: {
+        homeSqFt: 2000,
+        lotSqFt: 8000,
+        lotSizeMeasured: false,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    const insert = writes.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const estData = JSON.parse(insert.payload.estimate_data);
+    expect(estData.engineInputs.lotSizeMeasured).toBe(false);
+  });
+
+  test('a zero annual_total with positive monthly refuses — the fallback amount must not diverge from the claim', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      summary: { ...ENGINE_RESULT.summary, recurringAnnualAfterDiscount: 0 },
+    });
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      // The model faithfully passes compute's annual (0) — but the row would
+      // persist the monthly*12 fallback, so the write must refuse rather
+      // than store an amount the operator never saw.
+      engineResult: { monthlyTotal: 54.17, annualTotal: 0, oneTimeTotal: 0 },
+    });
+
+    expect(result.error).toMatch(/does not match the server reprice/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('a lead that moved to a different address after pricing refuses at the locked write', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+      lockedLead: {
+        id: 'lead-1',
+        customer_id: null,
+        estimate_id: null,
+        phone: '9415550100',
+        email: 'road@example.com',
+        address: '999 Other St',
+        city: 'Venice',
+        zip: '34285',
+      },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', PENDING_INPUT);
+
+    expect(result.error).toMatch(/address changed after pricing/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('accepts compute_estimate\'s snake_case totals passed unchanged', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineResult: { monthly_total: 54.17, annual_total: 650, onetime_total: 0, waveguard_tier: null },
+    });
+
+    expect(result.success).toBe(true);
+    const insert = writes.find((w) => w.table === 'estimates' && w.op === 'insert');
+    expect(insert.payload.monthly_total).toBe(54.17);
+  });
+});
