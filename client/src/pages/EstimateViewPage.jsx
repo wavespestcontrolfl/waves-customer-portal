@@ -3781,7 +3781,14 @@ function EstimateViewPageInner() {
     setAddServiceRequestState({ status: 'idle', message: '' });
   }, [token, addServiceOffer?.serviceKey]);
 
-  const loadEstimate = useCallback(async ({ preserveSelection = false, signal } = {}) => {
+  // Component-lifetime abort controller, owned by the fetch-on-mount effect
+  // below. EVERY loadEstimate call reads it — mount fetch, preference refresh,
+  // accept/reserve recovery, retry, extension refresh — so navigating away
+  // aborts whichever load is in flight, not just the mount-time one.
+  const lifetimeAbortRef = useRef(null);
+
+  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+    const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
     // skeleton — a failed refresh used to leave the skeleton up forever
@@ -3869,15 +3876,17 @@ function EstimateViewPageInner() {
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
 
-  // Fetch on mount. AbortController so a token change (which remounts this
-  // component) aborts the in-flight /data request — otherwise a late response
-  // for the previous token would still run loadEstimate's global side effects
-  // (setGlassDefault) after unmount. An AbortError is swallowed (not a load
-  // error) since the abort is deliberate.
+  // Fetch on mount. This effect owns the component-lifetime AbortController
+  // (lifetimeAbortRef): unmounting (= a token change, via the key={token}
+  // remount) aborts whichever /data request is in flight — otherwise a late
+  // response for the previous token would still run loadEstimate's global
+  // side effects (setGlassDefault) after unmount. An AbortError is swallowed
+  // (not a load error) since the abort is deliberate.
   useEffect(() => {
     const controller = new AbortController();
+    lifetimeAbortRef.current = controller;
     let cancelled = false;
-    loadEstimate({ signal: controller.signal }).catch((err) => {
+    loadEstimate().catch((err) => {
       if (!cancelled && err?.name !== 'AbortError') {
         setLoadError(true);
         setLoading(false);

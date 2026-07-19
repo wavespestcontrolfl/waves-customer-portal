@@ -5,7 +5,7 @@
 // PII under B's URL. The remount wrapper (key={token}) is what enforces this.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 let currentToken = 'token-A';
@@ -71,5 +71,36 @@ describe('EstimateViewPage token scoping', () => {
     rerender(<EstimateViewPage />);
 
     await waitFor(() => expect(signalsByToken['token-A'].aborted).toBe(true));
+  });
+
+  it('aborts a pending SECONDARY refresh (retry) on a token change, not just the mount fetch', async () => {
+    // Mount fetch for A fails → load-error screen; the retry is a non-mount
+    // loadEstimate() call site and must ride the same component-lifetime
+    // signal, or its late resolve could still run setGlassDefault for A
+    // after navigating to B.
+    let aCalls = 0;
+    let retrySignal;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const token = String(url).match(/\/estimates\/([^/]+)\/data/)?.[1];
+      if (token === 'token-A') {
+        aCalls += 1;
+        if (aCalls === 1) return Promise.reject(new Error('network down'));
+        retrySignal = opts.signal;
+        return new Promise(() => {}); // retry pending forever
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(<EstimateViewPage />);
+    const retryButton = await screen.findByRole('button', { name: 'Try again' });
+    fireEvent.click(retryButton);
+    await waitFor(() => expect(retrySignal).toBeInstanceOf(AbortSignal));
+    expect(retrySignal.aborted).toBe(false);
+
+    currentToken = 'token-B';
+    rerender(<EstimateViewPage />);
+
+    await waitFor(() => expect(retrySignal.aborted).toBe(true));
   });
 });
