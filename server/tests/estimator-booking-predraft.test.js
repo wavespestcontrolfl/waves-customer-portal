@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
       whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
       select() { return builder; },
+      forUpdate() { mockState.forUpdates.push(table); return builder; },
       first: async () => {
         if (mockState.firstError) { const e = mockState.firstError; mockState.firstError = null; throw e; }
         return mockState.firstQueue.length ? mockState.firstQueue.shift() : null;
@@ -102,7 +103,7 @@ const CUSTOMER = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], whereRaws: [], rawFragments: [], firstError: null };
+  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], whereRaws: [], rawFragments: [], forUpdates: [], firstError: null };
   process.env.GATE_ESTIMATOR_BOOKING_PREDRAFTS = 'true';
   mockEstimatorEngineEnabled.mockReturnValue(true);
   mockBlockDuplicate.mockResolvedValue(null);
@@ -185,7 +186,6 @@ describe('maybePreDraftForBooking — call delegation', () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
-      BOOKING({ source_call_log_id: 'call-7' }), // post-run linkage guard re-read
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
@@ -203,6 +203,14 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockState.updates[0].payload.estimate_data.__raw[1]).toEqual(['svc-1']);
     expect(mockState.whereRaws.some((w) => w.table === 'estimates'
       && w.args[0].includes("'scheduled_service_id') is null"))).toBe(true);
+    // The booking-liveness predicate is INSIDE the same statement — a
+    // separate check would race a cancellation committing between check
+    // and write (codex round 3).
+    const guard = mockState.whereRaws.find((w) => w.table === 'estimates' && w.args[0].includes('exists (select 1 from scheduled_services'));
+    expect(guard).toBeTruthy();
+    expect(guard.args[0]).toContain('source_estimate_id is null');
+    expect(guard.args[0]).toContain('status not in');
+    expect(guard.args[1]).toEqual(['svc-1', 'completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']);
   });
 
   test('a booking that died before the delegation starts never runs the engine', async () => {
@@ -215,18 +223,19 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
   });
 
-  test('a booking that died DURING the engine run keeps the draft but never links the dead visit', async () => {
+  test('a booking that dies DURING the engine run keeps the draft; the linkage UPDATE itself refuses dead visits', async () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation re-read: alive
-      BOOKING({ source_call_log_id: 'call-7', status: 'cancelled' }), // post-run: dead
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
-    // The quote was promised on the CALL — the draft stands; only the
-    // schedule linkage must not point at a dead row.
+    // The quote was promised on the CALL — the draft stands. The dead-visit
+    // exclusion is not a separate racy SELECT: the liveness predicate rides
+    // inside the linkage UPDATE statement (asserted in the happy-path test),
+    // so PostgreSQL evaluates it against committed state at write time.
     expect(result.drafted).toBe(true);
-    expect(mockState.updates).toHaveLength(0);
+    expect(mockState.updates).toHaveLength(1);
   });
 });
 
@@ -240,6 +249,9 @@ describe('maybePreDraftForBooking — shell path', () => {
     ];
     const result = await maybePreDraftForBooking('svc-1');
     expect(result.drafted).toBe(true);
+    // The in-lock re-read holds the booking row FOR UPDATE through the
+    // insert — booking mutations don't share the advisory lock.
+    expect(mockState.forUpdates).toContain('scheduled_services');
     expect(mockState.inserts).toHaveLength(1);
     const row = mockState.inserts[0].payload;
     expect(row.source).toBe('booking_assessment');

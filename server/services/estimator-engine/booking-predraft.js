@@ -73,12 +73,20 @@ async function isAssessmentBooking(booking) {
 // read-modify-write of the whole blob could overwrite a concurrent admin
 // revision's estimate_data with a stale snapshot (quote data loss). An
 // existing linkage (the call pipeline stitches this key when one call
-// produced both rows) wins via the predicate. Fail-soft.
+// produced both rows) wins via the predicate. The booking-liveness
+// predicate rides INSIDE the same statement — a separate SELECT would race
+// a cancellation committing between check and write, leaving the draft
+// linked to a dead visit. Fail-soft.
 async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   try {
+    const terminals = [...TERMINAL_BOOKING_STATUSES];
     await db('estimates')
       .where({ id: estimateId })
       .whereRaw("(estimate_data ->> 'scheduled_service_id') is null")
+      .whereRaw(
+        `exists (select 1 from scheduled_services ss where ss.id = ? and ss.source_estimate_id is null and ss.status not in (${terminals.map(() => '?').join(', ')}))`,
+        [String(scheduledServiceId), ...terminals],
+      )
       .update({
         estimate_data: db.raw(
           "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{scheduled_service_id}', to_jsonb(?::text))",
@@ -130,22 +138,13 @@ async function maybePreDraftForBooking(scheduledServiceId) {
         // scheduled_service_id so the draft gets the exact schedule badge
         // and the booking-link collision guard sees it (existing linkage,
         // e.g. call-pipeline stitching, is never clobbered). The visit can
-        // also die DURING the composer run: re-check before stitching so a
-        // dead visit is never linked. The draft itself deliberately stands
-        // either way — the quote was promised on the CALL, and cancelling
-        // the visit does not cancel the caller's pricing request; only the
-        // booking linkage (schedule badge + per-booking idempotency key)
-        // must not point at a dead row.
-        const postRun = await db('scheduled_services').where({ id: booking.id }).first();
-        const postRunDead = !postRun || TERMINAL_BOOKING_STATUSES.has(String(postRun.status || ''));
-        if (!postRunDead) {
-          await linkEstimateToBooking(outcome.estimateId, booking.id);
-        } else {
-          logger.info('[booking-predraft] booking went terminal during engine run — draft kept, linkage skipped', {
-            scheduledServiceId: booking.id,
-            estimateId: outcome.estimateId,
-          });
-        }
+        // also die DURING the composer run: the linkage statement itself
+        // carries the booking-liveness predicate (atomic — a separate
+        // check would race the cancellation), so a dead visit is never
+        // linked. The draft deliberately stands either way — the quote was
+        // promised on the CALL, and cancelling the visit does not cancel
+        // the caller's pricing request.
+        await linkEstimateToBooking(outcome.estimateId, booking.id);
       }
       return {
         drafted: outcome?.created === true,
@@ -211,8 +210,11 @@ async function maybePreDraftForBooking(scheduledServiceId) {
       // The pre-lock status read is stale by now if the booking was
       // cancelled/rescheduled (or became estimate-born) while this detached
       // worker waited on the lock — a draft must never seed off a dead
-      // visit. The in-lock re-read is authoritative.
-      const freshBooking = await trx('scheduled_services').where({ id: booking.id }).first();
+      // visit. FOR UPDATE makes the re-read authoritative THROUGH the
+      // insert: booking mutations don't share our advisory lock, so without
+      // the row lock a cancellation could commit between this check and the
+      // insert below.
+      const freshBooking = await trx('scheduled_services').where({ id: booking.id }).forUpdate().first();
       if (!freshBooking) return { drafted: false, skipped: 'booking_not_found' };
       if (TERMINAL_BOOKING_STATUSES.has(String(freshBooking.status || ''))) {
         return { drafted: false, skipped: 'booking_terminal' };
