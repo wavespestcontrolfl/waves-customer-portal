@@ -7169,24 +7169,25 @@ async function handleEstimateView(req, res, next) {
     const requestIp = clientIp(req);
     const countThisView = shouldCountView(req, requestIp, estimate);
     if (countThisView) {
-      try {
-        await db('estimates').where({ id: estimate.id }).update({
-          view_count: db.raw('COALESCE(view_count, 0) + 1'),
-          last_viewed_at: db.fn.now(),
-        });
-      } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
-
-      // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
-      // Wrapped so a schema drift can't break the public estimate page.
+      // ONE transaction for the counter + the per-open row (Estimates v2 spec
+      // §4) — separate writes let a single failure leave view_count diverged
+      // from COUNT(estimate_views) forever (dashboard vs engagement engine).
+      // Still wrapped so schema drift can't break the public estimate page.
       try {
         const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db('estimate_views').insert({
-          estimate_id: estimate.id,
-          viewed_at: db.fn.now(),
-          ip: requestIp || null,
-          user_agent: ua || null,
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: requestIp || null,
+            user_agent: ua || null,
+          });
         });
-      } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+      } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook: a real customer open may complete a
       // qualifying session boundary (return visit / dark-then-return /
@@ -9840,7 +9841,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
 
-    logger.info(`[estimate] ${estimate.customer_name} selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
+    logger.info(`[estimate] ${estimate.id}: selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
     res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
   } catch (err) { next(err); }
 });
@@ -9990,7 +9991,7 @@ router.put('/:token/preferences', async (req, res, next) => {
 
     const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeManualAndPrefs) * 100) / 100);
 
-    logger.info(`[estimate] ${estimate.customer_name} toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
+    logger.info(`[estimate] ${estimate.id}: toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
     res.json({
       success: true,
       preferences: nextPrefs,
@@ -15957,6 +15958,11 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
   } catch (err) { next(err); }
 });
 
+// In-process SMS send claims for /:token/service-details/send —
+// estimate:service:phone → epoch ms. See the dedup comment at the SMS branch.
+const serviceDetailsSmsClaims = new Map();
+const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
+
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -16039,13 +16045,124 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
     const TwilioService = require('../services/twilio');
-    const smsResult = await TwilioService.sendSMS(
-      contact.customerPhone,
-      `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
-      { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
-    );
-    if (!smsResult?.success) return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
-    return res.json({ ok: true, channel: 'sms' });
+    // Retry/retap dedup, scoped to THIS estimate+service+recipient: the email
+    // branch is idempotency-keyed per day, but TwilioService has no
+    // idempotency support, so a double-tap or client retry would stack
+    // duplicate packet texts. The in-process claim is set SYNCHRONOUSLY
+    // before any await, so concurrent requests on this replica (the deploy
+    // runs one) can never both pass it — no DB lock is held across the
+    // external Twilio call. A failed send releases the claim so a retry
+    // works. The sms_log check (strpos on the deterministic pdfUrl — unique
+    // per estimate+service, underscore-safe; never a different packet)
+    // covers restarts, best-effort: its failure never blocks the send.
+    const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
+    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
+    if (priorClaim?.promise) {
+      // A send for this exact packet is in flight — share ITS outcome rather
+      // than declaring success for a text that may still fail.
+      const shared = await priorClaim.promise.catch(() => null);
+      if (shared?.success) return res.json({ ok: true, channel: 'sms', deduped: true });
+      return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
+    }
+    if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
+      return res.json({ ok: true, channel: 'sms', deduped: true });
+    }
+    // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
+    // upsert — no bucket edges) covers rolling-deploy overlap and any future
+    // multi-replica config, where the Map only covers one process.
+    const claimKey = dedupKey;
+    const recentPacketSend = async () => db('sms_log')
+      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+      .whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+      .whereRaw("created_at >= NOW() - interval '10 minutes'")
+      .first();
+    const sendPromise = (async () => {
+      // Claim acquired = fresh insert OR takeover of a claim older than the
+      // window (a crashed winner never blocks forever). Claim-infra failure
+      // fails OPEN to sending — dedup is protection, not a send gate.
+      let claimAcquired = true;
+      try {
+        const claim = await db.raw(
+          `INSERT INTO sms_send_claims (claim_key) VALUES (?)
+           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+           WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
+           RETURNING id`,
+          [claimKey],
+        );
+        claimAcquired = (claim.rows || []).length > 0;
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim skipped: ${e.message}`); }
+      if (!claimAcquired) {
+        // Another process holds a live claim. Only DURABLE proof (the
+        // winner's sms_log row) earns a deduped success — a still-in-flight
+        // or failed winner must NOT be reported as sent, so poll briefly and
+        // otherwise return a retryable failure.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await new Promise((resolve) => { setTimeout(resolve, 1500); });
+          try {
+            if (tenDigits.length === 10 && await recentPacketSend()) {
+              return { success: true, deduped: true };
+            }
+          } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup poll skipped: ${e.message}`); }
+        }
+        return { success: false, claimHeldElsewhere: true };
+      }
+      // Cross-restart cover (a pre-restart send has a log row but no Map
+      // entry; its claim row was taken over above), best-effort — a dedup
+      // query failure never blocks the send.
+      try {
+        if (tenDigits.length === 10 && await recentPacketSend()) {
+          return { success: true, deduped: true };
+        }
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      return TwilioService.sendSMS(
+        contact.customerPhone,
+        `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
+      );
+    })();
+    serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
+    const releaseClaims = () => {
+      serviceDetailsSmsClaims.delete(dedupKey);
+      // Fire-and-forget: a failed send must not stay claimed for the rest of
+      // the bucket, or the customer's real retry silently no-ops.
+      db('sms_send_claims').where({ claim_key: claimKey }).del()
+        .catch((e) => logger.warn(`[estimate-public] service-details SMS claim release failed: ${e.message}`));
+    };
+    let smsResult;
+    try {
+      smsResult = await sendPromise;
+    } catch (err) {
+      // Provider throw: release the claims so a real retry can send, then
+      // keep the route's pre-dedup error contract (500 via the outer handler).
+      releaseClaims();
+      throw err;
+    }
+    if (!smsResult?.success) {
+      // Never release a claim we never held — deleting the WINNER's live
+      // claim would reopen the duplicate window it is guarding.
+      if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
+      else releaseClaims();
+      return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
+    }
+    // Confirmed success only: start the dedup window and prune stale entries
+    // (Map here; expired claim rows fire-and-forget — one row per send, so a
+    // daily horizon keeps the table trivial).
+    const sentAt = Date.now();
+    serviceDetailsSmsClaims.set(dedupKey, { sentAt });
+    if (serviceDetailsSmsClaims.size > 500) {
+      for (const [key, claim] of serviceDetailsSmsClaims) {
+        if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
+          serviceDetailsSmsClaims.delete(key);
+        }
+      }
+    }
+    void db('sms_send_claims')
+      .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
+      .del()
+      .catch(() => {});
+    return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -16086,8 +16203,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // send_failed / archived rows stay 404 even for staff, and every view
     // side effect below is skipped — a preview must not count views or flip
     // a draft's status.
-    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+    // Verified staff preview, independent of publish status: a staff
+    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
+    // Bearer) must not count as a customer view or fire first-view side
+    // effects — without this, previewing from a device without the marker
+    // cookie and off the admin IP inflates view_count and pings the
+    // "Estimate viewed" notification. adminDraftPreview stays the narrow
+    // unpublished-only gate for serving drafts + the payload flag. (The
+    // legacy SSR path can't get this guard: full-page navigations carry no
+    // Bearer header, so it stays on the cookie/IP heuristics.)
+    const verifiedStaffPreview = req.query.adminPreview === '1'
       && Boolean(await verifyStaffBearer(req));
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && verifiedStaffPreview;
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
@@ -16116,23 +16244,28 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
-      try {
-        await db('estimates').where({ id: estimate.id }).update({
-          view_count: db.raw('COALESCE(view_count, 0) + 1'),
-          last_viewed_at: db.fn.now(),
-        });
-      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
-
+    if (!verifiedStaffPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
+      // ONE transaction for the aggregate counter + the per-open row: written
+      // separately, a failure of either half leaves view_count permanently
+      // diverged from COUNT(estimate_views) — the dashboard count and the
+      // engagement engine (which sessionizes off estimate_views) would then
+      // disagree forever. Still one defensive catch so schema drift or a
+      // locked row never breaks the customer-facing endpoint.
       try {
         const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db('estimate_views').insert({
-          estimate_id: estimate.id,
-          viewed_at: db.fn.now(),
-          ip: ip || null,
-          user_agent: ua || null,
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: ip || null,
+            user_agent: ua || null,
+          });
         });
-      } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook — same contract as the legacy HTML view
       // site: fire-and-forget, never blocks the response.
@@ -16148,7 +16281,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // The staff draft preview is hard-excluded above IP/UA heuristics: the
     // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
     // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!verifiedStaffPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
