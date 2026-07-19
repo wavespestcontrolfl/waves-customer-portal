@@ -274,6 +274,31 @@ describe("collectMarginReviewNotes — standing lawn margin (no discount) — co
     const notes = collectMarginReviewNotes(est);
     expect(notes.filter((n) => n.startsWith("Lawn Care")).length).toBe(1);
   });
+
+  it("normalizes a raw-service-key WaveGuard lawn warning so the dedupe catches it (codex P3 round 13 #2827)", () => {
+    // Server-engine warnings carry messages starting "lawn_care …" — the
+    // typed branch must normalize them to the Lawn Care label so a thin
+    // WaveGuard-discounted lawn line yields exactly ONE review note.
+    const notes = collectMarginReviewNotes({
+      recurring: {
+        marginWarnings: [{
+          service: "lawn_care",
+          type: "waveguard_discount_below_margin_floor",
+          margin: 0.31,
+          marginFloor: 0.35,
+          finalAnnual: 546,
+          message: "lawn_care: WaveGuard discount drops collected margin to 31.0% (below the 35% review floor) — price stands as discounted.",
+        }],
+      },
+      results: {
+        lawn: [{ recommended: true, ann: 546, costs: { total: 380 } }],
+      },
+    });
+    const lawnNotes = notes.filter((n) => n.startsWith("Lawn Care"));
+    expect(lawnNotes.length).toBe(1);
+    expect(lawnNotes[0]).toContain("WaveGuard");
+    expect(lawnNotes[0]).toContain("35%");
+  });
 });
 
 describe("collectMarginReviewNotes — report-only low-margin signals for the estimator panel", () => {

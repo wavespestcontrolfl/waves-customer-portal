@@ -452,6 +452,17 @@ export function collectMarginReviewNotes(E) {
       notes.push(
         `${label(w.service)}: manual discount takes the collected annual to ${finalAnn || "below the program-floor reference"}${floorAnn ? ` — under the ${floorAnn} program-floor reference` : ""}.`,
       );
+    } else if (w.type === "waveguard_discount_below_margin_floor") {
+      // Normalized like the manual branch — server-emitted messages start
+      // with the raw service key ("lawn_care …"), which would slip past the
+      // standing-lawn dedupe below and double-note a thin WaveGuard lawn
+      // line (codex P3 round 13 on #2827).
+      const m = pct(w.margin);
+      const floorRatio = Number(w.marginFloor);
+      const floorLabel = Number.isFinite(floorRatio) ? `${Math.round(floorRatio * 100)}%` : null;
+      notes.push(
+        `${label(w.service)}: WaveGuard discount drops collected margin to ${m || "below target"}${floorLabel ? ` (below the ${floorLabel} review floor)` : ""} — price stands as discounted.`,
+      );
     } else if (w.message) {
       notes.push(String(w.message));
     }
