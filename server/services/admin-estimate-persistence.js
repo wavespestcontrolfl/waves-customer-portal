@@ -99,6 +99,9 @@ function estimateResultRoot(estimateData) {
 const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
 // round(89 × v1 mult) per cadence — the exact values the client literal produces.
 const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+// The client fallback's own cadence multipliers (pestFrequencyTiers ft.disc)
+// — used to recognize CONFIGURED-floor client stamps below.
+const CLIENT_PEST_V1_MULTS = { 4: 1.0, 6: 0.85, 12: 0.7 };
 function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
   if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
   if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
@@ -127,11 +130,28 @@ function normalizeClientPestFloorMetadata(estimateData) {
     ? pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn))
     : 0;
 
+  // The client fallback stamps its resolved per-visit floor into
+  // pricingMetadata (post round-9 #2827): a floorPa equal to round(that
+  // base × the client's v1 cadence mult) is a CLIENT stamp even when
+  // pest_base.floor is configured away from 89 — without this, a config
+  // change between fallback calculation and save would preserve stale
+  // client floor metadata as if it were a server snapshot (codex P2
+  // round 11). The 89-literal set still covers pre-stamp client saves.
+  const clientFloorBase = Number(root?.pricingMetadata?.pestProgramFloorPerVisit);
+  const clientStampForRow = (row) => {
+    const mult = CLIENT_PEST_V1_MULTS[Number(row.apps ?? row.v)];
+    if (!mult || !Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return null;
+    return Math.round(clientFloorBase * mult * 100) / 100;
+  };
+
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
-    const isClientStamped = hasMetadata && CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa);
+    const isClientStamped = hasMetadata && (
+      CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
+      || (isClientEngineResult && stampedPa === clientStampForRow(row))
+    );
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
     // Metadata-less rows get stamped only on client-engine payloads, where the
     // totals correction below applies the matching lift. Stamping a legacy

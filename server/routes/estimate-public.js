@@ -12773,7 +12773,26 @@ function estimateLawnFloorArmed(estData = {}) {
   }
   const engineInputs = rawEngineInputs(estData) || {};
   const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
-  return stored == null ? null : !!stored;
+  if (stored != null) return !!stored;
+  // Legacy engine-backed saves ({ engineInputs, engineResult }, pre-stamp,
+  // no explicit flag): the stored engine rows are the only evidence the
+  // quote was cost-floor priced — same enforcement-stamp rule as the v1
+  // ladder path (lawnRowsShowFloorEnforcement: reporting fields are NOT
+  // evidence). Without this, extractEngineInputs replays an already-sent
+  // floor-priced estimate under the current disarmed default and lowers
+  // view/accept (codex P2 round 11 on #2827). Evidence only arms — its
+  // absence stays null (tri-state preserved; caller falls to the global).
+  const engineRows = [];
+  for (const li of [
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+    ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
+  ]) {
+    if ((li?.service || '') !== 'lawn_care') continue;
+    engineRows.push(li);
+    if (Array.isArray(li.tiers)) engineRows.push(...li.tiers);
+  }
+  if (engineRows.length && lawnRowsShowFloorEnforcement(engineRows)) return true;
+  return null;
 }
 
 // Legacy pre-disarm estimates (engine armed the cost floor by default, so
@@ -13069,6 +13088,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
       const rawPerTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
+      // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
+      // stored rows persist the same cadence floor under prov.costFloorAnnual
+      // (v1-legacy-mapper) — both paths must clamp at it when armed.
+      const rowMarginFloorAnnual = finiteNumberOrNull(
+        row.marginFloorAnnual
+        ?? row.prov?.minimumCollectedAnnualPrice
+        ?? row.prov?.costFloorAnnual
+        ?? row.costFloorAnnual,
+      );
       const {
         monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed, flooredAtMinimum,
       } = clampLawnLadderEntry({
@@ -13078,15 +13106,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment: rawPerTreatment,
         visits,
         manualDiscount: rawManualDiscountForTier,
-        // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
-        // stored rows persist the same cadence floor under prov.costFloorAnnual
-        // (v1-legacy-mapper) — both paths must clamp at it when armed.
-        marginFloorAnnual: finiteNumberOrNull(
-          row.marginFloorAnnual
-          ?? row.prov?.minimumCollectedAnnualPrice
-          ?? row.prov?.costFloorAnnual
-          ?? row.costFloorAnnual,
-        ),
+        marginFloorAnnual: rowMarginFloorAnnual,
         marginFloorArmed,
         programMinMonthly,
       });
@@ -13109,6 +13129,13 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         billingFrequencyKey: 'monthly',
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
+        // Armed margin floor rides the entry so downstream repricers (the
+        // split-section ladder) clamp the same way this ladder does — a
+        // section card must never offer a cadence below the floor the
+        // combo/accept path collects (codex P2 round 11 on #2827).
+        ...(marginFloorArmed && rowMarginFloorAnnual > 0
+          ? { marginFloorMonthly: roundMonthly(rowMarginFloorAnnual / 12) }
+          : {}),
         flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14408,7 +14435,16 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
     const discounted = roundMonthly(base * (1 - d));
-    const monthly = Math.max(discounted, sectionMinMonthly);
+    // Armed margin floor rides the entry (lawnFrequenciesFromRows) — clamp
+    // the section card the same way the combo/accept path does, capped at
+    // the authored base (never re-prices, only undiscounts) — codex P2
+    // round 11 on #2827.
+    const entryMarginFloor = Number(e.marginFloorMonthly) || 0;
+    const entryFloor = Math.max(
+      sectionMinMonthly,
+      entryMarginFloor > 0 ? Math.min(base, entryMarginFloor) : 0,
+    );
+    const monthly = Math.max(discounted, entryFloor);
     const visits = Number(e.visitsPerYear) || null;
     const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
     return {
@@ -14419,7 +14455,7 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
       manualDiscount: null,
       // Floor-pinned either upstream (engine/program-minimum on the stored
       // row) or here, where the WaveGuard % dropped the tier below the floor.
-      flooredAtMinimum: e.flooredAtMinimum === true || (sectionMinMonthly > 0 && discounted < sectionMinMonthly),
+      flooredAtMinimum: e.flooredAtMinimum === true || (entryFloor > 0 && discounted < entryFloor),
       perServiceTreatments: Array.isArray(e.perServiceTreatments)
         ? e.perServiceTreatments.map((r) => ({ ...r, perTreatment, displayPrice: perTreatment }))
         : [],

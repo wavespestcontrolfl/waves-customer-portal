@@ -291,6 +291,33 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
   });
 
+  test('recognizes CONFIGURED-floor client stamps via the pricingMetadata base (codex P2 round 11 #2827)', () => {
+    // A fallback quote priced under a configured $79 floor stamps
+    // 79/67.15/55.30 + pricingMetadata.pestProgramFloorPerVisit: 79. If the
+    // live floor moves to $95 before save, those rows are still CLIENT
+    // stamps (not server snapshots) and must restamp to the live 95 basis.
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95;
+    const estData = {
+      result: {
+        pricingMetadata: { pestProgramFloorArmed: true, pestProgramFloorPerVisit: 79 },
+        recurring: { pestProgramFloorApplied: false, discount: 0 },
+        results: {
+          pestTiers: [
+            { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
+            { pa: 80.75, apps: 6, ann: 484.50, mo: 40.38, label: 'Bi-Monthly', floorPa: 67.15, floorAnn: 402.90, floorMo: 33.58 },
+          ],
+          pest: { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
+        },
+      },
+    };
+    normalizeClientPestFloorMetadata(estData);
+    const [q, b] = estData.result.results.pestTiers;
+    expect(q).toMatchObject({ floorPa: 95, floorAnn: 380 });
+    expect(b).toMatchObject({ floorPa: 80.75, floorAnn: 484.50 });
+    expect(estData.result.results.pest).toMatchObject({ floorPa: 95, floorAnn: 380 });
+  });
+
   test('kill switch off strips the client-stamped floors entirely', () => {
     constants.PEST.enforceFloorPostDiscount = false;
     const estData = clientStampedEstData();

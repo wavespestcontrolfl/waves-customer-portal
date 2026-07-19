@@ -716,6 +716,23 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       .toBeCloseTo(49.5, 2);
   });
 
+  test('legacy engine-backed saves arm from COST_FLOOR evidence in the stored engineResult (codex P2 round 11 #2827)', () => {
+    // { engineInputs, engineResult } saves made pre-stamp with no explicit
+    // flag: the stored engine rows are the only floor evidence. The arm
+    // resolver scans them, so the ladder (and the replay injection) clamps
+    // instead of repricing under the current disarmed default.
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      engineInputs: { services: { lawn: { track: 'st_augustine' } } },
+      engineResult: {
+        lineItems: [{
+          service: 'lawn_care',
+          tiers: [{ tier: 'enhanced', pricingSource: 'COST_FLOOR', costFloorApplied: true }],
+        }],
+      },
+    });
+    expect(Object.fromEntries(freqs.map((f) => [f.key, f])).standard.monthly).toBeCloseTo(53.34, 2);
+  });
+
   test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
     // Pre-disarm saves never persisted the flag (the engine armed by
     // default) — the evidence is the enforcement stamps on the stored rows.

@@ -308,6 +308,40 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
     for (const e of ladder) expect(e.manualDiscount).toBeNull();
   });
 
+  test('a re-armed margin floor clamps the section card like the combo path (codex P2 round 11 #2827)', () => {
+    // Rows carry costFloorAnnual for reporting on every quote; with the
+    // estimate ARMED (pricingMetadata stamp) the entry's own floor rides
+    // the ladder (marginFloorMonthly) and the section reprice clamps at it
+    // — capped at the authored base (undiscounts, never re-prices).
+    const estData = {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      results: {
+        lawn: [
+          { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, costFloorAnnual: 516 },
+          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 850 },
+          { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, costFloorAnnual: 516 },
+        ],
+      },
+    };
+    const ladder = bundleSectionLadderForService('lawn_care', estData, lawnSvc, 0.10);
+    const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
+    // Standard: 45.5 × 0.9 = 40.95 → clamped at 516/12 = 43.
+    expect(byKey.standard.monthly).toBe(43);
+    expect(byKey.standard.flooredAtMinimum).toBe(true);
+    // Enhanced: floor 850/12 = 70.83 ABOVE the 66.75 stored monthly — the
+    // upstream ladder's armed re-clamp (clampLawnLadderEntry, #2795
+    // save==accept semantics) already lifted the ENTRY to its floor, and
+    // the section inherits that base: the card shows exactly what accept
+    // collects.
+    expect(byKey.enhanced.monthly).toBe(70.83);
+    // Premium: 89 × 0.9 = 80.1 sits above its 43 floor — untouched.
+    expect(byKey.premium.monthly).toBe(80.1);
+
+    // Disarmed (no stamp): same rows reprice with the full discount.
+    const disarmed = bundleSectionLadderForService('lawn_care', { results: estData.results }, lawnSvc, 0.10);
+    expect(Object.fromEntries(disarmed.map((e) => [e.key, e])).standard.monthly).toBe(40.95);
+  });
+
   test('no discount applied when the rate is 0 (Bronze / single-service)', () => {
     const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
