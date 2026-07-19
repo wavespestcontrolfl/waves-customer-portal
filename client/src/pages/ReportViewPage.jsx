@@ -3653,11 +3653,39 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
   );
 }
 
+// Technician-traced treatment perimeter (Treatment Zone Mapper): the tech
+// traced the treated line over a live satellite photo in the field, and the
+// server stored the composited snapshot (imagery attribution is baked into
+// the image). When present it replaces the generic schematic drawing as the
+// report's coverage map.
+function TracedTreatmentZoneMap({ traced }) {
+  if (!traced?.snapshotUrl) return null;
+  const caption = [
+    traced.label || 'Treated perimeter traced on-site by your technician.',
+    traced.linearFt ? `${traced.linearFt} linear ft treated.` : null,
+  ].filter(Boolean).join(' ');
+  return (
+    <div className="service-coverage-map-panel">
+      <div className="service-coverage-map traced-zone-map">
+        {/* Eager on purpose: the PDF renderer prints without scrolling, so a
+            native-lazy image below the fold could render blank in PDFs. */}
+        <img
+          className="traced-zone-image"
+          src={traced.snapshotUrl}
+          alt="Satellite photo of the property with the treated perimeter highlighted"
+        />
+      </div>
+      <p className="traced-zone-caption">{caption}</p>
+    </div>
+  );
+}
+
 function ServiceCoverageCard({
   coverage,
   evidenceLevel,
   mapBackgroundUrl,
   mapAttribution,
+  tracedMap = null,
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
@@ -3682,15 +3710,25 @@ function ServiceCoverageCard({
     return representative?.id || items[0]?.id || null;
   }, [items]);
 
-  if (!coverage?.enabled) return null;
+  // A technician-traced map stands on its own: it renders even when the
+  // zone-coverage config is absent/disabled for this service line (the traced
+  // snapshot IS the coverage artifact). Everything zone-driven (summary,
+  // list, schematic) still requires coverage.enabled.
+  const covEnabled = Boolean(coverage?.enabled);
+  const showTraced = Boolean(tracedMap?.snapshotUrl);
+  if (!covEnabled && !showTraced) return null;
 
-  const showSummary = coverage.settings?.showSummaryCounts !== false;
-  const showList = coverage.settings?.showList !== false && items.length > 0;
-  const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
+  const showSummary = covEnabled && coverage.settings?.showSummaryCounts !== false;
+  const showList = covEnabled && coverage.settings?.showList !== false && items.length > 0;
+  // settings.showMap exists to suppress the GENERIC map when no
+  // technician-marked data would render — a traced satellite snapshot IS
+  // technician-marked data, so it bypasses that toggle.
+  const showMap = showTraced
+    || (covEnabled && coverage.settings?.showMap !== false && coverage.map?.available);
   const activeId = activeItemId || initialActiveId;
   const meta = [
-    coverage.address,
-    coverage.serviceDate ? formatDate(coverage.serviceDate) : null,
+    coverage?.address,
+    coverage?.serviceDate ? formatDate(coverage.serviceDate) : null,
   ].filter(Boolean);
 
   if (!showList && !showMap) {
@@ -3698,8 +3736,8 @@ function ServiceCoverageCard({
       <section data-glass="card" className="sr-section service-coverage-section" id="service-coverage">
         <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
         <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
-        <h2>{coverage.title || 'Service Area Map'}</h2>
-          <div className="coverage-empty-state">{coverage.unavailableText || 'Service coverage details were not recorded for this visit.'}</div>
+        <h2>{coverage?.title || 'Service Area Map'}</h2>
+          <div className="coverage-empty-state">{coverage?.unavailableText || 'Service coverage details were not recorded for this visit.'}</div>
       </section>
     );
   }
@@ -3710,8 +3748,8 @@ function ServiceCoverageCard({
       <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
       <div className="coverage-section-header">
         <div>
-          <h2>{coverage.title || 'Service Area Map'}</h2>
-          <p className="map-context-copy">{coverage.intro || coverage.introText || DEFAULT_SERVICE_COVERAGE_COPY.introByServiceLine.default}</p>
+          <h2>{coverage?.title || 'Service Area Map'}</h2>
+          <p className="map-context-copy">{coverage?.intro || coverage?.introText || DEFAULT_SERVICE_COVERAGE_COPY.introByServiceLine.default}</p>
         </div>
         {meta.length > 0 && (
           <div className="coverage-map-meta" aria-label="Service coverage context">
@@ -3725,15 +3763,19 @@ function ServiceCoverageCard({
       {showMap || showList ? (
         <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
           {showMap ? (
-            <ServiceCoverageMap
-              coverage={coverage}
-              evidenceLevel={evidenceLevel}
-              mapBackgroundUrl={mapBackgroundUrl}
-              mapAttribution={mapAttribution}
-              activeItemId={activeId}
-              onActivate={setActiveItemId}
-              hasStatusText={showList}
-            />
+            showTraced ? (
+              <TracedTreatmentZoneMap traced={tracedMap} />
+            ) : (
+              <ServiceCoverageMap
+                coverage={coverage}
+                evidenceLevel={evidenceLevel}
+                mapBackgroundUrl={mapBackgroundUrl}
+                mapAttribution={mapAttribution}
+                activeItemId={activeId}
+                onActivate={setActiveItemId}
+                hasStatusText={showList}
+              />
+            )
           ) : (
             <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
           )}
@@ -3750,7 +3792,7 @@ function ServiceCoverageCard({
         </div>
       ) : null}
 
-      <p className="map-footnote">{coverage.disclaimer || DEFAULT_SERVICE_COVERAGE_COPY.disclaimerText}</p>
+      <p className="map-footnote">{coverage?.disclaimer || DEFAULT_SERVICE_COVERAGE_COPY.disclaimerText}</p>
     </section>
   );
 }
@@ -4748,11 +4790,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
   // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
   // hides it too (the "Where we protected" diagram replaces the lettered map).
-  const hideCoverageCard = data.serviceLine === 'lawn'
+  // A technician-traced satellite map overrides every hide: it is the real
+  // photo of THIS property's treated perimeter, which beats any generic
+  // diagram (that replacement is the Treatment Zone Mapper's whole point).
+  const hideCoverageCard = (data.serviceLine === 'lawn'
     || /tree|shrub/.test(String(data.serviceLine || ''))
     || Boolean(data.pestReportV2)
     // Mosquito V2's habitat diagram replaces the lettered map the same way.
-    || Boolean(data.mosquitoReportV2);
+    || Boolean(data.mosquitoReportV2))
+    && !data.treatmentMap?.traced?.snapshotUrl;
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
@@ -5521,6 +5567,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background-image: linear-gradient(rgba(255,255,255,.14), rgba(255,255,255,.22)), var(--coverage-map-image);
           background-size: cover;
           background-position: center;
+        }
+        .service-coverage-map.traced-zone-map {
+          aspect-ratio: 4 / 3;
+        }
+        .traced-zone-image {
+          display: block;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        .traced-zone-caption {
+          margin: 8px 0 0;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.4;
         }
         .coverage-map-svg {
           display: block;
@@ -7953,6 +8014,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <AppliedProductsSection data={data} mode={mode} />
         )}
 
+        {/* V2 lead layouts (lawn/tree-shrub reportV2) skip the lower coverage
+            mount entirely, so a technician-traced map gets its own mount here —
+            otherwise saved traces would silently vanish from these reports.
+            Mutually exclusive with the !isV2LeadLayout mount below, so the
+            #map id never duplicates. */}
+        {isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
+          <div id="map">
+            <ServiceCoverageCard
+              coverage={serviceCoverage}
+              evidenceLevel={data.evidenceLevel}
+              mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+              mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+              tracedMap={data.treatmentMap?.traced || null}
+              applications={data.applications || []}
+            />
+          </div>
+        )}
+
         <TypedFindingsCard typedReport={data.typedReport} />
 
         <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
@@ -8060,6 +8139,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+              tracedMap={data.treatmentMap?.traced || null}
               applications={data.applications || []}
             />
           </div>

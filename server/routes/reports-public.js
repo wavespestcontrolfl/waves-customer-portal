@@ -140,6 +140,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -1213,8 +1214,11 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // Treatment-zone key component: gate flips and re-traces change the
+      // key so cached PDFs re-render with/without the traced map.
+      const tzSignature = await treatmentZonePdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1268,7 +1272,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
