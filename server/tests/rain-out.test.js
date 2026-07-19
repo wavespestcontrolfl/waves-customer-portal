@@ -314,9 +314,12 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
-    test('a missing v2 template falls back to the legacy row with legacy variables', async () => {
-      wireSingle();
-      // v2 render nulls (e.g. rolled-back migration) → legacy render used.
+    test('an ABSENT v2 template row falls back to the legacy row with legacy variables', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls and the row is truly gone (rolled-back migration).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
+      });
       renderSmsTemplate.mockResolvedValueOnce(null);
 
       const result = await RainOut.commit({
@@ -334,6 +337,29 @@ describe('rain-out service', () => {
       const legacyVars = renderSmsTemplate.mock.calls[1][1];
       expect(legacyVars.weather_phrase).toBe('heavy rain');
       expect(legacyVars.weather_lead).toBeUndefined();
+    });
+
+    test('a DISABLED v2 template row is the kill switch — no legacy reroute, no SMS', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls but the row EXISTS (admin disabled it).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ id: 'tpl-v2' }) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // The move still commits; the send is stopped, not rerouted.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('no reschedule token falls back to a reply-to-adjust clause', async () => {

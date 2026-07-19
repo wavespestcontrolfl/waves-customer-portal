@@ -449,11 +449,11 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
 
   // rain_out_moved_v2 is the forecast-grounded template this PR's
   // migration seeds; the legacy rain_out_moved row stays untouched so an
-  // older server (or a rolled-back deploy) keeps rendering it. If v2 is
-  // missing/inactive — a rolled-back migration — fall back to the legacy
-  // row with legacy variables: old copy, but the customer still gets a
-  // text. The legacy row is retired in the cleanup PR once this deploy
-  // is verified.
+  // older server (or a rolled-back deploy) keeps rendering it. The legacy
+  // fallback fires ONLY when the v2 ROW is absent (a rolled-back
+  // migration) — an existing-but-disabled v2 row is the ops kill switch
+  // and must stop the send, not reroute it to old copy. The legacy row
+  // is retired in the cleanup PR once this deploy is verified.
   let body = await renderSmsTemplate('rain_out_moved_v2', {
     ...sharedVars,
     weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
@@ -464,13 +464,16 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
   }, renderContext);
   if (!body) {
-    body = await renderSmsTemplate('rain_out_moved', {
-      ...sharedVars,
-      weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
-    }, renderContext);
+    const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
+    if (!v2Row) {
+      body = await renderSmsTemplate('rain_out_moved', {
+        ...sharedVars,
+        weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
+      }, renderContext);
+    }
   }
   if (!body) {
-    logger.warn(`[rain-out] rain_out_moved templates missing/disabled — moved ${serviceId} without SMS`);
+    logger.warn(`[rain-out] rain-out template missing/disabled — moved ${serviceId} without SMS`);
     return { sent: false, reason: 'missing_template' };
   }
 

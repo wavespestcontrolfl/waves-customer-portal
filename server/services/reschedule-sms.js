@@ -38,33 +38,46 @@ class RescheduleSMS {
       .where({ customer_id: customerId })
       .whereNull('customer_response')
       .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
-      .orderBy('created_at', 'desc')
-      .limit(5);
+      .orderBy('created_at', 'desc');
+    if (!pendingRows || !pendingRows.length) return null;
 
-    // A log without reply options can never be acted on here — modern
-    // rain-outs attach none (the moved SMS asks for no reply, only a
-    // self-serve link), so claiming their rows would swallow the customer's
-    // next inbound (e.g. a "call me" would get the canned ack and never
-    // reach the office). Skip them and keep scanning so an OLDER pending
-    // offer that still carries options stays answerable; no actionable row
-    // at all falls through to normal inbound handling.
-    let pending = null;
-    let options = {};
-    for (const row of pendingRows || []) {
-      let parsed = {};
+    const reply = (messageBody || '').trim().toLowerCase();
+    const isOptionReply = ['1', 'one', '2', 'two'].includes(reply)
+      || /^[12][ .]/.test(reply);
+
+    const parseOptions = (row) => {
       try {
-        parsed = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
+        return (typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {})) || {};
       } catch (e) {
         logger.warn(`[reschedule-sms] Failed to parse notes for log ${row.id}: ${e.message}`);
+        return {};
       }
-      if (parsed.option1 || parsed.option2) {
-        pending = row;
-        options = parsed;
-        break;
+    };
+
+    // Modern rain-outs attach no options (the moved SMS asks for no reply,
+    // only a self-serve link), so their rows can never be acted on here.
+    // When the NEWEST pending row is such a no-reply rain-out, only an
+    // explicit option reply digs deeper for an older still-answerable
+    // offer — a call request or freeform text belongs to normal inbound
+    // handling (office alert), not to a stale offer's canned flows. The
+    // scan walks the whole 7-day window: any number of no-reply rain-outs
+    // may sit between the reply and its offer.
+    let pending = pendingRows[0];
+    let options = parseOptions(pending);
+    if (!options.option1 && !options.option2) {
+      if (!isOptionReply) return null;
+      pending = null;
+      options = {};
+      for (const row of pendingRows.slice(1)) {
+        const parsed = parseOptions(row);
+        if (parsed.option1 || parsed.option2) {
+          pending = row;
+          options = parsed;
+          break;
+        }
       }
+      if (!pending) return null;
     }
-    if (!pending) return null;
-    const reply = (messageBody || '').trim().toLowerCase();
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 
     let selectedOption = null;

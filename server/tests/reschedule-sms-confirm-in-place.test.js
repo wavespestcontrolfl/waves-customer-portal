@@ -269,6 +269,22 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test('a call request after a no-reply rain-out is NOT consumed by an older offer', async () => {
+    // Newest pending row is a modern no-reply rain-out; an older offer with
+    // options is still open. "please call me" must go to normal inbound
+    // handling (office alert), not claim the stale offer's canned call flow.
+    wireDb({
+      reschedule_log: [
+        chain({ rows: [{ ...pendingRow(), id: 'log-2', notes: null }, pendingRow()] }),
+      ],
+    });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', 'please call me');
+
+    expect(result).toBeNull();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an optionless newer log does not shadow an older offer that still has options', async () => {
     // Customer got a pre-change offer (options attached, unanswered), then a
     // modern no-reply rain-out. Their "1" must still act on the older offer
