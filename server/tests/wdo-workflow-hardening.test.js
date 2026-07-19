@@ -281,6 +281,40 @@ describe('POST /:id/send concurrency claim', () => {
       expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
     });
   });
+
+  test('send-with-invoice shares the claim: losing it 409s and returns the invoice claim', async () => {
+    const projects = chain({
+      first: jest.fn().mockResolvedValue(wdoProject({ delivery_status: 'sending' })),
+      // The shared delivery claim matches no row — a report-only /send owns it.
+      update: jest.fn().mockResolvedValue(0),
+    });
+    const invoices = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'inv-1', customer_id: 'customer-1', status: 'draft',
+        total: 175, line_items: [], token: 'invtok123', invoice_number: 'WPC-1',
+      }),
+      update: jest.fn().mockResolvedValue(1),
+    });
+    mockTables({
+      projects,
+      invoices,
+      customers: chain({ first: jest.fn().mockResolvedValue(CUSTOMER) }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('send_in_progress');
+      // The invoice claimed 'sending' a moment earlier was returned to draft.
+      expect(invoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft' }));
+      expect(ProjectEmail.sendProjectReportWithInvoice).not.toHaveBeenCalled();
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('photo mutations flag a signed WDO signature stale', () => {

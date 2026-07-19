@@ -28,6 +28,9 @@ const HOLD_ATTENTION_ATTEMPTS = 5;
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 
+// Query failures propagate — a schema/connection outage must surface as a
+// failed sweep in the scheduler's error log, never as clean:true (this sweep
+// exists to catch silence; it can't be allowed to produce it).
 async function findAttentionItems(now = new Date()) {
   // Signed but never sent: the licensee did their part and the filing is
   // sitting in drafts. 48h grace covers the normal same-week office send.
@@ -35,18 +38,19 @@ async function findAttentionItems(now = new Date()) {
     .where({ project_type: 'wdo_inspection', status: 'draft' })
     .whereNotNull('wdo_signature')
     .where('updated_at', '<', new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3))
-    .select('id', 'customer_id', 'project_date', 'updated_at')
-    .catch(() => []);
+    .select('id', 'customer_id', 'project_date', 'updated_at');
 
-  // Inspection happened (or was due) and the visit never completed — for a
-  // WDO that means no report row even exists yet (project-required 409 lane).
+  // Inspection happened (or was due) and the visit is still in an ACTIVE
+  // state — allowlist, not a terminal-state blocklist, so rescheduled /
+  // skipped / any future terminal status can never ring a false alarm.
+  // A linked project row does NOT exempt the visit: a past-date on_site
+  // WITH a draft report is a half-finished closeout, still a stall.
   const stuckAppts = await db('scheduled_services as ss')
     .join('services as s', 's.id', 'ss.service_id')
     .where('s.name', 'ilike', '%wdo%')
     .where('ss.scheduled_date', '<', new Date(now.getTime() - STUCK_APPT_HOURS * 3600e3))
-    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled'])
-    .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id')
-    .catch(() => []);
+    .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
+    .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
 
   // A paid-for held report whose release keeps failing retries forever by
   // design (no terminal cap) — after enough attempts a human needs to look
@@ -55,8 +59,7 @@ async function findAttentionItems(now = new Date()) {
     .whereIn('project_type', ['wdo_inspection', 'pre_treatment_termite_certificate'])
     .where('report_hold_status', 'held')
     .where('report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
-    .select('id', 'report_hold_attempts', 'report_hold_last_error')
-    .catch(() => []);
+    .select('id', 'report_hold_attempts', 'report_hold_last_error');
 
   return { signedUnsent, stuckAppts, stuckHolds };
 }
@@ -74,11 +77,12 @@ function itemIds({ signedUnsent, stuckAppts, stuckHolds }) {
 // current picture, not just the delta).
 async function priorBellCovers(currentIds, now = new Date()) {
   const since = new Date(now.getTime() - REMIND_DAYS * 24 * 3600e3);
+  // Propagates on failure (same contract as findAttentionItems): a broken
+  // dedupe read must fail the sweep loudly, not silently re-ring or go quiet.
   const priors = await db('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .where('created_at', '>', since)
-    .select('metadata')
-    .catch(() => []);
+    .select('metadata');
   const covered = new Set();
   for (const row of priors) {
     let meta = row.metadata;

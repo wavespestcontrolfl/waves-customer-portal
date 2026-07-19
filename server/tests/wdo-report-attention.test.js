@@ -121,4 +121,32 @@ describe('runWdoReportAttentionSweep', () => {
     expect(r.deduped).toBe(true);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
+
+  test('a query failure fails the sweep loudly instead of reporting clean', async () => {
+    isEnabled.mockReturnValue(true);
+    db.mockImplementation((table) => {
+      if (table === 'projects') {
+        return chain({ select: jest.fn().mockRejectedValue(new Error('relation missing')) });
+      }
+      return chain();
+    });
+    await expect(runWdoReportAttentionSweep()).rejects.toThrow('relation missing');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('stuck-appt query allowlists active visit states', async () => {
+    isEnabled.mockReturnValue(true);
+    let apptChain;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as ss') {
+        apptChain = chain();
+        return apptChain;
+      }
+      return chain();
+    });
+    await runWdoReportAttentionSweep();
+    // Allowlist, not a terminal-state blocklist — rescheduled/skipped/any
+    // future terminal status must never ring.
+    expect(apptChain.whereIn).toHaveBeenCalledWith('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+  });
 });

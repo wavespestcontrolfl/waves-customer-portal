@@ -2361,7 +2361,12 @@ async function refreshWdoSignatureStaleness(req, before, after) {
 // (newly flagged by THIS mutation — the caller logs the activity entry).
 async function flagWdoSignatureStaleForPhotos(project, trx) {
   if (!project || project.project_type !== 'wdo_inspection') return false;
-  let sig = project.wdo_signature;
+  // Re-read the signature UNDER LOCK inside the mutation's transaction — the
+  // request-scope project snapshot can predate a concurrent signature save,
+  // and writing that snapshot back would resurrect the old signature image
+  // (or miss flagging the one that just landed).
+  const row = await trx('projects').where({ id: project.id }).forUpdate().first('wdo_signature');
+  let sig = row ? row.wdo_signature : null;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
   if (!sig || !sig.image) return false;
   if (sig.content_stale) return 'already_stale';
@@ -2375,7 +2380,10 @@ async function flagWdoSignatureStaleForPhotos(project, trx) {
 // Activity-trail companion to flagWdoSignatureStaleForPhotos — logged AFTER
 // the mutation's transaction commits (best-effort, like every activity write).
 async function logWdoPhotoStaleness(req, project, changeSummary) {
-  let sig = project.wdo_signature;
+  // Post-commit truth, not the request snapshot — a concurrent signature
+  // save may have changed whose name belongs in the trail.
+  const row = await db('projects').where({ id: project.id }).first('wdo_signature').catch(() => null);
+  let sig = row ? row.wdo_signature : project.wdo_signature;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
   await logProjectActivity(
     req,
@@ -4007,6 +4015,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // Tracks an invoice claimed as 'sending' so any abort (a throw before the
   // normal finalize/restore path) releases it instead of stranding it.
   let claimedInvoice = null;
+  // Tracks the SHARED project delivery claim (delivery_status='sending') this
+  // route takes alongside /send — the invoice claim alone can't stop a
+  // concurrent report-only /send from emailing + archiving the same FDACS
+  // report. The delivered branches resolve the claim by writing the final
+  // delivery_status; the guarded revert only touches a still-'sending' row.
+  let deliveryClaim = null;
+  const revertDeliveryClaimOnAbort = async (projectId) => {
+    if (!deliveryClaim) return;
+    await db('projects')
+      .where({ id: projectId, delivery_status: 'sending' })
+      .update({ delivery_status: deliveryClaim.previousStatus, updated_at: db.fn.now() })
+      .catch((err) => logger.warn(`[projects] combined-send delivery claim revert failed for ${projectId}: ${err.message}`));
+    deliveryClaim = null;
+  };
   // Tracks a held→releasing claim taken for an UN-HELD delivery of a
   // currently-held report (Codex P2 on #2753) — hoisted like claimedInvoice
   // so the outer catch returns the row to 'held' on any abort. The revert
@@ -4296,6 +4318,29 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus };
 
+    // Shared project delivery claim (see hoist comment): one claim namespace
+    // across /send and /send-with-invoice so the two routes can't race each
+    // other into duplicate FDACS emails/archives. Taken AFTER the invoice
+    // claim; losing it returns the invoice claim before 409ing.
+    const previousDeliveryStatus = project.delivery_status || null;
+    const deliveryClaimRows = await db('projects')
+      .where({ id: project.id })
+      .where((q) => q
+        .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
+        .orWhereRaw("updated_at < now() - interval '10 minutes'"))
+      .update({ delivery_status: 'sending', updated_at: db.fn.now() });
+    if (!deliveryClaimRows) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after lost delivery claim failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      return res.status(409).json({
+        error: 'This report is already being sent — give it a moment, then refresh.',
+        code: 'send_in_progress',
+      });
+    }
+    deliveryClaim = { previousStatus: previousDeliveryStatus };
+
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
     // 'sent' legacy-visible path in documents.js.
@@ -4400,6 +4445,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         await db('invoices').where({ id: invoice.id, status: 'sending' })
           .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
         await reverseProjectCreditOnAbort();
+        await revertDeliveryClaimOnAbort(project.id);
         return res.status(409).json({
           error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
           code: 'release_in_progress',
@@ -4445,6 +4491,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
         await reverseProjectCreditOnAbort();
         await revertHeldReportClaimOnAbort();
+        await revertDeliveryClaimOnAbort(project.id);
         logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
       }
@@ -4823,6 +4870,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // Released atomically above — nothing left for the outer catch to revert.
       heldReportClaim = null;
     }
+    // Delivered branches resolved the claim by writing the final
+    // delivery_status; anything short of delivered restores the pre-claim
+    // value so a failed send doesn't 409 retries for 10 minutes.
+    if (delivered) deliveryClaim = null;
+    else await revertDeliveryClaimOnAbort(project.id);
 
     await logProjectActivity(
       req, project,
@@ -4859,6 +4911,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
+    // Return the shared project delivery claim too (guarded: only reverts a
+    // row still parked at 'sending', so a post-delivery throw can't clobber
+    // the final delivery_status).
+    await revertDeliveryClaimOnAbort(req.params.id);
     // Return this send's seam-applied credit too — a throw between apply and the
     // explicit WDO/no-delivery guards (e.g. while building the PDF or composing
     // the message) would otherwise leave the invoice settled-by-credit with no
