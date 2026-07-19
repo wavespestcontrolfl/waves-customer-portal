@@ -54,7 +54,7 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     technician_name: 'Adam',
     customer_confirmed: true,
     confirmed_at: '2098-12-30T12:00:00Z',
-    notes: 'Square rebooking cleanup. $67.50 per visit. route_density: moved from 08:00. No SMS sent.',
+    notes: 'Legacy rebooking cleanup. $67.50 per visit. route_density: moved from 08:00. No SMS sent.',
     is_recurring: true,
     is_callback: false,
     reschedule_token: 'tok-1',
@@ -70,7 +70,7 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(body.upcoming).toHaveLength(1);
       const visit = body.upcoming[0];
       expect('notes' in visit).toBe(false);
-      expect(JSON.stringify(body)).not.toContain('Square rebooking');
+      expect(JSON.stringify(body)).not.toContain('Legacy rebooking');
       expect(visit).toMatchObject({
         id: 'svc-1',
         date: '2099-01-05',
@@ -90,7 +90,7 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect('notes' in body.next).toBe(false);
-      expect(JSON.stringify(body)).not.toContain('Square rebooking');
+      expect(JSON.stringify(body)).not.toContain('Legacy rebooking');
     });
   });
 });
