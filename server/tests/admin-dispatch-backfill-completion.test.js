@@ -9,14 +9,17 @@
  * quiet card mint, the account-credit skip, the prepaid-credit skip (the
  * rail mutates the invoice — reduces it, books a payments row, can flip it
  * paid — so it is GATED like the other money rails, not "safe by nature"),
- * the no-fabricated-durations policy, and the labor-costing guard — must
- * not be refactored away silently.
+ * the fully-prepaid review-invoice mint (out-of-band coverage must not
+ * suppress the promised open invoice — behavioral via the exported
+ * shouldAutoInvoiceCompletion), the no-fabricated-durations policy, and the
+ * labor-costing guard — must not be refactored away silently.
  */
 const fs = require('fs');
 const path = require('path');
 const {
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
+  shouldAutoInvoiceCompletion,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 
@@ -148,6 +151,74 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
   });
 });
 
+describe('shouldAutoInvoiceCompletion — backfill review-invoice override (Codex P1)', () => {
+  // The reported shape: a priced backfill visit whose operator recorded an
+  // out-of-band prepaid_amount (cash/Zelle) fully covering the bill. The
+  // route derives the composite prepaidCovered=true via the OUT-OF-BAND leg
+  // (annualPrepayCovered=false) — which used to return false here and mint
+  // no invoice at all, leaving the recorded prepayment with nothing to
+  // reconcile against. The minted invoice lands OPEN ('draft' from
+  // InvoiceService.create) with the prepayment UNAPPLIED — both pinned by
+  // the prepaid-credit-skip source contract below.
+  const prepaidBackfill = {
+    recapReviewOnly: false,
+    alreadyPaid: false,
+    prepaidCovered: true,
+    autopayCoversVisit: false,
+    preMintedInvoice: null,
+    existingCompletionInvoice: null,
+    createInvoiceOnComplete: true,
+    waveguardTier: null,
+    hasVisitPrice: true,
+    invoiceAmount: 129,
+    autoInvoicePricedVisits: false,
+    serviceType: 'Quarterly Pest Control Service',
+    isCallback: false,
+    visitPerformed: true,
+    isBackfillCompletion: true,
+    annualPrepayCovered: false,
+  };
+
+  test('backfill: a fully-covering out-of-band prepaid_amount no longer suppresses — the open review invoice mints', () => {
+    expect(shouldAutoInvoiceCompletion(prepaidBackfill)).toBe(true);
+  });
+
+  test('non-backfill control: the same fully prepaid visit still mints NO invoice (live behavior unchanged)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, isBackfillCompletion: false })).toBe(false);
+    // …and a caller that never passes the new inputs (the pre-change shape)
+    // gets the identical suppression — defaults are inert.
+    const legacyShape = { ...prepaidBackfill };
+    delete legacyShape.isBackfillCompletion;
+    delete legacyShape.annualPrepayCovered;
+    expect(shouldAutoInvoiceCompletion(legacyShape)).toBe(false);
+  });
+
+  test('annual-prepay coverage is EXCLUDED from the override — settled plan money never re-bills', () => {
+    // annualPrepayCoversVisit feeds the same composite prepaidCovered flag,
+    // but that money is genuinely settled on the annual prepay invoice (its
+    // own paper trail via settleInvoiceAsAnnualPrepayCovered) — a fresh
+    // collectible invoice would double-bill covered plan work.
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, annualPrepayCovered: true })).toBe(false);
+  });
+
+  test('autopay dues coverage is untouched by the override', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...prepaidBackfill, prepaidCovered: false, autopayCoversVisit: true,
+    })).toBe(false);
+  });
+
+  test('every other suppressor still holds under backfill — already-billed work never double-mints', () => {
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, alreadyPaid: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, preMintedInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, existingCompletionInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, recapReviewOnly: true })).toBe(false);
+  });
+
+  test('the override removes only the prepaid suppression — an otherwise-unbillable visit still mints nothing', () => {
+    expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, invoiceAmount: 0 })).toBe(false);
+  });
+});
+
 describe('completion route wiring (source contracts)', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
@@ -231,6 +302,25 @@ describe('completion route wiring (source contracts)', () => {
     // Both call sites still route through the gated helper.
     expect(source).toMatch(/invoice = await applyPrepaidCreditToInvoice\(invoice\);/);
     expect(source).toMatch(/preMintedInvoice = await applyPrepaidCreditToInvoice\(preMintedInvoice\);/);
+  });
+
+  test('fully prepaid backfill still mints the open review invoice — override wired into the invoice decision', () => {
+    // The route feeds the backfill flag AND the annual-prepay leg into
+    // shouldAutoInvoiceCompletion (behavioral coverage above): out-of-band
+    // prepaid coverage stops suppressing, annual-prepay coverage keeps
+    // suppressing.
+    expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?visitPerformed,[\s\S]*?isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\}\);/);
+    // And the structured_notes resume re-derivation sits BEFORE the invoice
+    // decision, so a crash-resumed retry (body flag absent) reaches the same
+    // override instead of silently re-suppressing the invoice.
+    const rederivation = source.indexOf("parseJsonObject(record.structured_notes)?.backfill === true");
+    const invoiceDecision = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion({');
+    expect(rederivation).toBeGreaterThan(-1);
+    expect(invoiceDecision).toBeGreaterThan(rederivation);
+    // The minted invoice is OPEN by construction ('draft' from
+    // InvoiceService.create; near-term due date pinned above) and the
+    // prepayment stays UNAPPLIED via the gated prepaid rail (contract
+    // above) — reconciliation is the reviewer's explicit step.
   });
 
   test('backfill durations come from the policy, not the stale lifecycle timestamps', () => {

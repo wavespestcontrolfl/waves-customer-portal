@@ -4989,6 +4989,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { /* non-blocking */ }
+    // Backfill survives resume via its own structured_notes freeze (the body
+    // flag may be absent on a crash-resumed retry). Re-derived HERE — before
+    // the invoice decision — so the backfill review-invoice override in
+    // shouldAutoInvoiceCompletion and every later backfill money/comms gate
+    // read the same truth on a resumed retry; the customer-comms re-force
+    // stays below, after the frozen-delivery re-derivation it must override.
+    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
+      isBackfillCompletion = true;
+    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -5049,6 +5058,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // inspection_only / customer_declined = no application performed
       // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
       visitPerformed,
+      // Backfill review-invoice override: an out-of-band prepaid_amount must
+      // not suppress the promised open invoice; the annual-prepay leg keeps
+      // suppressing (see the helper's comment). isBackfillCompletion is
+      // resume-safe here — re-derived from the structured_notes freeze above.
+      isBackfillCompletion,
+      annualPrepayCovered,
     });
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
@@ -5117,13 +5132,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
       }
     }
-    // Backfill survives resume via its own structured_notes freeze (the body
-    // flag may be absent on a crash-resumed retry), and re-forces quiet AFTER
-    // the frozen-delivery re-derivation above — an auto_send posture must not
-    // un-suppress a backdated closeout.
-    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
-      isBackfillCompletion = true;
-    }
+    // Backfill (re-derived from the structured_notes freeze above, before the
+    // invoice decision) re-forces quiet AFTER the frozen-delivery
+    // re-derivation — an auto_send posture must not un-suppress a backdated
+    // closeout.
     if (isBackfillCompletion) {
       suppressTypedCustomerComms = true;
       effectiveSendCompletionSms = false;
@@ -8520,8 +8532,30 @@ function shouldAutoInvoiceCompletion({
   serviceType,
   isCallback,
   visitPerformed = true,
+  isBackfillCompletion = false,
+  annualPrepayCovered = false,
 }) {
-  if (recapReviewOnly || alreadyPaid || prepaidCovered || autopayCoversVisit
+  // Backfill review-invoice override (Codex P1, stale-sweep lane): a
+  // backdated quiet closeout PROMISES the operator an open invoice to
+  // reconcile against. An out-of-band prepaid_amount (cash/Zelle recorded on
+  // the visit) that fully covers the bill normally suppresses invoicing via
+  // prepaidCovered — correct live, where applyPrepaidCreditToInvoice would
+  // immediately credit the fresh invoice back down. Under backfill that
+  // crediting rail is gated OFF, so suppressing here would mint NOTHING: the
+  // recorded prepayment would have no invoice to reconcile against and the
+  // completion would be absent from invoice/payment accounting entirely.
+  // Mint the invoice anyway; the gated prepaid rail leaves it open with the
+  // amount unapplied (its skip-log points review at the recorded amount).
+  // ONLY the out-of-band leg is overridden: annual-prepay coverage
+  // (annualPrepayCovered — the other input into the composite prepaidCovered
+  // flag) still suppresses under backfill, because that money is genuinely
+  // settled on the annual prepay invoice — its own paper trail, settled
+  // non-cash via settleInvoiceAsAnnualPrepayCovered — and a fresh collectible
+  // invoice would double-bill covered plan work. Autopay dues coverage rides
+  // its own flag (autopayCoversVisit) and, like every other suppressor
+  // (alreadyPaid / pre-minted / existing invoice), is untouched.
+  const effectivePrepaidCovered = isBackfillCompletion ? annualPrepayCovered : prepaidCovered;
+  if (recapReviewOnly || alreadyPaid || effectivePrepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
