@@ -13,7 +13,13 @@
  * appointment_time + updated_at captured (captureReminderGuards) BEFORE the
  * send — a row that moved on underneath matches zero rows and is skipped, the
  * newer reschedule owns it. Mirrors handleReschedule's own re-arm guard.
- * This pins both helpers' contract.
+ *
+ * The 72h window additionally only re-arms while the cron can still deliver
+ * it (the REAL AppointmentReminders.reminder72hStillReachable — appointment
+ * more than 24.25h out, the cron's own send boundary): clearing it for a
+ * same/next-day appointment leaves a dead armed flag the 15-minute scan
+ * re-selects forever, so those guards re-arm ONLY the 24h window (which
+ * carries the fallback notice). This pins both helpers' contract.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -34,9 +40,15 @@ function chain(overrides = {}) {
   return builder;
 }
 
+// Guard times relative to the REAL clock — the 72h band predicate is the real
+// AppointmentReminders.reminder72hStillReachable (unmocked), so these pin the
+// actual 24.25h boundary, not a stub of it.
+const FUTURE_APPT = new Date(Date.now() + 72 * 3600 * 1000); // inside the 72h send band
+const NEAR_APPT = new Date(Date.now() + 20 * 3600 * 1000);   // < 24.25h — 72h can never fire
+const FAR_APPT = new Date(Date.now() + 200 * 3600 * 1000);   // beyond the band — 72h fires later
 const APPT = new Date('2026-07-10T14:00:00Z');
 const UPD = new Date('2026-07-04T17:00:00Z');
-const guard = (id, appointmentTime = APPT, updatedAt = UPD) => ({
+const guard = (id, appointmentTime = FUTURE_APPT, updatedAt = UPD) => ({
   scheduledServiceId: id, appointmentTime, updatedAt,
 });
 
@@ -45,7 +57,7 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'now()') };
 });
 
-test('re-arms both windows for a single guard, scoped by service id + appointment_time + updated_at', async () => {
+test('re-arms both windows for a still-reachable guard, scoped by service id + appointment_time + updated_at', async () => {
   const q = chain();
   db.mockImplementation((table) => {
     if (table === 'appointment_reminders') return q;
@@ -56,7 +68,7 @@ test('re-arms both windows for a single guard, scoped by service id + appointmen
 
   expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
   // The move-on-underneath guard: the exact row state this invocation synced.
-  expect(q.where).toHaveBeenCalledWith('appointment_time', APPT);
+  expect(q.where).toHaveBeenCalledWith('appointment_time', FUTURE_APPT);
   expect(q.where).toHaveBeenCalledWith('updated_at', UPD);
   // …and the sibling/cancelled carve-out is preserved.
   expect(q.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
@@ -69,16 +81,55 @@ test('re-arms both windows for a single guard, scoped by service id + appointmen
   }));
 });
 
-test('re-arms every occurrence of a series move (one guarded update per guard)', async () => {
+test('a same/next-day guard (< 24.25h out) re-arms ONLY the 24h window — the dead 72h flag stays covered', async () => {
+  // The cron's 72h branch never fires inside 24.25h: clearing the flag there
+  // can never produce a text, it just re-enters the row in every 15-minute
+  // scan forever. The covered flag the sync stamped is the correct terminal
+  // state; the re-armed 24h window carries the fallback notice.
   const q = chain();
   db.mockImplementation(() => q);
 
-  await rearmRescheduleReminderWindows([guard('svc-1'), guard('svc-2'), guard('svc-3')]);
+  await rearmRescheduleReminderWindows(guard('svc-1', NEAR_APPT));
+
+  const payload = q.update.mock.calls[0][0];
+  expect(payload).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+  expect(payload).not.toHaveProperty('reminder_72h_sent');
+  expect(payload).not.toHaveProperty('reminder_72h_sent_at');
+});
+
+test('a guard beyond the 72h send band (no upper bound) still re-arms the 72h window for the later pass', async () => {
+  // reminder72hStillReachable has no upper bound on purpose: a visit 200h out
+  // re-arms now and the cron delivers when it drops into (24.25h, 72.25h].
+  const q = chain();
+  db.mockImplementation(() => q);
+
+  await rearmRescheduleReminderWindows(guard('svc-1', FAR_APPT));
+
+  expect(q.update).toHaveBeenCalledWith(expect.objectContaining({
+    reminder_72h_sent: false,
+    reminder_72h_sent_at: null,
+    reminder_24h_sent: false,
+    reminder_24h_sent_at: null,
+  }));
+});
+
+test('re-arms every occurrence of a series move (one guarded update per guard), each judged on its OWN time', async () => {
+  const q = chain();
+  db.mockImplementation(() => q);
+
+  await rearmRescheduleReminderWindows([
+    guard('svc-1', FUTURE_APPT), guard('svc-2', NEAR_APPT), guard('svc-3', FUTURE_APPT),
+  ]);
 
   expect(q.update).toHaveBeenCalledTimes(3);
   expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
   expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-2' });
   expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-3' });
+  // Per-guard band decisions: occurrences 1 and 3 re-arm both windows, the
+  // same/next-day occurrence 2 re-arms only the 24h window.
+  expect(q.update.mock.calls[0][0]).toHaveProperty('reminder_72h_sent', false);
+  expect(q.update.mock.calls[1][0]).not.toHaveProperty('reminder_72h_sent');
+  expect(q.update.mock.calls[2][0]).toHaveProperty('reminder_72h_sent', false);
 });
 
 test('a newer reschedule that moved the row on underneath is not stomped (zero-row skip, no throw)', async () => {
@@ -89,7 +140,7 @@ test('a newer reschedule that moved the row on underneath is not stomped (zero-r
   db.mockImplementation(() => q);
 
   await expect(rearmRescheduleReminderWindows(guard('svc-1'))).resolves.toBeUndefined();
-  expect(q.where).toHaveBeenCalledWith('appointment_time', APPT);
+  expect(q.where).toHaveBeenCalledWith('appointment_time', FUTURE_APPT);
   expect(q.where).toHaveBeenCalledWith('updated_at', UPD);
   expect(logger.error).not.toHaveBeenCalled();
 });

@@ -6,8 +6,12 @@
  * BEFORE the confirmation SMS goes out. sendAppointmentSms throws on a
  * blocked number, so the customer got neither the confirmation nor any
  * later reminder of the new time. The send is now wrapped: any no-send
- * outcome re-arms both windows (mirrors reschedule-public.js — "silence is
- * worse") and the original error still propagates.
+ * outcome re-arms the windows (mirrors reschedule-public.js — "silence is
+ * worse") and the original error still propagates. The 72h window only
+ * re-arms while the cron can still deliver it
+ * (AppointmentReminders.reminder72hStillReachable — more than 24.25h out);
+ * inside that boundary only the 24h window re-arms, since a cleared 72h flag
+ * there can never fire and would just re-enter every 15-minute scan.
  *
  * The pre-send snapshot read is BEST-EFFORT: it only guards the re-arm, so a
  * transient failure on that read must never abort the confirmation send (the
@@ -23,6 +27,9 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
 jest.mock('../utils/datetime-et', () => ({
+  // Real parser — the blocked-send fallback re-arm judges the 72h band from
+  // the confirmed slot's parsed time, so the value must be a genuine ET Date.
+  parseETDateTime: jest.requireActual('../utils/datetime-et').parseETDateTime,
   etDateString: jest.fn((d) => (d ? '2026-07-05' : '2026-07-04')),
   etParts: jest.fn(() => ({ hour: 13, minute: 30 })),
   addETDays: jest.fn(() => new Date('2026-07-05T12:00:00Z')),
@@ -30,11 +37,17 @@ jest.mock('../utils/datetime-et', () => ({
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
   markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
+  // Band predicate consulted by the blocked-send re-arm. Default: still
+  // reachable (both windows re-arm); the same/next-day test flips it. The
+  // real boundary math is pinned by admin-dispatch-rearm-reminders.test.js,
+  // which runs the unmocked helper.
+  reminder72hStillReachable: jest.fn(() => true),
 }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const AppointmentReminders = require('../services/appointment-reminders');
 const RescheduleSMS = require('../services/reschedule-sms');
 
 db.fn = { now: jest.fn(() => 'NOW()') };
@@ -117,6 +130,37 @@ test('a blocked confirmation re-arms both reminder windows (guarded on the snaps
     reminder_24h_sent: false,
     reminder_24h_sent_at: null,
   }));
+  // The 72h band was judged against the ROW'S own time — the same value the
+  // appointment_time predicate pins the update to.
+  expect(AppointmentReminders.reminder72hStillReachable).toHaveBeenCalledWith(APPT);
+});
+
+test('a blocked confirmation for a same/next-day slot re-arms ONLY the 24h window', async () => {
+  // Inside 24.25h the cron's 72h branch can never fire: clearing that flag
+  // would leave a dead armed window re-selected by every 15-minute scan
+  // forever. The covered flag stays; the re-armed 24h window carries the
+  // fallback notice for the new time.
+  AppointmentReminders.reminder72hStillReachable.mockReturnValueOnce(false);
+  sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(guardRow()) });
+  const rearmChain = chain();
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    appointment_reminders: [snapshotChain, rearmChain],
+  });
+
+  await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
+    .rejects.toThrow(/appointment SMS blocked/);
+
+  const payload = rearmChain.update.mock.calls[0][0];
+  expect(payload).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+  expect(payload).not.toHaveProperty('reminder_72h_sent');
+  expect(payload).not.toHaveProperty('reminder_72h_sent_at');
 });
 
 test('a successful confirmation reads the snapshot but never re-arms the covered windows', async () => {
@@ -224,6 +268,11 @@ test('a blocked confirmation after a failed snapshot read re-arms UNGUARDED, sco
     reminder_24h_sent: false,
     reminder_24h_sent_at: null,
   }));
+  // With no snapshot, the 72h band is judged from the slot this reply just
+  // confirmed — the same date+start string the handleReschedule sync used.
+  expect(AppointmentReminders.reminder72hStillReachable).toHaveBeenCalledWith(
+    jest.requireActual('../utils/datetime-et').parseETDateTime('2026-07-04T13:00'),
+  );
 });
 
 test('when the reminder row vanished before the send (no snapshot), the blocked path re-arms nothing and still throws', async () => {

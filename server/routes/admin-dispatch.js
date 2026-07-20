@@ -7269,8 +7269,16 @@ async function captureReminderGuards(serviceIds) {
 // with willNotify:true covers any due 24h/72h window in anticipation of THIS
 // route's own SMS. When that SMS never actually goes out (no phone / blocked /
 // send threw), the covered flags would suppress every reminder of the new
-// time — re-arm both windows so the 15-min cron still reminds the customer.
-// A possible duplicate was the risk covering guards against; silence is worse.
+// time — re-arm so the 15-min cron still reminds the customer. A possible
+// duplicate was the risk covering guards against; silence is worse.
+//
+// The 24h window re-arms for any guard; the 72h window only while the cron
+// can still deliver it (AppointmentReminders.reminder72hStillReachable — the
+// cron's 72h branch never fires once the appointment is within 24.25h, so
+// clearing the flag for a same/next-day appointment leaves a dead armed
+// window the scan re-selects every 15 minutes forever, and the covered flag
+// the sync stamped was already the correct terminal state; the re-armed 24h
+// window carries the fallback notice for those).
 //
 // Guarded per-row on the appointment_time + updated_at captured at read time
 // (captureReminderGuards, before the SMS): the re-arm is scoped by service id
@@ -7284,8 +7292,24 @@ async function captureReminderGuards(serviceIds) {
 async function rearmRescheduleReminderWindows(guards) {
   const list = (Array.isArray(guards) ? guards : [guards]).filter((g) => g && g.scheduledServiceId);
   if (!list.length) return;
+  // Shared boundary predicate — never a local copy of the cron's 24.25h cutoff.
+  const { reminder72hStillReachable } = require('../services/appointment-reminders');
   for (const g of list) {
     try {
+      // g.appointmentTime is the row's just-synced NEW time (captured by
+      // captureReminderGuards after syncRescheduleReminder), and the
+      // appointment_time predicate below means the update only lands on a row
+      // still at that time — so the band decision is judged against exactly
+      // the appointment the cleared flag would fire for.
+      const rearm = {
+        reminder_24h_sent: false,
+        reminder_24h_sent_at: null,
+        updated_at: db.fn.now(),
+      };
+      if (reminder72hStillReachable(g.appointmentTime)) {
+        rearm.reminder_72h_sent = false;
+        rearm.reminder_72h_sent_at = null;
+      }
       await db('appointment_reminders')
         .where({ scheduled_service_id: g.scheduledServiceId })
         // A sibling-suppressed row is suppressed BY SETTING both sent flags —
@@ -7299,13 +7323,7 @@ async function rearmRescheduleReminderWindows(guards) {
         // invocation synced. A newer reschedule changes at least one of these.
         .where('appointment_time', g.appointmentTime)
         .where('updated_at', g.updatedAt)
-        .update({
-          reminder_72h_sent: false,
-          reminder_72h_sent_at: null,
-          reminder_24h_sent: false,
-          reminder_24h_sent_at: null,
-          updated_at: db.fn.now(),
-        });
+        .update(rearm);
     } catch (err) {
       logger.error(`[dispatch] reminder re-arm after failed notice failed (${g.scheduledServiceId}): ${err.message}`);
     }

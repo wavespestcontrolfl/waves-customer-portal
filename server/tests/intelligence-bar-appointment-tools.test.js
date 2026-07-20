@@ -12,7 +12,10 @@
  *     reschedule_log audit row (initiated_by 'admin_ib'), track-token refresh,
  *     and the rebooker's LIVE_LIFECYCLE_RESET on en_route/on_site rows
  *   - create registers the durable reminder row (registration only, no SMS)
- *     like the canonical admin create path, and logs ids only (no PII)
+ *     like the canonical admin create path, and logs ids only (no PII);
+ *     a WINDOWLESS create registers at the canonical date+08:00 slot time
+ *     but with both reminder windows pre-closed (closeReminderWindows) so
+ *     the cron never texts "at 8:00 AM" for a time nobody chose
  *   - live moves carry the rebooker-parity side effects
  *     (applyLiveMoveSideEffects): job_status_history append, tech_status
  *     release, customer tracker refresh
@@ -140,13 +143,22 @@ describe('create_appointment', () => {
     expect(result.success).toBe(true);
     // Canonical admin-create semantics: durable row for the 72h/24h cron,
     // sendConfirmation:false so NO SMS goes out (sends stay operator-initiated).
+    // A REAL start time was given, so the reminder windows stay armed.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       'appt-1', 'cust-1', '2099-01-15T09:00', 'Pest Control', 'admin_ib',
-      { sendConfirmation: false },
+      { sendConfirmation: false, closeReminderWindows: false },
     );
   });
 
-  test('windowless create registers the reminder at the 08:00 default (canonical admin convention)', async () => {
+  test('windowless create registers at the canonical 08:00 slot time with BOTH reminder windows pre-closed', async () => {
+    // The 08:00 appointment_time is the slot convention every reminder writer
+    // COALESCEs on (DB sync trigger, self-heal, same-slot dedup) — but the
+    // 72h/24h texts render that clock time, so an ARMED windowless row would
+    // promise "at 8:00 AM" for a time the operator never chose.
+    // closeReminderWindows pre-closes both windows; the sync trigger re-arms
+    // them from the real start if a window is set later. (Skipping
+    // registration instead would not help — selfHealMissingReminderRows
+    // registers any row-less future visit at 08:00 ARMED within 15 minutes.)
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
       scheduled_services: [chain()],
@@ -156,7 +168,7 @@ describe('create_appointment', () => {
     });
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       'appt-1', 'cust-1', '2099-01-15T08:00', 'Pest Control', 'admin_ib',
-      { sendConfirmation: false },
+      { sendConfirmation: false, closeReminderWindows: true },
     );
   });
 
@@ -571,7 +583,10 @@ describe('reschedule_appointment', () => {
     // Two ordinary moves of the same confirmed row: the second one's snapshot
     // is stale. Status alone matched both, so the later write silently
     // overwrote the newer date/window and logged from the stale snapshot. The
-    // CAS now carries the observed scheduled_date + window_start: the stale
+    // CAS now carries the observed scheduled_date + window_start + window_end
+    // (the UPDATE always writes window_end from the pre-read — verbatim on a
+    // date-only move, via the preserved-duration derivation on a timed one —
+    // so a concurrent END-only resize must also make it miss): the stale
     // writer matches zero rows and must not write, log, or fire side effects.
     const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
     wireDb({
@@ -589,12 +604,44 @@ describe('reschedule_appointment', () => {
     });
 
     expect(result.error).toMatch(/changed concurrently/);
-    // The CAS carried the full observed snapshot — status AND schedule fields.
+    // The CAS carried the full observed snapshot — status AND the complete
+    // schedule triple (date + start + END).
     expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
-    expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00' });
+    expect(updateChain.where).toHaveBeenCalledWith({
+      scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
+    });
     // No side effects for a refused move.
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
     expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
+  test('a windowless visit CASes on null start/end (object-form IS NULL contract) and moves date-only', async () => {
+    // A windowless row's observed window fields are null — the object-form
+    // predicate renders them as IS NULL (never `= NULL`, which matches
+    // nothing), so a date-only move of a windowless visit still commits while
+    // a concurrently-windowed copy would miss.
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, window_start: null, window_end: null }) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15',
+    });
+
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.where).toHaveBeenCalledWith({
+      scheduled_date: '2026-07-01', window_start: null, window_end: null,
+    });
+    // The date-only move preserves the (absent) window rather than inventing one.
+    expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+      scheduled_date: '2099-01-15', window_start: null, window_end: null,
+    });
   });
 
   test('a failed reschedule_log insert never fails the already-committed move', async () => {

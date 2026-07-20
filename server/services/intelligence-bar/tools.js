@@ -1358,6 +1358,19 @@ async function createAppointment(input) {
   // only: sendConfirmation:false marks the confirmation not-applicable
   // (mirroring an admin-created visit with the "Send confirmation SMS"
   // checkbox off), so no SMS goes out — sends stay operator-initiated.
+  //
+  // Windowless creates ("put this customer on Friday") register at the
+  // canonical date+08:00 slot time — the convention the reminder DB sync
+  // trigger, the self-heal sweep, and the same-slot dedup all COALESCE on —
+  // but with BOTH reminder windows pre-closed (closeReminderWindows): the
+  // 72h/24h texts render the appointment_time's clock time, so an armed
+  // windowless row would promise "at 8:00 AM" for a time nobody chose.
+  // Skipping registration instead would not help: selfHealMissingReminderRows
+  // registers any row-less future visit at 08:00 ARMED within 15 minutes.
+  // When a real window is later set, the sync trigger's time_changed branch
+  // re-arms the windows from the real start, so reminders resume with a time
+  // the operator actually picked.
+  //
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
   try {
@@ -1366,7 +1379,7 @@ async function createAppointment(input) {
       appointment.id, customer_id,
       `${dateStr}T${win.start || '08:00'}`,
       service_type, 'admin_ib',
-      { sendConfirmation: false },
+      { sendConfirmation: false, closeReminderWindows: !win.start },
     );
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
@@ -1447,20 +1460,29 @@ async function rescheduleAppointment(input) {
   // snapshot. Matching the observed scheduled_date + window_start makes the
   // later writer miss instead (knex renders a null value in the object form
   // as IS NULL — the same contract auto-dispatch's rebooker `expect` relies
-  // on). Field-level CAS is the repo's established pattern for exactly this
-  // (rebooker options.expect); deliberately NOT SELECT..FOR UPDATE, which
-  // would put a row lock + transaction around a quick single-row mover for
-  // no added safety. updated_at stays out of the predicate: knex never
-  // auto-touches it and not every mover stamps it (the bulk route's UPDATE
-  // doesn't), so it isn't a reliable change marker. Zero rows matched = the
-  // row changed under us; refuse instead of writing.
+  // on). window_end is in the predicate too: the UPDATE below always writes
+  // it from this pre-read — verbatim on a date-only move, and via the
+  // preserved-duration derivation on a timed one — so a concurrent edit that
+  // only resized the END (the bulk route's explicit-end form) would otherwise
+  // still match on start alone and get its end silently restored from the
+  // stale snapshot. Field-level CAS is the repo's established pattern for
+  // exactly this (rebooker options.expect); deliberately NOT
+  // SELECT..FOR UPDATE, which would put a row lock + transaction around a
+  // quick single-row mover for no added safety. updated_at stays out of the
+  // predicate: knex never auto-touches it and not every mover stamps it (the
+  // bulk route's UPDATE doesn't), so it isn't a reliable change marker. Zero
+  // rows matched = the row changed under us; refuse instead of writing.
   const observedDate = appt.scheduled_date instanceof Date
     ? appt.scheduled_date.toISOString().slice(0, 10)
     : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
   const updatedRows = await db('scheduled_services')
     .where('id', appointment_id)
     .where('status', String(appt.status))
-    .where({ scheduled_date: observedDate, window_start: appt.window_start ?? null })
+    .where({
+      scheduled_date: observedDate,
+      window_start: appt.window_start ?? null,
+      window_end: appt.window_end ?? null,
+    })
     .update({
       scheduled_date: dateStr,
       window_start: newStart,

@@ -16,7 +16,8 @@
  *   - window times are range-validated (25:00 / 18:75 fail per-row) and an
  *     explicit end needs a positive same-day span over the effective start
  *   - the write is a field-level CAS on the OBSERVED status + scheduled_date
- *     + window_start, so a concurrent ordinary move is refused, not clobbered
+ *     + window_start + window_end (the start-only derivation reads the stored
+ *     end), so a concurrent ordinary move is refused, not clobbered
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -528,8 +529,11 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   // Two ORDINARY bulk moves of the same confirmed row both satisfied the
   // status-only predicate — the later write silently overwrote the newer
   // date/window and logged from a stale snapshot. The CAS now carries the
-  // observed scheduled_date + window_start, so the stale writer matches zero
-  // rows and lands in failed[] instead.
+  // observed scheduled_date + window_start + window_end (the start-only form
+  // derives its new end from THIS read's duration, so a concurrent END-only
+  // resize must miss too — not have its end overwritten by a stale-duration
+  // derivation), so the stale writer matches zero rows and lands in failed[]
+  // instead.
   const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
   const trx = wireTrx({
     scheduled_services: [
@@ -551,9 +555,12 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
     reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
   }]);
 
-  // The CAS carried the full observed snapshot — status AND schedule fields.
+  // The CAS carried the full observed snapshot — status AND the complete
+  // schedule triple (date + start + END).
   expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
-  expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00' });
+  expect(updateChain.where).toHaveBeenCalledWith({
+    scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
+  });
   // No audit row for a move that did not happen.
   expect(trx).not.toHaveBeenCalledWith('reschedule_log');
 });

@@ -484,7 +484,12 @@ async function moveStopsToDay(input) {
     // from a stale snapshot. Matching the observed scheduled_date +
     // window_start makes the later writer miss instead (knex renders a null
     // value in the object form as IS NULL — the same contract auto-dispatch's
-    // rebooker `expect` relies on). Field-level CAS is the repo's established
+    // rebooker `expect` relies on). window_end is in the predicate too: this
+    // mover never writes the window columns themselves, but it DOES stamp
+    // track_token_expires_at derived from the observed end (and classified
+    // movability + logs the window pair off the same read) — a concurrent
+    // end-resize would otherwise still match and get a token expiry computed
+    // from the stale end. Field-level CAS is the repo's established
     // pattern for exactly this (rebooker options.expect); deliberately NOT
     // SELECT..FOR UPDATE, which would put row locks + a transaction around a
     // quick per-stop mover for no added safety. updated_at stays out of the
@@ -498,7 +503,11 @@ async function moveStopsToDay(input) {
     const updatedRows = await db('scheduled_services')
       .where('id', s.id)
       .where('status', String(s.status))
-      .where({ scheduled_date: observedDate, window_start: s.window_start ?? null })
+      .where({
+        scheduled_date: observedDate,
+        window_start: s.window_start ?? null,
+        window_end: s.window_end ?? null,
+      })
       .update({
         scheduled_date: dateStr,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,

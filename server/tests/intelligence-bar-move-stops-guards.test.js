@@ -256,8 +256,11 @@ test('a same-day move whose every stop has already elapsed errors and reports th
 test('a stop moved concurrently (stale date/window snapshot) lands in skipped_conflict via the field CAS; the rest still move', async () => {
   // Two ordinary moves of the same confirmed stop both satisfied the
   // status-only predicate — the later write silently clobbered the newer
-  // date. The CAS now carries the observed scheduled_date + window_start, so
-  // the stale writer matches zero rows and the stop is reported, not
+  // date. The CAS now carries the observed scheduled_date + window_start +
+  // window_end (this mover never writes the window columns, but it stamps
+  // track_token_expires_at derived from the observed end — a concurrent
+  // END-only resize must miss too, not get a token expiry off the stale end),
+  // so the stale writer matches zero rows and the stop is reported, not
   // rewritten. Note the re-read status is still 'confirmed': this conflict is
   // a concurrent MOVE, which the old status-only predicate could never see.
   const listChain = chain({
@@ -288,9 +291,12 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
   expect(result).toMatchObject({ success: true, moved_count: 1, new_date: '2099-01-15' });
   expect(result.stops.map((s) => s.id)).toEqual(['svc-ok']);
   expect(result.skipped_conflict).toEqual([{ id: 'svc-stale', status: 'confirmed' }]);
-  // The CAS carried the full observed snapshot — status AND schedule fields.
+  // The CAS carried the full observed snapshot — status AND the complete
+  // schedule triple (date + start + END).
   expect(staleUpdate.where).toHaveBeenCalledWith('status', 'confirmed');
-  expect(staleUpdate.where).toHaveBeenCalledWith({ scheduled_date: '2026-05-20', window_start: '09:00:00' });
+  expect(staleUpdate.where).toHaveBeenCalledWith({
+    scheduled_date: '2026-05-20', window_start: '09:00:00', window_end: '10:00:00',
+  });
   // Exactly one audit row — the skipped stop logged nothing.
   expect(logChain.insert).toHaveBeenCalledTimes(1);
   expect(logChain.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_service_id: 'svc-ok' }));

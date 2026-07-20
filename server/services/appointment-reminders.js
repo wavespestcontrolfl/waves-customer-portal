@@ -544,6 +544,25 @@ function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
   };
 }
 
+// The reminder cron's 72h branch only delivers while the appointment is more
+// than 24.25 hours out (checkAndSendReminders: `hoursUntil > 24.25` — the
+// boundary where the 24h reminder takes over, plus the 15-minute cron slack).
+// Every compensating re-arm — handleReschedule's failed-notice path below,
+// the dispatch route's rearmRescheduleReminderWindows, reschedule-sms's
+// blocked-confirmation re-arm — must consult this before clearing
+// reminder_72h_sent: an armed 72h flag on a closer appointment can never
+// fire, so the cron would just re-select the row every 15 minutes until the
+// appointment is cancelled or the row is otherwise closed, while the covered
+// flag the caller's own sync stamped was already the correct terminal state
+// (the re-armed 24h window carries the fallback notice for those). Exported
+// on the service object so those callers reuse this exact boundary instead
+// of hardcoding their own copy of 24.25.
+function reminder72hStillReachable(appointmentTime, now = new Date()) {
+  const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
+  if (isNaN(apptTime.getTime())) return false;
+  return (apptTime.getTime() - now.getTime()) / 3600000 > 24.25;
+}
+
 // ── Landline detection ──
 
 async function isLandline(customerId, phone) {
@@ -998,6 +1017,16 @@ const AppointmentReminders = {
    *
    * Pass `options.sendConfirmation` (boolean) to override the source-based default —
    * e.g. admin_manual with the "Send confirmation SMS" checkbox unchecked passes false.
+   *
+   * Pass `options.closeReminderWindows` (boolean) when the visit has NO time
+   * window: the row still registers at the canonical date+08:00 slot time
+   * (the convention the DB sync trigger, the self-heal sweep, and the
+   * same-slot dedup all COALESCE on), but both reminder windows land
+   * pre-closed so the cron never texts a customer "at 8:00 AM" for a time
+   * nobody chose. When a real window is later set, the sync trigger's
+   * time_changed branch re-arms the windows from the real start; until then
+   * the row's existence keeps selfHealMissingReminderRows (which registers
+   * windowless visits at 08:00 ARMED) from resurrecting the 8 AM promise.
    */
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
@@ -1014,6 +1043,7 @@ const AppointmentReminders = {
       const sendConfirmation = typeof options.sendConfirmation === 'boolean'
         ? options.sendConfirmation
         : (source === 'booking_new' || source === 'admin_manual');
+      const closeReminderWindows = options.closeReminderWindows === true;
 
       const registration = await db.transaction(async (trx) => {
         await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
@@ -1083,6 +1113,14 @@ const AppointmentReminders = {
           };
         }
 
+        // closeReminderWindows: pre-close both windows IN the insert (see the
+        // JSDoc above) — a register-then-close pair would leave a gap where a
+        // cron tick could send an 08:00-stamped reminder for a windowless
+        // visit. Only the 72h/24h stamps close here; confirmation keeps its
+        // normal source-based handling. (At insert confirmation_sent is
+        // false, so the legacy sibling-suppression fingerprint — which needs
+        // all three flags stamped identically — can't misread this row.)
+        const windowsClosedAt = closeReminderWindows ? new Date() : null;
         const [record] = await trx('appointment_reminders').insert({
           scheduled_service_id: scheduledServiceId,
           customer_id: customerId,
@@ -1090,6 +1128,12 @@ const AppointmentReminders = {
           service_type: serviceLabel,
           source,
           confirmation_sent: false,
+          ...(closeReminderWindows ? {
+            reminder_72h_sent: true,
+            reminder_72h_sent_at: windowsClosedAt,
+            reminder_24h_sent: true,
+            reminder_24h_sent_at: windowsClosedAt,
+          } : {}),
         }).returning('*');
 
         return { record, serviceLabel, inserted: true };
@@ -1791,12 +1835,12 @@ const AppointmentReminders = {
           }
         }
       } finally {
-        if (!noticeSent && (newApptTime.getTime() - Date.now()) / 3600000 > 24.25) {
+        if (!noticeSent && reminder72hStillReachable(newApptTime)) {
           // Re-arm ONLY while the appointment is still inside the 72h
-          // delivery band — the cron's 72h branch never fires once
-          // hoursUntil <= 24.25, so a false flag there would just keep the
-          // row in every 15-minute scan forever (the still-armed 24h window
-          // carries the fallback for those). Guarded three ways so a failed
+          // delivery band (reminder72hStillReachable — the cron's 72h branch
+          // never fires once hoursUntil <= 24.25, so a false flag there would
+          // just keep the row in every 15-minute scan forever; the still-armed
+          // 24h window carries the fallback). Guarded three ways so a failed
           // attempt only re-arms state it still owns:
           //   • appointment_time — a newer reschedule to a different time
           //     (which may have sent its own notice) makes this a no-op;
@@ -2115,6 +2159,10 @@ AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel
 // resolution the appointment reminders use.
 AppointmentReminders.apptChannel = apptChannel;
 AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
+// Shared 72h re-arm boundary (see the function's own comment) — the dispatch
+// and reschedule-sms compensating re-arms consult this instead of hardcoding
+// the cron's 24.25h cutoff.
+AppointmentReminders.reminder72hStillReachable = reminder72hStillReachable;
 
 AppointmentReminders._test = {
   maskPhone,

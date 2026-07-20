@@ -3550,7 +3550,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // snapshot. Matching the observed scheduled_date + window_start
               // makes the later writer miss instead (knex renders a null
               // value in the object form as IS NULL — the same contract
-              // auto-dispatch's rebooker `expect` relies on). Field-level CAS
+              // auto-dispatch's rebooker `expect` relies on). window_end is
+              // in the predicate too: the start-only form derives its new end
+              // from THIS read's duration (windowDurationMinutes over the
+              // observed pair) and the elapsed guard + reschedule_log read
+              // the same snapshot — a concurrent edit that only resized the
+              // END would otherwise still match on start alone and have its
+              // end silently overwritten by the stale-duration derivation.
+              // Field-level CAS
               // is the repo's established pattern for exactly this (rebooker
               // options.expect); deliberately NOT SELECT..FOR UPDATE, which
               // would widen this quick single-row mover's tx shape for no
@@ -3563,7 +3570,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const updatedRows = await trx('scheduled_services')
                 .where({ id })
                 .where('status', String(svc.status))
-                .where({ scheduled_date: prevDate, window_start: svc.window_start ?? null })
+                .where({
+                  scheduled_date: prevDate,
+                  window_start: svc.window_start ?? null,
+                  window_end: svc.window_end ?? null,
+                })
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
