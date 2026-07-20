@@ -223,3 +223,137 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(keysB[0]).toBe(keysA[0]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Series path (rescheduleSeries) — the two P1s codex found in the SERIES leg:
+//   1. a shifted sibling that would overlap an occupied window must be
+//      MOVED-OR-ABORTED, never committed unassigned-but-overlapping (an
+//      unassigned row still OCCUPIES its window under the tech-blind check).
+//   2. the projected-date advisory locks must be acquired BEFORE the parent
+//      row UPDATE, so the global order (advisory date locks -> row locks)
+//      holds on the series path and can't deadlock a concurrent single move.
+// Real lock helpers (acquireOccupancyLocks issues the trx.raw statements the
+// assertions read); only findConflictingVisits is stubbed.
+// ---------------------------------------------------------------------------
+describe('rescheduleSeries — shared occupancy conflict gate + lock order', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    findConflictingVisits.mockResolvedValue([]);
+  });
+
+  // Every occupancy advisory lock a transaction took, in acquisition order.
+  function occupancyLockOrder(trx) {
+    const out = [];
+    trx.raw.mock.calls.forEach((c, i) => {
+      if (Array.isArray(c[1]) && c[1][0] === 'slot-reserve' && String(c[1][1]).startsWith('occupancy:')) {
+        out.push(trx.raw.mock.invocationCallOrder[i]);
+      }
+    });
+    return out;
+  }
+
+  test('unresolvable sibling overlap ABORTS the series (SLOT_TAKEN) — never commits an unassigned-but-overlapping row', async () => {
+    const anchor = {
+      id: 'svc-1', customer_id: 'cust-1', technician_id: null,
+      scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
+      status: 'confirmed',
+      recurring_parent_id: null, is_recurring: true, recurring_pattern: 'weekly',
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
+    };
+    const siblings = [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', technician_id: null },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: dayOffset(17), window_start: '09:00:00', window_end: '11:00:00', technician_id: 'tech-9' },
+    ];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const historyInsert = chain();
+    const logInsert = chain();
+
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return historyInsert;
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    // Anchor window is clear; the recomputed sibling lands on an occupied one.
+    findConflictingVisits
+      .mockResolvedValueOnce([])                     // anchor occupancy check
+      .mockResolvedValueOnce([{ id: 'other-job' }]); // sibling occupancy check
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+
+    // The KEY invariant: the overlapping sibling is NEVER written — no
+    // unassigned-but-overlapping row commits; the whole trx rolls back.
+    expect(sibUpdate.update).not.toHaveBeenCalled();
+  });
+
+  test('month-based series takes the date advisory locks BEFORE the parent row UPDATE', async () => {
+    const anchor = {
+      id: 'svc-1', customer_id: 'cust-1', technician_id: null,
+      scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
+      status: 'confirmed',
+      recurring_parent_id: null, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
+    };
+    const siblings = [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', technician_id: null },
+    ];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    const parentUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const logInsert = chain();
+
+    // Month-based order: siblings SELECT, parent UPDATE, seriesClash probe,
+    // anchor UPDATE.
+    const scheduledQueue = [siblingsQuery, parentUpdate, seriesClashProbe, anchorUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return chain();
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+    );
+    expect(result.success).toBe(true);
+
+    // The parent recurrence-anchor UPDATE ran…
+    expect(parentUpdate.update).toHaveBeenCalled();
+    // …and the date advisory lock was HELD first (rung 1 before the first row
+    // lock) — the inversion that would deadlock a concurrent single move.
+    const lockOrders = occupancyLockOrder(trx);
+    expect(lockOrders.length).toBeGreaterThan(0);
+    expect(lockOrders[0]).toBeLessThan(parentUpdate.update.mock.invocationCallOrder[0]);
+  });
+});

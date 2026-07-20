@@ -26,6 +26,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
@@ -504,7 +505,13 @@ describe('live-status reschedule override (allowLive)', () => {
     );
   });
 
-  test('rescheduleSeries unassigns a shifted sibling whose kept tech is double-booked on the recomputed date', async () => {
+  test('rescheduleSeries ABORTS (never unassign-commits) when a shifted sibling would overlap an occupied window', async () => {
+    // Codex P1: clearing technician_id is NOT a resolution — a tech-blind
+    // occupancy check counts the unassigned row too, so an unassigned-but-
+    // overlapping commit is still a double-booking that then blocks later
+    // offers. The series has no cadence-tolerance search to relocate the
+    // occurrence, so an unplaceable sibling aborts the whole all-or-none
+    // shift with SLOT_TAKEN — nothing overlapping is ever written.
     const anchorFull = {
       ...liveService('confirmed'),
       recurring_parent_id: null,
@@ -524,13 +531,13 @@ describe('live-status reschedule override (allowLive)', () => {
     // No same-series date collision…
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    // …but tech-9 already has an overlapping job on the recomputed sibling date.
-    const conflictCheck = chain({ first: jest.fn().mockResolvedValue({ id: 'other-job' }) });
+    // …the conflict now surfaces via the shared tech-blind check below, not a
+    // local tech-scoped probe. This sibling update must NEVER be reached.
     const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, conflictCheck, sibUpdate];
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -548,17 +555,18 @@ describe('live-status reschedule override (allowLive)', () => {
       throw new Error(`Unexpected db table ${table}`);
     });
 
-    const result = await SmartRebooker.rescheduleSeries(
-      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
-    );
+    // Anchor window is clear; the recomputed sibling window lands on an
+    // already-occupied slot (the shared check is called once per occurrence).
+    findConflictingVisits
+      .mockResolvedValueOnce([])                     // anchor occupancy check
+      .mockResolvedValueOnce([{ id: 'other-job' }]); // sibling occupancy check
 
-    // The sibling still shifts (cadence preserved) but its tech is cleared
-    // inside the trx so nothing double-booked ever commits; the flag lets
-    // the route park it for dispatch reassignment.
-    const sibPayload = sibUpdate.update.mock.calls[0][0];
-    expect(sibPayload.scheduled_date).toBe(SIB1_SHIFTED);
-    expect(sibPayload.technician_id).toBeNull();
-    expect(result.rescheduledOccurrences[0].conflicted).toBe(false);
-    expect(result.rescheduledOccurrences[1].conflicted).toBe(true);
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+
+    // The overlapping sibling is never written — no unassigned-but-overlapping
+    // row commits; the whole trx rolls back.
+    expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 });

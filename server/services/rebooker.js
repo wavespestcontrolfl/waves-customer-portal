@@ -578,13 +578,14 @@ class SmartRebooker {
     const RESCHEDULABLE = RESCHEDULABLE_STATUSES;
 
     const occurrencesRescheduled = await db.transaction(async (trx) => {
-      if (isMonthBasedPattern) {
-        await trx('scheduled_services').where({ id: parentId }).update({
-          recurring_nth: opts.nth,
-          recurring_weekday: opts.weekday,
-          updated_at: trx.fn.now(),
-        });
-      }
+      // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
+      // is deliberately NOT here. It is the series path's first ROW lock and
+      // must be taken AFTER the date-wide advisory locks (rung 1) below —
+      // acquiring it up front inverted the global order and deadlocked a
+      // concurrent single reschedule that held a target-date advisory lock
+      // while waiting to touch this same parent row. It now runs right after
+      // acquireOccupancyLocks. The plain (unlocked) sibling SELECT that
+      // follows is a read, takes no row lock, and can safely precede rung 1.
 
       // Cadence rows ONLY: booster-month extras share recurring_parent_id
       // but carry is_recurring=false and hold no recurrence index — sweeping
@@ -681,6 +682,19 @@ class SmartRebooker {
           // the series-vs-series case can deadlock. See the ORDERING CONTRACT
           // in scheduling/occupancy.js.
           await acquireOccupancyLocks(trx, projectedDates);
+
+          // First ROW lock of the series path — taken here, AFTER the rung-1
+          // date advisory locks, never before (see the NOTE at the top of the
+          // transaction). The projected date set is already known from the
+          // plain-SELECT sibling read above (no row lock), so the parent
+          // update can wait until the advisory locks are held.
+          if (isMonthBasedPattern) {
+            await trx('scheduled_services').where({ id: parentId }).update({
+              recurring_nth: opts.nth,
+              recurring_weekday: opts.weekday,
+              updated_at: trx.fn.now(),
+            });
+          }
 
           const seriesClash = await trx('scheduled_services')
             .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
@@ -811,67 +825,42 @@ class SmartRebooker {
           updateData.recurring_weekday = opts.weekday;
         }
 
-        // Non-anchor siblings land on recomputed dates the route never
-        // validated. Never COMMIT a double-booking: if the sibling's kept
-        // tech already has an overlapping job on the new date (outside this
-        // series — earlier-loop siblings have already moved), clear the
-        // assignment inside the same trx and flag the occurrence so the
-        // caller can park it for dispatch. The visit itself still shifts —
-        // cadence is preserved; only the route assignment is deferred.
-        let conflicted = false;
-        if (!isAnchor && sib.technician_id && updateData.window_start) {
-          // Null window_end (schema-legal) must not collapse the probe to a
-          // zero-length window — mirror the SQL predicate's fallback and
-          // assume a 60-minute block from the start.
-          const clashEnd = updateData.window_end || (() => {
-            const [h, m] = String(updateData.window_start).split(':').map(Number);
-            const total = h * 60 + (m || 0) + 60;
-            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-          })();
-          // Same slot-reserve advisory lock the anchor and single-visit
-          // paths take — without it a concurrent assignment can pass its
-          // own overlap check before this trx commits and double-book
-          // anyway.
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],
-          );
-          const clash = await trx('scheduled_services')
-            .where('scheduled_date', date)
-            .where('technician_id', sib.technician_id)
-            // Exclude only the rows this sweep is moving (sweptIds — their
-            // dates are changing, so their pre-shift positions are noise).
-            // Everything else counts: boosters, pre-anchor cadence rows
-            // that stayed put, other plans — a shifted sibling landing on
-            // any of their windows is a real conflict and must unassign.
-            .whereNotIn('id', sweptIds)
-            .whereNotIn('status', TERMINAL)
-            .where((q) => {
-              q.whereNull('reservation_expires_at')
-                .orWhereRaw('reservation_expires_at > NOW()');
-            })
-            .whereRaw(
-              "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
-              [clashEnd, updateData.window_start],
-            )
-            .first('id');
-          if (clash) {
-            conflicted = true;
-            updateData.technician_id = null;
+        // Non-anchor siblings land on recomputed cadence dates the route
+        // never validated. Under the tech-blind invariant an UNASSIGNED row
+        // still OCCUPIES its window — findConflictingVisits counts every
+        // non-terminal row regardless of technician_id — so clearing
+        // technician_id does NOT resolve a clash; it commits a double-booking
+        // that then blocks later offers/reschedules. Unassignment is not a
+        // resolution. The series path fixes each sibling's date
+        // deterministically from the cadence (nextRecurringDate) and has no
+        // tolerance search to slide an occurrence into a free window, so an
+        // unplaceable sibling aborts the whole all-or-none shift the same way
+        // the anchor and single-visit paths signal an unresolvable conflict —
+        // throw SLOT_TAKEN, roll back, commit nothing overlapping.
+        if (!isAnchor && updateData.window_start) {
+          // Kept-tech slot-reserve lock (rung 3) — same lock the anchor and
+          // single-visit paths take, keeping the global order even though the
+          // check itself is tech-blind: a concurrent assignment on this
+          // tech+date must serialize behind us, not pass its own overlap
+          // check and double-book before this trx commits.
+          if (sib.technician_id) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],
+            );
           }
-        }
-        // Sibling tech-blind occupancy (shared module) — the tech-scoped
-        // probe above misses technician-NULL rows entirely and never ran
-        // for techless siblings. Same failure mode as the tech clash:
-        // flag + unassign (the visit still shifts — cadence preserved,
-        // dispatch parks the occurrence), never a throw that aborts the
-        // whole series over one crowded day.
-        if (!isAnchor && !conflicted && updateData.window_start) {
+          // Null window_end (schema-legal) must not collapse the probe to a
+          // zero-length window — mirror the SQL predicate's 60-minute fallback.
           const occEnd = updateData.window_end || (() => {
             const [h, m] = String(updateData.window_start).split(':').map(Number);
             const total = h * 60 + (m || 0) + 60;
             return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
           })();
+          // Tech-blind occupancy (shared module) — a strict superset of the
+          // old tech-scoped probe (it also catches technician-NULL rows and
+          // ran even for techless siblings). sweptIds excludes exactly the
+          // rows this sweep is moving; everything else counts (boosters,
+          // pre-anchor cadence rows that stayed put, other plans).
           const occClash = await findConflictingVisits({
             db: trx,
             date: String(date).split('T')[0],
@@ -881,8 +870,11 @@ class SmartRebooker {
             excludeStatuses: TERMINAL,
           });
           if (occClash.length) {
-            conflicted = true;
-            updateData.technician_id = null;
+            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
           }
         }
 
@@ -935,9 +927,12 @@ class SmartRebooker {
           date,
           windowStart: win.start || sib.window_start,
           windowEnd: win.end || sib.window_end,
-          // True when the shift cleared this row's tech to avoid committing
-          // a double-booked route — the caller parks it for reassignment.
-          conflicted,
+          // Always false now: a sibling that would land on an occupied window
+          // aborts the whole series (SLOT_TAKEN) instead of committing an
+          // unassigned-but-overlapping row, so no occurrence is ever parked.
+          // Retained for the callers that still read it (admin-dispatch and
+          // reschedule-public park-for-dispatch filters) — they now see none.
+          conflicted: false,
         });
       }
 

@@ -304,6 +304,25 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     }
   });
 
+  test('series parent recurrence-anchor UPDATE (first row lock) comes AFTER the date advisory locks', () => {
+    // The series path's month-based branch UPDATEs (row-locks) the recurring
+    // parent. That row lock must follow the rung-1 date advisory locks, never
+    // precede them — otherwise a concurrent single reschedule holding a
+    // target-date advisory lock while waiting to touch this parent row
+    // deadlocks against this txn holding the parent row and waiting for the
+    // advisory lock. Pinned at the source so a future edit can't reintroduce
+    // the inversion.
+    const src = read('services/rebooker.js');
+    const locksIdx = src.indexOf('await acquireOccupancyLocks(trx, projectedDates);');
+    const parentUpdateIdx = src.indexOf('.where({ id: parentId }).update({');
+    expect(locksIdx).toBeGreaterThan(-1);
+    expect(parentUpdateIdx).toBeGreaterThan(-1);
+    // Advisory date locks first…
+    expect(parentUpdateIdx).toBeGreaterThan(locksIdx);
+    // …and NO parent-row UPDATE precedes them (the inversion this closes).
+    expect(src.lastIndexOf('.where({ id: parentId }).update({', locksIdx)).toBe(-1);
+  });
+
   test('every writer imports rung 1 from the shared module — no private key shapes', () => {
     // A local copy of the lock statement would have to reproduce the
     // namespace AND the `occupancy:<date>` key exactly; one drift and the
