@@ -824,6 +824,15 @@ const gates = {
   // send (uncompleted inspections, signed-but-unsent drafts, stuck holds).
   // Admin-notification-only; no customer contact.
   wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
+
+  // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
+  // outlook) to the customer portal's visit-tracker payload so the tracker
+  // can show a "42% chance of rain — your tech may adjust timing" caption.
+  // Display-only: no rescheduling, no customer sends. Customer-facing
+  // surface change, so opt-in in EVERY environment. Kill switch: unset (or
+  // any non-'true' value) — the field is omitted from the payload and the
+  // tracker reverts to today's forecast-string behavior.
+  customerRainChip: process.env.GATE_CUSTOMER_RAIN_CHIP === 'true',
 };
 
 function isEnabled(gate) {

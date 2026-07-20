@@ -1799,6 +1799,13 @@ export default function DispatchPageV2({
   const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
   const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
   const hasRainAlert = rainProbability != null && rainProbability > 40;
+  // Per-zone NWS rain chances for the zones on today's board (day payload
+  // zoneRain: { zoneSlug: 0-100|null }). Exception-based: only zones at
+  // ≥40% surface as chips on the weather bar — amber <50, alert-red ≥50
+  // (same thresholds as the rain-alert / spray-hold lines below).
+  const zoneRainAlerts = Object.entries(safeData.zoneRain || {})
+    .filter(([, chance]) => chance != null && chance >= 40)
+    .sort(([, a], [, b]) => b - a);
   const hasFocusAlerts =
     (!isMobile && unassignedCount > 0) ||
     newCustomers.length > 0 ||
@@ -2377,7 +2384,25 @@ export default function DispatchPageV2({
                   )}
                 >
                   SPRAY: {sprayHold ? "HOLD" : "GO"}
-                </span>{" "}
+                </span>
+                {/* Per-zone rain chips — only zones at ≥40% render. */}
+                {zoneRainAlerts.map(([zone, chance]) => (
+                  <span key={zone} className="inline-flex items-center gap-2">
+                    {" "}
+                    <span className="text-zinc-300" aria-hidden="true">
+                      ·
+                    </span>{" "}
+                    <span
+                      className={cn(
+                        "u-nums font-medium",
+                        chance >= 50 ? "text-alert-fg" : "text-amber-700",
+                      )}
+                      title={`${zoneLabels?.[zone] || zone}: ${chance}% chance of rain`}
+                    >
+                      {zoneLabels?.[zone] || zone} {chance}%
+                    </span>
+                  </span>
+                ))}{" "}
               </div>
             );
           })()}
@@ -2419,6 +2444,7 @@ export default function DispatchPageV2({
               mode="day"
               date={date}
               services={services}
+              rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
               onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {

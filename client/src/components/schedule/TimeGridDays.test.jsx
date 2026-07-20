@@ -50,6 +50,37 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('TimeGridDays rain chips', () => {
+  it('shows red at ≥50, amber at ≥40, and nothing below 40 or when null', async () => {
+    const day = (date, dayOfWeek, dayNum, rainChance) => ({
+      date, dayOfWeek, dayNum, services: [], rainChance,
+    });
+    fetch.mockResolvedValueOnce(response({
+      startDate: '2026-07-13',
+      days: [
+        day('2026-07-13', 'Mon', '13', 55),
+        day('2026-07-14', 'Tue', '14', 42),
+        day('2026-07-15', 'Wed', '15', 20),
+        day('2026-07-16', 'Thu', '16', null),
+      ],
+    }));
+
+    render(<TimeGridDays date="2026-07-13" dayCount={7} />);
+
+    const red = await screen.findByText('55%');
+    expect(red).toBeInTheDocument();
+    expect(red.className).toContain('text-alert-fg');
+
+    const amber = screen.getByText('42%');
+    expect(amber.className).toContain('text-amber-800');
+    expect(amber.className).not.toContain('text-alert-fg');
+
+    // 20% and null render no chip at all — exception-based display.
+    expect(screen.queryByText('20%')).not.toBeInTheDocument();
+    expect(screen.getAllByTitle(/chance of rain/)).toHaveLength(2);
+  });
+});
+
 describe('TimeGridDays week loading', () => {
   it('clears the prior week on failure and retries the requested week', async () => {
     fetch

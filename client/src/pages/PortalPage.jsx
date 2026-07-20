@@ -9722,10 +9722,18 @@ function ServiceTracker() {
           }} />
           {status.label}
         </div>
-        {weather && (
+        {(weather || (tracker.rainChance != null && tracker.rainChance >= 40)) && (
           <div style={{ fontSize: 14, color: B.textBody, fontFamily: FONTS.ui, textAlign: 'right' }}>
-            {weather.temp}°F
-            {weather.forecast?.toLowerCase().includes('rain') && (
+            {weather && <>{weather.temp}°F</>}
+            {/* Gated rain chip (tracker.rainChance rides the payload only when
+                GATE_CUSTOMER_RAIN_CHIP is on): at ≥40% show the specific
+                chance; otherwise fall back to today's forecast-string caption
+                so the gate-off behavior is unchanged. */}
+            {tracker.rainChance != null && tracker.rainChance >= 40 ? (
+              <div style={{ fontSize: 14, color: B.textCaption, marginTop: 2 }}>
+                {tracker.rainChance}% chance of rain — your tech may adjust timing if needed
+              </div>
+            ) : weather?.forecast?.toLowerCase().includes('rain') && (
               <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
             )}
           </div>
