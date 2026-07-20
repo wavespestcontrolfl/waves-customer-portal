@@ -308,16 +308,65 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(lockIdx).toBeLessThan(capCountIdx); // taken before the count it serializes
   });
 
-  test('lock acquisition order stays fixed — customer → tech → zone → day — so writers can never deadlock', () => {
+  // ORDERING CONTRACT (services/scheduling/occupancy.js): the ONE global
+  // order is date-occupancy → self-booking-confirm → tech → zone → day-cap.
+  // createSelfBooking uses every rung, so it is the writer that pins the
+  // whole order down.
+  test('lock acquisition order stays fixed — date → customer → tech → zone → day-cap — so writers can never deadlock', () => {
     const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
     const customerLockIdx = src.indexOf("['self-booking-confirm', `${custId}:${slotDateStr}`],", txIdx);
     const techLockIdx = src.indexOf("['slot-reserve', `${technician_id}:${slotDateStr}`],", txIdx);
     const zoneLockIdx = src.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],", txIdx);
     const dayLockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);', txIdx);
-    expect(customerLockIdx).toBeGreaterThan(txIdx);
+    expect(dateLockIdx).toBeGreaterThan(txIdx);
+    expect(customerLockIdx).toBeGreaterThan(dateLockIdx);
     expect(techLockIdx).toBeGreaterThan(customerLockIdx);
     expect(zoneLockIdx).toBeGreaterThan(techLockIdx);
     expect(dayLockIdx).toBeGreaterThan(zoneLockIdx);
+  });
+
+  test('the date-occupancy lock comes from the SHARED module (a private copy would key a different lock)', () => {
+    // A hand-rolled advisory-lock statement here would have to reproduce the
+    // namespace AND the `occupancy:<date>` key shape exactly; one typo and
+    // this writer silently stops serializing against the rebooker.
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
+    expect(dateLockIdx).toBeGreaterThan(-1);
+    expect(src.slice(txIdx, dateLockIdx))
+      .toContain("require('../services/scheduling/occupancy')");
+    // ...and it is the FIRST advisory lock the transaction takes.
+    const firstRawLockIdx = src.indexOf('pg_advisory_xact_lock', txIdx);
+    expect(dateLockIdx).toBeLessThan(firstRawLockIdx);
+  });
+
+  test('the GLOBAL tech-blind probe runs under the date lock — after the narrow fast path, before any insert', () => {
+    // Round-3 P1: the conflictQuery's capacity legs are NARROW (tech route +
+    // zone pool + live holds) — an overlapping visit for a different tech
+    // outside this zone, or an unassigned row whose customer city isn't in
+    // the zone list, matches none of them. Rung 1 only serializes writers;
+    // it cannot widen what this check sees — the shared global predicate
+    // must ALSO run under it before the inserts (ORDERING CONTRACT,
+    // services/scheduling/occupancy.js).
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
+    const narrowIdx = src.indexOf("const conflict = await conflictQuery.first('scheduled_services.id');", txIdx);
+    const probeIdx = src.indexOf('const globalClash = await findConflictingVisits({', txIdx);
+    const insertIdx = src.indexOf("await trx('self_booked_appointments').insert({", txIdx);
+    expect(dateLockIdx).toBeGreaterThan(txIdx);
+    expect(narrowIdx).toBeGreaterThan(dateLockIdx);
+    // Fast path answers first (it owns this route's specific 409 copy)...
+    expect(probeIdx).toBeGreaterThan(narrowIdx);
+    // ...and nothing is inserted before the global predicate has passed.
+    expect(insertIdx).toBeGreaterThan(probeIdx);
+    // The probe throws the same operational SLOT_TAKEN shape the fast path
+    // uses, so the route's 409 handling (created-profile rollback included)
+    // is identical for both.
+    const probeBlock = src.slice(probeIdx, probeIdx + 700);
+    expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
+    expect(probeBlock).toMatch(/statusCode: 409/);
+    // Shared module import rides the same lazy require as the lock helper.
+    expect(src.slice(txIdx, dateLockIdx)).toContain('findConflictingVisits');
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
@@ -401,12 +450,17 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
     expect(availSrc).toMatch(/module\.exports\.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;/);
   });
 
-  test('confirmBooking takes the day lock AFTER its zone lock (fixed order) and counts globally before inserting', () => {
+  test('confirmBooking takes date → zone → day-cap (the global order) and counts globally before inserting', () => {
+    const dateLockIdx = availSrc.indexOf('await acquireOccupancyLock(trx, dateStr);');
     const zoneLockIdx = availSrc.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],");
     const dayLockIdx = availSrc.indexOf('await acquireSelfBookingDayCapLock(trx, dateStr);');
     const dayCountIdx = availSrc.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {');
     const insertIdx = availSrc.indexOf("await trx('self_booked_appointments').insert({");
-    expect(zoneLockIdx).toBeGreaterThan(-1);
+    expect(dateLockIdx).toBeGreaterThan(-1);
+    expect(zoneLockIdx).toBeGreaterThan(dateLockIdx); // rung 1 before rung 4
+    // Exactly ONE acquisition — hoisted out of the zone-null branch, so the
+    // zone-resolved branch can't skip it.
+    expect(availSrc.split('await acquireOccupancyLock(trx, dateStr);')).toHaveLength(2);
     expect(dayLockIdx).toBeGreaterThan(zoneLockIdx); // zone → day, same relative order as createSelfBooking
     expect(dayCountIdx).toBeGreaterThan(dayLockIdx); // count under the lock
     expect(insertIdx).toBeGreaterThan(dayCountIdx); // checked before the write

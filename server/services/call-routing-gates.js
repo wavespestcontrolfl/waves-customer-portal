@@ -165,6 +165,12 @@ function buildTriageItem({
     secondary_contact_is_existing_customer: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
     unassigned_auto_booking: 'time_ambiguous',
+    // Advisory schedule-clash / time-sanity cards for AI call bookings
+    // (call-recording-processor): the visit BOOKED as normal — the card
+    // surfaces a cross-customer time overlap, or a transcript-parsed time
+    // outside 8a–5p / on a weekend, for the office to re-slot.
+    booking_time_conflict: 'time_ambiguous',
+    booking_out_of_hours: 'time_ambiguous',
     // AI extraction retry budget exhausted (call-recording-processor) — the
     // call has NO extraction, so nothing downstream (lead/customer/route
     // decision) exists; this card is the only surface it gets.

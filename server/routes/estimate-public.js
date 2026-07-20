@@ -18,6 +18,10 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const slotReservation = require('../services/slot-reservation');
+// Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
+// services/scheduling/occupancy.js): the accept transaction pre-acquires the
+// held slot's date key ahead of its estimate/customer row locks.
+const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
@@ -8242,6 +8246,41 @@ router.put('/:token/accept', async (req, res, next) => {
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
     const txResult = await db.transaction(async (trx) => {
+      // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
+      // the row-lock rule). When this accept will graduate a held slot,
+      // commitReservation's date-occupancy lock used to be reached DEEP in
+      // this txn — after the estimates UPDATE below (and the customer
+      // insert/update) had already taken row locks — while a concurrent
+      // reserveSlot holds rung 1 and waits on the estimate FOR UPDATE:
+      // lock-order inversion, resolved by Postgres deadlock-aborting one
+      // side (a customer acceptance dying as an unmapped 500). Take the
+      // hold's date key HERE, before ANY row lock, per the contract's
+      // unlocked-read → lock → re-check pattern: the hold's date is read
+      // UNLOCKED (it can move between read and lock), and commitReservation
+      // re-checks its own pre-read against the key we pass down
+      // (preLockedDate) — a moved hold fails into the existing
+      // RESERVATION_EXPIRED re-pick recovery instead of proceeding under
+      // (or acquiring) the wrong key. commitReservation's own acquisition
+      // of this same key is a reentrant no-op (pg advisory xact locks are
+      // re-acquirable by the owning txn). A hold row that vanished since
+      // the pre-txn check skips the lock: commitReservation then throws
+      // RESERVATION_NOT_FOUND from its pre-read, BEFORE taking any lock of
+      // its own (hold ids are never reused), so no inversion opens.
+      let acceptPreLockedDate = null;
+      {
+        const acceptHoldRow = reservationRow
+          || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
+            ? existingAppointmentRow
+            : null);
+        if (acceptHoldRow) {
+          const holdDateRow = await trx('scheduled_services')
+            .where({ id: acceptHoldRow.id })
+            .first('scheduled_date');
+          acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
+          if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+        }
+      }
+
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
@@ -8419,6 +8458,9 @@ router.put('/:token/accept', async (req, res, next) => {
             estimate: acceptedEstimateForScheduling,
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
+            // Rung 1 was pre-acquired on this key at the top of this txn —
+            // commitReservation re-checks the hold still sits on it.
+            preLockedDate: acceptPreLockedDate,
             trx,
           });
           reservationCommitted = true;
@@ -8472,6 +8514,9 @@ router.put('/:token/accept', async (req, res, next) => {
               estimate: acceptedEstimateForScheduling,
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
+              // Rung 1 was pre-acquired on this key at the top of this txn —
+              // commitReservation re-checks the hold still sits on it.
+              preLockedDate: acceptPreLockedDate,
               trx,
             });
             reservationCommitted = true;
@@ -8968,6 +9013,24 @@ router.put('/:token/accept', async (req, res, next) => {
         standardInvoiceMinted,
         standardInvoiceAttached,
       };
+    }).catch((txErr) => {
+      // PG 40P01 (deadlock_detected): Postgres aborted this transaction to
+      // break a lock cycle — everything rolled back, nothing committed, and
+      // the customer's hold is untouched (its expiry clear happened inside
+      // the aborted txn). The rung-1 pre-lock at the top of the txn removes
+      // the known accept-vs-reserveSlot inversion; this mapping is
+      // defense-in-depth for residual row-lock races (customers/leads/
+      // estimates rows shared with other writers). Same retryable-conflict
+      // shape as the RESERVATION_EXPIRED path (a 409 the 4xx translator in
+      // this route's catch returns as { error }) instead of an unmapped 500
+      // that reads as "your acceptance failed".
+      if (txErr && txErr.code === '40P01') {
+        logger.warn(`[estimate-accept] accept transaction deadlock-aborted for estimate ${estimate.id} — returning retryable 409`);
+        const conflictErr = new Error('a concurrent scheduling update interrupted this acceptance — please try again');
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
+      throw txErr;
     });
 
     const { customerId, reservationCommitted } = txResult;

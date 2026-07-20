@@ -838,6 +838,38 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
   );
 
+  // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
+  // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
+  // blocks on unassigned zone rows and live customer-NULL estimate holds,
+  // but find-time's occupied set is per-tech — technician_id-NULL rows and
+  // techless holds never occupied anything, so /book kept re-offering a
+  // slot every tap on which 409'd. Post-filter candidates against the
+  // shared tech-blind occupancy set (one active tech: ANY overlap is the
+  // commit gate's superset — tech-backed rows are already excluded by
+  // find-time, so re-dropping them is idempotent; over-filtering is
+  // acceptable, a new 409 source is not). Degrades soft: on query failure
+  // serve unfiltered rather than serving nothing — the commit gate still
+  // owns correctness.
+  let occupiedByDate = null;
+  try {
+    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+    const occupiedRows = await listOccupiedWindows({
+      dateFrom: rangeFrom,
+      dateTo: rangeTo,
+      // Public self-reschedule: the moving row must not block the slot it
+      // is vacating — same exclusion findAvailableSlots already applies.
+      excludeServiceIds,
+    });
+    occupiedByDate = new Map();
+    for (const row of occupiedRows) {
+      if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
+      occupiedByDate.get(row.date).push(row);
+    }
+  } catch (occErr) {
+    logger.warn(`[booking] availability occupancy filter unavailable — serving unfiltered slots: ${occErr.message}`);
+    occupiedByDate = null;
+  }
+
   const fmt = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
   // Location scope for every offer this build signs — the exact coords the
   // slot computation ran on, on the public rounding grid. Callers that mint
@@ -853,6 +885,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     if (startMin < dayStartMin || endMin > dayEndMin) return;
     // Lunch windows are reserved for route health and should never be self-booked.
     if (startMin < lunchEnd && endMin > lunchStart) return;
+    // Commit-gate occupancy mirror (see the fetch above). Overlap semantics
+    // match the gate's SQL predicate (half-open: back-to-back windows touch
+    // without clashing). Also covers cleanBookingStart snaps that would land
+    // a candidate on a window find-time validated around.
+    if (occupiedByDate) {
+      const dayOccupied = occupiedByDate.get(slot.date);
+      if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
+    }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
     const key = `${slot.date}|${startTime}`;
@@ -1698,6 +1738,16 @@ async function createSelfBooking(payload = {}) {
     let txResult;
     try {
       txResult = await db.transaction(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
+      // in services/scheduling/occupancy.js). This path's own conflict gate
+      // below is zone/tech-scoped, but the row it inserts is counted by the
+      // GLOBAL tech-blind check the rebooker and the zone-null confirm run.
+      // Without this lock our uncommitted insert is invisible to them: they
+      // pass their check and commit an overlapping visit on top of it. Taken
+      // before the customer/tech/zone/day-cap locks below so every writer in
+      // the family acquires the same rungs in the same order.
+      const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+      await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${custId}:${slotDateStr}`],
@@ -1708,8 +1758,8 @@ async function createSelfBooking(payload = {}) {
       // BOTH locks: tech:date serializes against slot-reservation and
       // rebooker, zone:date serializes against the zone-capacity writers
       // (availability.confirmBooking and no-tech confirms here). Lock
-      // order is fixed (tech first) so concurrent confirms can't
-      // deadlock.
+      // order is fixed (date → customer → tech → zone → day-cap, the
+      // global order) so concurrent confirms can't deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       if (technician_id) {
         await trx.raw(
@@ -1728,7 +1778,8 @@ async function createSelfBooking(payload = {}) {
       // (the SHARED helper — availability.js's confirmBooking takes the same
       // one) serializes the count+insert across zones AND across writers.
       // Taken last, keeping the acquisition order fixed
-      // (customer → tech → zone → day) so concurrent confirms can't deadlock.
+      // (date → customer → tech → zone → day-cap — the global order in
+      // scheduling/occupancy.js) so concurrent confirms can't deadlock.
       await acquireSelfBookingDayCapLock(trx, slotDateStr);
 
       // Idempotent replay: same customer, same day, same start time →
@@ -1792,6 +1843,32 @@ async function createSelfBooking(payload = {}) {
       });
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
+      // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1
+      // holder runs the global predicate under the date lock before
+      // committing). The conflictQuery above stays as this path's fast
+      // path — tech route + zone pool + live holds, answering with this
+      // route's SLOT_TAKEN shape — but its capacity legs are NARROW: an
+      // overlapping visit assigned to a different tech outside this zone,
+      // or an unassigned row whose customer city isn't in the zone list,
+      // matches none of them, and with ONE field tech any time overlap is
+      // a real clash. The date lock alone can't close that — it only
+      // serializes writers; a narrow predicate stays narrow under any
+      // lock. No exclusions: this path moves no existing row (the
+      // double-submit replay returned above before any conflict check).
+      const globalClash = await findConflictingVisits({
+        db: trx,
+        date: slotDateStr,
+        windowStart: slot_start,
+        windowEnd: endTime,
+      });
+      if (globalClash.length) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,
