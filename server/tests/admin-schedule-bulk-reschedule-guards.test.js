@@ -155,8 +155,8 @@ test('a past scheduledDate produces per-row failed[] entries instead of moving a
   expect(status).toBe(200);
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([
-    { id: 'svc-1', reason: 'scheduledDate is invalid or in the past' },
-    { id: 'svc-2', reason: 'scheduledDate is invalid or in the past' },
+    { id: 'svc-1', reason: 'scheduledDate must be a valid YYYY-MM-DD date that is not in the past' },
+    { id: 'svc-2', reason: 'scheduledDate must be a valid YYYY-MM-DD date that is not in the past' },
   ]);
 });
 
@@ -250,4 +250,135 @@ test('a pending row moves WITHOUT lifecycle fields', async () => {
   // would throw above).
   expect(clearTechCurrentJob).not.toHaveBeenCalled();
   expect(mockIoEmit).not.toHaveBeenCalled();
+});
+
+// --- Write-time status guard, post-commit ordering, strict date validation ---
+
+test('an impossible calendar date is rejected before any DB work', async () => {
+  // normalizeDateOnly only split on 'T', so 2099-02-31 passed the shape check
+  // and reached the DATE column as a raw PG cast error. validScheduleDate
+  // rejects it up front, per-row, like any other validation failure.
+  db.transaction = jest.fn(async () => { throw new Error('transaction must not be opened'); });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-02-31' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([
+    { id: 'svc-1', reason: 'scheduledDate must be a valid YYYY-MM-DD date that is not in the past' },
+  ]);
+  expect(db.transaction).not.toHaveBeenCalled();
+});
+
+test('the validated date is what gets persisted, not the raw payload', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    // A 'T…' suffix only the normalizer strips.
+    payload: { scheduledDate: '2099-01-15T00:00:00.000Z' },
+  });
+
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ scheduled_date: '2099-01-15' });
+});
+
+test('a row that changes status between the read and the write is skipped, not rewritten', async () => {
+  // The terminal guard and the wasLive branch are both derived from the read
+  // at the top of the trx. If the visit completes in between, an update by id
+  // alone would rewrite the finished row back onto the schedule as
+  // 'confirmed'. The status-conditional UPDATE matches zero rows instead.
+  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  const trx = wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route', technician_id: 'tech-1' }) }),
+      updateChain,
+    ],
+    job_status_history: [chain()],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'status changed while the reschedule was pending (it may have been completed, cancelled, or started)',
+  }]);
+
+  // The UPDATE was scoped to the OBSERVED status, so a row that moved on
+  // could not match it.
+  expect(updateChain.where).toHaveBeenCalledWith('status', 'en_route');
+  // Nothing downstream of the write ran: no audit row, no tech release, no
+  // phantom refresh for a move that did not happen.
+  expect(trx).not.toHaveBeenCalledWith('reschedule_log');
+  expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  expect(mockIoEmit).not.toHaveBeenCalled();
+});
+
+test('a rollback leaves NO tech_status write and NO socket emit', async () => {
+  // clearTechCurrentJob writes on the GLOBAL db connection and the customer
+  // refresh emits immediately — neither rolls back. So both must run only
+  // after a successful commit, never inside the trx.
+  const trxFn = jest.fn((table) => {
+    if (table === 'scheduled_services') {
+      return chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'on_site', technician_id: 'tech-1' }) });
+    }
+    if (table === 'job_status_history') return chain();
+    // The audit insert blows up AFTER the status flip → the whole trx rolls back.
+    if (table === 'reschedule_log') return chain({ insert: jest.fn().mockRejectedValue(new Error('deadlock detected')) });
+    return chain();
+  });
+  trxFn.raw = jest.fn();
+  trxFn.fn = { now: jest.fn(() => 'now()') };
+  // Real rollback semantics: the callback rejects, so db.transaction rejects.
+  db.transaction = jest.fn(async (cb) => cb(trxFn));
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'deadlock detected' }]);
+
+  // The externally-visible half never fired for a move that was rolled back.
+  expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  expect(mockIoEmit).not.toHaveBeenCalled();
+});
+
+test('a malformed window time is rejected rather than persisted raw', async () => {
+  db.transaction = jest.fn(async (cb) => {
+    const trx = jest.fn(() => chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }));
+    trx.raw = jest.fn();
+    trx.fn = { now: jest.fn(() => 'now()') };
+    return cb(trx);
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '2:00 PM' },
+  });
+
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'windowStart must be HH:MM' }]);
 });

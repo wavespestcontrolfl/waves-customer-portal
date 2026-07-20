@@ -905,7 +905,10 @@ class SmartRebooker {
 // `svc` is the pre-update row (id / status / customer_id / technician_id);
 // `actor` is the acting technician/staff uuid for history attribution
 // (null = system, matching reschedule()'s own insert).
-async function applyLiveMoveSideEffects(conn, svc, { actor = null } = {}) {
+// Transactional half: the job_status_history append. Runs on `conn` so a
+// transactional caller keeps it atomic with the status flip — and ONLY this
+// half may run inside a caller's transaction (see below).
+async function applyLiveMoveHistory(conn, svc, { actor = null } = {}) {
   if (String(svc.status) !== 'confirmed') {
     await conn('job_status_history').insert({
       job_id: svc.id,
@@ -914,6 +917,16 @@ async function applyLiveMoveSideEffects(conn, svc, { actor = null } = {}) {
       transitioned_by: actor,
     });
   }
+}
+
+// Post-commit half: tech_status release + customer tracker refresh. Both are
+// externally visible outside the caller's transaction (clearTechCurrentJob
+// writes via the GLOBAL db connection; the socket emit reaches clients
+// immediately), so a transactional caller MUST run this only after a
+// successful commit — otherwise a rollback leaves the tech cleared and
+// clients holding a phantom refresh for a move that never happened. Matches
+// reschedule()'s own post-commit sequencing above.
+async function applyLiveMovePostCommitEffects(svc) {
   if (svc.technician_id) {
     try {
       await clearTechCurrentJob({
@@ -928,8 +941,20 @@ async function applyLiveMoveSideEffects(conn, svc, { actor = null } = {}) {
   emitCustomerJobRefresh(svc, 'confirmed');
 }
 
+// Convenience composition for NON-transactional callers (the IB movers run
+// their UPDATE directly on db, so "after the update" is already
+// post-commit). Transactional callers (admin bulk reschedule) must call the
+// two halves separately: applyLiveMoveHistory on the trx, then
+// applyLiveMovePostCommitEffects after the commit.
+async function applyLiveMoveSideEffects(conn, svc, opts = {}) {
+  await applyLiveMoveHistory(conn, svc, opts);
+  await applyLiveMovePostCommitEffects(svc);
+}
+
 module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
+module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
+module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;

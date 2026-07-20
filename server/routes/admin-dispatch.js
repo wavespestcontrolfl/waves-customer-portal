@@ -7254,6 +7254,13 @@ async function rearmRescheduleReminderWindows(serviceIds) {
   try {
     await db('appointment_reminders')
       .whereIn('scheduled_service_id', ids)
+      // A sibling-suppressed row is suppressed BY SETTING both sent flags —
+      // clearing them here would put it back in the cron's send set alongside
+      // the slot's owner (two texts per window for one slot). Same carve-out
+      // the success path takes in markRescheduleNoticeSent. A cancelled row
+      // must stay silent for the same reason.
+      .where('suppressed_by_sibling', false)
+      .where('cancelled', false)
       .update({
         reminder_72h_sent: false,
         reminder_72h_sent_at: null,

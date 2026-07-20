@@ -447,23 +447,47 @@ async function moveStopsToDay(input) {
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const movedIds = new Set();
+  const skippedConflict = [];
   for (const s of movable) {
     const oldDate = s.scheduled_date;
     // A live (en_route/on_site) stop being moved rewinds its tracker
     // lifecycle exactly like the rebooker's live override does.
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
     const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
-    await db('scheduled_services').where('id', s.id).update({
-      scheduled_date: dateStr,
-      notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
-      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
-      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
-      // moved en_route/on_site stop back on 'confirmed' so it isn't left live
-      // on a future date, matching the rebooker's own path.
-      ...(wasLive ? { status: 'confirmed' } : {}),
-      ...liveReset,
-      updated_at: new Date(),
-    });
+    // Conditional on the OBSERVED status: everything below (the wasLive
+    // classification, the lifecycle rewind, the 'confirmed' restamp) was
+    // derived from the initial read — if the stop completed, got cancelled,
+    // or went live between that read and this write, applying the stale
+    // branch by id alone would rewrite a terminal row back to 'confirmed'
+    // (or leave a now-live row unrewound). Zero rows matched = the stop
+    // changed under us; skip it and report the conflict.
+    const updatedRows = await db('scheduled_services')
+      .where('id', s.id)
+      .where('status', String(s.status))
+      .update({
+        scheduled_date: dateStr,
+        notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
+        track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+        // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
+        // moved en_route/on_site stop back on 'confirmed' so it isn't left live
+        // on a future date, matching the rebooker's own path.
+        ...(wasLive ? { status: 'confirmed' } : {}),
+        ...liveReset,
+        updated_at: new Date(),
+      });
+    if (updatedRows === 0) {
+      // Best-effort re-read so the operator sees the status that blocked the
+      // move (falls back to the stale one if the row vanished).
+      let nowStatus = s.status;
+      try {
+        const row = await db('scheduled_services').where('id', s.id).first('status');
+        if (row) nowStatus = row.status;
+      } catch { /* reporting only */ }
+      skippedConflict.push({ id: s.id, status: nowStatus });
+      continue;
+    }
+    movedIds.add(s.id);
     // Rebooker-parity side effects of the live → confirmed flip above:
     // job_status_history audit row, tech_status release, customer tracker
     // refresh. Best-effort: the move is committed — a side-effect failure
@@ -495,14 +519,25 @@ async function moveStopsToDay(input) {
     }
   }
 
-  logger.info(`[intelligence-bar:schedule] Moved ${stops.length} stops to ${dateStr}`);
+  const movedStops = stops.filter((st) => movedIds.has(st.id));
+
+  if (!movedStops.length) {
+    return {
+      error: 'No stops were moved — every selected stop changed status (completed/cancelled/started) while the move was pending',
+      ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    };
+  }
+
+  logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
   return {
     success: true,
-    moved_count: stops.length,
+    moved_count: movedStops.length,
     new_date: dateStr,
-    stops,
+    stops: movedStops,
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
   };
 }
 

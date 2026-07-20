@@ -71,3 +71,18 @@ test('a re-arm failure is logged, never thrown (best-effort compensation)', asyn
   await expect(rearmRescheduleReminderWindows('svc-1')).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-arm after failed notice failed'));
 });
+
+test('a sibling-suppressed row is excluded from the re-arm (no duplicate reminders)', async () => {
+  // A suppressed sibling is suppressed BY SETTING both sent flags, and the
+  // cron's scan has no suppressed_by_sibling filter — so a blanket re-arm
+  // would put it back in the send set alongside the slot's owner and text the
+  // customer twice for one window. The success path (markRescheduleNoticeSent)
+  // takes the same carve-out.
+  const q = chain();
+  db.mockImplementation(() => q);
+
+  await rearmRescheduleReminderWindows('svc-1');
+
+  expect(q.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
+  expect(q.where).toHaveBeenCalledWith('cancelled', false);
+});

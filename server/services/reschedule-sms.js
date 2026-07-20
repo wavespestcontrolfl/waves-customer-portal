@@ -261,6 +261,12 @@ class RescheduleSMS {
         try {
           await db('appointment_reminders')
             .where({ scheduled_service_id: pending.scheduled_service_id })
+            // A sibling-suppressed row is suppressed BY SETTING both sent
+            // flags — clearing them would put it back in the cron's send set
+            // alongside the slot's owner (duplicate reminders). Same carve-out
+            // markRescheduleNoticeSent takes on the success path.
+            .where('suppressed_by_sibling', false)
+            .where('cancelled', false)
             .update({
               reminder_72h_sent: false,
               reminder_72h_sent_at: null,

@@ -113,3 +113,26 @@ test('a successful confirmation never touches the covered windows', async () => 
   const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
   expect(result).toMatchObject({ handled: true, action: 'rescheduled' });
 });
+
+test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled rows', async () => {
+  // Same carve-out as the dispatch re-arm: clearing the sent flags on a
+  // sibling-suppressed row would return it to the cron's send set alongside
+  // the slot's owner (two texts for one window).
+  sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const rearmChain = chain();
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    appointment_reminders: [rearmChain],
+  });
+
+  await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
+    .rejects.toThrow(/appointment SMS blocked/);
+
+  expect(rearmChain.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
+  expect(rearmChain.where).toHaveBeenCalledWith('cancelled', false);
+});

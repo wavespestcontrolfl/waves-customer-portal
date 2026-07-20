@@ -1418,21 +1418,33 @@ async function rescheduleAppointment(input) {
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
 
-  await db('scheduled_services').where('id', appointment_id).update({
-    scheduled_date: dateStr,
-    window_start: newStart,
-    window_end: newWindowEnd,
-    notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
-    // Public track links live until the day after the visit — refresh onto
-    // the new date, same as schedule-tools' movers.
-    track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
-    // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
-    // en_route/on_site row would keep a live status on a future date. Land it
-    // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
-    ...(wasLive ? { status: 'confirmed' } : {}),
-    ...liveReset,
-    updated_at: new Date(),
-  });
+  // Conditional on the OBSERVED status: the terminal guard and the wasLive
+  // classification above came from the initial read — if the visit completed
+  // (or got cancelled / went live) between that read and this write, an
+  // update by id alone would apply the stale branch and rewrite a terminal
+  // row back onto the schedule. Zero rows matched = the row changed under
+  // us; refuse instead of writing.
+  const updatedRows = await db('scheduled_services')
+    .where('id', appointment_id)
+    .where('status', String(appt.status))
+    .update({
+      scheduled_date: dateStr,
+      window_start: newStart,
+      window_end: newWindowEnd,
+      notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
+      // Public track links live until the day after the visit — refresh onto
+      // the new date, same as schedule-tools' movers.
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
+      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
+      // en_route/on_site row would keep a live status on a future date. Land it
+      // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
+      ...(wasLive ? { status: 'confirmed' } : {}),
+      ...liveReset,
+      updated_at: new Date(),
+    });
+  if (updatedRows === 0) {
+    return { error: 'Appointment changed status while the reschedule was pending (it may have been completed, cancelled, or started) — nothing was moved. Re-check the appointment and retry if still applicable.' };
+  }
 
   // Rebooker-parity side effects of the live → confirmed flip above:
   // job_status_history audit row, tech_status release, customer tracker

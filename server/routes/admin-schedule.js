@@ -16,7 +16,7 @@ const {
 } = require('../utils/service-normalizer');
 const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
-  etNthWeekdayOfMonth, parseETDateTime,
+  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -3418,12 +3418,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // scheduled_date holds ET calendar dates — a past target moves the
             // visit where no upcoming query will ever find it. Per-row throw so
             // the batch result carries the reason instead of failing wholesale.
-            const bulkTargetDate = normalizeDateOnly(payload.scheduledDate);
-            if (!bulkTargetDate || bulkTargetDate < etDateString()) {
-              throw Object.assign(new Error('scheduledDate is invalid or in the past'), { isValidation: true });
+            // Shared strict validator: normalizeDateOnly only splits on 'T', so
+            // an impossible calendar date (2099-02-31) passed the shape check
+            // and died downstream as a raw PG cast error.
+            const bulkTargetDate = validScheduleDate(payload.scheduledDate);
+            if (!bulkTargetDate) {
+              throw Object.assign(new Error('scheduledDate must be a valid YYYY-MM-DD date that is not in the past'), { isValidation: true });
             }
             let reminderSyncTime = null;
             let callFollowUpShiftFrom = null;
+            // Collected inside the trx, applied only after a successful commit.
+            let liveMoveRow = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -3433,9 +3438,24 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
                 throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
               }
-              const updates = { scheduled_date: payload.scheduledDate };
-              if (payload?.windowStart) updates.window_start = payload.windowStart;
-              if (payload?.windowEnd) updates.window_end = payload.windowEnd;
+              // Persist the NORMALIZED date — the raw payload may carry a
+              // 'T…' suffix that only the validator strips.
+              const updates = { scheduled_date: bulkTargetDate };
+              // Same validate-then-persist-the-normalized-value rule as the
+              // date above: an unnormalized time Postgres happens to accept
+              // ("2:00 PM") would store 14:00 while the reminderSyncTime below
+              // silently falls back to 08:00, so handleReschedule would then
+              // stamp appointment_time at the wrong hour.
+              if (payload?.windowStart) {
+                const ws = normalizeHHMM(payload.windowStart);
+                if (!ws) throw Object.assign(new Error('windowStart must be HH:MM'), { isValidation: true });
+                updates.window_start = ws;
+              }
+              if (payload?.windowEnd) {
+                const we = normalizeHHMM(payload.windowEnd);
+                if (!we) throw Object.assign(new Error('windowEnd must be HH:MM'), { isValidation: true });
+                updates.window_end = we;
+              }
               // A live (en_route/on_site) row being moved rewinds its tracker
               // lifecycle like the rebooker's live override — stale arrival
               // timestamps must not survive onto the new date. LIVE_LIFECYCLE_RESET
@@ -3447,14 +3467,33 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
               }
-              await trx('scheduled_services').where({ id }).update(updates);
-              // Rebooker-parity side effects of the live → confirmed flip:
-              // job_status_history audit row (same trx — atomic with the
-              // flip, like the rebooker's own path), tech_status release,
-              // customer tracker refresh.
+              // Conditional on the OBSERVED status: the terminal guard and the
+              // wasLive classification above came from the read at the top of
+              // this trx — under READ COMMITTED another writer can complete or
+              // cancel the row before this UPDATE lands, and an update by id
+              // alone would apply the stale branch, rewriting a terminal row
+              // back onto the schedule. Zero rows matched = the row changed
+              // under us; refuse this id (the batch carries the reason).
+              const updatedRows = await trx('scheduled_services')
+                .where({ id })
+                .where('status', String(svc.status))
+                .update(updates);
+              if (updatedRows === 0) {
+                throw Object.assign(
+                  new Error('status changed while the reschedule was pending (it may have been completed, cancelled, or started)'),
+                  { isValidation: true },
+                );
+              }
+              // Rebooker-parity side effects of the live → confirmed flip.
+              // ONLY the job_status_history audit row belongs on the trx (it
+              // must be atomic with the flip, like the rebooker's own path).
+              // The tech_status release writes via the GLOBAL db connection
+              // and the customer refresh emits a socket immediately — neither
+              // rolls back, so both are deferred to after the commit.
               if (wasLive) {
-                const { applyLiveMoveSideEffects } = require('../services/rebooker');
-                await applyLiveMoveSideEffects(trx, svc, { actor: req.technicianId || null });
+                const { applyLiveMoveHistory } = require('../services/rebooker');
+                await applyLiveMoveHistory(trx, svc, { actor: req.technicianId || null });
+                liveMoveRow = svc;
               }
               // Audit row matching the rebooker's reschedule_log conventions.
               await trx('reschedule_log').insert({
@@ -3466,8 +3505,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 initiated_by: 'admin_bulk',
                 original_window: svc.window_start ? `${svc.window_start}-${svc.window_end}` : null,
                 new_window: (() => {
-                  const ws = payload?.windowStart || svc.window_start;
-                  const we = payload?.windowEnd || svc.window_end;
+                  const ws = updates.window_start || svc.window_start;
+                  const we = updates.window_end || svc.window_end;
                   return ws ? (we ? `${ws}-${we}` : String(ws)) : null;
                 })(),
               });
@@ -3475,12 +3514,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const prevDate = svc.scheduled_date instanceof Date
                 ? svc.scheduled_date.toISOString().split('T')[0]
                 : normalizeDateOnly(svc.scheduled_date);
-              const nextDate = normalizeDateOnly(payload.scheduledDate);
-              const nextStart = payload?.windowStart || svc.window_start;
+              const nextDate = bulkTargetDate;
+              const nextStart = updates.window_start || svc.window_start;
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
               }
             });
+            // Post-commit only: the tech_status release writes on the global
+            // db connection and the customer refresh emits a socket, so a
+            // rolled-back trx must not have left either behind. Best-effort —
+            // the move is committed; a side-effect failure must not report the
+            // row as failed.
+            if (liveMoveRow) {
+              try {
+                const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+                await applyLiveMovePostCommitEffects(liveMoveRow);
+              } catch (err) {
+                logger.error(`[admin-schedule] bulk reschedule live-move side effects failed for ${id}: ${err.message}`);
+              }
+            }
             // Resync the reminder row so the 72h/24h cron texts the new date —
             // mirrors the cancel branch's handleCancellation call below.
             if (reminderSyncTime) {
@@ -3512,7 +3564,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 conn: db,
                 parentServiceId: id,
                 fromDate: callFollowUpShiftFrom,
-                toDate: payload.scheduledDate,
+                toDate: bulkTargetDate,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
