@@ -51,7 +51,27 @@ describe('recurring appointment seeder', () => {
       recurring_ongoing: true,
       status: 'pending',
       customer_confirmed: false,
+      appointment_type: 'pest_general',
     }));
+  });
+
+  test('stamps the classifier tag on every seeded follow-up', () => {
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-2',
+      customer_id: 'customer-2',
+      scheduled_date: '2026-06-05',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      service_type: 'Monthly Mosquito Treatment',
+    }, {
+      pattern: 'monthly',
+      plannedCount: 3,
+    });
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.appointment_type).toBe('mosquito');
+    }
   });
 
   test('does not extend a completed one-year quarterly series on retry', () => {
