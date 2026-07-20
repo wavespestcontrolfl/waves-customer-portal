@@ -950,7 +950,7 @@ export default function PestPressureSettingsPage() {
                         </td>
                         <td style={{ padding: "8px 8px", color: D.text }}>
                           <a
-                            href={`/admin/customers/${row.customer_id}`}
+                            href={`/admin/customers?customerId=${encodeURIComponent(row.customer_id)}`}
                             style={{ color: D.heading, textDecoration: "none" }}
                           >
                             {row.customer_name || row.customer_id}

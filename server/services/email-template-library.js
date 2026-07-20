@@ -71,6 +71,20 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// Href allowlist for CTA/image links. escapeHtml alone does not stop a
+// `javascript:`/`data:` scheme, so a payload- or template-supplied URL could
+// become an executable href. Permit only safe navigation schemes plus
+// relative/anchor URLs; anything else collapses to '#'. Caller still escapes.
+const SAFE_URL_SCHEME = /^(https?:|mailto:|tel:)/i;
+function safeUrl(url) {
+  const trimmed = String(url == null ? '' : url).trim();
+  if (!trimmed) return '';
+  // Relative or same-page links (no scheme) are fine; a bare "//" is
+  // protocol-relative http(s) and also fine.
+  if (trimmed.startsWith('/') || trimmed.startsWith('#') || trimmed.startsWith('?')) return trimmed;
+  return SAFE_URL_SCHEME.test(trimmed) ? trimmed : '#';
+}
+
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
 // provider error before it is persisted or audited (SendGrid 4xx bodies can
 // echo the recipient address).
@@ -314,7 +328,7 @@ function renderBlocks(blocks, payload) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
         const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
         renderedCtaCount += 1;
-        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
+        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(safeUrl(href)), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {
@@ -334,7 +348,7 @@ function renderBlocks(blocks, payload) {
           : (block.href ? renderInline(block.href, payload, { html: false }).trim() : '');
         const img = `<img src="${escapeHtml(src)}" width="${width}" alt="${escapeHtml(altText)}" style="width:${width}px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;display:block;margin:0 auto;${radius ? `border-radius:${radius}px;` : ''}" />`;
         const wrapped = href
-          ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-block;border:0;text-decoration:none;">${img}</a>`
+          ? `<a href="${escapeHtml(safeUrl(href))}" target="_blank" rel="noopener" style="display:inline-block;border:0;text-decoration:none;">${img}</a>`
           : img;
         htmlParts.push(`<div style="margin:18px 0;text-align:${align};">${wrapped}</div>`);
         if (href && altText) textParts.push(`${altText}: ${href}`);
@@ -377,7 +391,7 @@ function renderDefaultCta(template, payload) {
   if (!href) return { bodyHtml: '', bodyText: '' };
   const label = renderInline(labelTemplate, payload, { html: false }) || 'Open';
   return {
-    bodyHtml: `<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`,
+    bodyHtml: `<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(safeUrl(href)), escapeHtml(label))}</div>`,
     bodyText: `${label}: ${href}`,
   };
 }
@@ -1128,6 +1142,7 @@ module.exports = {
   validationFor,
   redactedPayloadSnapshot,
   redactEmailAddresses,
+  safeUrl,
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
