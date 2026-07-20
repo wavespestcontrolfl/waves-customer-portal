@@ -2091,6 +2091,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
       } catch (leadErr) {
         logger.warn(`[lead-trigger] status-complete conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }
+      // Recurring plan refill / end-of-plan flag — same maintenance the
+      // admin-schedule completion path runs. It historically lived ONLY on
+      // that route, which no production completion calls, so ongoing series
+      // completed through dispatch ran dry with no refill and no alert.
+      // Failure-isolated: never fails the committed status flip.
+      try {
+        const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+        await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_status_complete' });
+      } catch (seriesErr) {
+        logger.error(`[admin-dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
+      }
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
@@ -6613,6 +6624,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (leadErr) {
         logger.warn(`[lead-trigger] first-service conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }
+    }
+
+    // Recurring plan refill / end-of-plan flag — same maintenance the
+    // admin-schedule completion path runs (see recurring-series-extend).
+    // The row's status is 'completed' regardless of visitOutcome (the
+    // service_record carries 'incomplete'), so the visit consumed its series
+    // slot either way and the refill check is due. Idempotent on the durable
+    // resume path (it only tops up when upcoming < 2 and dedupes on dates).
+    // Failure-isolated: never fails the committed completion.
+    try {
+      const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+      await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
+    } catch (seriesErr) {
+      logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
     }
 
     const responsePayload = {

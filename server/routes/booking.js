@@ -1985,7 +1985,37 @@ async function createSelfBooking(payload = {}) {
       && requestedRecurringPattern === 'quarterly'
       && signedServiceKeyIsPest
       && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+    // Duplicate-series guard: don't seed a SECOND active series of the same
+    // service family — the booked visit itself stays (the customer chose it),
+    // but the 3 seeded follow-ups are what mint a duplicate quarterly series
+    // when the customer already has one running. Office sees the skip in the
+    // activity log. Fail-open: a guard failure must not change seeding.
+    let duplicateSeriesKept = null;
     if (shouldSeedQuarterlyPestFollowUps) {
+      try {
+        const existingSeriesMatches = await RecurringAppointmentSeeder.findActiveRecurringSeries(db, {
+          customerId: custId,
+          serviceId: serviceRow.service_id || null,
+          serviceType: serviceRow.service_type || resolvedServiceType,
+          excludeParentId: serviceRow.id,
+        });
+        if (existingSeriesMatches.length > 0) duplicateSeriesKept = existingSeriesMatches[0];
+      } catch (guardErr) {
+        logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardErr.message}`);
+      }
+    }
+    if (duplicateSeriesKept) {
+      logger.warn(`[booking:confirm] Skipped quarterly follow-up seeding for booking ${serviceRow.id} — customer ${custId} already has an active recurring series (series ${duplicateSeriesKept.id}); existing series kept`);
+      try {
+        await db('activity_log').insert({
+          customer_id: custId,
+          action: 'recurring_series_skipped',
+          description: `Self-booking on ${slotDateStr}: existing recurring series kept (${duplicateSeriesKept.service_type}, series #${duplicateSeriesKept.id}${duplicateSeriesKept.next_upcoming_date ? `, next visit ${duplicateSeriesKept.next_upcoming_date}` : ''}) — no second quarterly series was seeded. The booked visit itself is unchanged.`,
+        });
+      } catch (noteErr) {
+        logger.warn(`[booking:confirm] duplicate-series skip note failed: ${noteErr.message}`);
+      }
+    } else if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(db, serviceRow, {
           pattern: 'quarterly',

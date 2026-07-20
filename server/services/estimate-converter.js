@@ -1766,6 +1766,40 @@ const EstimateConverter = {
           : null;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
+        // Duplicate-series guard: the customer may ALREADY hold an active
+        // recurring series of this service family (a prior estimate, a
+        // self-booking, an admin booking). Seeding another parent+children
+        // here is the verified cause of customers carrying two live series —
+        // keep the existing series and surface the skip to the office
+        // instead. Fail-open: a guard failure must not block the conversion.
+        if (pattern) {
+          let existingSeriesMatches = [];
+          try {
+            existingSeriesMatches = await RecurringAppointmentSeeder.findActiveRecurringSeries(database, {
+              customerId,
+              serviceId: combinedServiceId,
+              serviceType: serviceName,
+            });
+          } catch (guardErr) {
+            logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardErr.message}`);
+          }
+          if (existingSeriesMatches.length > 0) {
+            const kept = existingSeriesMatches[0];
+            logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${serviceName}" (series ${kept.id}) — skipped scheduling a duplicate series`);
+            try {
+              await database('activity_log').insert({
+                customer_id: customerId,
+                action: 'recurring_series_skipped',
+                description: `Estimate #${estimateId}: existing recurring series kept (${kept.service_type}, series #${kept.id}${kept.next_upcoming_date ? `, next visit ${kept.next_upcoming_date}` : ''}) — no duplicate ${serviceName} series was scheduled. Review the existing series against the new agreement.`,
+                metadata: JSON.stringify({ estimateId, existingParentId: kept.id, skippedService: serviceName }),
+              });
+            } catch (noteErr) {
+              logger.warn(`[estimate-converter] duplicate-series skip note failed: ${noteErr.message}`);
+            }
+            continue;
+          }
+        }
+
         try {
           const combinedNote = unit.combo
             ? ` Combined service: ${unit.combo.combinedFrom

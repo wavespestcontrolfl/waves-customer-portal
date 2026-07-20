@@ -385,6 +385,71 @@ async function existingSeriesDates(conn, parent, columns) {
   return [...new Set(dates)];
 }
 
+// Find this customer's ACTIVE recurring series parents in the same service
+// family — the duplicate-series guard shared by the three series creators
+// (estimate-converter auto-schedule, booking.js self-book seeding, admin
+// POST /admin/schedule). A parent is a non-cancelled scheduled_services row
+// with is_recurring=true and no recurring_parent_id; it is ACTIVE when it is
+// flagged recurring_ongoing (auto-refills) or the series still has an
+// upcoming (pending/confirmed, today-or-later ET) visit. A fully-lapsed
+// series never blocks a new one.
+//
+// Service-family match: service_id equality when both sides carry one (the
+// catalog link survives renames), OR the serviceKeyFor normalization of
+// service_type. Exact service_type string equality is too narrow — the three
+// creators stamp different labels for the same program ("Quarterly Pest
+// Control" vs a catalog display name), so the family key is the shared
+// serviceKeyFor buckets.
+//
+// excludeParentId: callers that already inserted their own first-visit row
+// (booking.js) pass it so the fresh row can never match itself.
+// Returns [] when nothing matches; matches carry next_upcoming_date (ET
+// date string) when the series has a future visit.
+async function findActiveRecurringSeries(conn, {
+  customerId,
+  serviceId = null,
+  serviceType = null,
+  excludeParentId = null,
+} = {}) {
+  if (!conn || !customerId || (serviceId == null && !serviceType)) return [];
+  const columns = await scheduledServiceColumns(conn);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id) return [];
+  const query = conn('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
+  if (columns.service_id) query.select('service_id');
+  if (columns.recurring_ongoing) query.select('recurring_ongoing');
+  if (excludeParentId) query.whereNot('id', excludeParentId);
+  const parents = await query;
+  const targetKey = serviceType ? serviceKeyFor({ service_type: serviceType }) : null;
+  const matches = [];
+  for (const parent of parents || []) {
+    const idMatch = serviceId != null && parent.service_id != null
+      && String(parent.service_id) === String(serviceId);
+    const keyMatch = targetKey != null && parent.service_type
+      && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
+    if (!idMatch && !keyMatch) continue;
+    const upcoming = await conn('scheduled_services')
+      .where(function () {
+        this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });
+      })
+      .where('is_recurring', true)
+      .whereIn('status', ['pending', 'confirmed'])
+      .where('scheduled_date', '>=', etDateString())
+      .orderBy('scheduled_date', 'asc')
+      .first('scheduled_date');
+    const ongoing = columns.recurring_ongoing ? parent.recurring_ongoing === true : false;
+    if (!ongoing && !upcoming) continue; // lapsed series — a new one is legitimate
+    matches.push({
+      ...parent,
+      next_upcoming_date: upcoming ? dateOnly(upcoming.scheduled_date) : null,
+    });
+  }
+  return matches;
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -437,6 +502,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 
 module.exports = {
   buildRecurringFollowUpRows,
+  findActiveRecurringSeries,
   inferRecurringPattern,
   markParentRecurring,
   normalizeRecurringPattern,
