@@ -1625,7 +1625,7 @@ export default function BankingPage() {
           label: "Standard Payout",
           icon: Clock3,
           onClick: () => setPayoutModalMethod("standard"),
-          disabled: !available || available <= 0,
+          disabled: balanceError || !available || available <= 0,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"
       />
@@ -1795,9 +1795,11 @@ export default function BankingPage() {
             {balanceError ? "—" : fmtM(balance?.next_payout?.amount)}
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-            {balance?.next_payout?.arrival_date
-              ? fmtD(balance.next_payout.arrival_date)
-              : "No payout scheduled"}
+            {balanceError
+              ? "Unavailable"
+              : balance?.next_payout?.arrival_date
+                ? fmtD(balance.next_payout.arrival_date)
+                : "No payout scheduled"}
           </div>{" "}
         </div>{" "}
         <div
@@ -1830,8 +1832,9 @@ export default function BankingPage() {
             {statsError ? "—" : fmtM(stats?.mtd_deposited)}
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-            {stats?.payout_count ?? 0} payout
-            {(stats?.payout_count ?? 0) !== 1 ? "s" : ""} this month
+            {statsError
+              ? "Unavailable"
+              : `${stats?.payout_count ?? 0} payout${(stats?.payout_count ?? 0) !== 1 ? "s" : ""} this month`}
           </div>{" "}
         </div>{" "}
       </div>
