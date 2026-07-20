@@ -272,6 +272,11 @@ const SERVICE_DETAILS_COPY = {
         ['Standard station checks', '4 per year (quarterly)'],
         ['Required for guarantee', 'Annual inspection + current payments'],
         ['Warranty type', 'Retreatment AND repair (per written agreement)'],
+        // Bond option (owner 2026-07-20): terms are program structure and
+        // stable; the per-application price for each term lives on the
+        // estimate's bond selector, never in this static guide (rates are
+        // DB-tunable and a stale printed price would misquote).
+        ['Bond term options', '1-, 5-, or 10-year warranty bond — pick the term on your estimate, priced per application'],
         ['Repair coverage', 'Up to $1,000,000 for new covered WDO damage'],
         ['Transferable', 'Yes \u2014 to a new homeowner ($250 + transfer inspection)'],
         ['Station ownership', 'Yours \u2014 purchased once with installation'],

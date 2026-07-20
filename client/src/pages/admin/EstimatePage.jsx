@@ -867,6 +867,7 @@ function EstimateToolView() {
     termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
+    termiteBondTerm: "none",
     termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
@@ -1917,6 +1918,7 @@ function EstimateToolView() {
           thatchMeasurementSource: form.thatchMeasurementSource || "manual",
           termiteBaitSystem: form.termiteBaitSystem || "advance",
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
+          termiteBondTerm: form.termiteBondTerm || "none",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
           termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
           termiteFootprintSqFt,
@@ -2405,6 +2407,7 @@ function EstimateToolView() {
       termiteBaitComplexity: "",
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
+      termiteBondTerm: "none",
       termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
@@ -3642,6 +3645,24 @@ function EstimateToolView() {
                           ]}
                         />
                       </Field>
+                      {/* Residential bond rider (owner 2026-07-20): fixed
+                          quarterly warranty rate per term, priced by the
+                          engine — labels stay term-only so a DB rate change
+                          never strands a stale price here. Commercial keeps
+                          the manual-quote scope split below. */}
+                      {!isCommercialEstimateInput(form) && (
+                        <Field label="Bond (warranty)">
+                          <Select
+                            k="termiteBondTerm"
+                            options={[
+                              { value: "none", label: "No bond" },
+                              { value: "1yr", label: "1-Year term" },
+                              { value: "5yr", label: "5-Year term" },
+                              { value: "10yr", label: "10-Year term" },
+                            ]}
+                          />
+                        </Field>
+                      )}
                       {/* Scope-split is commercial-only — the residential termite
                           pricer ignores termiteScope, so hide it there to avoid a
                           "Bond — manual quote" label that still auto-prices. */}

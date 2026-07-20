@@ -153,3 +153,114 @@ describe('accept scheduling: bait + bond combine to ONE visit (converter routes)
     expect(remaining.map((r) => r.service)).toEqual(['termite_bond_10yr']);
   });
 });
+
+describe('estimate view payload + bond term switcher rewrite', () => {
+  const {
+    buildPricingBundle,
+    applySelectedTermiteBondToEstimateData,
+  } = require('../routes/estimate-public');
+
+  function bondEstimate(term) {
+    const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput(term ? { termiteBondTerm: term } : {})));
+    return {
+      id: `estimate-bond-${term || 'none'}`,
+      status: 'sent',
+      monthly_total: mapped.recurring.monthlyTotal,
+      annual_total: mapped.recurring.annualAfterDiscount,
+      onetime_total: mapped.oneTime.total,
+      waveguard_tier: 'Bronze',
+      estimate_data: { inputs: { svcTermiteBait: true }, result: mapped },
+    };
+  }
+
+  test('bond stays a rider: ONE termite section carrying bondOptions + selection, never its own card', async () => {
+    const bundle = await buildPricingBundle(bondEstimate('10yr'));
+    const keys = bundle.services.map((s) => s.key);
+    expect(keys.filter((k) => String(k).startsWith('termite_bond'))).toHaveLength(0);
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite).toBeTruthy();
+    expect(termite.bondOptions).toHaveLength(3);
+    expect(termite.bondOptions.map((o) => o.key)).toEqual(['1yr', '5yr', '10yr']);
+    expect(termite.bondOptions.find((o) => o.key === '10yr')).toMatchObject({
+      perApplicationAdd: 45, monthlyAdd: 15, annualAdd: 180,
+    });
+    expect(termite.selectedBondTerm).toBe('10yr');
+    // The bond still shows as a priced line in the breakdown rows.
+    expect(JSON.stringify(bundle)).toContain('Termite Bond (10-Year Term)');
+  });
+
+  test('no-bond estimate still carries the selector options with nothing selected', async () => {
+    const bundle = await buildPricingBundle(bondEstimate(null));
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite.bondOptions).toHaveLength(3);
+    expect(termite.selectedBondTerm).toBeNull();
+  });
+
+  test('switcher rewrite: 10yr -> 1yr adjusts rows and totals by the exact deltas', () => {
+    const estimate = bondEstimate('10yr');
+    const parsed = estimate.estimate_data;
+    const outcome = applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(outcome).toMatchObject({ ok: true, changed: true, monthlyDelta: 5, annualDelta: 60, selectedBondTerm: '1yr' });
+    const rows = parsed.result.recurring.services;
+    const bondRows = rows.filter((svc) => String(svc.service).startsWith('termite_bond'));
+    expect(bondRows).toHaveLength(1);
+    expect(bondRows[0]).toMatchObject({ service: 'termite_bond_1yr', mo: 20, perTreatment: 60, visitsPerYear: 4 });
+    expect(parsed.result.recurring.monthlyTotal).toBe(55);
+    expect(parsed.result.recurring.annualAfterDiscount).toBe(660);
+    expect(parsed.result.results.tmBait.selectedBondTerm).toBe('1yr');
+  });
+
+  test('switcher rewrite: none removes the bond row and subtracts its slice', () => {
+    const estimate = bondEstimate('10yr');
+    const parsed = estimate.estimate_data;
+    const outcome = applySelectedTermiteBondToEstimateData(parsed, 'none');
+    expect(outcome).toMatchObject({ ok: true, changed: true, monthlyDelta: -15, annualDelta: -180, selectedBondTerm: null });
+    expect(parsed.result.recurring.services.some((svc) => String(svc.service).startsWith('termite_bond'))).toBe(false);
+    expect(parsed.result.recurring.monthlyTotal).toBe(35);
+  });
+
+  test('switcher rewrite: invalid term and bond-less payloads fail closed', () => {
+    expect(applySelectedTermiteBondToEstimateData(bondEstimate('10yr').estimate_data, '3yr'))
+      .toMatchObject({ ok: false, reason: 'invalid_bond_term' });
+    const legacy = { result: { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 35 }] }, results: { tmBait: {} } } };
+    expect(applySelectedTermiteBondToEstimateData(legacy, '10yr'))
+      .toMatchObject({ ok: false, reason: 'bond_not_available' });
+  });
+});
+
+describe('solo termite accept totals carry the bond (money-path)', () => {
+  const { buildPricingBundle } = require('../routes/estimate-public');
+
+  function soloBondEstimate(term) {
+    const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput(term ? { termiteBondTerm: term } : {})));
+    return {
+      id: `estimate-solo-bond-${term || 'none'}`,
+      status: 'sent',
+      monthly_total: mapped.recurring.monthlyTotal,
+      annual_total: mapped.recurring.annualAfterDiscount,
+      onetime_total: mapped.oneTime.total,
+      waveguard_tier: 'Bronze',
+      estimate_data: { inputs: { svcTermiteBait: true }, result: mapped },
+    };
+  }
+
+  test('selected bond folds into the SOLO section frequency — the plan the accept freezes', async () => {
+    const bundle = await buildPricingBundle(soloBondEstimate('10yr'));
+    expect(bundle.services).toHaveLength(1);
+    const entry = bundle.services[0].frequencies[0];
+    // 35+15 monthly, 420+180 annual, 105+45 per application — the true
+    // price of the combined bait+bond visit; accept's effective totals and
+    // the converter's $150 per-application fee both read these.
+    expect(entry.monthly).toBe(50);
+    expect(entry.annual).toBe(600);
+    expect(entry.perTreatment).toBe(150);
+    expect(entry.visitsPerYear).toBe(4);
+  });
+
+  test('no bond selected: solo section frequency unchanged', async () => {
+    const bundle = await buildPricingBundle(soloBondEstimate(null));
+    const entry = bundle.services[0].frequencies[0];
+    expect(entry.monthly).toBe(35);
+    expect(entry.perTreatment).toBe(105);
+  });
+});
