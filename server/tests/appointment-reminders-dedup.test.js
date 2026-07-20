@@ -514,6 +514,57 @@ describe('appointment reminder reschedule windows', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a windowless pre-closed placeholder NEVER re-arms on reschedule — the trigger-held closed windows survive the recompute', async () => {
+    // Untimed IB/health-alert visit, date-only move while still windowless.
+    // The admin bulk/dispatch paths call handleReschedule AFTER their
+    // service update — the DB sync trigger has already held the
+    // placeholder's windows closed, so recomputing them from the new time
+    // here would clear the flags and the 15-min cron would text the 08:00
+    // placeholder time nobody chose.
+    const { updateReminder } = mockRescheduleRecord({
+      reminderOverrides: {
+        suppressed_by_sibling: true,
+        windows_preclosed: true,
+      },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-20T08:00',
+      { sendNotification: false, coverDueWindows: true },
+    );
+
+    const payload = updateReminder.update.mock.calls[0][0];
+    // The row still tracks the move…
+    expect(payload).toMatchObject({ appointment_time: expect.any(Date), cancelled: false });
+    // …but the reminder windows are untouched — the trigger owns them.
+    expect(payload).not.toHaveProperty('reminder_72h_sent');
+    expect(payload).not.toHaveProperty('reminder_72h_sent_at');
+    expect(payload).not.toHaveProperty('reminder_24h_sent');
+    expect(payload).not.toHaveProperty('reminder_24h_sent_at');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a sibling-suppressed row keeps its flags on reschedule — the main update carries the same carve-out as every re-arm site', async () => {
+    // The slot's owner carries the messaging; recomputing a suppressed
+    // row's windows from the new time would put it back in the cron's send
+    // set alongside the owner (duplicate texts per window).
+    const { updateReminder } = mockRescheduleRecord({
+      reminderOverrides: { suppressed_by_sibling: true },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-20T09:00',
+      { sendNotification: false },
+    );
+
+    const payload = updateReminder.update.mock.calls[0][0];
+    expect(payload).toMatchObject({ appointment_time: expect.any(Date) });
+    expect(payload).not.toHaveProperty('reminder_72h_sent');
+    expect(payload).not.toHaveProperty('reminder_24h_sent');
+  });
+
   test('same-start edit that notifies still covers a not-yet-sent due window', async () => {
     // Same start (2026-05-12T14:00Z = 10:00 AM ET — but inside the 24h window
     // relative to fixedNow via the move below) with the 24h reminder NOT yet

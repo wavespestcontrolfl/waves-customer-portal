@@ -7685,6 +7685,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
         }
       }
+      // Sync each occurrence's reminder and snapshot its guard IMMEDIATELY
+      // after — capture must sit adjacent to its own sync, before ANY awaited
+      // board broadcast. A snapshot taken after the emits would capture a
+      // concurrent dispatcher's newer reschedule of an occurrence as "our"
+      // state, and a later SMS failure would then re-arm against it —
+      // clearing the newer reschedule's covered flags and double-texting the
+      // customer (the guard exists precisely so zero rows match in that case).
+      const seriesReminderGuards = [];
+      let seriesGuardSnapshotFailed = false;
       for (const occurrence of occurrences) {
         await syncRescheduleReminder(
           occurrence.id,
@@ -7692,15 +7701,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           { start: occurrence.windowStart, end: occurrence.windowEnd },
           { willNotify: notifyCustomer !== false },
         );
+        const occurrenceGuards = await captureReminderGuards(occurrence.id);
+        if (Array.isArray(occurrenceGuards)) {
+          seriesReminderGuards.push(...occurrenceGuards);
+        } else {
+          // Per-occurrence snapshot read failed — degrade the WHOLE set to
+          // the unguarded fallback below. rearmRescheduleReminderWindows'
+          // failure marker is all-or-nothing (same semantics as the previous
+          // single whole-series snapshot query failing); a partially-guarded
+          // list would silently skip the re-arm for the failed occurrence,
+          // and silence is worse than a possible duplicate.
+          seriesGuardSnapshotFailed = true;
+        }
+      }
+      // Board broadcasts only AFTER every sync→capture pair — an awaited emit
+      // between a sync and its capture would reopen the snapshot gap above.
+      for (const occurrence of occurrences) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
         } catch (err) {
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
         }
       }
-      // Snapshot each occurrence's just-synced reminder state BEFORE the SMS,
-      // so a no-send re-arm below can't stomp a newer reschedule of any of them.
-      const seriesReminderGuards = await captureReminderGuards(occurrences.map((occurrence) => occurrence.id));
 
       let notificationSent = false;
       let notificationError = null;
@@ -7754,7 +7776,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         if (!notificationSent) {
           // Fallback scope for a failed guard snapshot: each occurrence's NEW
           // time, recomputed exactly as syncRescheduleReminder stamped it above.
-          await rearmRescheduleReminderWindows(seriesReminderGuards, occurrences.map((occurrence) => ({
+          const guardsForRearm = seriesGuardSnapshotFailed
+            ? { failed: true, guards: seriesReminderGuards }
+            : seriesReminderGuards;
+          await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
             scheduledServiceId: occurrence.id,
             appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
           })));

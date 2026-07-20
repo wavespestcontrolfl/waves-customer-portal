@@ -1417,6 +1417,14 @@ const AppointmentReminders = {
     try {
       const reminders = await db('appointment_reminders')
         .where({ cancelled: false, confirmation_sent: true })
+        // Belt-and-braces marker exclusion: a windowless pre-closed
+        // placeholder is normally hidden from this scan by its closed flags
+        // alone, but any writer that mistakenly clears them would put the
+        // row straight into the send set — texting the 08:00 placeholder
+        // time nobody chose. Excluding the durable marker outright means a
+        // future flag-clearing bug can never text; a real window arrival
+        // clears windows_preclosed (DB sync trigger) and re-admits the row.
+        .where({ windows_preclosed: false })
         .where(function () {
           this.where({ reminder_72h_sent: false }).orWhere({ reminder_24h_sent: false });
         })
@@ -1820,8 +1828,6 @@ const AppointmentReminders = {
         if (!startMoved && prevSent) return { sent: true, at: prevSentAt };
         return { sent: coveredVal, at: coveredVal ? now : null };
       };
-      const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
-      const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
         // Re-arm the row: a reschedule moves the appointment to a live new time,
@@ -1830,12 +1836,28 @@ const AppointmentReminders = {
         // cron's live-status guard re-checks the service each run, so this can
         // never resurrect a reminder for a still-terminal service.
         cancelled: false,
-        reminder_72h_sent: r72.sent,
-        reminder_72h_sent_at: r72.at,
-        reminder_24h_sent: r24.sent,
-        reminder_24h_sent_at: r24.at,
         updated_at: now,
       };
+      // Marker carve-out — a windowless pre-closed placeholder
+      // (windows_preclosed) or a sibling-suppressed row NEVER recomputes its
+      // reminder windows here. Their flags are HELD closed by the DB
+      // machinery (the sync trigger keeps a placeholder closed across
+      // date-only moves and only re-arms it when a real window arrives; a
+      // suppressed row's slot owner carries the messaging — same carve-out
+      // markRescheduleNoticeSent and every no-send re-arm take). The admin
+      // bulk/dispatch paths call this AFTER their service update, so an
+      // unmarked recompute would clear the trigger-held flags and the 15-min
+      // cron would text the 08:00 placeholder time nobody chose (or
+      // double-text beside the slot owner). appointment_time / cancelled /
+      // the confirmation supersede below still sync normally.
+      if (!record.windows_preclosed && !record.suppressed_by_sibling) {
+        const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
+        const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
+        rescheduleUpdate.reminder_72h_sent = r72.sent;
+        rescheduleUpdate.reminder_72h_sent_at = r72.at;
+        rescheduleUpdate.reminder_24h_sent = r24.sent;
+        rescheduleUpdate.reminder_24h_sent_at = r24.at;
+      }
       // A reschedule supersedes a still-pending creation confirmation — admin
       // saves defer the confirmation SMS off the request path, so a reschedule
       // landing in that window must claim the slot. This suppresses the deferred

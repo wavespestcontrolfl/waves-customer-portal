@@ -117,6 +117,27 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
+describe('scan marker exclusion', () => {
+  test('the reminder scan excludes windows_preclosed placeholder rows outright (belt-and-braces)', async () => {
+    // A windowless pre-closed placeholder is normally hidden from the scan
+    // by its closed flags alone — the explicit marker predicate means any
+    // future writer that mistakenly clears those flags still can't put the
+    // 08:00 placeholder time into the send set. A real window arrival
+    // clears windows_preclosed (DB sync trigger) and re-admits the row.
+    const scanQuery = chain({ select: jest.fn().mockResolvedValue([]) });
+    wireDb({
+      appointment_reminders: [
+        chain(), // stranded-confirmation sweep → []
+        scanQuery,
+      ],
+    });
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(scanQuery.where).toHaveBeenCalledWith({ windows_preclosed: false });
+  });
+});
+
 describe('preference-skip closes the window', () => {
   test('72h preference skip marks reminder_72h_sent (guarded on appointment_time) so the row stops rescanning', async () => {
     const reminderRow = row72();

@@ -579,6 +579,16 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
   if (!apptTime) return;
   await trx('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
+    // Marker carve-out — the scheduled_services update that precedes every
+    // call to this helper already ran the DB sync trigger, which owns marked
+    // rows: a windowless pre-closed placeholder (windows_preclosed) is HELD
+    // with both windows closed across date-only moves (re-armed only when a
+    // real window arrives), and sibling suppression is re-decided on time
+    // changes. Re-arming those rows here would put the 08:00 placeholder
+    // time nobody chose into the cron's send set, or double-text beside the
+    // slot's owner. Same carve-out AppointmentReminders.handleReschedule
+    // takes on its own recompute.
+    .where({ suppressed_by_sibling: false, windows_preclosed: false })
     .update({
       appointment_time: apptTime,
       reminder_72h_sent: false,

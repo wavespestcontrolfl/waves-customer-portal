@@ -213,31 +213,48 @@ describe('live-status reschedule override (allowLive)', () => {
   // Same-day elapsed-window guard (shared datetime-et.sameDayWindowElapsed).
   // A move to TODAY whose effective window already passed in ET is as
   // unreachable as a past date — it must 409 before any DB write. A move to
-  // today with a still-future window is fine. Windows sit at the ET day edges
-  // so the assertion holds for essentially the whole day (this file already
-  // couples to the real clock — see the dayOffset note above).
-  test('a same-day move whose window already elapsed in ET is rejected before any write', async () => {
-    const serviceLookup = chain({ first: jest.fn().mockResolvedValue(liveService('confirmed')) });
-    db.mockImplementation(() => serviceLookup);
-
-    await expect(SmartRebooker.reschedule(
-      'svc-1', etDateString(), { start: '00:00', end: '00:01' }, 'customer_request', 'admin',
-    )).rejects.toMatchObject({
-      statusCode: 409,
-      code: 'SLOT_TAKEN',
-      message: 'That window has already passed today',
+  // today with a still-future window is fine. The windows sit at the ET day
+  // edges, and sameDayWindowElapsed reads the REAL wall clock (no injectable
+  // now) — so a real-clock run in the last minute of the ET day flipped the
+  // "still future" 23:58 window to elapsed, and a run in the first minute
+  // flipped the "elapsed" 00:00–00:01 window to future. Freeze the clock at
+  // noon ET of the current day instead (same fake-timer pattern as
+  // appointment-reminders-dedup): both assertions are then deterministic at
+  // any real run time. etDateString() is read BEFORE freezing so the frozen
+  // instant sits on the real current day, keeping the module-level dayOffset
+  // fixtures (real clock at load) on the same calendar.
+  describe('same-day elapsed-window guard (clock frozen at ET noon)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(parseETDateTime(`${etDateString()}T12:00`));
     });
-    // Rejected up front — the move transaction never opened.
-    expect(db.transaction).toBeUndefined();
-  });
 
-  test('a same-day move to a still-future window today still succeeds', async () => {
-    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    afterEach(() => {
+      jest.useRealTimers();
+    });
 
-    await expect(SmartRebooker.reschedule(
-      'svc-1', etDateString(), { start: '23:58', end: '23:59' }, 'customer_request', 'admin',
-    )).resolves.toMatchObject({ success: true, newDate: etDateString() });
-    expect(updateQuery.update).toHaveBeenCalled();
+    test('a same-day move whose window already elapsed in ET is rejected before any write', async () => {
+      const serviceLookup = chain({ first: jest.fn().mockResolvedValue(liveService('confirmed')) });
+      db.mockImplementation(() => serviceLookup);
+
+      await expect(SmartRebooker.reschedule(
+        'svc-1', etDateString(), { start: '00:00', end: '00:01' }, 'customer_request', 'admin',
+      )).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'SLOT_TAKEN',
+        message: 'That window has already passed today',
+      });
+      // Rejected up front — the move transaction never opened.
+      expect(db.transaction).toBeUndefined();
+    });
+
+    test('a same-day move to a still-future window today still succeeds', async () => {
+      const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+
+      await expect(SmartRebooker.reschedule(
+        'svc-1', etDateString(), { start: '23:58', end: '23:59' }, 'customer_request', 'admin',
+      )).resolves.toMatchObject({ success: true, newDate: etDateString() });
+      expect(updateQuery.update).toHaveBeenCalled();
+    });
   });
 
   test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {

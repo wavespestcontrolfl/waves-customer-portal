@@ -344,3 +344,65 @@ describe('snapshot-read-failure fallback (unguarded re-arm)', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-arm after failed notice failed'));
   });
 });
+
+describe('reschedule route sync→capture→emit ordering (source)', () => {
+  // The guard snapshot is only sound if it reflects THIS request's own
+  // sync. An awaited board broadcast between a sync and its capture is a
+  // window where a concurrent dispatcher's reschedule of that occurrence
+  // lands and gets snapshotted as "ours" — a later SMS failure then
+  // re-arms against the NEWER state, clearing the newer reschedule's
+  // covered flags (duplicate fallback texts). The guard exists precisely
+  // so that write matches zero rows instead. The loops live mid-route, so
+  // these are source-pattern guards (house style — see
+  // recurring-spawn-hardening / booking-slot-commit-validation).
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+  // Series block: the scope === 'series' branch, up to the single-path
+  // rebooker call that follows it.
+  const seriesStart = src.indexOf("if (scope === 'series') {");
+  const seriesEnd = src.indexOf('await SmartRebooker.reschedule(req.params.serviceId', seriesStart);
+  const seriesBlock = src.slice(seriesStart, seriesEnd);
+
+  test('blocks located', () => {
+    expect(seriesStart).toBeGreaterThan(-1);
+    expect(seriesEnd).toBeGreaterThan(seriesStart);
+  });
+
+  test('series path: each occurrence guard is captured adjacent to its own sync — before ANY awaited broadcast', () => {
+    const syncIdx = seriesBlock.indexOf('await syncRescheduleReminder(');
+    const captureIdx = seriesBlock.indexOf('await captureReminderGuards(occurrence.id)');
+    const emitIdx = seriesBlock.indexOf('emitDispatchJobUpdate(');
+    expect(syncIdx).toBeGreaterThan(-1);
+    // sync → capture → (only then) board broadcasts.
+    expect(captureIdx).toBeGreaterThan(syncIdx);
+    expect(emitIdx).toBeGreaterThan(captureIdx);
+    // Nothing awaited sits between a sync and its capture (the capture is
+    // the very next awaited statement in the loop body).
+    const between = seriesBlock.slice(seriesBlock.indexOf(');', syncIdx), captureIdx);
+    expect(between).not.toContain('emitDispatchJobUpdate');
+    expect(between).not.toMatch(/await\s/);
+  });
+
+  test('series path: a per-occurrence snapshot failure degrades the whole set to the unguarded fallback marker', () => {
+    // rearmRescheduleReminderWindows' failure marker is all-or-nothing — a
+    // partially-guarded list would silently skip the re-arm for the failed
+    // occurrence ("silence is worse").
+    expect(seriesBlock).toContain('seriesGuardSnapshotFailed = true');
+    expect(seriesBlock).toContain('failed: true, guards: seriesReminderGuards');
+  });
+
+  test('single path: capture immediately follows the sync (no awaited work between), broadcast after', () => {
+    const single = src.slice(seriesEnd);
+    const syncIdx = single.indexOf('await syncRescheduleReminder(req.params.serviceId');
+    const captureIdx = single.indexOf('await captureReminderGuards(req.params.serviceId)');
+    const emitIdx = single.indexOf('emitDispatchJobUpdate(');
+    expect(syncIdx).toBeGreaterThan(-1);
+    expect(captureIdx).toBeGreaterThan(syncIdx);
+    expect(emitIdx).toBeGreaterThan(captureIdx);
+    const between = single.slice(single.indexOf(');', syncIdx), captureIdx);
+    expect(between).not.toContain('emitDispatchJobUpdate');
+    expect(between).not.toMatch(/await\s/);
+  });
+});
