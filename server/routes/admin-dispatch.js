@@ -553,8 +553,24 @@ function serviceDateOnly(value) {
 // Only valid for a genuinely past-dated row (ET calendar-date compare):
 // today's visits complete through the normal path so the 6PM checker's and
 // same-day semantics stay untouched.
-function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString() } = {}) {
+// ADMIN-ONLY: backfill is a financial/comms override (suppresses charges and
+// every customer send), so the office authorizes it — the route itself is
+// requireTechOrAdmin, and a technician token must not be able to quietly
+// close out a visit. `role` is req.techRole; anything but 'admin' fail-closes
+// to 403 (Codex P1 on the fix round). Errors carry `status` so the call site
+// returns 403 for the authz failure vs 400 for the date validation.
+function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(), role } = {}) {
   if (backfill !== true) return { active: false };
+  if (role !== 'admin') {
+    return {
+      active: false,
+      status: 403,
+      error: {
+        error: 'Backdated closeout is an office override — admin login required',
+        code: 'backfill_admin_only',
+      },
+    };
+  }
   const serviceDate = scheduledDate ? serviceDateOnly(scheduledDate) : null;
   if (!serviceDate || serviceDate >= today) {
     return {
@@ -2562,9 +2578,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // scheduled_date (past days only). `let`: a crash-resumed completion may
     // retry without the body flag; the frozen structured_notes recover it
     // below, before any send/invoice decision reads it.
-    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date });
+    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });
     if (backfillPlan.error) {
-      return res.status(400).json(backfillPlan.error);
+      return res.status(backfillPlan.status || 400).json(backfillPlan.error);
     }
     let isBackfillCompletion = backfillPlan.active;
 
@@ -5393,7 +5409,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // not payer-billed). Applies PARTIAL credit (the charge/verify paths now price
     // amount due), reducing what the customer pays; fully-covered → prepaid. The
     // helper also fail-closes on a live PaymentIntent. Gated + best-effort.
-    if (invoice?.id && !alreadyPaid && !invoice.payer_id
+    // Backfill closeouts never auto-consume account credit: the invoice must
+    // land open and untouched for operator review (Codex P1, stale-sweep
+    // lane) — silently draining a referral credit into a days-old backdated
+    // bill (possibly flipping it prepaid) is a money movement the quiet path
+    // promises not to make. The operator applies credit deliberately if it
+    // belongs on the bill.
+    if (!isBackfillCompletion
+      && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
@@ -5885,6 +5908,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // return early in this handler — it records the alert and continues — so
     // it belongs here too, matching the referral-credit non-performed guard
     // (Codex P2 #2588 r2 + r5).
+    // Backfill closeouts stay on the quiet path here too: the mint still runs
+    // (pure data setup — card row / promoter enroll / short link), but
+    // suppressIssuedEmail keeps the card.issued email from firing off a
+    // days-old visit; it sends on the next real completion instead.
     const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
     if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
       try {
@@ -5893,6 +5920,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
+          suppressIssuedEmail: isBackfillCompletion,
         }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
       } catch (e) {
         logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);

@@ -5,7 +5,8 @@
  * the giant completion route can't be exercised end-to-end here, but the
  * load-bearing lines — backdated completionServiceDate, forced comms/review
  * suppression (initial AND post-resume re-derivation), the structured_notes
- * freeze, and the near-term invoice due date — must not be refactored away
+ * freeze, the near-term invoice due date, the admin-only authz gate, the
+ * quiet card mint, and the account-credit skip — must not be refactored away
  * silently.
  */
 const fs = require('fs');
@@ -25,8 +26,8 @@ describe('backfillCompletionPlan', () => {
     expect(backfillCompletionPlan({ backfill: 1, scheduledDate: '2026-07-01', today: TODAY })).toEqual({ active: false });
   });
 
-  test('past-dated row → active, serviceDate comes from the row (not today)', () => {
-    const plan = backfillCompletionPlan({ backfill: true, scheduledDate: '2026-07-01', today: TODAY });
+  test('past-dated row + admin → active, serviceDate comes from the row (not today)', () => {
+    const plan = backfillCompletionPlan({ backfill: true, scheduledDate: '2026-07-01', today: TODAY, role: 'admin' });
     expect(plan.active).toBe(true);
     expect(plan.serviceDate).toBe('2026-07-01');
   });
@@ -36,27 +37,57 @@ describe('backfillCompletionPlan', () => {
       backfill: true,
       scheduledDate: new Date('2026-07-01T00:00:00Z'),
       today: TODAY,
+      role: 'admin',
     });
     expect(plan.active).toBe(true);
     expect(plan.serviceDate).toBe('2026-07-01');
   });
 
   test("today's visit is rejected — same-day completions stay on the normal path", () => {
-    const plan = backfillCompletionPlan({ backfill: true, scheduledDate: TODAY, today: TODAY });
+    const plan = backfillCompletionPlan({ backfill: true, scheduledDate: TODAY, today: TODAY, role: 'admin' });
     expect(plan.active).toBe(false);
     expect(plan.error.code).toBe('backfill_not_past');
   });
 
   test('future-dated and missing scheduled_date are rejected', () => {
-    expect(backfillCompletionPlan({ backfill: true, scheduledDate: '2026-08-01', today: TODAY }).error.code)
+    expect(backfillCompletionPlan({ backfill: true, scheduledDate: '2026-08-01', today: TODAY, role: 'admin' }).error.code)
       .toBe('backfill_not_past');
-    expect(backfillCompletionPlan({ backfill: true, scheduledDate: null, today: TODAY }).error.code)
+    expect(backfillCompletionPlan({ backfill: true, scheduledDate: null, today: TODAY, role: 'admin' }).error.code)
       .toBe('backfill_not_past');
+  });
+
+  // Backfill is a financial/comms override (suppresses charges + customer
+  // sends) on a requireTechOrAdmin route — a technician token must not be
+  // able to invoke it.
+  test('technician role → 403 backfill_admin_only, even for a valid past date', () => {
+    const plan = backfillCompletionPlan({ backfill: true, scheduledDate: '2026-07-01', today: TODAY, role: 'technician' });
+    expect(plan.active).toBe(false);
+    expect(plan.status).toBe(403);
+    expect(plan.error.code).toBe('backfill_admin_only');
+  });
+
+  test('missing/unknown role fail-closes to 403 (authz checked before date validation)', () => {
+    const missing = backfillCompletionPlan({ backfill: true, scheduledDate: '2026-07-01', today: TODAY });
+    expect(missing.status).toBe(403);
+    expect(missing.error.code).toBe('backfill_admin_only');
+    // Even an invalid date fails on authz first — no validation oracle for techs.
+    const techFuture = backfillCompletionPlan({ backfill: true, scheduledDate: '2026-08-01', today: TODAY, role: 'technician' });
+    expect(techFuture.error.code).toBe('backfill_admin_only');
+  });
+
+  test('non-backfill requests never hit the role gate — techs complete visits normally', () => {
+    expect(backfillCompletionPlan({ scheduledDate: '2026-07-01', today: TODAY, role: 'technician' })).toEqual({ active: false });
+    expect(backfillCompletionPlan({ backfill: false, scheduledDate: '2026-07-01', today: TODAY, role: 'technician' })).toEqual({ active: false });
   });
 });
 
 describe('completion route wiring (source contracts)', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+  test('route feeds the requester role into the plan and honors the 403 status', () => {
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: req\.techRole \}\)/);
+    expect(source).toMatch(/res\.status\(backfillPlan\.status \|\| 400\)\.json\(backfillPlan\.error\)/);
+  });
 
   test('completionServiceDate is backdated from the plan under backfill', () => {
     expect(source).toMatch(/const completionServiceDate = isBackfillCompletion\s*\n\s*\? backfillPlan\.serviceDate\s*\n\s*: etDateString\(completionEndedAt\)/);
@@ -95,6 +126,24 @@ describe('completion route wiring (source contracts)', () => {
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
+  });
+
+  test('backfill mints the digital card quietly — card.issued email suppressed', () => {
+    // The mint call passes the quiet flag straight off the completion's
+    // backfill state…
+    expect(source).toMatch(/ensureCardForCompletion\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceRecordId: record\.id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*suppressIssuedEmail: isBackfillCompletion,/);
+    // …and the service honors it: the email leg is gated, everything before
+    // it (card row / promoter enroll / short link) still runs.
+    const cardSource = fs.readFileSync(path.join(__dirname, '../services/customer-card.js'), 'utf8');
+    expect(cardSource).toMatch(/async function ensureCardForCompletion\(\{ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false \}\)/);
+    expect(cardSource).toMatch(/if \(!suppressIssuedEmail\) \{\s*\n\s*await maybeSendCardEmail\(card, customer\);\s*\n\s*\}/);
+  });
+
+  test('backfill never auto-applies account credit — invoice stays open for operator review', () => {
+    // The auto-apply block is gated on !isBackfillCompletion BEFORE the
+    // applyAccountCreditToInvoice call, so a backfilled invoice can neither
+    // consume existing credit nor flip itself prepaid.
+    expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,400}applyAccountCreditToInvoice\(\{ invoiceId: invoice\.id \}\)/);
   });
 
   test('backfill + card hold parks for review instead of charging', () => {

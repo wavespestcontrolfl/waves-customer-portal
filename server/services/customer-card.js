@@ -135,8 +135,14 @@ async function resolveTechnicianId({ serviceRecordId, scheduledServiceId }) {
  * Mint (or complete) the customer's card off a completed visit. Idempotent:
  * one card per customer, ever (unique customer_id). Never throws for the
  * caller's benefit — the dispatch completion flow fire-and-forgets this.
+ *
+ * suppressIssuedEmail: the mint itself is pure data setup (card row, promoter
+ * enroll, tracked short link — no customer contact), but the card.issued email
+ * is a customer send. Backdated quiet completions (backfill) pass true so the
+ * visit stays silent; email_sent_at is left unstamped, so the email goes out
+ * on the customer's next REAL completion instead (Codex P1, stale-sweep lane).
  */
-async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
+async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false }) {
   if (!customerId) return null;
 
   const customer = await db('customers').where({ id: customerId }).first();
@@ -206,7 +212,9 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     }
   }
 
-  await maybeSendCardEmail(card, customer);
+  if (!suppressIssuedEmail) {
+    await maybeSendCardEmail(card, customer);
+  }
   return card;
 }
 
