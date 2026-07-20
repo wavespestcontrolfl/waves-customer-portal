@@ -113,3 +113,43 @@ describe('engine + mapper emission', () => {
     expect(estimate.lineItems.some((l) => l.service === 'termite_bond')).toBe(false);
   });
 });
+
+describe('accept scheduling: bait + bond combine to ONE visit (converter routes)', () => {
+  const { combineRecurringServicesForScheduling } = require('../services/estimate-converter');
+  const baitRow = { name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35, perTreatment: 105, visitsPerYear: 4 };
+  const bondRow = {
+    name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr',
+    mo: 15, perTreatment: 45, visitsPerYear: 4, countsTowardWaveGuardTier: false,
+  };
+
+  test('combined route produces one quarterly unit whose NAME carries the bond + term fragments', () => {
+    const { remaining, combos } = combineRecurringServicesForScheduling([baitRow, bondRow], {});
+    expect(combos).toHaveLength(1);
+    expect(remaining).toHaveLength(0);
+    expect(combos[0].frequency).toBe('quarterly');
+    expect(combos[0].service.visitsPerYear).toBe(4);
+    expect(combos[0].service.name).toBe('Quarterly Termite Bait Station + Termite Bond Service (10-Year Term)');
+    // The scheduled service_type mints the termite_bonds row at the right term.
+    expect(sweepPrivate.termYearsFrom(combos[0].service.name)).toBe(10);
+  });
+
+  test('each term routes to its own combined label', () => {
+    for (const [key, label] of [['1yr', '1-Year'], ['5yr', '5-Year'], ['10yr', '10-Year']]) {
+      const bond = { ...bondRow, service: `termite_bond_${key}`, name: `Termite Bond (${label} Term)`, bondTerm: key };
+      const { combos } = combineRecurringServicesForScheduling([baitRow, bond], {});
+      expect(combos).toHaveLength(1);
+      expect(combos[0].service.name).toBe(`Quarterly Termite Bait Station + Termite Bond Service (${label} Term)`);
+    }
+  });
+
+  test('pest + bait + bond: pest consumes the bait line first; bond stays standalone (documented v1 limitation)', () => {
+    const pestRow = { name: 'Pest Control', service: 'pest_control', mo: 36.67, perTreatment: 110, visitsPerYear: 4, frequency: 'quarterly' };
+    const { combos, remaining } = combineRecurringServicesForScheduling(
+      [pestRow, baitRow, bondRow],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(remaining.map((r) => r.service)).toEqual(['termite_bond_10yr']);
+  });
+});
