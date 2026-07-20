@@ -3024,6 +3024,19 @@ export default function EstimateToolViewV2({
     if (lookupAbortRef.current) lookupAbortRef.current.abort();
     const lookupController = new AbortController();
     lookupAbortRef.current = lookupController;
+    // Supersession gate for everything this lookup applies. A NEWER lookup
+    // owns the status UI (plain return); an address edit with NO new lookup
+    // leaves nobody to clear the "loading" status this lookup set — clear it
+    // here or the page shows the AI/property lookup running forever.
+    const lookupSuperseded = () => {
+      if (lookupSeq !== lookupSeqRef.current) return true;
+      if (formAddressRef.current.trim() !== address) {
+        setLookupStatus({ type: "", msg: "" });
+        setSatelliteStatus({ type: "", msg: "" });
+        return true;
+      }
+      return false;
+    };
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
@@ -3033,11 +3046,7 @@ export default function EstimateToolViewV2({
       });
       if (!r.ok) throw new Error("API " + r.status);
       const data = await r.json();
-      // Superseded by a newer lookup OR the operator edited/selected/cleared
-      // the address while this one was in flight — this response belongs to
-      // a different property and must not apply (a stale customer match here
-      // would associate the save with the wrong customer).
-      if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+      if (lookupSuperseded()) return;
 
       if (data.errors?.length > 0 && !data.enriched) {
         setLookupStatus({
@@ -3146,7 +3155,7 @@ export default function EstimateToolViewV2({
         );
         if (custR.ok) {
           const custData = await custR.json();
-          if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+          if (lookupSuperseded()) return;
           const custs = custData.customers || custData || [];
           const match = custs.find(
             (c) =>
@@ -3187,9 +3196,8 @@ export default function EstimateToolViewV2({
 
       // The inner catch above deliberately swallows customer-lookup errors —
       // including the AbortError a NEWER lookup raises by aborting this one —
-      // so re-check supersession before the satellite/status writes below, or
-      // a stale lookup paints its property data over the newer one's UI.
-      if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+      // so re-gate before the satellite/status writes below.
+      if (lookupSuperseded()) return;
 
       if (data.satellite) {
         const aiSources = normalizeAiSources(

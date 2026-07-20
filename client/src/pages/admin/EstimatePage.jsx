@@ -1102,6 +1102,22 @@ function EstimateToolView() {
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
   const [generating, setGenerating] = useState(false);
+  // Synchronous in-flight truth for the guard (state lags a tick) + the
+  // queued request: a generate asked for WHILE one is running must not be
+  // dropped — the running one discards itself on the version check, and the
+  // old preview would stay mounted for Save to persist against the newer
+  // form. The queue replays the LATEST request from an effect, so it reads
+  // fresh form state, never a stale closure.
+  const generatingRef = useRef(false);
+  const [pendingGenerate, setPendingGenerate] = useState(null);
+  useEffect(() => {
+    if (!generating && pendingGenerate) {
+      setPendingGenerate(null);
+      void doGenerate(pendingGenerate.overrides);
+    }
+    // doGenerate is re-created each render — the effect deliberately uses
+    // the newest one so the queued run prices the CURRENT form.
+  }, [generating, pendingGenerate]);
   useEffect(() => {
     formAddressRef.current = String(form.address || "");
   }, [form.address]);
@@ -1401,6 +1417,19 @@ function EstimateToolView() {
     if (lookupAbortRef.current) lookupAbortRef.current.abort();
     const lookupController = new AbortController();
     lookupAbortRef.current = lookupController;
+    // Supersession gate for everything this lookup applies. A NEWER lookup
+    // owns the status UI (plain return); an address edit with NO new lookup
+    // leaves nobody to clear the "loading" status this lookup set — clear it
+    // here or the page shows the AI/property lookup running forever.
+    const lookupSuperseded = () => {
+      if (lookupSeq !== lookupSeqRef.current) return true;
+      if (formAddressRef.current.trim() !== address) {
+        setLookupStatus({ type: "", msg: "" });
+        setSatelliteStatus({ type: "", msg: "" });
+        return true;
+      }
+      return false;
+    };
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
@@ -1410,10 +1439,7 @@ function EstimateToolView() {
       });
       if (!r.ok) throw new Error("API " + r.status);
       const data = await r.json();
-      // Superseded by a newer lookup OR the operator edited the address while
-      // this one was in flight — either way this response belongs to a
-      // different property and must not apply.
-      if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+      if (lookupSuperseded()) return;
 
       if (data.errors?.length > 0 && !data.enriched) {
         setLookupStatus({
@@ -1475,7 +1501,7 @@ function EstimateToolView() {
         );
         if (custR.ok) {
           const custData = await custR.json();
-          if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+          if (lookupSuperseded()) return;
           const custs = custData.customers || custData || [];
           const match = custs.find(
             (c) =>
@@ -1486,6 +1512,10 @@ function EstimateToolView() {
           );
           if (match) {
             setExistingCustomerMatch(match);
+            // The match flips isRecurringCustomer (loyalty pricing) below —
+            // a generate started between the property autofill and this
+            // point must not mount a result priced without it.
+            estimateVersionRef.current += 1;
             // Only apply loyalty discount if they have an active WaveGuard tier.
             // 'Commercial' is a flat non-member tier — exclude it so a commercial
             // customer doesn't unlock recurring-customer loyalty discounts.
@@ -1509,9 +1539,8 @@ function EstimateToolView() {
 
       // The inner catch above deliberately swallows customer-lookup errors —
       // including the AbortError a NEWER lookup raises by aborting this one —
-      // so re-check supersession before the satellite/status writes below, or
-      // a stale lookup paints its property data over the newer one's UI.
-      if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+      // so re-gate before the satellite/status writes below.
+      if (lookupSuperseded()) return;
 
       // Satellite images
       if (data.satellite) {
@@ -1687,8 +1716,14 @@ function EstimateToolView() {
     // from pre-edit inputs — the invalidation version moved while the
     // calculate was in flight — is discarded instead of re-mounting stale
     // pricing that Save would persist.
-    if (generating) return;
+    if (generatingRef.current) {
+      // Queue the LATEST request instead of dropping it (codex: a dropped
+      // regenerate leaves the old preview mounted for Save).
+      setPendingGenerate({ overrides });
+      return;
+    }
     const versionAtStart = estimateVersionRef.current;
+    generatingRef.current = true;
     setGenerating(true);
     try {
     const formIsCommercial = isCommercialEstimateInput(form);
@@ -2187,6 +2222,7 @@ function EstimateToolView() {
     setEstimate(result);
     setSavedId(null);
     } finally {
+      generatingRef.current = false;
       setGenerating(false);
     }
   }
