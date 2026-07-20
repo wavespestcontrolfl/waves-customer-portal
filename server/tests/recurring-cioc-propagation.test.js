@@ -74,8 +74,10 @@ describe('extension call sites apply the resolved flag (source guards)', () => {
   });
 
   test('recurring-alert extend AND convert_ongoing both stamp the resolved flag', () => {
-    // Resolved once in the action route, applied in both insert loops.
-    expect(src).toContain('await resolveSeriesCreateInvoiceOnComplete(db, parentId, parent)');
+    // Resolved once inside the locked alert-action transaction, applied in
+    // both insert loops. (Was `db` before the actions joined the maintenance
+    // lock's transaction.)
+    expect(src).toContain('await resolveSeriesCreateInvoiceOnComplete(trx, parentId, parent)');
     const stamps = src.match(/if \(cols\.create_invoice_on_complete && seriesCioc !== undefined\) data\.create_invoice_on_complete = seriesCioc;/g) || [];
     expect(stamps.length).toBe(2);
   });
