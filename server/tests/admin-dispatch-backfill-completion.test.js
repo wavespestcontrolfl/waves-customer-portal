@@ -158,4 +158,75 @@ describe('completion route wiring (source contracts)', () => {
     // The real charge call survives, unreachable for backfill completions.
     expect(source).toMatch(/\} else try \{\s*\n\s*const CardHolds = require\('\.\.\/services\/estimate-card-holds'\);\s*\n\s*const holdCharge = await CardHolds\.chargeCardHoldOnCompletion/);
   });
+
+  test('backfill never credits a referral — no $25 to either party, no referrer SMS/email', () => {
+    // creditReferralOnFirstService posts real account credits to BOTH the
+    // referrer and the referee AND messages the referrer, so the quiet path
+    // must not reach it. The guard also protects the reward's single-use
+    // idempotency: firing here would burn it on a visit nobody announced.
+    expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;/);
+    const referralBlock = source.match(/if \(referralVisitPerformed\) \{([\s\S]*?)\n {4}\}/);
+    expect(referralBlock).not.toBeNull();
+    expect(referralBlock[1]).toContain('creditReferralOnFirstService');
+  });
+
+  test('lead conversion still runs on a backfill — pure data write, and there is no later completion', () => {
+    // convertLeadFromEvent only resolves the originating lead and calls
+    // leadAttribution.markConverted — no SMS/email/money anywhere in that
+    // path — so it is NOT part of the quiet-path contract. It must stay OUT
+    // of the referral guard: a stale-sweep closeout is the last completion
+    // these rows ever get, so gating it would strand the lead open forever.
+    expect(source).toMatch(/if \(closedDealVisitPerformed\) \{[\s\S]{0,600}convertLeadFromEvent\(\{ source: 'service_completed'/);
+    // And the shared predicate itself carries no backfill term.
+    expect(source).toMatch(/const closedDealVisitPerformed = visitOutcome !== 'inspection_only'\s*\n\s*&& visitOutcome !== 'customer_declined'\s*\n\s*&& !isIncompleteVisit;/);
+    // Belt-and-braces: the referral engine is never reached from that block.
+    const leadBlock = source.match(/if \(closedDealVisitPerformed\) \{([\s\S]*?)\n {4}\}/);
+    expect(leadBlock[1]).not.toContain('creditReferralOnFirstService');
+  });
+
+  test('every post-commit backfill gate sits AFTER the crash-resume re-derivation', () => {
+    // isBackfillCompletion is re-derived from the FROZEN structured_notes so a
+    // crash-resumed retry (which may arrive without the body flag) stays
+    // quiet. Any post-commit gate placed above that line would read a stale
+    // `false` on resume and leak. Pin the ordering, not just the presence.
+    const rederivation = source.indexOf("parseJsonObject(record.structured_notes)?.backfill === true");
+    expect(rederivation).toBeGreaterThan(-1);
+    const postCommitGates = [
+      // account-credit auto-apply
+      'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
+      // per-application saved-card / ACH auto-charge
+      'if (!isBackfillCompletion\n      && perApplicationBilling && visitPerformed',
+      // card-hold charge
+      '} else if (isBackfillCompletion) {',
+      // digital-business-card issued email
+      'suppressIssuedEmail: isBackfillCompletion,',
+      // payment-decline notice SMS
+      '&& !isBackfillCompletion) {',
+      // payer AP invoice email
+      'invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion',
+      // referral credit
+      'const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;',
+    ];
+    for (const gate of postCommitGates) {
+      const at = source.indexOf(gate);
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeGreaterThan(rederivation);
+    }
+  });
+
+  test('backfill is reachable ONLY through POST /complete — the other completion entry points ignore it', () => {
+    // Backfill is a body flag on POST /:serviceId/complete. PUT
+    // /:serviceId/status and admin-schedule's bare completed flip each run
+    // their own (ungated) referral/review rails, so the sweep must never be
+    // able to route through them. Neither destructures `backfill`.
+    const statusRoute = source.slice(
+      source.indexOf("router.put('/:serviceId/status'"),
+      source.indexOf("router.get('/:serviceId/complete-preview'"),
+    );
+    expect(statusRoute.length).toBeGreaterThan(0);
+    expect(statusRoute).not.toContain('backfill');
+
+    const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(scheduleSource).not.toMatch(/backfill\s*=\s*false|backfill\s*,/);
+  });
 });

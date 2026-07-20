@@ -6738,9 +6738,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // inspection-only, customer-declined, or incomplete outcome must not earn
     // the reward or burn the single-use guard. The helper re-confirms THIS
     // visit is recurring + handles idempotency itself; never blocks completion.
-    const referralVisitPerformed = visitOutcome !== 'inspection_only'
+    // Backfill exclusion: crediting a referral posts real $25 account credits
+    // to BOTH parties and texts/emails the referrer. A backdated cleanup of a
+    // months-old row must not move money or contact anyone — and the reward is
+    // single-use, so firing it here would also burn the guard on a visit
+    // nobody is announcing. The referral stays claimable on a real completion.
+    const closedDealVisitPerformed = visitOutcome !== 'inspection_only'
       && visitOutcome !== 'customer_declined'
       && !isIncompleteVisit;
+    const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;
     if (referralVisitPerformed) {
       try {
         const referralEngine = require('../services/referral-engine');
@@ -6748,9 +6754,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }
-      // Same closed-deal signal as the referral credit above, and gated by the
-      // same performed-visit guard: convert the originating lead to won if it's
-      // still open. Best-effort + idempotent; only matches never-converted leads.
+    }
+    // Same closed-deal signal as the referral credit, and gated by the same
+    // performed-visit guard — but NOT by the backfill guard. Converting the
+    // originating lead is a pure data write (lead-estimate-link resolves the
+    // lead and calls leadAttribution.markConverted; no SMS, email, or money
+    // anywhere in that path), so it does not violate the quiet-path contract.
+    // It must NOT be deferred either: a stale-sweep closeout is the LAST
+    // completion these rows will ever get, so suppressing it would strand the
+    // originating lead 'open' forever with no later completion to convert it —
+    // permanently understating won-deal attribution. Best-effort + idempotent;
+    // only matches never-converted leads.
+    if (closedDealVisitPerformed) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
