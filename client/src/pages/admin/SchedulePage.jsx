@@ -658,6 +658,19 @@ export function normalizeCompletionDetourPhotos(photos) {
   return Array.isArray(photos) ? photos : [];
 }
 
+// timeOnSite fragment of the completion POST body. The panel's running
+// `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
+// row that's days or weeks — and the server books any submitted timeOnSite
+// as explicit operator input (persisted service duration + job-costing
+// labor). Under a backdated closeout only an operator-TYPED positive number
+// of minutes may travel; blank/invalid omits the key so the duration stays
+// unknown. Non-backfill submits keep today's auto-elapsed exactly.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
+  if (!backfill) return { timeOnSite: elapsed };
+  const minutes = Math.round(Number(typedMinutes));
+  return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
+}
+
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
@@ -7723,6 +7736,11 @@ export function CompletionPanel({
   const [backfillCloseout, setBackfillCloseout] = useState(
     panelIsAdmin && backfillDaysPast >= 7,
   );
+  // Operator-typed minutes for a backdated closeout. Starts EMPTY on
+  // purpose: the running `elapsed` spans the whole stale gap, so backfill
+  // must never inherit it — blank submits no timeOnSite and the duration
+  // stays unknown (see completionTimeOnSiteBody).
+  const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -10238,7 +10256,13 @@ export function CompletionPanel({
         reviewScheduledFor: oneTimeRecapOnly
           ? null
           : selectedReviewScheduledFor,
-        timeOnSite: elapsed,
+        // Backfill: never the auto-elapsed (it spans the stale gap) — only
+        // what the operator typed, or nothing. See completionTimeOnSiteBody.
+        ...completionTimeOnSiteBody({
+          backfill: backfillEligible && backfillCloseout,
+          typedMinutes: backfillTimeOnSite,
+          elapsed,
+        }),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
@@ -12694,6 +12718,53 @@ export function CompletionPanel({
                   </span>{" "}
                 </label>
               )}{" "}
+              {backfillEligible && backfillCloseout && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                      marginBottom: 8,
+                    }}
+                  >
+                    Time on site (minutes)
+                  </span>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={backfillTimeOnSite}
+                    onChange={(e) => setBackfillTimeOnSite(e.target.value)}
+                    placeholder="Unknown"
+                    style={mInput}
+                  />{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 6,
+                    }}
+                  >
+                    The running timer spans the missed days and is not
+                    submitted — leave blank to record no duration.
+                  </span>{" "}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -14702,6 +14773,29 @@ export function CompletionPanel({
                 </span>
               </span>{" "}
             </label>
+          )}{" "}
+          {backfillEligible && backfillCloseout && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 4 }}>
+                Time on site (minutes)
+              </div>{" "}
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="720"
+                step="1"
+                value={backfillTimeOnSite}
+                onChange={(e) => setBackfillTimeOnSite(e.target.value)}
+                placeholder="Unknown"
+                style={{ ...inputStyle, fontSize: 14, marginBottom: 4 }}
+              />{" "}
+              <div style={{ fontSize: 14, color: D.muted }}>
+                The running timer spans the missed days and is not submitted —
+                leave blank to record no duration.
+              </div>{" "}
+            </div>
           )}{" "}
           <label style={checkboxRow}>
             {" "}

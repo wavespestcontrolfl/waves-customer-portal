@@ -595,8 +595,25 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
 // duration keys are stripped so the columns stay unknown (NULL) instead of
 // carrying a fabricated interval. Mutates and returns the updates object
 // built by buildCompletionLifecycleUpdates. Pure for testability (_test).
+//
+// "Explicit" is itself validated (Codex P1, PR #2897): the pre-fix panel
+// auto-submitted its running elapsed — the stale span again, relabeled as
+// operator input — so a provided value only counts within a workday cap.
+// Out of range degrades to absent (columns stay NULL), never a 400: the
+// backlog closeout must still land.
+const BACKFILL_MAX_TIME_ON_SITE_MINUTES = 720; // 12h — no single visit exceeds a workday
+
+// Sanitized operator minutes for a backfill completion: a positive duration
+// within the workday cap, else null ("absent"). The SINGLE source for both
+// the persisted service duration (applyBackfillDurationPolicy) and the
+// job-costing explicitLaborMinutes forward — the two must never disagree.
+function backfillTimeOnSiteMinutes(timeOnSite) {
+  const minutes = minutesFromElapsed(timeOnSite);
+  return minutes > 0 && minutes <= BACKFILL_MAX_TIME_ON_SITE_MINUTES ? minutes : null;
+}
+
 function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite) {
-  const explicitMinutes = minutesFromElapsed(timeOnSite);
+  const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
   if (explicitMinutes) {
     lifecycleUpdates.service_time_minutes = explicitMinutes;
     lifecycleUpdates.actual_duration_minutes = explicitMinutes;
@@ -2606,6 +2623,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return res.status(backfillPlan.status || 400).json(backfillPlan.error);
     }
     let isBackfillCompletion = backfillPlan.active;
+    // Backfill trusts a supplied timeOnSite only as sanitized minutes
+    // (positive, ≤ the workday cap) — a pre-fix panel auto-submits its
+    // running elapsed, i.e. the stale span itself. Sanitized ONCE here so
+    // every consumer — the duration policy, the structured_notes stamp
+    // (which feeds the report's on-site metric), and the job-costing labor
+    // forward — reads the same value or the same absence. Out-of-range
+    // degrades to unknown with a log line, never a 400.
+    const effectiveTimeOnSite = isBackfillCompletion
+      ? backfillTimeOnSiteMinutes(timeOnSite)
+      : timeOnSite;
+    if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
+      logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
+    }
 
     // No-show is terminal and non-completable. A completion/recap sheet
     // opened before another dispatcher marked the visit no_show would
@@ -3596,11 +3626,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const completionServiceDate = isBackfillCompletion
             ? backfillPlan.serviceDate
             : etDateString(completionEndedAt);
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout) —
-          // explicit timeOnSite or unknown. See applyBackfillDurationPolicy.
-          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite);
+          // sanitized timeOnSite or unknown. See applyBackfillDurationPolicy.
+          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite);
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -3618,7 +3648,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
-            timeOnSite: timeOnSite || null,
+            timeOnSite: effectiveTimeOnSite || null,
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             // Backfill frozen on the record: a crash-resumed retry may lack
@@ -6648,9 +6678,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // between — either way weeks of labor booked to one visit. Labor may
         // only come from entries tied to THIS job or the operator's explicit
         // timeOnSite — never elapsed math over the stale span (same rule as
-        // service_time_minutes via applyBackfillDurationPolicy).
+        // service_time_minutes via applyBackfillDurationPolicy). Forwarded
+        // through the same workday-capped sanitizer the duration policy
+        // uses (idempotent on the already-sanitized effectiveTimeOnSite),
+        // so persisted duration and costed labor can never disagree.
         void JobCosting.calculateJobCost(svc.id, undefined, isBackfillCompletion
-          ? { untrustedLifecycleSpan: true, explicitLaborMinutes: minutesFromElapsed(timeOnSite) }
+          ? { untrustedLifecycleSpan: true, explicitLaborMinutes: backfillTimeOnSiteMinutes(effectiveTimeOnSite) }
           : {}).catch(e =>
           logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
         );
@@ -8782,4 +8815,6 @@ module.exports._test = {
   completionSavedCardFallbackPolicy,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
+  backfillTimeOnSiteMinutes,
+  BACKFILL_MAX_TIME_ON_SITE_MINUTES,
 };

@@ -19,6 +19,8 @@ const path = require('path');
 const {
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
+  backfillTimeOnSiteMinutes,
+  BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   shouldAutoInvoiceCompletion,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
@@ -130,6 +132,35 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
     }
   });
 
+  // Codex P1 (PR #2897): the pre-fix panel auto-submitted its running
+  // elapsed — the stale span itself, relabeled as "explicit" input. A
+  // provided value is only explicit within a workday; beyond the cap it is
+  // treated as absent (columns stay unknown), never a 400.
+  test('an auto-elapsed-sized timeOnSite (2 weeks) is rejected by the workday cap — duration keys stripped', () => {
+    for (const oversized of [20160, '20160', '336:00:00']) { // 2 weeks as number, string, H:MM:SS
+      const updates = applyBackfillDurationPolicy(
+        buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT, { elapsed: oversized }),
+        oversized,
+      );
+      expect(updates).not.toHaveProperty('service_time_minutes');
+      expect(updates).not.toHaveProperty('actual_duration_minutes');
+    }
+  });
+
+  test('the cap boundary: a full workday (720) is honored, one minute past it is not', () => {
+    const atCap = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT, { elapsed: 720 }),
+      720,
+    );
+    expect(atCap.service_time_minutes).toBe(BACKFILL_MAX_TIME_ON_SITE_MINUTES);
+    const pastCap = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT, { elapsed: 721 }),
+      721,
+    );
+    expect(pastCap).not.toHaveProperty('service_time_minutes');
+    expect(pastCap).not.toHaveProperty('actual_duration_minutes');
+  });
+
   test('garbage timeOnSite is not a fabrication license — falls back to unknown, not to the stale span', () => {
     for (const junk of ['', '  ', 'abc', -5, 0, null]) {
       const updates = applyBackfillDurationPolicy(
@@ -148,6 +179,33 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
     );
     expect(updates).not.toHaveProperty('service_time_minutes');
     expect(updates).not.toHaveProperty('actual_duration_minutes');
+  });
+});
+
+describe('backfillTimeOnSiteMinutes — the shared workday-cap sanitizer (Codex P1, PR #2897)', () => {
+  // One function feeds BOTH the persisted duration (applyBackfillDurationPolicy)
+  // and the job-costing explicitLaborMinutes forward — so "rejected" here IS
+  // "no explicit labor minutes forwarded" (calcLaborCost treats null as no
+  // data and, with untrustedLifecycleSpan, books zero labor rather than the
+  // stale span).
+  test('a plausible visit duration passes through, in every completion-body shape', () => {
+    expect(backfillTimeOnSiteMinutes(45)).toBe(45);
+    expect(backfillTimeOnSiteMinutes('45')).toBe(45);
+    expect(backfillTimeOnSiteMinutes('0:45:00')).toBe(45);
+    expect(backfillTimeOnSiteMinutes('90 min')).toBe(90);
+    expect(backfillTimeOnSiteMinutes(720)).toBe(720);
+  });
+
+  test('an auto-elapsed-sized value (2 weeks) or anything past a workday → null, never forwarded', () => {
+    expect(backfillTimeOnSiteMinutes(20160)).toBeNull();
+    expect(backfillTimeOnSiteMinutes('336:00:00')).toBeNull();
+    expect(backfillTimeOnSiteMinutes(721)).toBeNull();
+  });
+
+  test('absent/zero/garbage → null', () => {
+    for (const junk of [null, undefined, '', '  ', 0, -5, 'abc']) {
+      expect(backfillTimeOnSiteMinutes(junk)).toBeNull();
+    }
   });
 });
 
@@ -326,14 +384,35 @@ describe('completion route wiring (source contracts)', () => {
   test('backfill durations come from the policy, not the stale lifecycle timestamps', () => {
     // The route builds lifecycle updates from the shared helper, then under
     // backfill immediately re-derives the duration through the policy
-    // (explicit timeOnSite or unknown — behavioral coverage above).
-    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: timeOnSite \}\);[\s\S]{0,400}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, timeOnSite\);/);
+    // (sanitized timeOnSite or unknown — behavioral coverage above).
+    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,400}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite\);/);
+  });
+
+  test('timeOnSite is sanitized ONCE at intake — every consumer reads the same value or absence', () => {
+    // Under backfill the raw body value is replaced by the workday-capped
+    // minutes (or null); non-backfill completions pass through untouched.
+    expect(source).toMatch(/const effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: timeOnSite;/);
+    // A rejected value logs a note — the closeout still succeeds (no 400
+    // path exists between the sanitation and the log).
+    expect(source).toMatch(/if \(isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== ''\) \{\s*\n\s*logger\.warn\([\s\S]{0,300}recorded as unknown/);
+    // The structured_notes stamp — the report's on-site metric reads it via
+    // computeOnSiteMin — carries the sanitized value, never the raw span.
+    expect(source).toMatch(/timeOnSite: effectiveTimeOnSite \|\| null,/);
+    // And no other consumer still reads the raw body value: `timeOnSite`
+    // appears only in the destructure, the sanitation, and the helpers'
+    // definitions/comments — never as a bare argument past the intake.
+    const afterIntake = source.slice(source.indexOf('const effectiveTimeOnSite = isBackfillCompletion'));
+    expect(afterIntake).not.toMatch(/\{ elapsed: timeOnSite \}/);
+    expect(afterIntake).not.toMatch(/applyBackfillDurationPolicy\(lifecycleUpdates, timeOnSite\)/);
+    expect(afterIntake).not.toMatch(/minutesFromElapsed\(timeOnSite\)/);
   });
 
   test('backfill job costing never derives labor from the stale span (or the clock-in window over it)', () => {
     // The completion route flags the span untrusted and forwards the
-    // operator's explicit minutes…
-    expect(source).toMatch(/JobCosting\.calculateJobCost\(svc\.id, undefined, isBackfillCompletion\s*\n\s*\? \{ untrustedLifecycleSpan: true, explicitLaborMinutes: minutesFromElapsed\(timeOnSite\) \}\s*\n\s*: \{\}\)/);
+    // operator's explicit minutes through the SAME workday-cap sanitizer
+    // the duration policy uses — an oversized value forwards null, so
+    // persisted duration and costed labor can never disagree…
+    expect(source).toMatch(/JobCosting\.calculateJobCost\(svc\.id, undefined, isBackfillCompletion\s*\n\s*\? \{ untrustedLifecycleSpan: true, explicitLaborMinutes: backfillTimeOnSiteMinutes\(effectiveTimeOnSite\) \}\s*\n\s*: \{\}\)/);
     // …and calcLaborCost honors it: the technician clock-in-window fallback
     // and the actual_start/end span fallback are both skipped for untrusted
     // bounds; only direct job entries or the explicit minutes may count.
