@@ -14634,7 +14634,13 @@ function sectionFrequenciesForRecurringService(key, recurringService = {}, baseF
         const row = treatmentRowForServiceFrequency(frequency, key);
         return row ? frequencyFromTreatmentRow(frequency, key, row, recurringService, {
           allowAddOns: false,
-          useBaseFrequencyKey: preserveSelectableKeys && !isFlatMonthlyRow(row),
+          // Termite bait monitoring now carries explicit per-application data
+          // (visitsPerYear 4, owner 2026-07-20) so it no longer reads as
+          // flat-monthly — but its cadence is FIXED, so never mirror the
+          // pest-keyed ladder onto it: that renders an active
+          // Quarterly/Bi-monthly/Monthly selector on a program with exactly
+          // one cadence (codex #2911 r2).
+          useBaseFrequencyKey: preserveSelectableKeys && key !== 'termite_bait' && !isFlatMonthlyRow(row),
         }) : null;
       })
       .filter(Boolean);

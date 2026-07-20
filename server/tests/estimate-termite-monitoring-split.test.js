@@ -427,7 +427,12 @@ describe('termite-bait rows with explicit per-application fields (billed per app
     const bundle = await buildPricingBundle(perAppBundleEstimate());
     const termite = bundle.services.find((s) => s.key === 'termite_bait');
     expect(termite).toBeTruthy();
+    // Codex #2911 r2: explicit per-app fields must NOT promote termite onto
+    // the mirrored pest cadence ladder — its cadence is fixed, so the
+    // section stays a single 'recurring' entry (no active selector).
+    expect(termite.frequencies).toHaveLength(1);
     const entry = termite.frequencies[0];
+    expect(entry.key).toBe('recurring');
     // 105 pre-discount -> 89.25 net of Gold 15%, same figure the legacy
     // derivation produced — the price is unchanged, only its authority moved
     // from a display-time derivation to the persisted row.
