@@ -17,6 +17,13 @@
  * converter's reserved-slot accept (the common public path) and the
  * standalone-bait block are guarded too, not just the auto-schedule branch.
  *
+ * Round 3 (codex P0): the lock keys now cover BOTH dimensions of the
+ * OR-matcher. A family-only key let two creators with the SAME service_id but
+ * differently-normalized labels take different locks and both seed;
+ * checkActiveSeriesLocked now acquires one lock per dimension it carries
+ * ('<cust>:family:<bucket>' + '<cust>:svc:<serviceId>'), sorted before
+ * acquisition so overlapping creators can never swap-deadlock.
+ *
  * Unit tests drive the helpers with a scripted fake connection; source
  * guards pin the consumer call sites + the admin escape hatch.
  */
@@ -157,15 +164,23 @@ describe('findActiveRecurringSeries — service-family matching', () => {
 // Fake knex-ish environment for the locked-guard tests: callable AS a
 // transaction (`.transaction(cb)` invokes cb with a trx-shaped conn; a nested
 // call from inside one is a SAVEPOINT and runs inline), records the advisory
-// lock raw calls, serializes TOP-LEVEL transactions on a shared mutex (= the
-// per-customer/family advisory lock), and backs findActiveRecurringSeries
-// with a mutable shared parents array — so a "committed" insert from the
-// first creator is visible to the second creator's in-lock re-check, exactly
-// like the real lock + READ COMMITTED interplay.
+// lock raw calls, and backs findActiveRecurringSeries with a mutable shared
+// parents array — so a "committed" insert from the first creator is visible
+// to the second creator's in-lock re-check, exactly like the real lock +
+// READ COMMITTED interplay.
+//
+// Round 3: locks are modelled PER KEY, not as one global mutex. A single
+// mutex serialized every creator regardless of key, so it could not tell a
+// real fix from the bug — two creators taking DIFFERENT locks would still
+// have appeared serialized. Here each distinct lock key has its own FIFO wait
+// queue, and (like pg_advisory_xact_lock) a key is re-entrant within a
+// transaction and every key a transaction took is released only when that
+// TOP-LEVEL transaction ends — savepoints inherit the same holder context.
+// Two creators overlap only if they actually request a common key.
 function makeLockEnv({ parents = [], upcomingByParent = {}, columns = COLS, rawError = null } = {}) {
   const rawCalls = [];
   const state = { parents: [...parents] };
-  const mutex = { tail: Promise.resolve() };
+  const locks = new Map(); // lock key → tail of that key's wait queue
   const buildTable = () => {
     const calls = [];
     const b = {};
@@ -204,25 +219,43 @@ function makeLockEnv({ parents = [], upcomingByParent = {}, columns = COLS, rawE
     b.then = (res, rej) => Promise.resolve(state.parents).then(res, rej);
     return b;
   };
-  const build = (isTransaction) => {
+  const build = (isTransaction, holder) => {
     const fn = () => buildTable();
     fn.isTransaction = isTransaction;
     fn.raw = (sql, bindings) => {
       rawCalls.push([sql, bindings]);
-      return rawError ? Promise.reject(rawError) : Promise.resolve();
+      if (rawError) return Promise.reject(rawError);
+      if (!holder || !/pg_advisory_xact_lock/.test(sql)) return Promise.resolve();
+      const key = String(bindings.join('|'));
+      if (holder.held.has(key)) return Promise.resolve(); // re-entrant, as pg is
+      holder.held.add(key);
+      // Queue behind whoever holds this key; publish our own release as the
+      // new tail so the next waiter blocks until this transaction ends.
+      const prev = locks.get(key) || Promise.resolve();
+      let release;
+      const mine = new Promise((r) => { release = r; });
+      locks.set(key, prev.then(() => mine));
+      holder.releases.push(release);
+      return prev;
     };
     fn.transaction = (cb) => {
-      const exec = () => Promise.resolve().then(() => cb(build(true)));
-      if (isTransaction) return exec(); // savepoint — runs under the held lock
-      const prev = mutex.tail;
-      let release;
-      mutex.tail = new Promise((r) => { release = r; });
-      return prev.then(exec).finally(() => release());
+      // Savepoint: same holder context, so locks taken inside it survive the
+      // savepoint release and hold to the top-level commit.
+      if (isTransaction) return Promise.resolve().then(() => cb(build(true, holder)));
+      const ctx = { held: new Set(), releases: [] };
+      return Promise.resolve()
+        .then(() => cb(build(true, ctx)))
+        .finally(() => { for (const r of ctx.releases) r(); });
     };
     return fn;
   };
-  return { db: build(false), rawCalls, state };
+  return { db: build(false, null), rawCalls, state };
 }
+
+// Lock keys recorded by makeLockEnv, in acquisition order.
+const lockKeysFrom = (rawCalls) => rawCalls
+  .filter(([sql]) => /pg_advisory_xact_lock/.test(sql))
+  .map(([, bindings]) => bindings[1]);
 
 describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert race)', () => {
   test('takes the per-customer/family advisory lock, then re-runs the guard under it', async () => {
@@ -237,11 +270,53 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect(rawCalls).toHaveLength(1);
     expect(rawCalls[0][0]).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
     // Key = customerId + the NORMALIZED family key, so differently-labeled
-    // creators of the same program contend on the same lock.
+    // creators of the same program contend on the same lock. No serviceId was
+    // supplied, so the svc dimension contributes no key.
     expect(rawCalls[0][1]).toEqual([
       'recurring-series-create',
-      `5:${serviceKeyFor({ service_type: 'Quarterly Pest Control' })}`,
+      `5:family:${serviceKeyFor({ service_type: 'Quarterly Pest Control' })}`,
     ]);
+  });
+
+  test('locks BOTH matcher dimensions when the caller carries service_id AND a label', async () => {
+    const { db, rawCalls } = makeLockEnv({ parents: [] });
+    await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceId: 'cat-7', serviceType: 'Quarterly Pest Control',
+    }));
+    // The guard matches on service_id equality OR family equality, so a
+    // single key can never cover every path that matches — one lock per
+    // dimension does.
+    expect(lockKeysFrom(rawCalls)).toEqual([
+      `5:family:${serviceKeyFor({ service_type: 'Quarterly Pest Control' })}`,
+      '5:svc:cat-7',
+    ].sort());
+  });
+
+  test('lock keys are acquired in sorted order regardless of the caller (no swap deadlock)', async () => {
+    // Two creators sharing both dimensions must request them in IDENTICAL
+    // order — otherwise each could hold one and wait on the other's forever.
+    const keysFor = async (opts) => {
+      const { db, rawCalls } = makeLockEnv({ parents: [] });
+      await db.transaction((trx) => checkActiveSeriesLocked(trx, opts));
+      return lockKeysFrom(rawCalls);
+    };
+    // Same two dimensions reached from different labels/ids: every caller
+    // emits the same sorted sequence, so acquisition order is a property of
+    // the key set, never of the call site.
+    const a = await keysFor({ customerId: 5, serviceId: 'cat-7', serviceType: 'Quarterly Pest Control' });
+    const b = await keysFor({ customerId: 5, serviceId: 'aaa-1', serviceType: 'General Pest Control Service' });
+    expect(a).toEqual([...a].sort());
+    expect(b).toEqual([...b].sort());
+    // 'Quarterly Pest Control' and 'General Pest Control Service' normalize to
+    // one family, so both callers put the SAME family key first.
+    expect(a[0]).toBe(b[0]);
+  });
+
+  test('scopes the lock to the customer — a different customer never contends', async () => {
+    const { db, rawCalls } = makeLockEnv({ parents: [] });
+    await db.transaction((trx) => checkActiveSeriesLocked(trx, { customerId: 5, serviceId: 'cat-7' }));
+    await db.transaction((trx) => checkActiveSeriesLocked(trx, { customerId: 6, serviceId: 'cat-7' }));
+    expect(lockKeysFrom(rawCalls)).toEqual(['5:svc:cat-7', '6:svc:cat-7']);
   });
 
   test('fail-open: a lock/query failure returns guardError and NEVER throws', async () => {
@@ -279,6 +354,65 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect([a.seeded, b.seeded].filter(Boolean)).toHaveLength(1);
     expect([a.kept, b.kept].filter(Boolean)).toHaveLength(1);
     expect(rawCalls).toHaveLength(2);
+  });
+
+  // Runs two creators concurrently against the keyed-lock env and reports how
+  // many series ended up seeded. Each mirrors production: locked re-check in
+  // the same transaction as the insert, seed only when the guard is empty.
+  async function raceTwoCreators(optsA, optsB) {
+    const { db, state, rawCalls } = makeLockEnv({ parents: [] });
+    const createSeries = (opts) => db.transaction(async (trx) => {
+      const { matches, guardError } = await checkActiveSeriesLocked(trx, opts);
+      expect(guardError).toBeNull();
+      if (matches.length > 0) return { kept: matches[0] };
+      await trx('scheduled_services').insert({
+        customer_id: opts.customerId, service_type: opts.serviceType,
+        service_id: opts.serviceId ?? null,
+        is_recurring: true, recurring_ongoing: true,
+        scheduled_date: FUTURE, status: 'pending',
+      });
+      return { seeded: true };
+    });
+    const [a, b] = await Promise.all([createSeries(optsA), createSeries(optsB)]);
+    return { seeded: [a.seeded, b.seeded].filter(Boolean).length, state, rawCalls };
+  }
+
+  test('P0: SAME service_id but differently-normalized labels still mint exactly ONE series', async () => {
+    // The bug: keyed only on the family, these two took DIFFERENT locks, so
+    // neither blocked, both re-checks came back empty, and the customer got
+    // two billable series for one catalog service. The svc-dimension lock is
+    // the only thing they share.
+    expect(serviceKeyFor({ service_type: 'Quarterly Pest Control' }))
+      .not.toBe(serviceKeyFor({ service_type: 'Mosquito Control' }));
+    const { seeded, state, rawCalls } = await raceTwoCreators(
+      { customerId: 5, serviceId: 'cat-7', serviceType: 'Quarterly Pest Control' },
+      { customerId: 5, serviceId: 'cat-7', serviceType: 'Mosquito Control' },
+    );
+    expect(seeded).toBe(1);
+    expect(state.parents).toHaveLength(1);
+    // Both creators requested the shared svc key — that is what serialized
+    // them despite the family keys diverging.
+    expect(lockKeysFrom(rawCalls).filter((k) => k === '5:svc:cat-7')).toHaveLength(2);
+  });
+
+  test('different service_ids in ONE family still mint exactly one series (family dimension holds)', async () => {
+    const { seeded, state } = await raceTwoCreators(
+      { customerId: 5, serviceId: 'cat-1', serviceType: 'Quarterly Pest Control' },
+      { customerId: 5, serviceId: 'cat-2', serviceType: 'General Pest Control Service' },
+    );
+    expect(seeded).toBe(1);
+    expect(state.parents).toHaveLength(1);
+  });
+
+  test('genuinely unrelated programs share no lock and both seed', async () => {
+    // The locks must not over-serialize: nothing about mosquito and pest
+    // control should make one creator wait on — or be skipped by — the other.
+    const { seeded, state } = await raceTwoCreators(
+      { customerId: 5, serviceId: 'cat-1', serviceType: 'Quarterly Pest Control' },
+      { customerId: 5, serviceId: 'cat-9', serviceType: 'Mosquito Control' },
+    );
+    expect(seeded).toBe(2);
+    expect(state.parents).toHaveLength(2);
   });
 });
 
