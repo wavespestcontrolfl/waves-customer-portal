@@ -69,8 +69,13 @@ function scheduledDateKey(value) {
 // tracker. Gated: with GATE_CUSTOMER_RAIN_CHIP off the field is never
 // included and the payload is byte-identical to today's. Coordinate
 // precedence: the canonical scheduled_services row's own lat/lng → the
-// customer's geocode → the office point. Fail-soft everywhere — a null or
-// failed outlook simply omits the field, never breaks the tracker read.
+// customer's geocode (ONLY when the visit's stamped address does not
+// diverge from the primary — a stamped rental must not show the primary
+// home's rain; same divergence rule the coordinate/pin fallbacks use) →
+// the office point. Bounded lookup with a short deadline + failure
+// cooldown so the 15-second tracker poll never waits on live NWS fetches
+// (Codex 2026-07-20 ×2). Fail-soft everywhere — a null/deadlined outlook
+// simply omits the field, never breaks the tracker read.
 async function attachRainChance(tracker, service, customer) {
   if (!tracker) return tracker;
   const featureGates = require('../config/feature-gates');
@@ -82,15 +87,26 @@ async function attachRainChance(tracker, service, customer) {
     let lat = finiteNumber(service?.lat);
     let lng = finiteNumber(service?.lng);
     if (lat == null || lng == null) {
-      lat = finiteNumber(customer?.latitude);
-      lng = finiteNumber(customer?.longitude);
+      const { stampedAddressDiverges } = require('../services/stamped-address');
+      const diverges = stampedAddressDiverges({
+        service_address_line1: service?.service_address_line1,
+        service_address_zip: service?.service_address_zip,
+        service_address_city: service?.service_address_city,
+        customer_address_line1: customer?.address_line1,
+        customer_zip: customer?.zip,
+        customer_city: customer?.city,
+      });
+      if (!diverges) {
+        lat = finiteNumber(customer?.latitude);
+        lng = finiteNumber(customer?.longitude);
+      }
     }
     if (lat == null || lng == null) {
       lat = RAIN_OFFICE_LAT;
       lng = RAIN_OFFICE_LNG;
     }
-    const { getDailyRainOutlook } = require('../services/weather-forecast');
-    const outlook = await getDailyRainOutlook(lat, lng);
+    const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+    const outlook = await getDailyRainOutlookBounded(lat, lng, { deadlineMs: 800 });
     const chance = outlook?.[dateKey]?.rainChance;
     if (Number.isFinite(chance)) tracker.rainChance = chance;
   } catch {

@@ -411,7 +411,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -461,6 +461,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
         <DaySegment
           dateStr={date}
           services={services || []}
+          rainChance={rainChance}
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}

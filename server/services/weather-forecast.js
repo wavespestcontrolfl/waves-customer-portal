@@ -102,6 +102,41 @@ async function getDailyRainOutlook(lat, lng) {
   return byDate;
 }
 
+// Bounded daily lookup for decorative consumers (rain chips): the raw
+// lookup can spend up to two live NWS fetches (2.5s timeout each) on a
+// cold cache, and a payload that only DECORATES with weather must never
+// wait that long. Races the lookup against a short deadline — on deadline
+// the caller gets null NOW while the in-flight fetch keeps running and
+// warms the shared cache for the next request. Failures (null result)
+// additionally enter a short per-coordinate cooldown so a polling caller
+// (the 15s tracker poll) doesn't re-fire live NWS fetches every tick
+// through an outage; a deadline is NOT a failure and never enters the
+// cooldown.
+const _dailyFailCooldown = new Map();
+const DAILY_FAIL_COOLDOWN_MS = 60 * 1000;
+const DEADLINE = Symbol('deadline');
+
+async function getDailyRainOutlookBounded(lat, lng, { deadlineMs = 1200 } = {}) {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  const key = cacheKey(latNum, lngNum);
+  const failedAt = _dailyFailCooldown.get(key);
+  if (failedAt && Date.now() - failedAt < DAILY_FAIL_COOLDOWN_MS) return null;
+
+  let timer;
+  const result = await Promise.race([
+    getDailyRainOutlook(latNum, lngNum).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(resolve, deadlineMs, DEADLINE); }),
+  ]).finally(() => clearTimeout(timer));
+
+  if (result === DEADLINE) return null;
+  if (result === null) _dailyFailCooldown.set(key, Date.now());
+  else _dailyFailCooldown.delete(key);
+  return result;
+}
+
 // Hourly cache — shorter TTL than the daily one because storm-watch
 // polls on a 15-minute cadence and hourly precip values move faster.
 const _hourlyCache = new Map();
@@ -159,7 +194,8 @@ function forecastLinkForZip(zip) {
 
 module.exports = {
   getDailyRainOutlook,
+  getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { cacheKey, _cache, _hourlyCache },
+  _test: { cacheKey, _cache, _hourlyCache, _dailyFailCooldown },
 };

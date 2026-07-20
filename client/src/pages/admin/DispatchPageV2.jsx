@@ -2444,6 +2444,7 @@ export default function DispatchPageV2({
               mode="day"
               date={date}
               services={services}
+              rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
               onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {

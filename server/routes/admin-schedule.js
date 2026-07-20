@@ -51,7 +51,7 @@ const {
 const {
   syncCustomerWaveGuardPlanFromScheduledServices,
 } = require('../services/self-booking-plan-sync');
-const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
 // Office coordinates for office-level rain outlooks (matches the NWS point
 // used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
@@ -1481,10 +1481,11 @@ router.get('/', async (req, res, next) => {
     const date = req.query.date || etDateString();
 
     // NWS daily rain outlook (office point) — kicked off here so it runs in
-    // parallel with the DB work below. Fail-soft: the helper is fail-open
-    // (null on any timeout/error) and the .catch belts it — weather must
-    // never break or delay the schedule payload.
-    const rainOutlookPromise = getDailyRainOutlook(OFFICE_LAT, OFFICE_LNG).catch(() => null);
+    // parallel with the DB work below. Bounded (Codex 2026-07-20): the
+    // decorative rain chip must never hold the schedule response — on a
+    // cold cache the bounded helper deadlines to null while the in-flight
+    // fetch warms the shared cache for the next request.
+    const rainOutlookPromise = getDailyRainOutlookBounded(OFFICE_LAT, OFFICE_LNG).catch(() => null);
 
     // Server-resolved Bill-To for the completion banner: per-job payer, else
     // the customer default (unless the visit is pinned to self-pay), and only
@@ -1831,23 +1832,26 @@ router.get('/', async (req, res, next) => {
     } catch { /* weather is optional */ }
 
     // Requested-date rain chance (office point) + per-zone chances for the
-    // zones actually on this day's board. Fail-soft: any NWS failure leaves
-    // rainChance null / zoneRain values null — never blocks the payload.
+    // zones actually on this day's board. Office and every zone resolve in
+    // ONE parallel bounded wave — total added wait is capped by the bounded
+    // helper's deadline regardless of zone count, and any NWS failure or
+    // deadline leaves rainChance null / zoneRain values null (Codex
+    // 2026-07-20: decorative weather must never hold the payload).
     let rainChance = null;
     let zoneRain;
     try {
-      const outlook = await rainOutlookPromise;
-      const officeChance = outlook?.[date]?.rainChance;
-      rainChance = Number.isFinite(officeChance) ? officeChance : null;
       const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
-      if (zonesPresent.length > 0) {
-        const perZone = await Promise.all(zonesPresent.map(async (z) => {
-          const zoneOutlook = await getDailyRainOutlook(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
+      const [outlook, ...perZone] = await Promise.all([
+        rainOutlookPromise,
+        ...zonesPresent.map(async (z) => {
+          const zoneOutlook = await getDailyRainOutlookBounded(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
           const chance = zoneOutlook?.[date]?.rainChance;
           return [z, Number.isFinite(chance) ? chance : null];
-        }));
-        zoneRain = Object.fromEntries(perZone);
-      }
+        }),
+      ]);
+      const officeChance = outlook?.[date]?.rainChance;
+      rainChance = Number.isFinite(officeChance) ? officeChance : null;
+      if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
     } catch { /* rain outlook is optional */ }
 
     res.json({
@@ -1870,8 +1874,10 @@ router.get('/week', async (req, res, next) => {
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
     // ONE office-point NWS outlook for the whole week, started before the
-    // per-day DB loop so it resolves in parallel. Fail-soft (see day view).
-    const rainOutlookPromise = getDailyRainOutlook(OFFICE_LAT, OFFICE_LNG).catch(() => null);
+    // per-day DB loop so it resolves in parallel. Bounded + fail-soft (see
+    // day view) — a cold NWS cache deadlines to null instead of holding
+    // the week payload.
+    const rainOutlookPromise = getDailyRainOutlookBounded(OFFICE_LAT, OFFICE_LNG).catch(() => null);
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
