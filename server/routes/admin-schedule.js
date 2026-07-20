@@ -4643,6 +4643,37 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
             throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
           }
+          // Race-safe duplicate-series backstop (P0), mirroring the POST
+          // creator's in-trx guard: the child-date preload above only dedupes
+          // rows already attached to THIS parent — it never sees a DIFFERENT
+          // active same-family series for the customer, nor does it serialize
+          // against concurrent POST/booking/converter creators. Run the shared
+          // per-customer/family advisory-locked guard HERE, inside the spawn
+          // trx that inserts the children, so the loser waits on the winner's
+          // commit and sees its series. excludeParentId: parent.id keeps the
+          // row being made recurring from matching itself. The explicit
+          // allowDuplicateSeries escape hatch bypasses it (logged), exactly as
+          // it does on the POST create path; guard ERRORS stay fail-open
+          // (checkActiveSeriesLocked never throws — its savepoint isolates a
+          // failed query from this trx). A hit throws the same tagged error the
+          // route catch maps to the same 409 the POST creator returns.
+          if (req.body.allowDuplicateSeries === true) {
+            logger.warn(`[schedule/update-details] allowDuplicateSeries override: making a second active "${parent.service_type}" series recurring for customer ${parent.customer_id} from row ${parent.id}`);
+          } else {
+            const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+            const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+              customerId: parent.customer_id,
+              serviceId: parent.service_id || null,
+              serviceType: parent.service_type,
+              excludeParentId: parent.id,
+            });
+            if (guardError) logger.warn(`[schedule/update-details] locked duplicate-series guard failed (spawn proceeds): ${guardError.message}`);
+            if (matches.length > 0) {
+              const dupErr = new Error('duplicate_recurring_series');
+              dupErr.duplicateRecurringSeries = matches;
+              throw dupErr;
+            }
+          }
           // Member-covered series (mirrors POST's createInvoiceStamp
           // stripping): a monthly-membership customer's recurring children
           // are covered by dues — per-visit price stamps + the create-invoice
@@ -4876,6 +4907,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
     });
   } catch (err) {
+    // The in-transaction duplicate-series backstop rolled the spawn back —
+    // present the SAME 409 the POST creator returns.
+    if (Array.isArray(err.duplicateRecurringSeries)) {
+      return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
+    }
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }

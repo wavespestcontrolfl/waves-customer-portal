@@ -471,7 +471,36 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(parentInsert).toBeGreaterThan(backstop);
     expect(scheduleSrc).toContain('req.body.allowDuplicateSeries !== true');
     expect(scheduleSrc).toContain('dupErr.duplicateRecurringSeries = matches;');
-    // Both rejection paths present the SAME 409 payload.
-    expect((scheduleSrc.match(/res\.status\(409\)\.json\(duplicateSeriesConflictBody\(/g) || []).length).toBe(2);
+    // The POST preflight, the POST backstop, AND the update-details spawn
+    // backstop each present the SAME 409 payload.
+    expect((scheduleSrc.match(/res\.status\(409\)\.json\(duplicateSeriesConflictBody\(/g) || []).length).toBe(3);
+  });
+
+  test('admin PUT /:id/update-details spawn: locked backstop inside the spawn trx, before the child insert, with the same escape hatch + 409', () => {
+    // The fourth series creator. The spawn branch preloads existing CHILDREN
+    // of THIS parent for date-dedup, but that only dedupes rows already
+    // attached to this parent — it never checks for a DIFFERENT active
+    // same-family series, nor serializes against concurrent creators. The
+    // shared locked guard closes that gap.
+    const spawnGuard = scheduleSrc.indexOf('[schedule/update-details] locked duplicate-series guard failed');
+    expect(spawnGuard).toBeGreaterThan(-1);
+    // The guard runs on `trx` — the SAME transaction that spawns the children,
+    // so the advisory lock covers the child inserts to commit.
+    const spawnGuardCall = scheduleSrc.lastIndexOf('checkActiveSeriesLocked(trx, {', spawnGuard);
+    expect(spawnGuardCall).toBeGreaterThan(-1);
+    // Keys off the SAME service_type/service_id the matcher (and the spawned
+    // children) use, and excludes the row being made recurring from matching
+    // itself.
+    const spawnGuardBlock = scheduleSrc.slice(spawnGuardCall, spawnGuard);
+    expect(spawnGuardBlock).toContain('serviceType: parent.service_type');
+    expect(spawnGuardBlock).toContain('serviceId: parent.service_id || null');
+    expect(spawnGuardBlock).toContain('excludeParentId: parent.id');
+    // Guard runs BEFORE the first child insert of the spawn branch.
+    const firstChildInsert = scheduleSrc.indexOf("trx('scheduled_services').insert(childData)", spawnGuard);
+    expect(firstChildInsert).toBeGreaterThan(spawnGuard);
+    // Escape hatch bypasses it exactly as on the POST path (logged override).
+    expect(scheduleSrc).toContain('[schedule/update-details] allowDuplicateSeries override');
+    // A hit throws the same tagged error the update-details catch maps to 409.
+    expect(scheduleSrc).toContain("if (Array.isArray(err.duplicateRecurringSeries)) {");
   });
 });
