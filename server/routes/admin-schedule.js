@@ -17,6 +17,7 @@ const {
 const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
+  windowDurationMinutes, deriveWindowEnd,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -3456,13 +3457,40 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 if (!we) throw Object.assign(new Error('windowEnd must be HH:MM'), { isValidation: true });
                 updates.window_end = we;
               }
+              // A start-only move must not validate or persist against the
+              // STALE stored end: moving an 08:00–09:00 visit to 16:00 today
+              // was rejected after 09:00 (the old end read as elapsed), and
+              // the UPDATE would have persisted the 16:00 start beside the
+              // stale 09:00 end — an inverted window. Derive the complete
+              // window up front — new start + the visit's original duration
+              // (stored span, else the flat-60 convention), the same
+              // derivation the IB reschedule tool uses — so BOTH the elapsed
+              // guard below and the UPDATE see the derived end. deriveWindowEnd
+              // returns null when that end would cross midnight (a modulo
+              // wrap would slip an inverted block past every overlap check) —
+              // per-row throw, like every other validation here.
+              if (updates.window_start && !updates.window_end) {
+                const derivedEnd = deriveWindowEnd(
+                  updates.window_start,
+                  windowDurationMinutes(svc.window_start, svc.window_end),
+                );
+                if (!derivedEnd) {
+                  throw Object.assign(
+                    new Error('that window would cross midnight (pick an earlier start)'),
+                    { isValidation: true },
+                  );
+                }
+                updates.window_end = derivedEnd;
+              }
               // validScheduleDate accepts TODAY, but a move to today whose
               // effective window already elapsed in ET lands the visit in a
               // past window no route can serve — unreachable, just like a past
               // date. Same cutoff logic the rebooker uses (window_end preferred,
-              // else window_start; new value over the stored one). Per-row throw
-              // so the batch result carries the reason instead of failing
-              // wholesale; a today move with a still-future window still passes.
+              // else window_start; new value over the stored one — a start-only
+              // move consults the DERIVED end set above, never the stale stored
+              // one). Per-row throw so the batch result carries the reason
+              // instead of failing wholesale; a today move with a still-future
+              // window still passes.
               if (sameDayWindowElapsed(
                 bulkTargetDate,
                 updates.window_end || svc.window_end || updates.window_start || svc.window_start,

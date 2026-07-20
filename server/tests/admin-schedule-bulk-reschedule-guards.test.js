@@ -436,3 +436,111 @@ test('a malformed window time is rejected rather than persisted raw', async () =
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([{ id: 'svc-1', reason: 'windowStart must be HH:MM' }]);
 });
+
+// --- Start-only moves: derived complete windows, never the stale stored end ---
+
+test('a start-only move to today validates against the DERIVED end and persists the complete window', async () => {
+  // Moving an 08:00–09:00 visit to a 16:00 start today: the old guard
+  // preferred the STALE stored 09:00 end, so the move was rejected all
+  // afternoon — and had it passed, the UPDATE would have persisted the 16:00
+  // start beside the stale 09:00 end (an inverted window). The derived end is
+  // 16:00 + the original 60-min duration = 17:00.
+  datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '08:00:00', window_end: '09:00:00' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: TODAY_ET, windowStart: '16:00' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual(['svc-1']);
+  // The elapsed guard consulted the DERIVED 17:00 end — not the stale 09:00.
+  expect(datetimeEt.sameDayWindowElapsed).toHaveBeenCalledWith(TODAY_ET, '17:00');
+  // BOTH derived fields persisted — never a 16:00 start beside a 09:00 end.
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+    scheduled_date: TODAY_ET,
+    window_start: '16:00',
+    window_end: '17:00',
+  });
+});
+
+test('a start-only move preserves a longer stored duration in the derived end', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      // 90-minute stored window — the derived end must carry the same span.
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '08:00:00', window_end: '09:30:00' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '16:00' },
+  });
+
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+    window_start: '16:00',
+    window_end: '17:30',
+  });
+});
+
+test('an explicit windowStart+windowEnd pair is persisted as given (no derivation)', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '16:00', windowEnd: '18:30' },
+  });
+
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+    window_start: '16:00',
+    window_end: '18:30',
+  });
+});
+
+test('a start-only move whose derived end would cross midnight lands in failed[] — never persisted', async () => {
+  // 23:30 + the original 60-min duration wraps past midnight. The old
+  // modulo-24h derivation would have persisted a 23:30–00:30 same-day block —
+  // a non-positive span invisible to every overlap predicate. No UPDATE chain
+  // is queued: an attempted write would throw Unexpected trx().
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+    ],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '23:30' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'that window would cross midnight (pick an earlier start)',
+  }]);
+});

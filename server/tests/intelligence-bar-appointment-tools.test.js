@@ -252,6 +252,38 @@ describe('create_appointment', () => {
     expect(result.success).toBe(true);
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ scheduled_date: TODAY_ET, window_start: '09:00' });
   });
+
+  test('a 23:30 start is rejected before any DB call — the flat-60 end would cross midnight', async () => {
+    // The old modulo-24h derivation accepted 23:30 and inserted a wrapped
+    // 23:30–00:30 same-day block: a non-positive span invisible to every
+    // overlap predicate and nonsense to the elapsed guard.
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+      time_window: '11:30 PM',
+    });
+
+    expect(result.error).toMatch(/cross midnight/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a 4:00 PM start still derives the flat-60 17:00 end (no midnight rejection)', async () => {
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
+      scheduled_services: [insertChain],
+    });
+
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+      time_window: '4:00 PM',
+    });
+
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
+      window_start: '16:00',
+      window_end: '17:00',
+    });
+  });
 });
 
 describe('reschedule_appointment', () => {
@@ -473,6 +505,49 @@ describe('reschedule_appointment', () => {
     expect(payload).toMatchObject({ window_start: '09:00:00', window_end: '10:00:00' });
     expect(payload.track_token_expires_at).toMatchObject({ bindings: ['2099-01-15', '10:00:00'] });
     expect(logChain.insert.mock.calls[0][0]).toMatchObject({ new_window: '09:00:00-10:00:00' });
+  });
+
+  test('a 23:30 start is rejected — the preserved 60-min duration would cross midnight; nothing moves', async () => {
+    // baseAppt spans 09:00–10:00 (60 min): 23:30 + 60 wraps past midnight.
+    // The old modulo-24h derivation would have persisted a 23:30–00:30
+    // inverted block. The update chain is queued to prove it is never used.
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '11:30 PM',
+    });
+
+    expect(result.error).toMatch(/cross midnight/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a 4:00 PM start on a 60-min visit still derives the 17:00 end and moves normally', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '4:00 PM',
+    });
+
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+      window_start: '16:00',
+      window_end: '17:00',
+    });
   });
 
   test('rejects an impossible calendar date (2099-02-31) with a clear error and never moves the row', async () => {

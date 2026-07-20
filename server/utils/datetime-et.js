@@ -193,9 +193,41 @@ function sameDayWindowElapsed(dateStr, cutoff) {
   return ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute;
 }
 
+// Window-derivation helpers shared by every mover that builds a complete
+// window from a new start (bulk admin reschedule, IB create/reschedule) —
+// extracted here alongside sameDayWindowElapsed so the movers stay in
+// lockstep on how ends are derived, not just on how elapsed-ness is judged.
+
+// Minutes spanned by an HH:MM[:SS] window, defaulting to the flat-60
+// admin-schedule convention when either bound is missing or the stored span
+// is non-positive — so preserving a window's length across a move never
+// collapses it to zero.
+function windowDurationMinutes(start, end) {
+  if (!start || !end) return 60;
+  const [sh, sm] = String(start).split(':').map(Number);
+  const [eh, em] = String(end).split(':').map(Number);
+  const diff = (eh * 60 + em) - (sh * 60 + sm);
+  return diff > 0 ? diff : 60;
+}
+
+// 'HH:MM' end for a window starting at `start` (HH:MM[:SS]) and lasting
+// `durationMin` minutes — or null when the end would land at or past
+// midnight. A modulo-24h wrap (23:30 + 60 → 00:30) yields a same-day block
+// that sorts at or before its own start: a non-positive span the overlap
+// predicates can't see and the elapsed guard misreads. Callers must treat
+// null as a validation failure ("pick an earlier start"), never as a
+// windowless visit.
+function deriveWindowEnd(start, durationMin) {
+  const [h, m] = String(start == null ? '' : start).split(':').map(Number);
+  if (!Number.isFinite(h)) return null;
+  const total = h * 60 + (m || 0) + durationMin;
+  if (!Number.isFinite(total) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
-  sameDayWindowElapsed,
+  sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

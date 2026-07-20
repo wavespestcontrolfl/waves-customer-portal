@@ -9,7 +9,10 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
+const {
+  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
+  windowDurationMinutes, deriveWindowEnd,
+} = require('../../utils/datetime-et');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1287,23 +1290,12 @@ function parseTimeWindowStart(timeWindow) {
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
-function addMinutesToHHMM(hhmm, minutes) {
-  const [h, m] = String(hhmm).split(':').map(Number);
-  const total = (h * 60 + m + minutes) % (24 * 60);
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-}
-
-// Minutes spanned by an HH:MM[:SS] window, defaulting to the flat-60
-// admin-schedule convention when either bound is missing or the stored span
-// is non-positive — so preserving a window's length across a move never
-// collapses it to zero.
-function windowDurationMinutes(start, end) {
-  if (!start || !end) return 60;
-  const [sh, sm] = String(start).split(':').map(Number);
-  const [eh, em] = String(end).split(':').map(Number);
-  const diff = (eh * 60 + em) - (sh * 60 + sm);
-  return diff > 0 ? diff : 60;
-}
+// Window length + end derivation are the shared datetime-et helpers
+// (windowDurationMinutes / deriveWindowEnd). deriveWindowEnd returns null on
+// a midnight-crossing end instead of the old local modulo-24h wrap, which
+// turned an accepted 23:30 start into a 23:30–00:30 same-day block — a
+// non-positive span invisible to the overlap predicates and nonsense to the
+// elapsed guard.
 
 async function createAppointment(input) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
@@ -1315,6 +1307,16 @@ async function createAppointment(input) {
   const win = parseTimeWindowStart(time_window);
   if (win.error) return { error: win.error };
 
+  // Flat-60 convention (admin-schedule: every service call defaults to 60
+  // minutes) so overlap checks see a real block, not an open-ended start.
+  // deriveWindowEnd returns null when start+60 would cross midnight — the
+  // old modulo wrap turned a 23:30 start into a 23:30–00:30 same-day block
+  // no overlap predicate could see. Reject up front, before any DB read.
+  const windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
+  if (win.start && !windowEnd) {
+    return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
+
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
 
@@ -1324,10 +1326,6 @@ async function createAppointment(input) {
     const tech = await db('technicians').whereILike('name', `%${technician_name}%`).first();
     if (tech) technician_id = tech.id;
   }
-
-  // Flat-60 convention (admin-schedule: every service call defaults to 60
-  // minutes) so overlap checks see a real block, not an open-ended start.
-  const windowEnd = win.start ? addMinutesToHHMM(win.start, 60) : null;
 
   // A today target whose window already elapsed in ET is unreachable — the
   // visit lands in a past window no route can serve. Same cutoff logic the
@@ -1413,11 +1411,16 @@ async function rescheduleAppointment(input) {
   // Preserve the original visit's window length when a new start is given.
   // Persisting only window_start against a stale window_end collapses the
   // window to zero (09:00→10:00 against a stored 10:00 end) — token expiry
-  // and the audit log both read window_end, so both would break.
+  // and the audit log both read window_end, so both would break. The shared
+  // deriveWindowEnd returns null when the preserved duration would carry the
+  // end past midnight — reject rather than persist a wrapped, inverted block.
   const newStart = win.start || appt.window_start;
   const newWindowEnd = win.start
-    ? addMinutesToHHMM(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
+    ? deriveWindowEnd(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
     : appt.window_end;
+  if (win.start && !newWindowEnd) {
+    return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
 
   // A today target whose effective window already elapsed in ET is unreachable
   // — moving into a past window strands the visit. Same cutoff logic as the
