@@ -18,6 +18,7 @@ const path = require('path');
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const { applyStoredVisitFinancials } = adminScheduleRouter._test;
+const { buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
@@ -62,6 +63,48 @@ describe('update-details spawn branch guards (source)', () => {
     expect(spawnBlock).toContain('else delete childData.estimated_price;');
     // Prepay-annual + payer-billed rows keep their stamps.
     expect(spawnBlock).toContain('!parent.payer_id && !parent.annual_prepay_term_id');
+  });
+
+  test('spawned children inherit the stamped service address (secondary/rental-property series)', () => {
+    // Bill-To already rides the spawn (guard above); the visit-level
+    // property stamp must too, or children fall back to the customer's
+    // primary address at dispatch time.
+    expect(spawnBlock).toContain('copyStampedServiceAddressFields(childData, parent, cols);');
+  });
+});
+
+describe('seeded follow-up rows — stamped service address propagation', () => {
+  test('follow-ups inherit property_id + service_address_* + coords from the parent', () => {
+    const stamp = {
+      property_id: 'prop-9',
+      service_address_line1: '77 Dock St',
+      service_address_line2: 'Unit B',
+      service_address_city: 'Venice',
+      service_address_state: 'FL',
+      service_address_zip: '34285',
+      lat: 27.0998,
+      lng: -82.4543,
+    };
+    const rows = buildRecurringFollowUpRows({
+      id: 'parent-1',
+      customer_id: 'customer-1',
+      technician_id: 'tech-1',
+      scheduled_date: '2026-06-05',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      service_type: 'Quarterly Pest Control',
+      status: 'confirmed',
+      ...stamp,
+    }, {
+      pattern: 'quarterly',
+      plannedCount: 4,
+      skipWeekends: true,
+      weekendShift: 'forward',
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row).toMatchObject(stamp);
+    }
   });
 });
 

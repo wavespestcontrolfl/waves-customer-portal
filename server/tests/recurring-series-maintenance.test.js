@@ -271,6 +271,15 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     ]));
   });
 
+  test('alert-route extension registrations run the same terminal re-check (source guard)', () => {
+    // The recurring-alert action route holds no series lock, so its two
+    // spawn loops have the same registration/cancellation window as the
+    // auto-extend wrapper (behavior pinned above via the shared helper).
+    const alertRechecks = src.match(/cancelSpawnedReminderIfVisitTerminal\(db, row\?\.id, 'recurring-alerts'\);/g) || [];
+    expect(alertRechecks.length).toBe(2);
+    expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');");
+  });
+
   test('falls back to the parent template when no sibling carries the flag', async () => {
     const { conn, inserted } = ongoingScenario({
       upcomingCount: 0,

@@ -318,6 +318,25 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'service_id',
       'lat',
       'lng',
+      // Stamped service address (property linkage): a series booked for a
+      // secondary/rental property carries a visit-level stamp; follow-ups
+      // must inherit it or every reader's COALESCE(service_address_*,
+      // customers.address_*) falls back to the customer's PRIMARY address
+      // and the visit dispatches to the wrong property. Cols-guarded like
+      // the rest of the row — the insert path maps through filterByColumns.
+      'property_id',
+      'service_address_line1',
+      'service_address_line2',
+      'service_address_city',
+      'service_address_state',
+      'service_address_zip',
+      // Inert legacy names: scheduled_services has no plain
+      // address/city/state/zip columns, so a real parent row never carries
+      // these keys (copyIfPresent skips) and filterByColumns would strip
+      // them from the insert anyway. Left in place rather than removed —
+      // this exported builder is driven directly by other suites and the
+      // cleanup belongs to its own change; the service_address_* columns
+      // above are the live stamp.
       'address',
       'city',
       'state',

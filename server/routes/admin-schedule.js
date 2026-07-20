@@ -600,6 +600,44 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   }
 }
 
+// Post-registration cancellation re-check for spawned/extension visits —
+// the reminder leg of the cancellation race. registerSpawnedVisitReminder
+// runs AFTER the visit's insert committed (deliberately: the reminder
+// writer works on its own connection, and the label must include the
+// mirrored add-ons), so a series cancel can land BETWEEN that commit and
+// the registration finishing. Nothing else covers that window:
+// handleSeriesCancellation marks only reminder rows that exist when it
+// runs, and the scheduled_services sync trigger cancels reminders on the
+// visit's status UPDATE — an update that fired BEFORE the registration
+// inserted the row, so it matched nothing and never re-fires. In-trx
+// registration (registerVisitReminderInTx) would close the window
+// structurally but records the reminder label before the add-on mirror
+// exists, permanently degrading multi-service labels — so instead: re-read
+// the visit once registration is done. Losing the race has exactly one
+// signature — the cancel's status flip commits before its reminder sweep
+// runs, so a terminal status here means the fresh reminder escaped that
+// sweep; cancel it. Every interleaving is covered: reminder inserted
+// before the sweep → the sweep marks it; inserted after → the terminal
+// status is already committed and visible here. Terminal set mirrors the
+// reminder cron's SELF_HEAL_TERMINAL_STATUSES (keep in sync);
+// 'rescheduled' stays armed for the rebook, same as the cron's live-status
+// guard. Best-effort: never fails the caller.
+async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, logContext) {
+  if (!scheduledServiceId) return;
+  try {
+    const visitNow = await conn('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('status');
+    const statusNow = String(visitNow?.status || '').toLowerCase();
+    if (!visitNow || ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'].includes(statusNow)) {
+      await conn('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+        .update({ cancelled: true, updated_at: new Date() });
+      logger.info(`[${logContext}] Spawned-visit reminder cancelled — visit ${scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
+    }
+  } catch (e) { logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`); }
+}
+
 // Void any still-open invoices minted for a now-cancelled scheduled service
 // so dunning doesn't chase a cancelled job. The money-state rules (skip
 // applied payments / live PaymentIntents, atomic row-locked void) live in
@@ -4844,6 +4882,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
               if (cols.po_number) childData.po_number = parent.po_number ?? null;
               if (cols.self_pay_override) childData.self_pay_override = parent.self_pay_override === true;
+              // Stamped service address rides the spawn too — a series
+              // anchored on a secondary/rental-property visit must not spawn
+              // children that fall back to the customer's primary address.
+              copyStampedServiceAddressFields(childData, parent, cols);
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
@@ -5953,40 +5995,12 @@ async function runRecurringSeriesMaintenance(conn, svc) {
       serviceType: spawnedVisit.serviceType,
       source: 'recurring_auto_extend',
     });
-    // Post-registration cancellation re-check — the reminder leg of the
-    // cancellation race. Registration runs POST-COMMIT (above, deliberately:
-    // the reminder writer works on its own connection and the label must
-    // include the add-on mirror), so a series cancel can take the per-parent
-    // advisory lock right after our commit and land BETWEEN it and the
-    // registration that just finished. Nothing else covers that window:
-    // handleSeriesCancellation marks only reminder rows that exist when it
-    // runs, and the scheduled_services sync trigger cancels reminders on the
-    // visit's status UPDATE — an update that fired BEFORE this registration
-    // inserted the row, so it matched nothing and never re-fires. In-trx
-    // registration (registerVisitReminderInTx) would close the window
-    // structurally but records the reminder label before the post-commit
-    // add-on mirror exists, permanently degrading multi-service labels — so:
-    // re-read the visit now that registration is done. Losing the race has
-    // exactly one signature — the cancel's status flip commits before its
-    // reminder sweep runs, so a terminal status here means our fresh
-    // reminder escaped that sweep; cancel it. Every interleaving is covered:
-    // reminder inserted before the sweep → the sweep marks it; inserted
-    // after → the terminal status is already committed and visible here.
-    // Terminal set mirrors the reminder cron's SELF_HEAL_TERMINAL_STATUSES
-    // (keep in sync); 'rescheduled' stays armed for the rebook, same as the
-    // cron's live-status guard.
-    try {
-      const visitNow = await conn('scheduled_services')
-        .where({ id: spawnedVisit.scheduledServiceId })
-        .first('status');
-      const statusNow = String(visitNow?.status || '').toLowerCase();
-      if (!visitNow || ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'].includes(statusNow)) {
-        await conn('appointment_reminders')
-          .where({ scheduled_service_id: spawnedVisit.scheduledServiceId, cancelled: false })
-          .update({ cancelled: true, updated_at: new Date() });
-        logger.info(`[recurring] Auto-extend reminder cancelled — visit ${spawnedVisit.scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
-      }
-    } catch (e) { logger.warn(`[recurring] Auto-extend post-registration cancel re-check failed (non-blocking): ${e.message}`); }
+    // A series cancel can take the per-parent advisory lock right after our
+    // commit and land before the registration above finished — the shared
+    // re-check cancels the fresh reminder if the visit went terminal in
+    // that window (full rationale + trigger/interleaving analysis on the
+    // helper).
+    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');
     logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
   }
 }
@@ -8191,6 +8205,10 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
           serviceType: parent.service_type,
           source: 'recurring_alert_action',
         });
+        // The alert route holds no series lock, so a concurrent series
+        // cancel can cancel this fresh row while its reminder is being
+        // registered — same window as the auto-extend path; see the helper.
+        await cancelSpawnedReminderIfVisitTerminal(db, row?.id, 'recurring-alerts');
         inserted++;
         created++;
       }
@@ -8252,6 +8270,10 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
           serviceType: parent.service_type,
           source: 'recurring_alert_action',
         });
+        // The alert route holds no series lock, so a concurrent series
+        // cancel can cancel this fresh row while its reminder is being
+        // registered — same window as the auto-extend path; see the helper.
+        await cancelSpawnedReminderIfVisitTerminal(db, row?.id, 'recurring-alerts');
         inserted++;
         created++;
       }
