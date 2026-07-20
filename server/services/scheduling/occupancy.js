@@ -76,6 +76,34 @@ const DEFAULT_DURATION_MINUTES = 60;
 // date order — use acquireOccupancyLocks(). pg_advisory_xact_lock auto-releases
 // at commit/rollback.
 //
+// ROW LOCKS COME AFTER RUNG 1 — the advisory-vs-row-lock half of the order:
+// within a writer's txn, rung 1 precedes EVERY row lock the writer takes
+// (SELECT ... FOR UPDATE, UPDATE/DELETE row locks, and the KEY SHARE locks
+// an INSERT's foreign keys take on referenced rows). A writer that
+// row-locks first and then waits on rung 1 deadlocks against a rung-1
+// holder that needs that row — concretely: reserveSlot used to FOR UPDATE
+// its estimate before rung 1, while createSelfBooking held rung 1 and its
+// insert's source_estimate_id FK sat blocked on that estimate row (KEY
+// SHARE vs FOR UPDATE). Later rungs MAY follow row locks: every rung key
+// is date-scoped and writers take same-date rungs only while holding
+// rung 1, so once a writer holds rung 1 no other txn can hold any other
+// rung for that date — the writer's remaining rungs can never block, and
+// only rung 1 has to beat the row locks. When the row that KEYS rung 1
+// must itself be read (commitReservation keys the date lock off its hold
+// row's scheduled_date), read it WITHOUT a lock, take rung 1, take the
+// row lock, then re-check the keyed field on the locked row — if the date
+// moved in between, the held key is wrong; fail into the writer's existing
+// recovery (commitReservation throws RESERVATION_EXPIRED into the accept
+// flow's re-pick path) instead of taking a second date key mid-txn.
+// Known, deliberate residual: the estimate-accept txn row-locks
+// estimates/customers/leads long before it reaches rung 1 inside
+// commitReservation (the same property the call-recording exemption below
+// exists for). Its only inverted partner is a concurrent reserveSlot for
+// the SAME estimate whose slot is on the SAME date as the hold being
+// accepted (rung 1 held, waiting on that estimate row) — a same-customer
+// two-tab race Postgres resolves by deadlock-aborting one side, accepted
+// as narrow rather than restructuring the accept route's txn.
+//
 // WHY EVERY BLOCKING WRITER MUST TAKE RUNG 1 — not just the tech-blind ones:
 // findConflictingVisits is GLOBAL but reads COMMITTED rows only. A writer that
 // skips the date lock can hold an UNCOMMITTED overlapping insert while a
@@ -118,6 +146,8 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     up front, BEFORE the loop's per-sibling rung-3 locks) -> 3 per sibling
 //     + probe per occurrence (excludes every sibling moving in the sweep).
 //   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
+//     Rung 1 is the txn's FIRST statement — keyed off the slotId, before
+//     the estimate FOR UPDATE (the row-lock rule above; the FK deadlock).
 //     + probe with includeHolds:false (committed visits only — see above;
 //     its own estimate's stale holds were already deleted in-txn). The
 //     same-slot REFRESH leg (idempotent retry) runs the same probe under
@@ -125,6 +155,9 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     whose window a committed visit has since taken is superseded
 //     (released, delete-only) and the reserve throws instead of refreshing.
 //   services/slot-reservation.js commitReservation  1
+//     Keys rung 1 off an UNLOCKED read of the hold row's date; its
+//     FOR UPDATE follows the lock, and a date moved in between fails into
+//     RESERVATION_EXPIRED (the row-lock rule above).
 //     + probe with includeHolds:false excluding its own hold row — runs even
 //     when no accept-time duration resolved (the narrow tech-scoped check is
 //     skipped then, but graduation still commits real occupancy).

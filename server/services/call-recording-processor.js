@@ -177,10 +177,17 @@ function callBookingTimeSanityFlags({
 // Rung-1 keys are taken one per DISTINCT date, ascending
 // (acquireOccupancyLocks — the contract's multi-date rule), before any
 // read; every probe excludes ALL of this call's fresh rows (the row being
-// checked plus its siblings). Each finding is annotated with WHICH created
-// visit it clashes (overlaps_visit: 'primary'|'follow_up' +
-// overlaps_service_id) so the triage card can say. The bare single-date
-// arguments remain supported as the one-visit form.
+// checked plus its siblings). excludeCustomerId applies to the PRIMARY
+// probe ONLY: the booking txn's same-customer same-day hold
+// (existing_appointment_same_date) vets exactly one date — the primary's —
+// so only there are the customer's own rows already handled. The follow-up
+// lands on a date that guard never looked at, where the customer's
+// existing visit is a real, reportable clash — customer-excluding it left
+// that card unfired. Each finding is annotated with WHICH created visit it
+// clashes (overlaps_visit: 'primary'|'follow_up' + overlaps_service_id)
+// plus same_customer (only reachable on non-primary probes) so the triage
+// card can say. The bare single-date arguments remain supported as the
+// one-visit form.
 async function recheckCallBookingConflicts({
   visits,
   scheduledDate,
@@ -202,12 +209,17 @@ async function recheckCallBookingConflicts({
     await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));
     const findings = [];
     for (const visit of targets) {
+      const isPrimary = (visit.role || 'primary') === 'primary';
       const rows = await findConflictingVisits({
         db: trx,
         date: visit.scheduledDate,
         windowStart: visit.windowStart,
         windowEnd: visit.windowEnd,
-        excludeCustomerId,
+        // PRIMARY-ONLY (see header): the in-txn same-day guard owns
+        // same-customer semantics for the primary's date alone. A follow-up
+        // probe keeps the customer's rows in view — its own fresh siblings
+        // are still excluded via freshRowIds below.
+        excludeCustomerId: isPrimary ? excludeCustomerId : null,
         excludeServiceIds: freshRowIds,
       });
       for (const row of rows) {
@@ -215,6 +227,10 @@ async function recheckCallBookingConflicts({
           ...row,
           overlaps_visit: visit.role || 'primary',
           overlaps_service_id: visit.id || null,
+          // Same-customer marker for the card copy. Only non-primary probes
+          // can surface one (the primary excludes the customer's rows).
+          same_customer: excludeCustomerId != null && row.customer_id != null
+            && String(row.customer_id) === String(excludeCustomerId),
         });
       }
     }
@@ -7602,12 +7618,15 @@ const CallRecordingProcessor = {
                 // the primary, and the follow-up child against its OWN
                 // date/window (merely excluding it from the primary's query
                 // left an overlap on the follow-up's own date fireless).
-                // Same exclusion semantics as the in-txn read
-                // (excludeCustomerId — the same-day guard owns
-                // same-customer clashes) plus this run's own fresh rows,
-                // belt-and-braces: both carry customerId anyway. Best-effort
-                // in the same spirit as the in-txn read — a recheck failure
-                // falls back to the in-txn findings rather than dropping an
+                // The helper applies excludeCustomerId to the PRIMARY probe
+                // ONLY — the in-txn same-day guard vets same-customer rows
+                // on the primary's date and no other, so the follow-up's
+                // probe must keep the customer's own visits in view (a +14d
+                // follow-up over the customer's existing visit that day is
+                // exactly the card the office needs). This run's own fresh
+                // rows stay excluded from every probe. Best-effort in the
+                // same spirit as the in-txn read — a recheck failure falls
+                // back to the in-txn findings rather than dropping an
                 // already-detected card.
                 try {
                   const recheckVisits = [{
@@ -7678,6 +7697,13 @@ const CallRecordingProcessor = {
                           // in-txn fallback rows carry no annotation; they
                           // were probed against the primary's window only.
                           overlaps_visit: r.overlaps_visit || 'primary',
+                          // A follow-up clash can be with THIS customer's
+                          // own existing visit (the recheck only customer-
+                          // excludes the primary's probe) — without the
+                          // marker the card reads as a cross-customer
+                          // double-booking. In-txn fallback rows were
+                          // customer-excluded, so false is honest there.
+                          same_customer: r.same_customer || false,
                         })),
                         // The follow-up child this call created (when one
                         // was), so a follow_up-tagged clash above resolves
@@ -7708,6 +7734,15 @@ const CallRecordingProcessor = {
                         overlapBit += followUpClashes === bookingTimeConflicts.length
                           ? ` (all on the follow-up visit's date${followUpDate ? `, ${followUpDate}` : ''})`
                           : ` (${followUpClashes} on the follow-up visit's date${followUpDate ? `, ${followUpDate}` : ''})`;
+                      }
+                      // Same-customer clashes (follow-up over the customer's
+                      // own existing visit) read very differently from a
+                      // cross-customer double-booking — say so.
+                      const sameCustomerClashes = bookingTimeConflicts.filter((r) => r.same_customer).length;
+                      if (sameCustomerClashes) {
+                        overlapBit += sameCustomerClashes === bookingTimeConflicts.length
+                          ? " — the customer's own existing visit"
+                          : ` — ${sameCustomerClashes} of them the customer's own existing visit${sameCustomerClashes === 1 ? '' : 's'}`;
                       }
                       conflictBits.push(overlapBit);
                     }

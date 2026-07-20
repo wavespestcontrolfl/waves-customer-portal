@@ -184,12 +184,14 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
     });
 
     // Findings carry the which-visit annotation (the one-visit legacy form
-    // is a primary-only recheck with no created-row id).
+    // is a primary-only recheck with no created-row id). same_customer can
+    // never be true here — the primary probe excludes the customer's rows.
     expect(rows).toEqual([{
       id: 'svc-existing',
       window_start: '09:30:00',
       overlaps_visit: 'primary',
       overlaps_service_id: null,
+      same_customer: false,
     }]);
     // A dedicated transaction — not the booking txn.
     expect(transaction).toHaveBeenCalledTimes(1);
@@ -235,6 +237,7 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
         window_start: '09:15:00',
         overlaps_visit: 'primary',
         overlaps_service_id: null,
+        same_customer: false,
       },
     ]);
   });
@@ -282,7 +285,13 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
       window_start: '09:30:00',
       overlaps_visit: 'follow_up',
       overlaps_service_id: 'svc-followup',
+      same_customer: false,
     }]);
+    // Customer exclusion is PRIMARY-ONLY (round-4 P1): the in-txn same-day
+    // guard vets same-customer rows on the primary's date and no other, so
+    // the follow-up's probe must keep the customer's own visits in view.
+    expect(builders[0].orWhereNot).toHaveBeenCalledWith('customer_id', 'cust-1');
+    expect(builders[1].orWhereNot).not.toHaveBeenCalled();
     // One rung-1 key per distinct date, both granted BEFORE the first probe
     // read (still one dedicated short transaction).
     const lockCalls = trxs[0].raw.mock.calls
@@ -297,6 +306,43 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
     // checked and its sibling (deduped against the belt-and-braces
     // excludeServiceIds the call site also passes).
     expect(builders[0].whereNotIn).toHaveBeenCalledWith('id', ['svc-primary', 'svc-followup']);
+    expect(builders[1].whereNotIn).toHaveBeenCalledWith('id', ['svc-primary', 'svc-followup']);
+  });
+
+  test('a SAME-CUSTOMER clash on the follow-up\'s own date IS returned, marked, with the primary still customer-excluded (round-4 P1)', async () => {
+    // The +14d follow-up lands on a date where THIS customer already has a
+    // visit. The in-txn same-day guard only ever vetted the PRIMARY's date,
+    // and the old recheck passed excludeCustomerId on every probe — so this
+    // clash produced no card at all. The follow-up probe now keeps the
+    // customer's rows in view and the finding is marked same_customer so
+    // the card doesn't read as a cross-customer double-booking.
+    const { builders } = wireRecheckQueue([
+      [], // primary probe — clean
+      [{ id: 'svc-own-visit', customer_id: 'cust-1', window_start: '09:30:00' }],
+    ]);
+
+    const rows = await recheckCallBookingConflicts({
+      visits: [
+        { id: 'svc-primary', role: 'primary', scheduledDate: '2099-01-05', windowStart: '09:00', windowEnd: '10:00' },
+        { id: 'svc-followup', role: 'follow_up', scheduledDate: '2099-01-19', windowStart: '09:00', windowEnd: '10:00' },
+      ],
+      excludeCustomerId: 'cust-1',
+      excludeServiceIds: ['svc-primary', 'svc-followup'],
+    });
+
+    expect(rows).toEqual([{
+      id: 'svc-own-visit',
+      customer_id: 'cust-1',
+      window_start: '09:30:00',
+      overlaps_visit: 'follow_up',
+      overlaps_service_id: 'svc-followup',
+      same_customer: true,
+    }]);
+    // The primary keeps its exclusion (same-day guard owns those semantics);
+    // the follow-up probe carries none — but both still exclude this call's
+    // own fresh rows.
+    expect(builders[0].orWhereNot).toHaveBeenCalledWith('customer_id', 'cust-1');
+    expect(builders[1].orWhereNot).not.toHaveBeenCalled();
     expect(builders[1].whereNotIn).toHaveBeenCalledWith('id', ['svc-primary', 'svc-followup']);
   });
 
@@ -353,11 +399,14 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // inside.
     const helperIdx = src.indexOf('async function recheckCallBookingConflicts(');
     expect(helperIdx).toBeGreaterThan(-1);
-    const helper = src.slice(helperIdx, helperIdx + 1800);
+    const helper = src.slice(helperIdx, helperIdx + 2600);
     expect(helper).toContain('db.transaction');
     expect(helper.indexOf('await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));'))
       .toBeLessThan(helper.indexOf('await findConflictingVisits({'));
     expect(helper.indexOf('await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));')).toBeGreaterThan(-1);
+    // Customer exclusion is PRIMARY-ONLY inside the helper (round-4 P1) —
+    // the follow-up probe must see the customer's own rows on its date.
+    expect(helper).toContain('excludeCustomerId: isPrimary ? excludeCustomerId : null');
 
     // Call site: fresh inserts only (inside the !scheduleWasReused card
     // block), REASSIGNS bookingTimeConflicts before the card condition reads
@@ -393,10 +442,16 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // probed against the primary's window only, so 'primary' is the honest
     // default there)...
     expect(cardSlice).toContain("overlaps_visit: r.overlaps_visit || 'primary'");
+    // ...a same-customer follow-up clash is marked so it doesn't read as a
+    // cross-customer double-booking (false is honest for the customer-
+    // excluded in-txn fallback rows)...
+    expect(cardSlice).toContain('same_customer: r.same_customer || false');
     // ...the card resolves a follow_up tag to the concrete child row...
     expect(cardSlice).toContain('follow_up: followUpCreated ?');
-    // ...and the admin bell's message + metadata carry the attribution too.
+    // ...and the admin bell's message + metadata carry the attribution too,
+    // including the same-customer wording.
     expect(cardSlice).toContain("on the follow-up visit's date");
+    expect(cardSlice).toContain("the customer's own existing visit");
     expect(cardSlice).toContain('followUpScheduledServiceId');
   });
 

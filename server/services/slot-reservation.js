@@ -319,12 +319,29 @@ async function reserveSlot({
 
   try {
     const reserved = await db.transaction(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST, before ANY row lock this
+      // txn takes (ORDERING CONTRACT, scheduling/occupancy.js — the
+      // row-lock rule). The key is the requested slot's date, straight from
+      // the slotId — available before any row is read, so nothing forces a
+      // read-then-lock detour here. Taking the estimate FOR UPDATE first
+      // (the old order) deadlocked against createSelfBooking: that writer
+      // holds rung 1 while its insert's source_estimate_id FK takes KEY
+      // SHARE on this same estimate row — blocked by our FOR UPDATE —
+      // while this txn sat waiting on its rung 1. The hold row inserted
+      // below is customer-NULL but findConflictingVisits COUNTS live
+      // holds, so this path is a real occupancy writer and owes the date
+      // lock regardless.
+      await acquireOccupancyLock(trx, date);
+
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
       // status/expiry checks could be made against committed state that
       // changes by the time we INSERT below. The `_expired` derived flag
       // does the expiry comparison in Postgres so server clock skew across
-      // app instances can't bypass the gate.
+      // app instances can't bypass the gate. Safe AFTER rung 1 (row locks
+      // never precede it), and rungs 3+4 below are safe after this row
+      // lock: same-date rungs are only ever taken while holding rung 1, so
+      // no other txn can hold them while we do — they can't block.
       const estimate = await trx('estimates')
         .where({ id: estimateId })
         .select('*', trx.raw('(expires_at IS NOT NULL AND expires_at < NOW()) AS _expired'))
@@ -418,20 +435,15 @@ async function reserveSlot({
         }
       }
 
-      // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
-      // in scheduling/occupancy.js). The hold row inserted below is
-      // customer-NULL but findConflictingVisits COUNTS live holds, so this is
-      // a real occupancy writer. The tech + zone locks taken next do NOT
-      // cover it: the rebooker takes the date + tech rungs and NO zone lock,
-      // so an estimate hold whose slot named a different tech (or none)
-      // shared nothing with a concurrent rebooker move on the same date and
-      // the two could interleave past each other's checks.
-      await acquireOccupancyLock(trx, date);
-      // The FOR UPDATE above only serializes THIS estimate — two different
-      // customers' estimates reserving the same tech/date can both pass the
-      // conflict check below concurrently and both insert. Serialize all
-      // reserves per tech+day (coarse but reserves are quick), released on
-      // commit/rollback.
+      // RUNGS 3 + 4 (tech, then zone) — rung 1 was taken at the top of this
+      // txn. These stay REQUIRED even under the date lock: rung 1 alone only
+      // serializes writers that take it, while the narrow tech/zone conflict
+      // checks below also arbitrate hold-vs-hold coexistence, which the
+      // global probe deliberately leaves to them (includeHolds:false). The
+      // estimate FOR UPDATE above only serializes THIS estimate — two
+      // different customers' estimates reserving the same tech/date meet
+      // HERE. Serialize all reserves per tech+day (coarse but reserves are
+      // quick), released on commit/rollback.
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', `${techId || 'unassigned'}:${date}`],

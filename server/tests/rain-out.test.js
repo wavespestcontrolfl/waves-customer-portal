@@ -294,9 +294,10 @@ describe('rain-out service', () => {
       // The appointment is BOOKED as the tight 1-hour slot the dispatcher saw.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
-        // excludeServiceIds = the batch being moved (here just the anchor) so
-        // the rebooker's tech-blind occupancy check never clashes a rain-out
-        // move against the batch's own pre-move positions.
+        // excludeServiceIds = the row being moved + already-VACATED batch
+        // members (here just the anchor itself) so the rebooker's tech-blind
+        // occupancy check never clashes a move against the row's own
+        // pre-move position.
         { allowLive: true, excludeServiceIds: ['svc-1'] },
       );
 
@@ -451,12 +452,17 @@ describe('rain-out service', () => {
       // Anchor 09:00→13:00 = +4h delta; sibling 11:30-13:30 → 15:30-17:30.
       // Tail-first: the later sibling moves BEFORE the anchor so the anchor's
       // new 13:00-15:00 slot isn't blocked by the not-yet-moved sibling.
+      // Exclusion = current row + already-vacated members only: the sibling
+      // moves first excluding just ITSELF (the not-yet-moved anchor's old
+      // 09:00 row stays visible — the tail-first order keeps the sibling's
+      // 15:30 target clear of it); the anchor then excludes itself + the
+      // vacated sibling.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
+        { allowLive: true, excludeServiceIds: ['svc-2'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
     });
 
     test('same-day BACKWARD pull (custom time earlier than anchor) moves head-first', async () => {
@@ -488,12 +494,16 @@ describe('rain-out service', () => {
         notifyCustomer: false,
       });
 
+      // Head-first exclusion mirror: the anchor moves first excluding just
+      // itself (the not-yet-moved sibling's old 11:30 row stays visible —
+      // the pull shifts the anchor AWAY from it); the sibling then excludes
+      // itself + the vacated anchor.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
+        { allowLive: true, excludeServiceIds: ['svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -623,16 +633,19 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(result.movedCount).toBe(3);
 
+      // Cross-day exclusion: unmoved siblings still sit on the OLD date —
+      // date-scoped probes can't see them, so nothing is pre-excluded. The
+      // set grows only with members already landed on the target date.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+        { allowLive: true, excludeServiceIds: ['svc-1'] });
       // Route siblings keep their own windows on the new date.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+        { allowLive: true, excludeServiceIds: ['svc-3', 'svc-1', 'svc-2'] });
 
       // Anchor and sibling both get the self-serve link — no reply ask;
       // no-phone sibling skipped.
@@ -716,7 +729,7 @@ describe('rain-out service', () => {
       // reminder helper re-arms the sibling onto its real window, not 08:00.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {
@@ -743,7 +756,7 @@ describe('rain-out service', () => {
       expect(failed.statusCode).toBe(409);
     });
 
-    test('a FAILED member re-enters the conflict domain for every later move (outcome-aware exclusion)', async () => {
+    test('exclusion = current + SUCCEEDED only; a FAILED member never leaves the conflict domain', async () => {
       wireRoute();
       SmartRebooker.reschedule
         .mockResolvedValueOnce({ success: true })
@@ -759,22 +772,79 @@ describe('rain-out service', () => {
         notifyCustomer: false,
       });
 
-      // Up to (and including) svc-2's own attempt, the whole batch is
-      // excluded — the delta/own-window math preserves relative order, so
-      // members that WILL move cleanly can't collide.
+      // Every move excludes ONLY itself + members already vacated. Members
+      // still awaiting their move are NOT pre-excluded — a blanket batch
+      // exclusion let a member another actor concurrently moved into an
+      // earlier target commit an invisible overlap that removing the id
+      // later could not undo.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+        { allowLive: true, excludeServiceIds: ['svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
-      // svc-2 FAILED — its row is still live at its OLD position, so it must
-      // be dropped from svc-3's exclusion set: the rebooker's tech-blind
-      // occupancy check has to see (and be able to block on) the stranded
-      // row instead of silently double-booking on top of it.
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
+      // svc-2 FAILED — its row is still live at its OLD position and it
+      // never entered the vacated set, so svc-3's probe keeps seeing the
+      // stranded row (and can block on it) instead of silently
+      // double-booking on top of it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-3'] });
+        { allowLive: true, excludeServiceIds: ['svc-3', 'svc-1'] });
+    });
+
+    test('a not-yet-processed member genuinely occupying an earlier target BLOCKS that move (no anticipatory exclusion)', async () => {
+      // Same-day forward push, tail-first: the sibling (svc-2) moves first,
+      // while the ANCHOR (svc-1) is still unprocessed. Another actor
+      // (customer /reschedule link, dispatch) has concurrently moved svc-1
+      // into svc-2's target window and COMMITTED. Under the old blanket
+      // exclusion svc-1's id was pre-excluded and the probe sailed past the
+      // committed row — a silent double-book no later bookkeeping could
+      // undo. Now svc-1 is NOT in svc-2's exclusion set, the rebooker's
+      // occupancy probe (rung-1-locked, committed rows visible) sees it and
+      // throws SLOT_TAKEN — a loud per-member failure instead.
+      const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [
+            { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },
+          ] }),
+        ],
+        reschedule_log: [logRow, chain()],
+      });
+      SmartRebooker.reschedule
+        .mockRejectedValueOnce(Object.assign(
+          new Error('That window conflicts with another job on the technician\'s route'),
+          { statusCode: 409, code: 'SLOT_TAKEN' },
+        ))
+        .mockResolvedValueOnce({ success: true });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
+        notifyCustomer: false,
+      });
+
+      // The property that makes the block possible: svc-2's probe excluded
+      // ONLY svc-2 — the unprocessed anchor stayed visible to it.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
+        'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-2'] });
+      // The anchor's own move still ran, excluding only itself (svc-2
+      // failed, so it never joined the vacated set).
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] });
+      // Loud partial result: the clashing member is reported failed, the
+      // rest of the batch is not stranded.
+      expect(result.ok).toBe(true);
+      expect(result.movedCount).toBe(1);
+      expect(result.failedCount).toBe(1);
+      expect(result.results.find((r) => r.id === 'svc-2')).toMatchObject({ ok: false, statusCode: 409 });
+      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true });
     });
   });
 

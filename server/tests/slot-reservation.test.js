@@ -244,6 +244,12 @@ describe('slot reservation helpers', () => {
       );
       expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
         .toBeLessThan(globalProbeBuilder.where.mock.invocationCallOrder[0]);
+      // ...and before ANY row lock — the estimate FOR UPDATE included
+      // (ORDERING CONTRACT row-lock rule). Grabbing the estimate row first
+      // deadlocked against createSelfBooking: it holds rung 1 while its
+      // insert's source_estimate_id FK waits on this estimate row.
+      expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
+        .toBeLessThan(estimateBuilder.forUpdate.mock.invocationCallOrder[0]);
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
         service_type: 'Quarterly Pest Control',
         notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
