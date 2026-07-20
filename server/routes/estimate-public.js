@@ -9222,32 +9222,28 @@ router.put('/:token/accept', async (req, res, next) => {
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
     // Geo visibility for future route scoring: the accept path creates the
-    // customer (and their whole visit series) with no coordinates, and
-    // find-time's detour math silently treats coordless stops as zero drive
-    // time — so these visits are invisible as route anchors to every later
-    // offer. Geocode the customer once, post-commit, fail-soft; find-time's
-    // customers.latitude fallback then covers all their visits.
-    //
-    // Guard: only when the accepted property IS the customer's own address.
-    // A phone-matched accept can reuse an existing customer for a DIFFERENT
-    // property; filling their primary latitude/longitude then makes
-    // find-time anchor the accepted visits at the primary home instead of
-    // the estimate property (Codex 2026-07-20). ensureCustomerGeocoded
-    // geocodes the customer's stored address fields, so it must only run
-    // when those fields describe the accepted property.
-    if (customerId) {
+    // visit series with no coordinates, and find-time's detour math silently
+    // treats coordless stops as zero drive time — so these visits are
+    // invisible as route anchors to every later offer. Geocode the ESTIMATE
+    // property once (the offer generator already geocoded the same string,
+    // so this is usually an in-process memo hit) and stamp lat/lng onto the
+    // accepted rows directly, keyed by source_estimate_id so the reserved
+    // parent, standalone units, and seeded follow-ups are all covered.
+    // Deliberately NOT customers.latitude: a phone-matched accept can reuse
+    // an existing customer for a different property, and no address-string
+    // heuristic safely proves the estimate property is the primary home
+    // (Codex 2026-07-20 ×2) — the visit rows' own coords carry no such
+    // ambiguity. Post-commit, fail-soft.
+    if (estimate.address) {
       void (async () => {
-        const cust = await db('customers')
-          .where({ id: customerId })
-          .first('address_line1', 'latitude', 'longitude');
-        if (!cust || (cust.latitude != null && cust.longitude != null)) return;
-        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        const estAddr = norm(estimate.address);
-        const custLine1 = norm(cust.address_line1);
-        if (!custLine1 || (estAddr && !estAddr.includes(custLine1))) return;
-        const { ensureCustomerGeocoded } = require('../services/geocoder');
-        await ensureCustomerGeocoded(customerId);
-      })().catch((e) => logger.warn(`[estimate-accept] customer geocode failed (non-blocking) for ${customerId}: ${e.message}`));
+        const { geocodeAddress } = require('../services/geocoder');
+        const coords = await geocodeAddress(estimate.address);
+        if (!coords) return;
+        await db('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNull('lat')
+          .update({ lat: coords.lat, lng: coords.lng });
+      })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows
