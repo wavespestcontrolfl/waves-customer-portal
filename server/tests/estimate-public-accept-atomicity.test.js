@@ -47,7 +47,10 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 // db.transaction with REAL rollback semantics (snapshot + restore) so the
 // atomicity assertions observe genuine transactional behavior.
 jest.mock('../models/db', () => {
-  const state = { tables: {} };
+  // state.ops is an append-only statement log (raw calls + table updates, in
+  // issue order) so tests can assert cross-statement ORDER — e.g. the accept
+  // txn's rung-1 occupancy lock landing before its estimates UPDATE.
+  const state = { tables: {}, ops: [] };
 
   const rowMatches = (row, ctx) => {
     for (const eq of ctx.eqFilters) {
@@ -92,14 +95,31 @@ jest.mock('../models/db', () => {
     b.orderByRaw = () => b;
     b.modify = (fn) => { fn(b); return b; };
     b.select = () => b;
+    // Row-lock + overlap-predicate surface the slot-commit path chains
+    // (commitReservation's FOR UPDATE read, applyWindowOverlapFilter,
+    // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
+    // fixtures keep the tables small enough that the eq/null filters decide.
+    b.forUpdate = () => b;
+    b.andWhereRaw = () => b;
+    b.orWhereNull = () => b;
+    b.orWhereNot = () => b;
     b.first = async () => {
       const row = matched()[0];
       return row ? { ...row } : undefined;
     };
-    b.update = async (obj) => {
+    b.update = (obj) => {
+      // Applies eagerly (same timing as the old async impl — mutation landed
+      // at call time), logs the statement for order assertions, and supports
+      // BOTH `await ...update(obj)` → count and `...update(obj).returning()`
+      // → rows (commitReservation's graduation UPDATE uses the latter).
+      state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
       hits.forEach((row) => Object.assign(row, obj));
-      return hits.length;
+      return {
+        returning: async () => hits.map((r) => ({ ...r })),
+        then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
+        catch: (fn) => Promise.resolve(hits.length).catch(fn),
+      };
     };
     b.insert = (row) => {
       const stored = { id: row.id || `${table}-${rows().length + 1}`, ...row };
@@ -120,7 +140,12 @@ jest.mock('../models/db', () => {
 
   const dbFn = (table) => makeBuilder(table);
   dbFn.fn = { now: () => new Date() };
-  dbFn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  dbFn.raw = (sql, bindings) => {
+    // Advisory-lock statements (`pg_advisory_xact_lock`) flow through here —
+    // logged so tests can assert rung-1 ordering against table mutations.
+    state.ops.push({ type: 'raw', sql, bindings });
+    return { __raw: sql, bindings };
+  };
   dbFn.schema = { hasColumn: async () => false };
   dbFn.transaction = async (cb) => {
     const snapshot = structuredClone(state.tables);
@@ -220,7 +245,7 @@ beforeAll((done) => {
   app.use(express.json());
   app.use('/api/estimates', require('../routes/estimate-public'));
   // Mirror the real error middleware's contract for next(err): 5xx JSON.
-  // eslint-disable-next-line no-unused-vars
+   
   app.use((err, req, res, next) => {
     res.status(err.status || err.statusCode || 500).json({ error: err.message });
   });
@@ -278,6 +303,7 @@ function resetStore(estimateRow) {
     property_preferences: [],
     notification_prefs: [],
   };
+  db.__state.ops = [];
 }
 
 function storedEstimate() {
@@ -987,5 +1013,103 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
     expect(res.data.bookingUrl).toContain('estimate_id=est-onetime-1');
     expect(storedEstimate().status).toBe('accepted');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('P1 — accept txn lock order: rung 1 before every estimate row mutation', () => {
+  function holdFixture(overrides = {}) {
+    return {
+      id: 'ss-hold-1',
+      source_estimate_id: 'est-lock-1',
+      customer_id: null,
+      technician_id: null,
+      scheduled_date: '2027-05-20',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      status: 'pending',
+      estimated_duration_minutes: 60,
+      notes: null,
+      reservation_expires_at: new Date(Date.now() + 15 * 60 * 1000),
+      ...overrides,
+    };
+  }
+
+  test('slot-commit accept takes the hold\'s date-occupancy lock FIRST, then mutates; the hold graduates', async () => {
+    // The deadlock shape this pins: the accept txn used to row-lock the
+    // estimate (the status UPDATE) and only reach rung 1 later, inside
+    // commitReservation — while a concurrent reserveSlot holds rung 1 and
+    // waits on that same estimate row (rung 1 → estimate FOR UPDATE).
+    // The fix pre-acquires the hold's date key as the txn's first
+    // statements, so rung 1 precedes the estimates UPDATE here.
+    resetStore(recurringPestEstimate({ id: 'est-lock-1', token: 'tok-lock-1' }));
+    db.__state.tables.scheduled_services = [holdFixture()];
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const res = await putAccept('tok-lock-1', {
+      slotId: '2027-05-20_09-00_unassigned',
+      paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.success).toBe(true);
+    expect(res.data.reservationCommitted).toBe(true);
+
+    // The hold graduated inside the accept: customer bound, expiry cleared,
+    // still on the pre-locked date.
+    const hold = db.__state.tables.scheduled_services.find((r) => r.id === 'ss-hold-1');
+    expect(hold.customer_id != null).toBe(true);
+    expect(hold.reservation_expires_at == null).toBe(true);
+    expect(String(hold.scheduled_date)).toBe('2027-05-20');
+
+    // ORDER: the rung-1 occupancy advisory lock precedes the estimates
+    // UPDATE (the txn's first row lock). Two acquisitions of the SAME key —
+    // the route's pre-lock and commitReservation's reentrant re-take.
+    const ops = db.__state.ops;
+    const lockIdxs = ops
+      .map((op, i) => (
+        op.type === 'raw'
+        && String(op.sql).includes('pg_advisory_xact_lock')
+        && Array.isArray(op.bindings)
+        && String(op.bindings[1] || '').startsWith('occupancy:') ? i : -1
+      ))
+      .filter((i) => i >= 0);
+    const acceptUpdateIdx = ops.findIndex((op) => (
+      op.type === 'update' && op.table === 'estimates' && op.data && op.data.status === 'accepted'
+    ));
+    expect(acceptUpdateIdx).toBeGreaterThanOrEqual(0);
+    expect(lockIdxs.length).toBe(2);
+    for (const i of lockIdxs) {
+      expect(ops[i].bindings).toEqual(['slot-reserve', 'occupancy:2027-05-20']);
+    }
+    expect(lockIdxs[0]).toBeLessThan(acceptUpdateIdx);   // pre-lock BEFORE the estimate row mutation
+    expect(lockIdxs[1]).toBeGreaterThan(acceptUpdateIdx); // commitReservation's re-take, later in the txn
+  });
+
+  test('a deadlock-aborted accept txn (PG 40P01) maps to the retryable 409 conflict shape, fully rolled back', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-dl-1', token: 'tok-dl-1' }));
+    // Simulate Postgres aborting the txn to break a lock cycle mid-accept
+    // (the conversion runs inside the transaction — FIX 1 above).
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(
+      Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+    );
+
+    const res = await putAccept('tok-dl-1');
+    // Same retryable-conflict shape as the RESERVATION_EXPIRED path (409 +
+    // { error }), never an unmapped 500.
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/try again/i);
+    // Rolled back and retryable: not accepted, price not locked, no orphans.
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(db.__state.tables.customers).toHaveLength(0);
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 });

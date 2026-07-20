@@ -249,8 +249,9 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
 
     const data = await gmailClient.getAttachment(email.gmail_id, req.params.attachmentId);
     const safeName = (att.filename || 'attachment').replace(/[\r\n"\\]/g, '_');
-    const actor = req.technician?.email || req.technician?.name || req.technicianId || 'unknown';
-    logger.info(`[email] Attachment downloaded: actor=${actor} email=${email.id} file="${safeName}"`);
+    // Log internal ids only — staff name/email and the filename are PII and
+    // stay out of application logs (the id resolves the record when needed).
+    logger.info(`[email] Attachment downloaded: actor=${req.technicianId || 'unknown'} email=${email.id} attachment=${req.params.attachmentId}`);
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
@@ -327,7 +328,8 @@ router.post('/send', async (req, res) => {
     if (!to || !body) return res.status(400).json({ error: 'to and body required' });
 
     const result = await gmailClient.sendMessage(to, subject || '(no subject)', body, threadId, inReplyTo);
-    logger.info(`[email] Sent email to ${to}: ${result.id}`);
+    // Log only the provider message id — no recipient address, even masked.
+    logger.info(`[email] Sent email: ${result.id}`);
     res.json({ success: true, messageId: result.id });
   } catch (err) {
     logger.error(`[email] Send error: ${err.message}`);

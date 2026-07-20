@@ -5,6 +5,7 @@ const {
   priceLawnCare,
   priceOneTimeLawn,
 } = require('../services/pricing-engine');
+const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 const { buildEnrichedProfile, needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
 
 function baseInput(overrides = {}) {
@@ -663,8 +664,12 @@ describe('lawn pricing production follow-up', () => {
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
     expect(lawn.customQuoteFlag).toBe(true);
-    expect(lawn.pricingBasis).toBe('THIRTY_FIVE_MARGIN_FLOOR');
-    expect(lawn.selected.pricingBasis).toBe('THIRTY_FIVE_MARGIN_FLOOR');
+    // Owner 2026-07-17 ("forget all pricing floors"): the 35% cost floor is
+    // default-OFF, so a 25,000 sqft lawn prices off the extrapolated market
+    // table instead of riding the margin floor above it.
+    expect(lawn.pricingBasis).toBe('EXTRAPOLATED_ABOVE_TABLE_MAX');
+    expect(lawn.selected.pricingBasis).toBe('EXTRAPOLATED_ABOVE_TABLE_MAX');
+    expect(lawn.selected.costFloorApplied).toBe(false);
     expect(lawn.selected.marketSource).toBe('EXTRAPOLATED_TABLE');
     expect(estimate.notes).toContainEqual({
       type: 'LAWN_CUSTOM_QUOTE',
@@ -706,8 +711,10 @@ describe('lawn pricing production follow-up', () => {
   });
 
   test('cost-floor pricing source is explicit per tier and selected tier', () => {
-    // 8,000 sqft: the enhanced market cell ($68/mo) clears the $50 program
-    // minimum, so the MARKET_TABLE vs COST_FLOOR source plumbing stays visible.
+    // 8,000 sqft keeps the MARKET_TABLE vs COST_FLOOR source plumbing
+    // visible. The floor is re-armed explicitly here (useLawnCostFloor
+    // defaults false since the 2026-07-17 owner ruling) because this test
+    // pins the provenance labels the floor path emits when selected.
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 8000 }));
     const market = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: false });
     const floor = priceLawnCare(property, {
@@ -746,7 +753,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers.map(t => t.label)).toEqual(['4x applications/yr', '6x applications/yr', '9x applications/yr', '12x applications/yr']);
   });
 
-  test('small lawn pricing floors at the $50 program minimum when the market cell sits below it', () => {
+  test('small lawn prices off the market table — the $50 program minimum is disarmed (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 2720,
       lotSqFt: 7200,
@@ -755,13 +762,17 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // Market $564/yr and cost floor both sit below the $600 program minimum
-    // → $603/yr (ceil'd to a clean 9-app multiple), $67/app.
-    expect(lawn.selected.perApp).toBe(67);
-    expect(lawn.selected.pricingSource).toBe('PROGRAM_MINIMUM');
+    // Owner 2026-07-17 ("forget all pricing floors"): programMinimumMonthly is
+    // 0, so the $564/yr market cell that used to floor at $600/$603 is now the
+    // sold price as-is: $564/yr ÷ 9 apps = $62.67/app.
+    expect(lawn.selected.perApp).toBe(62.67);
+    expect(lawn.selected.annual).toBe(564);
+    expect(lawn.selected.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.selected.programMinimumApplied).toBe(false);
     expect(lawn.selected.costFloorApplied).toBe(false);
+    // Cost-floor MATH still runs for reporting and sits below market here.
     expect(lawn.selected.costFloorAnnual).toBeLessThan(lawn.selected.marketAnnual);
-    expect(lawn.margin).toBeGreaterThan(0.45);
+    expect(lawn.margin).toBeGreaterThan(0.44); // 0.447 on the $564 market price (reserve-folded budgets, #2812)
   });
 
   test('reviewed 2,870 sqft estimate stays at 9 applications and Silver-discounted market price', () => {
@@ -782,29 +793,36 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
     });
     expect(lawn.frequency).toBe(9);
-    // The $564 market cell floors at the $600 program minimum ($603 ceil'd
-    // to a 9-app multiple); Silver 10% would land at $542.70 — below the
-    // floor, so the discount caps right back at $600 (owner 2026-07-09).
-    expect(lawn.perApp).toBe(67);
-    expect(lawn.annual).toBe(603);
-    expect(lawn.annualAfterDiscount).toBe(600);
-    expect(lawn.monthlyAfterDiscount).toBe(50);
-    expect(lawn.programMinimumGuardApplied).toBe(true);
-    expect(lawn.discountCapped).toBe(true);
-    expect(lawn.pricingSource).toBe('PROGRAM_MINIMUM');
+    // Owner 2026-07-17 ("forget all pricing floors"): the $564 market cell no
+    // longer floors at $600 — it sells at $564/yr ($62.67/app) and Silver 10%
+    // applies IN FULL: $564 × 0.90 = $507.60/yr = $42.30/mo. The post-discount
+    // program-minimum guard is inert (never set), so no discount cap.
+    expect(lawn.perApp).toBe(62.67);
+    expect(lawn.annual).toBe(564);
+    expect(lawn.annualAfterDiscount).toBe(507.6);
+    expect(lawn.monthlyAfterDiscount).toBe(42.3);
+    expect(lawn.programMinimumGuardApplied).toBeUndefined();
+    expect(lawn.discountCapped).toBeUndefined();
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.programMinimumApplied).toBe(false);
     expect(lawn.costFloorApplied).toBe(false);
   });
 
-  test('cost floor uses annual material budgets by grass type (not $8/K fallback)', () => {
+  test('cost floor (re-armed) uses annual material budgets by grass type (not $8/K fallback)', () => {
+    // Owner 2026-07-17 ("forget all pricing floors"): useLawnCostFloor now
+    // defaults FALSE, so floor selection never happens on a real quote. This
+    // test re-arms it explicitly because it pins the floor-derivation math
+    // itself — material budgets must differ by grass type, not the $8/K
+    // fallback — which still feeds minimumCollectedAnnualPrice reporting.
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4492 }));
 
-    const stAug = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
-    const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
-    const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
+    const stAug = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: true });
+    const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9, useLawnCostFloor: true });
+    const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9, useLawnCostFloor: true });
 
-    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor —
-    // with spot reserves folded in (owner 2026-07-16) it lands at $621/yr,
-    // clear of the $600 program minimum.
+    // St. Augustine enhanced at 4,492 sqft: 35% collected-margin floor with
+    // spot reserves folded in (#2812) lands at $621/yr = $69/app. The old
+    // ride-up to the $600 program minimum is gone (minimum is now $0).
     expect(stAug.selected.perApp).toBe(69);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
@@ -812,29 +830,40 @@ describe('lawn pricing production follow-up', () => {
     expect(bermuda.selected.perApp).toBe(68);
     expect(bermuda.selected.costFloorApplied).toBe(false);
 
-    // Zoysia enhanced carries the largest reserve budget, which pushes its
-    // floor ($657/yr) above the market table — floor-priced since the fold.
+    // Zoysia enhanced carries the largest reserve budget (#2812 fold), which
+    // pushes its floor above the market table — floor-priced when re-armed.
     expect(zoysia.selected.perApp).toBe(73);
     expect(zoysia.selected.costFloorApplied).toBe(true);
+
+    // Per-grass-type budgets, not a flat $/K: three distinct floor dollars.
+    // (Recomputed on the folded budgets — see PLACEHOLDER pins below.)
+    expect(stAug.selected.costFloorAnnual).toBeCloseTo(613.67, 2);
+    expect(bermuda.selected.costFloorAnnual).toBeCloseTo(598.31, 2);
+    expect(zoysia.selected.costFloorAnnual).toBeCloseTo(648.99, 2);
   });
 
-  test('dense route St. Augustine enhanced quote floors just below the program minimum', () => {
+  test('dense route St. Augustine enhanced sells the market price below the folded reporting floor', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // With spot reserves folded in the 35% cost floor (~$594/yr) sits above
-    // the market table (~$576/yr) — but both sit below the $600 program
-    // minimum, which is the final customer price ($603 ceil'd to a clean
-    // 9-app multiple).
-    expect(lawn.selected.perApp).toBe(67);
-    expect(lawn.annual).toBe(603);
-    expect(lawn.monthly).toBe(50.25);
+    // Owner 2026-07-17 ("forget all pricing floors"): the $576/yr market
+    // cell IS the customer price ($64/app, $48/mo). The cost-floor MATH
+    // still reports — with spot reserves folded in (#2812) the reporting
+    // floor (~$593.72 minimum-collected, costs ~$385.92) sits ABOVE the
+    // market price, so the reported margin (0.33) is below the 35% target.
+    // Nothing lifts the price: this is exactly the surfaced-not-enforced
+    // case the owner reviews in the estimator.
+    expect(lawn.selected.perApp).toBe(64);
+    expect(lawn.annual).toBe(576);
+    expect(lawn.monthly).toBe(48);
+    expect(lawn.selected.costFloorApplied).toBe(false);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(385);
     expect(lawn.costs.total).toBeLessThan(386);
     expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
     expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
-    expect(lawn.margin).toBeGreaterThanOrEqual(0.35);
-    expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
+    expect(lawn.margin).toBeCloseTo(0.33, 2);
+    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.selected.marketAnnual).toBe(576);
   });
 
@@ -853,16 +882,16 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    expect(lawn.annual).toBe(603);
-    // Silver 10% would land at $542.70/yr — below the $600/yr program
-    // minimum, so only the slice down to the floor applies (603 → 600 is an
-    // effective 0.5%).
-    expect(lawn.annualAfterDiscount).toBe(600);
-    expect(lawn.monthlyAfterDiscount).toBe(50);
-    expect(lawn.programMinimumGuardApplied).toBe(true);
-    expect(lawn.discountCapped).toBe(true);
-    expect(lawn.requestedDiscountPct).toBe(0.10);
-    expect(lawn.actualDiscountPct).toBe(0.005);
+    expect(lawn.annual).toBe(576);
+    // Owner 2026-07-17 ("forget all pricing floors"): the program minimum is
+    // disarmed, so Silver 10% applies IN FULL — $576 × 0.90 = $518.40/yr =
+    // $43.20/mo. The guard/cap fields are never set anymore.
+    expect(lawn.annualAfterDiscount).toBe(518.4);
+    expect(lawn.monthlyAfterDiscount).toBe(43.2);
+    expect(lawn.programMinimumGuardApplied).toBeUndefined();
+    expect(lawn.discountCapped).toBeUndefined();
+    expect(lawn.requestedDiscountPct).toBeUndefined();
+    expect(lawn.actualDiscountPct).toBeUndefined();
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,
@@ -871,9 +900,10 @@ describe('lawn pricing production follow-up', () => {
     });
   });
 
-  test('WaveGuard cannot discount lawn below its 35% collected-margin floor', () => {
+  test('re-armed: WaveGuard cannot discount lawn below its 35% collected-margin floor', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 5012,
+      useLawnCostFloor: true,
       services: {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', lawnFreq: 9 },
@@ -888,6 +918,39 @@ describe('lawn pricing production follow-up', () => {
     const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
       / lawn.annualAfterDiscount;
     expect(collectedMargin).toBeGreaterThanOrEqual(0.35 - 0.0001);
+    // An at-floor cap is NOT a breach — the report signal stays quiet.
+    expect(lawn.belowMarginFloor).toBe(false);
+    expect(estimate.marginWarnings.find((w) => w.type === 'waveguard_discount_below_margin_floor'))
+      .toBeUndefined();
+  });
+
+  test('a WaveGuard-discounted lawn line below 35% surfaces the report-only signal while disarmed', () => {
+    // Same bundle, floors disarmed: Silver discounts the 5,012 sqft lawn
+    // line below its collected-margin floor. Nothing caps it — but the
+    // estimator gets the same belowMarginFloor / finalMargin signals pest
+    // and tree/shrub emit, plus a Pricing Review Note via marginWarnings
+    // (codex P2, round 7 on #2827).
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.marginFloorGuardApplied).toBeUndefined();
+    expect(lawn.discountCapped).toBeFalsy();
+    const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
+      / lawn.annualAfterDiscount;
+    expect(collectedMargin).toBeLessThan(0.35);
+    expect(lawn.belowMarginFloor).toBe(true);
+    expect(lawn.finalMargin).toBeCloseTo(Math.round(collectedMargin * 1000) / 1000, 3);
+    const warning = estimate.marginWarnings.find((w) => (
+      w.service === 'lawn_care' && w.type === 'waveguard_discount_below_margin_floor'
+    ));
+    expect(warning).toBeTruthy();
+    expect(warning.message).toContain('price stands as discounted');
   });
 
   test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
@@ -901,21 +964,28 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    // Lawn holds at the $600 floor post-WaveGuard, so the manual-discount
-    // base is pest 421.20 + lawn 600 = 1021.20.
-    expect(lawn.annualAfterDiscount).toBe(600);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(1021.2, 2);
-    // 10% (102.12) fits inside the non-lawn headroom (1021.20 − 600 protected
-    // = 421.20), so the manual discount applies in full, uncapped.
-    expect(estimate.summary.manualDiscount.amount).toBe(102.12);
-    expect(estimate.summary.manualDiscount.capReason).not.toBe('lawn_program_minimum');
+    // Owner 2026-07-17 ("forget all pricing floors"): lawn takes the full
+    // Silver 10% ($576 → $518.40), so the manual-discount base is pest
+    // 421.20 + lawn 518.40 = 939.60.
+    expect(lawn.annualAfterDiscount).toBe(518.4);
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(939.6, 2);
+    // With no floor to protect, the 10% manual discount (93.96) applies in
+    // full, uncapped — no lawn_program_minimum cap exists anymore.
+    expect(estimate.summary.manualDiscount.amount).toBe(93.96);
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    expect(estimate.summary.manualDiscount.capReason).toBeNull();
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });
 
-  test('manual lawn discounts are capped at the collected-margin floor before persistence', () => {
+  // Re-armed variants of the #2795 margin-guard suite (useLawnCostFloor
+  // arms cost-floor selection AND the post-discount margin-floor caps —
+  // disarmed by default since the 2026-07-17 owner ruling; the machinery is
+  // kept and these pins prove a re-arm restores the full #2795 behavior).
+  test('re-armed: manual lawn discounts are capped at the collected-margin floor before persistence', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 5012,
+      useLawnCostFloor: true,
       services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
       manualDiscount: { type: 'PERCENT', value: 50 },
     }));
@@ -933,7 +1003,7 @@ describe('lawn pricing production follow-up', () => {
     ))).toBeUndefined();
   });
 
-  test('manual discount audit allocates non-lawn-first: floored lawn keeps its price, pest absorbs the cut', () => {
+  test('re-armed: manual discount audit allocates non-lawn-first — floored lawn keeps its price, pest absorbs the cut', () => {
     // 5,012 sqft: lawn is WaveGuard-capped at its $630.82 margin floor (zero
     // headroom); pest holds $421.20 after Silver. A 30% manual discount
     // ($315.61) fits entirely inside the non-lawn headroom, so the aggregate
@@ -945,6 +1015,7 @@ describe('lawn pricing production follow-up', () => {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', lawnFreq: 9 },
       },
+      useLawnCostFloor: true,
       manualDiscount: { type: 'PERCENT', value: 30, source: 'test', eligibilityConfirmed: true },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
@@ -970,13 +1041,14 @@ describe('lawn pricing production follow-up', () => {
     expect(warning.manualDiscountShare).toBeCloseTo(estimate.summary.manualDiscount.amount, 2);
   });
 
-  test('a manual discount inside non-lawn headroom raises no margin warning and leaves lawn audit fields at the floor', () => {
+  test('re-armed: a manual discount inside non-lawn headroom raises no margin warning and leaves lawn audit fields at the floor', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 5012,
       services: {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', lawnFreq: 9 },
       },
+      useLawnCostFloor: true,
       manualDiscount: { type: 'PERCENT', value: 10, source: 'test', eligibilityConfirmed: true },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
@@ -992,7 +1064,7 @@ describe('lawn pricing production follow-up', () => {
       .toBeUndefined();
   });
 
-  test('monthly CEILs when the WaveGuard lawn margin floor binds (never rebuilds a cent under the floor)', () => {
+  test('re-armed: monthly CEILs when the WaveGuard lawn margin floor binds (never rebuilds a cent under the floor)', () => {
     // 4,632 sqft: margin floor $601.45/yr. 601.45/12 = 50.1208… — nearest-cent
     // rounding gives $50.12/mo which rebuilds $601.44/yr, a cent UNDER the
     // protected floor. The public ladder ceils this case
@@ -1000,6 +1072,7 @@ describe('lawn pricing production follow-up', () => {
     // cent-identical with what the customer sees and accepts.
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4632,
+      useLawnCostFloor: true,
       services: {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', lawnFreq: 9 },
@@ -1022,13 +1095,14 @@ describe('lawn pricing production follow-up', () => {
       .toBeGreaterThanOrEqual(estimate.summary.recurringAnnualAfterDiscount);
   });
 
-  test('summary monthly CEILs when a manual discount pins lawn exactly on its margin floor', () => {
+  test('re-armed: summary monthly CEILs when a manual discount pins lawn exactly on its margin floor', () => {
     // Lawn-only at 4,632 sqft ($603 authored, $601.45 floor): a 50% manual
     // discount clamps to the $1.55 of headroom, leaving the plan billing the
     // floor. round(601.45/12) = $50.12 would understate it; the stored
     // monthly_total must carry the ladder's $50.13.
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4632,
+      useLawnCostFloor: true,
       services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
       manualDiscount: { type: 'PERCENT', value: 50, source: 'test', eligibilityConfirmed: true },
     }));
@@ -1045,11 +1119,12 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.manualFinalAnnual).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
   });
 
-  test('a manual discount on a lawn-only estimate is capped at the program minimum (recurring slice)', () => {
-    // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell floors to
-    // $50/mo ($600/yr). The whole recurring base is floor-protected, so a 10%
-    // manual discount has zero recurring room — the recurring slice caps to 0
-    // and the plan bills the floor.
+  test('a manual discount on a lawn-only estimate applies in full — program minimum disarmed (owner 2026-07-17)', () => {
+    // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell used to
+    // floor to $50/mo ($600/yr) and zero out the manual discount's recurring
+    // slice. Owner 2026-07-17 ("forget all pricing floors"): the cell sells
+    // at its market $456/yr, and the 10% manual discount ($45.60) applies in
+    // full — no lawn_program_minimum cap, plan bills $410.40.
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4500,
       services: {
@@ -1058,12 +1133,12 @@ describe('lawn pricing production follow-up', () => {
       manualDiscount: { type: 'PERCENT', value: 10 },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
-    expect(lawn.annual).toBe(600);
-    expect(lawn.programMinimumApplied).toBe(true);
-    expect(estimate.summary.manualDiscount.recurringAmount).toBe(0);
-    expect(estimate.summary.manualDiscount.capped).toBe(true);
-    expect(estimate.summary.manualDiscount.capReason).toBe('lawn_program_minimum');
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(600);
+    expect(lawn.annual).toBe(456);
+    expect(lawn.programMinimumApplied).toBe(false);
+    expect(estimate.summary.manualDiscount.recurringAmount).toBe(45.6);
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    expect(estimate.summary.manualDiscount.capReason).toBeNull();
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(410.4);
   });
 
   test('requesting the retired 4-application tier falls back to enhanced (quarterly retired 2026-07-09)', () => {
@@ -1086,11 +1161,189 @@ describe('lawn pricing production follow-up', () => {
     expect(withHidden.frequency).toBe(4);
   });
 
-  test('useLawnCostFloor defaults to true for recurring lawn', () => {
+  test('a deep lawn-only manual discount surfaces the below-margin warning while disarmed (report-only)', () => {
+    // 4,500 sqft standard/6x: market $456/yr, 50% manual → $228 collected.
+    // Nothing caps it (floors disarmed), but the owner still gets the
+    // "looks low" signal — the same warn path pest/tree lines already have
+    // (codex P2 on the #2827 main-merge: guardedLineCost had no lawn branch).
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      manualDiscount: { type: 'PERCENT', value: 50 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(228);
+    expect(lawn.manualFinalAnnual).toBe(228);
+    expect(lawn.manualFinalMargin).toBeLessThan(0.35);
+    expect(lawn.manualMarginWarning).toBe(true);
+    const warning = estimate.marginWarnings.find((w) => (
+      w.service === 'lawn_care' && w.type === 'manual_discount_below_margin_floor'
+    ));
+    expect(warning).toBeTruthy();
+  });
+
+  test('re-armed: the live DB switch arms cost-floor selection for direct priceLawnCare callers', () => {
+    // Direct callers (weekly invariant sweep, public lawn assessment,
+    // snapshots) pass no option — the destructuring default reads the live
+    // lawn_pricing_v2.useLawnCostFloor switch so a no-deploy re-arm reaches
+    // them exactly like generateEstimate (codex P2 on the #2827 main-merge).
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const prior = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+      // Same fixture as the disarmed default pin below: floor $591.25 sits
+      // above the $588 market cell, so armed selection must take the floor.
+      expect(lawn.selected.costFloorApplied).toBe(true);
+      expect(lawn.selected.pricingSource).toBe('COST_FLOOR');
+      expect(lawn.selected.annual).toBeGreaterThan(588);
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = prior;
+    }
+  });
+
+  test('the engine stamps its resolved cost-floor arm state into pricingMetadata', () => {
+    // The stamp is the authoritative record of what priced the saved result
+    // — estimate-public reads it first so a later global switch flip can't
+    // change how a sent quote replays (codex P2, round 8 on #2827).
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(disarmed.pricingMetadata.lawnCostFloorArmed).toBe(false);
+
+    const armed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      useLawnCostFloor: true,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(armed.pricingMetadata.lawnCostFloorArmed).toBe(true);
+  });
+
+  test('the engine stamps its resolved program minimum into pricingMetadata', () => {
+    // Same replay rule as the arm stamp (pre-push codex P0, round 9): the
+    // minimum that priced the run rides the result, so view/accept and the
+    // converter's prepay protection clamp a sent quote at ITS minimum, not
+    // whatever the global holds at render time.
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(disarmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(0);
+
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+    try {
+      const armed = generateEstimate(baseInput({
+        measuredTurfSf: 4500,
+        services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      }));
+      expect(armed.pricingMetadata.lawnProgramMinimumMonthly).toBe(50);
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
+  test('input-level floor overrides replay a saved estimate under its own state, not the live globals', () => {
+    // estimate-public's engine-input replay threads the saved stamps back in
+    // (pre-push codex P0, round 9 on #2827): a quote saved under a re-armed
+    // $50 minimum reprices clamped even though the global is 0…
+    const replayArmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      lawnProgramMinimumMonthly: 50,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const lawn = replayArmed.lineItems.find((li) => li.service === 'lawn_care');
+    expect(lawn.monthly).toBeGreaterThanOrEqual(50);
+    expect(replayArmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(50);
+
+    // …and a quote saved DISARMED replays unclamped after a global re-arm
+    // (explicit 0 beats the live value).
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+    try {
+      const replayDisarmed = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        lawnProgramMinimumMonthly: 0,
+        services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      const disarmedLawn = replayDisarmed.lineItems.find((li) => li.service === 'lawn_care');
+      expect(disarmedLawn.monthly).toBeLessThan(50);
+      expect(replayDisarmed.pricingMetadata.lawnProgramMinimumMonthly).toBe(0);
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
+  test('pest floor arm + per-visit value replay input-first and stamp into pricingMetadata', () => {
+    // Saved-armed replay under a disarmed global: the tier rows carry the
+    // floor metadata at the SAVED per-visit value, and the stamps record it.
+    const replayArmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      pestProgramFloorArmed: true,
+      pestProgramFloorPerVisit: 79,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const pest = replayArmed.lineItems.find((li) => li.service === 'pest_control');
+    const quarterly = (pest.tiers || []).find((t) => t.frequency === 'quarterly');
+    expect(quarterly.programFloorPerVisit).toBeCloseTo(79, 2);
+    expect(replayArmed.pricingMetadata.pestProgramFloorArmed).toBe(true);
+
+    // Disarmed default: no floor metadata on tiers, stamp records disarmed.
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 3000,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+    }));
+    const disarmedPest = disarmed.lineItems.find((li) => li.service === 'pest_control');
+    expect((disarmedPest.tiers || []).find((t) => t.frequency === 'quarterly').programFloorPerVisit)
+      .toBeUndefined();
+    expect(disarmed.pricingMetadata.pestProgramFloorArmed).toBe(false);
+  });
+
+  test('the LIST-price bottom replays at the saved per-visit floor, not the live one (pre-push P0, round 13)', () => {
+    // A floor-bound quote saved under one pest_base.floor must replay at
+    // THAT bottom even after the live floor moves — basePrice reads the
+    // same resolved value as the post-discount metadata.
+    const { PEST } = require('../services/pricing-engine/constants');
+    const prior = PEST.floor;
+    PEST.floor = 200; // live floor moved after save — binds basePrice hard
+    try {
+      const replayed = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        pestProgramFloorArmed: true,
+        pestProgramFloorPerVisit: 79,
+        services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      const replayedPest = replayed.lineItems.find((li) => li.service === 'pest_control');
+      // Saved $79 bottom: the quote's own base+adj price stands (< 200).
+      expect(replayedPest.perApp).toBeLessThan(200);
+      expect(replayed.pricingMetadata.pestProgramFloorPerVisit).toBe(79);
+
+      // No override: a live run bottoms at the live $200 floor.
+      const live = generateEstimate(baseInput({
+        measuredTurfSf: 3000,
+        services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      }));
+      expect(live.lineItems.find((li) => li.service === 'pest_control').perApp)
+        .toBeGreaterThanOrEqual(200);
+    } finally {
+      PEST.floor = prior;
+    }
+  });
+
+  test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // With cost floor on by default and material budgets, most tiers will show COST_FLOOR
+    // The floor math still runs and is emitted for margin reporting…
     expect(lawn.selected.costFloorAnnual).toBeGreaterThan(0);
+    // …and here it sits ABOVE the market cell ($591.25 vs $588) — yet the
+    // quote stays market-priced, proving the default is disarmed.
+    expect(lawn.selected.costFloorAnnual).toBeGreaterThan(lawn.selected.marketAnnual);
+    expect(lawn.selected.costFloorApplied).toBe(false);
+    expect(lawn.selected.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.selected.annual).toBe(588);
   });
 });

@@ -100,7 +100,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // No production source maps: dist/ is served statically, so emitted .map
+    // files (even "hidden" ones without a sourceMappingURL comment) were
+    // publicly fetchable at the chunk URL + '.map' and embedded original source.
+    sourcemap: false,
     chunkSizeWarningLimit: 2000,
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.

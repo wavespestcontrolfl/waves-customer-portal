@@ -425,6 +425,12 @@ function mapV1ToLegacyShape(v1Result) {
       rOG: pestLI.roachAddOn || 0,
       label: sel.label || 'Quarterly',
       ...floorFields(sel),
+      // Report-only low-margin signals (owner ruling 2026-07-17: margins
+      // are surfaced, never enforced) — the estimator shows these so the
+      // owner can raise a line the discount cut thin.
+      belowMarginFloor: pestLI.belowMarginFloor === true,
+      belowProgramFloor: pestLI.belowProgramFloor === true,
+      finalMargin: pestLI.finalMargin ?? null,
     };
     // Session 11a Step 2b-3: uppercase to match v2-legacy-mapper output.
     // pestLI.roachType is lowercase (german/regular/none) per service-pricing.
@@ -494,6 +500,11 @@ function mapV1ToLegacyShape(v1Result) {
       // would make the FIELD VERIFY warning impossible to clear after an
       // operator override (codex P3).
       bedAreaIsEstimated: tsLI.bedAreaSource === 'lot_based' || tsLI.bedAreaSource === 'fallback',
+      // Report-only low-margin signals (owner ruling 2026-07-17) — see the
+      // pest mapping above.
+      belowMarginFloor: tsLI.belowMarginFloor === true,
+      belowProgramFloor: tsLI.belowProgramFloor === true,
+      finalMargin: tsLI.finalMargin ?? null,
     };
   }
 
@@ -939,6 +950,10 @@ function mapV1ToLegacyShape(v1Result) {
     productionDiagnostics: pestLI?.productionDiagnostics || null,
     fieldVerify: v1Result.fieldVerify || [],
     notes: v1Result.notes || [],
+    // Margin visibility passthrough (owner ruling 2026-07-17): warn-only
+    // manual-discount margin warnings ride the mapped response so the
+    // estimator can surface "this looks low" — nothing enforces.
+    marginWarnings: v1Result.marginWarnings || [],
     pricingMetadata: v1Result.pricingMetadata || v1Result.routingMetadata || null,
     routingMetadata: v1Result.routingMetadata || v1Result.pricingMetadata || null,
     urgency: { mult: 1, label: '' },

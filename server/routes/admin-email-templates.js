@@ -859,7 +859,21 @@ router.post('/automations/runs/process-due', async (req, res, next) => {
     if (!isEnabled('emailTemplateAutomations')) {
       return res.status(403).json({ error: 'Email template automations are disabled' });
     }
-    const result = await AutomationExecutor.processDueRuns({ limit: req.body.limit });
+    // preview=true returns the due runs without sending, so the UI can confirm
+    // the recipient list before firing the batch.
+    const preview = req.body.preview === true;
+    const runIds = Array.isArray(req.body.runIds) ? req.body.runIds : null;
+    // A real send over HTTP must name the previewed runs — this endpoint can
+    // never fire the whole due batch unattended. The scheduler's full-batch run
+    // goes through the in-process executor call, not this route.
+    if (!preview && (!runIds || runIds.length === 0)) {
+      return res.status(400).json({ error: 'Preview and confirm first: runIds is required to send.' });
+    }
+    const result = await AutomationExecutor.processDueRuns({
+      limit: req.body.limit,
+      preview,
+      runIds,
+    });
     res.json(result);
   } catch (err) { next(err); }
 });

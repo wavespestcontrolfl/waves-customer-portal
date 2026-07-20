@@ -168,31 +168,31 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   return roundCurrency(price);
 }
 
-// Post-discount margin guard (Tree & Shrub + Pest Control).
+// Post-discount margin REPORT (Tree & Shrub + Pest Control).
 //
-// Protects the same margin definition the engine displays to admin/customer:
+// Computes the same margin definition the engine displays to admin/customer:
 //     margin = (annual - allInAnnualCost) / annual
 // where allInAnnualCost is direct cost + admin overhead.
 //
-// So the discounted annual must satisfy
-//     annual >= allInAnnualCost / (1 - marginFloor)
+// MARGIN-FLOOR ENFORCEMENT REMOVED (owner ruling 2026-07-17: "forget all
+// floors"). Historically this guard lifted WaveGuard-discounted totals back
+// to the 35% margin floor. Since the ruling, discounted prices go out
+// exactly as computed — margins are SURFACED (finalMargin here,
+// belowMarginFloor/belowProgramFloor flags on quotes, the manual-discount
+// warnings in estimate-engine) and the owner adjusts prices in the
+// estimator; nothing moves a price automatically. The margin floor has NO
+// re-arm key: it stays report-only.
 //
-// Guard policy (applies to AUTO discounts — WaveGuard tier):
-//  - Cap the discount when it would push displayed margin below the floor.
-//  - Never raise the discounted price above the original undiscounted annual:
-//    if the undiscounted price itself doesn't clear the floor, the discount
-//    engine just prevents *additional* discounting. Fixing under-priced base
-//    quotes is the pricing engine's job, not the discount engine's.
-//
-// Cost-shape per service: Tree & Shrub exposes costs.directCost + costs.adminCost
-// separately; Pest exposes a single costs.annualCost that already folds in admin.
-// Pest additionally enforces a post-discount PROGRAM FLOOR (dollar bound, not
-// margin bound): collected annual >= PEST.floor × freqMult × visitsPerYear.
-// The margin guard alone let Platinum collect ~$23/mo on floor-priced
-// quarterly quotes; the program floor holds every cadence at its own bottom
-// cell (owner decision 2026-07-09). Kill switch: pest_base row
-// enforce_floor_post_discount=false (DB, no deploy).
-// Manual owner discounts are NOT capped here — they warn-only (see estimate-engine).
+// PEST PROGRAM FLOOR (PEST.floor × freqMult × visits, owner decision
+// 2026-07-09) is DISARMED by default — migration 20260717120000 sets
+// pest_base.enforce_floor_post_discount=false and the in-code default is
+// false. The floor REFERENCE is always computed so the belowProgramFloor
+// signal reports the comparison either way (reporting is independent of
+// enforcement). When an operator re-arms the DB flag, ENFORCEMENT comes
+// back in full and end to end: this guard lifts the saved engine totals,
+// service-pricing stamps floorPa/floorAnn tier metadata, and
+// estimate-public clamps the public/accept reprice to the same floor — so
+// saved, viewed, and accepted amounts always agree (codex P1 on #2827).
 
 // Program-floor amounts for a pest cadence. The per-visit basis is rounded
 // FIRST — matching pricePestControl's perApp = round(basePrice × freqMult)
@@ -200,20 +200,26 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
 // annual a cent above the actual list price for a quote sitting exactly at
 // the floor (which would silently defeat the Math.min(lifted, originalAnnual)
 // cap and report the floor as applied at a price below it).
-function pestProgramFloorPerVisit(freqMult) {
+// Optional floorPerVisit override: saved-estimate replays thread the floor
+// the quote was priced with (pricingMetadata.pestProgramFloorPerVisit) so a
+// live pest_base.floor change never re-prices a sent quote (pre-push codex
+// P0, round 9 on #2827). Default: the live DB-synced PEST.floor.
+function pestProgramFloorPerVisit(freqMult, floorPerVisit) {
   const fm = Number(freqMult);
   if (!Number.isFinite(fm) || fm <= 0) return null;
-  return roundMoney(Number(PEST.floor) * fm);
+  const base = Number(floorPerVisit ?? PEST.floor);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  return roundMoney(base * fm);
 }
 
-function pestProgramFloorAnnual(freqMult, visitsPerYear) {
-  const perVisit = pestProgramFloorPerVisit(freqMult);
+function pestProgramFloorAnnual(freqMult, visitsPerYear, floorPerVisit) {
+  const perVisit = pestProgramFloorPerVisit(freqMult, floorPerVisit);
   const visits = Number(visitsPerYear);
   if (perVisit === null || !Number.isFinite(visits) || visits <= 0) return null;
   return roundMoney(perVisit * visits);
 }
 
-function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
+function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0, floorContext = {}) {
   const service = serviceQuote?.service;
   let annualCostAllIn = null;
   let marginFloor = Number(GLOBAL.MARGIN_FLOOR);
@@ -226,14 +232,17 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   } else if (service === 'pest_control') {
     const annualCost = Number(serviceQuote.costs?.annualCost);
     if (Number.isFinite(annualCost)) annualCostAllIn = annualCost;
-    // Post-discount program floor: the collected pest annual may not drop
-    // below PEST.floor × cadence multiplier × visits — the same per-visit
-    // floor the list price honors, scaled to the quote's cadence. Both the
-    // floor value and the kill switch (enforce_floor_post_discount: false)
-    // are DB-tunable on the pricing_config pest_base row.
-    if (PEST.enforceFloorPostDiscount) {
-      programFloorAnnual = pestProgramFloorAnnual(serviceQuote.freqMult, serviceQuote.visitsPerYear);
-    }
+    // Post-discount program floor REFERENCE: PEST.floor × cadence multiplier
+    // × visits — the same per-visit floor the list price honors, scaled to
+    // the quote's cadence. Computed UNCONDITIONALLY so the belowProgramFloor
+    // signal reports the comparison even while enforcement is disarmed
+    // (codex P2 on #2827); only the lift below is gated on the DB kill
+    // switch (pricing_config pest_base.enforce_floor_post_discount).
+    programFloorAnnual = pestProgramFloorAnnual(
+      serviceQuote.freqMult,
+      serviceQuote.visitsPerYear,
+      floorContext.pestProgramFloorPerVisit,
+    );
   } else {
     return {
       finalAnnual: roundMoney(finalAnnual),
@@ -260,47 +269,58 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   const finalMargin = hasCostBasis
     ? (candidateAnnual - annualCostAllIn) / candidateAnnual
     : null;
-  const needsMarginLift = hasCostBasis && finalMargin < marginFloor;
-  const needsFloorLift = programFloorAnnual !== null && candidateAnnual < programFloorAnnual;
 
-  if (!needsMarginLift && !needsFloorLift) {
+  // Pest program floor — ENFORCED only when the DB flag is re-armed, so the
+  // saved engine total matches what estimate-public clamps the public/accept
+  // reprice to off the stamped floor metadata (never above the original
+  // undiscounted price; a legacy below-floor base stays merely undiscounted).
+  // Arm state resolves caller-first: saved-estimate replays thread the arm
+  // state the quote was priced with (pre-push codex P0, round 9 on #2827).
+  const pestFloorArmed = typeof floorContext.pestProgramFloorArmed === 'boolean'
+    ? floorContext.pestProgramFloorArmed
+    : PEST.enforceFloorPostDiscount === true;
+  const needsFloorLift =
+    pestFloorArmed &&
+    programFloorAnnual !== null &&
+    candidateAnnual < programFloorAnnual;
+
+  if (needsFloorLift) {
+    const lifted = Math.max(candidateAnnual, programFloorAnnual);
+    const guardedAnnual = ceilMoney(hasOriginal ? Math.min(lifted, originalAnnual) : lifted);
+    const guardedMargin = hasCostBasis
+      ? (guardedAnnual - annualCostAllIn) / guardedAnnual
+      : null;
+    const actualDiscountPct = hasOriginal ? 1 - guardedAnnual / originalAnnual : 0;
     return {
-      finalAnnual: candidateAnnual,
-      finalMargin: finalMargin === null ? null : roundRatio(finalMargin),
+      finalAnnual: guardedAnnual,
+      finalMargin: guardedMargin === null ? null : roundRatio(guardedMargin),
+      // Margin-floor lift stays retired (no re-arm key) — report-only.
       marginGuardApplied: false,
-      discountCapped: false,
-      programFloorApplied: false,
+      programFloorApplied: guardedAnnual > candidateAnnual,
+      discountCapped: actualDiscountPct < requestedDiscountPct,
+      belowMarginFloor: hasCostBasis ? guardedMargin < marginFloor : false,
+      belowProgramFloor: guardedAnnual < programFloorAnnual,
       requestedDiscountPct,
-      actualDiscountPct: hasOriginal
-        ? roundRatio(1 - candidateAnnual / originalAnnual)
-        : 0,
+      actualDiscountPct: roundRatio(Math.max(0, actualDiscountPct)),
+      programFloorAnnual,
     };
   }
 
-  const minAnnualForMargin = hasCostBasis ? annualCostAllIn / (1 - marginFloor) : 0;
-  // Raise the discounted price to the binding bound (margin floor and/or the
-  // pest program floor), but never above the original undiscounted price —
-  // see policy comment above.
-  const lifted = Math.max(
-    candidateAnnual,
-    needsMarginLift ? minAnnualForMargin : 0,
-    needsFloorLift ? programFloorAnnual : 0,
-  );
-  const guardedAnnual = ceilMoney(hasOriginal ? Math.min(lifted, originalAnnual) : lifted);
-  const guardedMargin = hasCostBasis
-    ? (guardedAnnual - annualCostAllIn) / guardedAnnual
-    : null;
-  const actualDiscountPct = hasOriginal ? 1 - guardedAnnual / originalAnnual : 0;
-
+  // Report-only since the 2026-07-17 owner ruling: the discounted price
+  // stands as computed. belowMarginFloor / belowProgramFloor let callers
+  // and the estimator surface "this looks low" without moving the number.
   return {
-    finalAnnual: guardedAnnual,
-    finalMargin: guardedMargin === null ? null : roundRatio(guardedMargin),
-    marginGuardApplied: needsMarginLift,
-    programFloorApplied: needsFloorLift && guardedAnnual > candidateAnnual,
-    discountCapped: actualDiscountPct < requestedDiscountPct,
+    finalAnnual: candidateAnnual,
+    finalMargin: finalMargin === null ? null : roundRatio(finalMargin),
+    marginGuardApplied: false,
+    discountCapped: false,
+    programFloorApplied: false,
+    belowMarginFloor: hasCostBasis ? finalMargin < marginFloor : false,
+    belowProgramFloor: programFloorAnnual !== null && candidateAnnual < programFloorAnnual,
     requestedDiscountPct,
-    actualDiscountPct: roundRatio(Math.max(0, actualDiscountPct)),
-    ...(needsMarginLift ? { minAnnualForMargin: ceilMoney(minAnnualForMargin) } : {}),
+    actualDiscountPct: hasOriginal
+      ? roundRatio(Math.max(0, 1 - candidateAnnual / originalAnnual))
+      : 0,
     ...(programFloorAnnual !== null ? { programFloorAnnual } : {}),
   };
 }

@@ -1466,6 +1466,9 @@ async function seoActionQueueReport(input) {
 async function approveSeoAction(input, context) {
   if (!input.action_id) return { error: 'action_id is required' };
   if (!context?.isAdmin) return { error: 'Admin access required to approve SEO actions' };
+  // Server-derived confirmation only (same contract as runSeoPipeline below):
+  // /execute attaches confirmed after its own checks; the model loop never does.
+  if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to approve an SEO action' };
 
   return db.transaction(async (trx) => {
     const action = await trx('seo_actions').where('id', input.action_id).first();

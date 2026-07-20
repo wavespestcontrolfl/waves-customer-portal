@@ -331,6 +331,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         whereNotIn: () => b,
         whereRaw: () => b,
         first: () => Promise.resolve(null), // conflict re-check → free
+        // Global tech-blind probe (shared occupancy module, round 3): its
+        // chain tails with .select(...).orderBy(...) and resolves rows —
+        // empty here, so the probe passes and the flow reaches the insert.
+        select: () => b,
+        orderBy: () => Promise.resolve([]),
         insert: (row) => { capturedScheduledInsert = row; throw new Error(SENTINEL); },
       };
       return b;

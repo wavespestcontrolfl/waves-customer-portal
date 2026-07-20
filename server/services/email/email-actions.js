@@ -293,6 +293,18 @@ const LEAD_HARD_SKIP_SENDERS = [
   '@twimlets.com', // Twilio voicemail relay robots
 ];
 
+// Lead-marketplace solicitors (pay-to-unlock model, e.g. Bark): their
+// "X is looking for pest control" notifications NEVER contain the
+// prospect's real contact — the phone/email in the body is the
+// marketplace's own call-tracking number and relay address, so the
+// automated-sender "real contact extracted" heuristic passes on the
+// marketplace's own details and mints junk leads (two "Boris" leads off
+// team@bark.com + Bark's (424) call-tracking number, 2026-07-20). Distinct
+// from AUTOMATED_RELAY_DOMAINS (Thumbtack), whose notifications DO carry
+// the prospect's contact. Never a lead; the email itself stays in the
+// inbox — auto-trash remains an admin blocked_email_senders decision.
+const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com'];
+
 // Automated/no-reply senders and relay domains (e.g. Thumbtack lead
 // notifications). These CAN carry a real prospect, so a lead is still created
 // when the classifier extracted a real contact — but the automated
@@ -320,9 +332,10 @@ function leadMinConfidence() {
 function isHardSkippedLeadSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return false;
-  return LEAD_HARD_SKIP_SENDERS.some((entry) => (
+  if (LEAD_HARD_SKIP_SENDERS.some((entry) => (
     entry.startsWith('@') ? normalized.endsWith(entry) : normalized === entry
-  ));
+  ))) return true;
+  return domainMatches(domainFromAddress(normalized), LEAD_MARKETPLACE_SOLICITOR_DOMAINS);
 }
 
 function isAutomatedSender(fromAddress) {

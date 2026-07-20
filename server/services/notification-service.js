@@ -198,6 +198,16 @@ const NotificationService = {
     return updated > 0;
   },
 
+  // Mark a single admin notification read — scoped to recipient_type 'admin' so
+  // the admin endpoint can't clear a customer's notification by supplying its id
+  // (admin notifications are the shared admin queue; customer rows are off-limits).
+  async markReadAdmin(notificationId) {
+    const updated = await db('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .update({ read_at: new Date() });
+    return updated > 0;
+  },
+
   // Mark all read for admin
   async markAllReadAdmin() {
     await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at').update({ read_at: new Date() });

@@ -1497,6 +1497,7 @@ const SOURCE_ICON = {
 function EngineReviewBadge({ engine, agentReview, onOpen }) {
   if (!engine?.lane && !agentReview) return null;
   const flagged = (engine?.lane && engine.lane !== "green")
+    || (engine?.marginWarnings || []).length > 0
     || (agentReview?.uncertainty || []).length > 0
     || (agentReview?.belowTargetServices || []).length > 0
     || (agentReview?.unverifiedLineCount || 0) > 0;
@@ -1526,6 +1527,7 @@ export function EngineReviewModal({ estimate, onClose }) {
   const engine = estimate.estimatorEngine || {};
   const agentReview = estimate.agentDraftReview || null;
   const flagged = (estimate.estimatorEngine && engine.lane !== "green")
+    || (engine.marginWarnings || []).length > 0
     || (agentReview?.uncertainty || []).length > 0
     || (agentReview?.belowTargetServices || []).length > 0
     || (agentReview?.unverifiedLineCount || 0) > 0;
@@ -1601,6 +1603,20 @@ export function EngineReviewModal({ estimate, onClose }) {
               </pre>
             </div>
           )}
+          {(engine.marginWarnings || []).length > 0 && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Margin review (report-only — nothing moved the price)
+              </div>
+              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
+                {engine.marginWarnings.map((warning, i) => (
+                  <li key={i}>
+                    {String(warning?.message || warning?.code || warning).replace(/_/g, " ")}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {agentReview?.reasoning && (
             <div>
               <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
@@ -1664,6 +1680,7 @@ export function EngineReviewModal({ estimate, onClose }) {
           )}
           {!engine.reviewNotes
             && !(engine.laneReasons || []).length
+            && !(engine.marginWarnings || []).length
             && !agentReview?.reasoning
             && !(agentReview?.assumptions || []).length
             && !(agentReview?.uncertainty || []).length

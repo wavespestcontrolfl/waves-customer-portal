@@ -863,8 +863,102 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 // discount — including the annual-prepay % — may cut into. Scans the same
 // dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
 // lineItems) and dedupes by key so a lawn line is only protected once.
+// Per-estimate lawn program minimum (pre-push codex P0s, round 9 on #2827) —
+// the SINGLE resolution shared by the converter's prepay protection and
+// estimate-public's ladder/bundle clamps (the route delegates here), so
+// billing and render can never disagree about which floor a quote carries:
+// 1. pricingMetadata stamp — the engine (and client fallback engine) record
+//    the RESOLVED minimum on every pricing run; a later global re-arm or
+//    disarm must never re-price a sent quote (0 = priced disarmed).
+// 2. Legacy row evidence — pre-stamp estimates saved while the minimum was
+//    armed carry it on the stored rows: priceLawnCare stamps
+//    programMinimumMonthly whenever armed (v1 mapper mirrors it at
+//    prov/lawnMeta), and clamped rows carry programMinimumApplied /
+//    PROGRAM_MINIMUM source (client-fallback rows are value-less — their
+//    clamped monthly IS the minimum they were held at). Without this, a
+//    pre-disarm $600 quote falls to the now-0 global and renders/accepts
+//    below what was saved.
+// 3. Live global — estimates with no stamp and no row evidence
+//    (post-ruling and pre-#2540 saves): their existing behavior.
+function legacyLawnProgramMinimumMonthly(estimateData = {}) {
+  const result = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result
+    : (estimateData || {});
+  const rows = [];
+  if (Array.isArray(result?.results?.lawn)) rows.push(...result.results.lawn);
+  if (result?.lawnMeta && typeof result.lawnMeta === 'object') rows.push(result.lawnMeta);
+  // v1 saves nest the selected-lawn provenance at results.lawnMeta.
+  if (result?.results?.lawnMeta && typeof result.results.lawnMeta === 'object') {
+    rows.push(result.results.lawnMeta);
+  }
+  const lineItemSources = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    // Admin V2 saves persist the raw engine result separately.
+    ...(Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : []),
+  ];
+  for (const li of lineItemSources) {
+    if ((li?.service || '') !== 'lawn_care') continue;
+    rows.push(li);
+    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
+  }
+  // Explicit value stamps are exact — prefer them outright. Value-less
+  // applied rows (client-fallback saves) only bound the minimum from above:
+  // each clamped annual is ceil'd to a whole per-application multiple, so a
+  // $50 minimum produces rows at $50 (6x/12x) and $50.25 (9x). The MIN over
+  // applied rows recovers the tightest cadence-rounding-free estimate and
+  // never raises any saved row (every applied row's own price ≥ the min, and
+  // the ladder clamp only lifts below-minimum values) — max would over-infer
+  // $50.25 and re-price $50 tiers (pre-push codex P0, round 9 on #2827).
+  let stampedMax = null;
+  let appliedMin = null;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const stampedValue = Number(row.programMinimumMonthly ?? row.prov?.programMinimumMonthly);
+    if (Number.isFinite(stampedValue) && stampedValue > 0) {
+      stampedMax = Math.max(stampedMax ?? 0, stampedValue);
+      continue;
+    }
+    const applied = row.programMinimumApplied === true
+      || row.prov?.programMinimumApplied === true
+      || row.pricingSource === 'PROGRAM_MINIMUM'
+      || row.prov?.pricingSource === 'PROGRAM_MINIMUM'
+      || row.programMinimumGuardApplied === true;
+    if (!applied) continue;
+    let monthly = Number(row.mo ?? row.monthly);
+    if (!(Number.isFinite(monthly) && monthly > 0)) {
+      const annual = Number(row.annualAfterDiscount ?? row.annual ?? row.ann);
+      monthly = Number.isFinite(annual) && annual > 0 ? Math.round((annual / 12) * 100) / 100 : NaN;
+    }
+    if (Number.isFinite(monthly) && monthly > 0) {
+      appliedMin = appliedMin == null ? monthly : Math.min(appliedMin, monthly);
+    }
+  }
+  return stampedMax ?? appliedMin;
+}
+
+// Signal-only variant: stamp → legacy row evidence → NULL (no live-global
+// fallback). estimate-public's engine-input replay uses this to decide
+// whether to thread a saved minimum into generateEstimate — a silent
+// estimate must replay under the live global, not a frozen copy of it.
+function estimateLawnProgramMinimumSignal(estimateData = {}) {
+  const stamped = estimateData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.engineResult?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
+  const stampedN = Number(stamped);
+  if (stamped != null && Number.isFinite(stampedN) && stampedN >= 0) return stampedN;
+  return legacyLawnProgramMinimumMonthly(estimateData);
+}
+
+function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  const signal = estimateLawnProgramMinimumSignal(estimateData);
+  if (signal != null) return signal;
+  const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  return Number.isFinite(live) && live > 0 ? live : 0;
+}
+
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
-  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const minMonthly = resolveLawnProgramMinimumMonthlyForEstimate(estimateData);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
@@ -1160,15 +1254,24 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
   }
 }
 
-async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
+// The pattern seedRecurringFollowUpsForParent would actually seed for this
+// service/parent pair, or null when seeding would no-op. The guarded seeding
+// paths use it to decide whether the duplicate-series lock + re-check is
+// warranted at all — running the guard for a row that would never seed a
+// series would write misleading "series skipped" notes (and take a lock) for
+// nothing.
+function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency) {
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
-    fallbackFrequency: opts.fallbackFrequency,
+    fallbackFrequency,
   });
+  if (!pattern || !supportsConverterFollowUpSeeding(svc, parentRow, pattern)) return null;
+  return pattern;
+}
+
+async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
+  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency);
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
-  if (!supportsConverterFollowUpSeeding(svc, parentRow, pattern)) {
-    return { pattern, insertedCount: 0, insertedRows: [] };
-  }
   const visitsPerYear = visitsPerYearForRecurringService(svc);
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
@@ -1532,6 +1635,24 @@ const EstimateConverter = {
     let termStartDate = null;
     let firstScheduledServiceId = null;
     const deferredFollowUpReminderRows = [];
+    // Series-seeding transaction wrapper (P0: check-then-insert race). Every
+    // converter path that can CREATE a recurring series runs its duplicate-
+    // series re-check (checkActiveSeriesLocked — advisory lock per
+    // customer + service family) and its series inserts inside ONE
+    // transaction, so a concurrent creator blocks on the lock and then sees
+    // the committed series. A caller-provided transaction (public accept,
+    // manual Mark Won) is reused as-is — the lock then holds until THEIR
+    // commit; otherwise a transaction is opened per seeding step.
+    //
+    // Reminder registration goes through a SEPARATE connection
+    // (appointment-reminders), which cannot see rows this transaction hasn't
+    // committed — so when we open our own transaction the seed calls pass
+    // registerReminders:false and the wrapper's caller registers post-commit.
+    // Inside a caller transaction the pre-existing registerReminders
+    // semantics are preserved unchanged (those callers defer registration).
+    const seedsInOwnTransaction = !database.isTransaction;
+    const runSeedingStep = (fn) => (seedsInOwnTransaction ? database.transaction(fn) : fn(database));
+    const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
@@ -1539,6 +1660,92 @@ const EstimateConverter = {
       .count('id as count')
       .first();
     const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
+    // Loaded here rather than inside the reservation branch so the multi-unit
+    // lock pre-pass below can read the reserved row's service identity before
+    // any seeding unit processes.
+    const reservedRows = reservationRowsExist
+      ? await database('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNotNull('customer_id')
+        .whereNull('reservation_expires_at')
+        .orderBy('scheduled_date', 'asc')
+      : [];
+
+    // ——— Multi-unit lock-order pre-pass (P1: cross-conversion deadlock) ———
+    // Only the CALLER-TRANSACTION path needs it: with a caller-provided trx
+    // every runSeedingStep reuses that trx, so each unit's series-create
+    // advisory locks are held to the OUTER commit — two concurrent
+    // multi-service conversions processing the same families in different
+    // unit order each hold one family's locks while waiting on the other's,
+    // and Postgres aborts one acceptance (deadlock detected). The fix is the
+    // total-order discipline: collect every unit's lock keys up front and
+    // acquire the sorted union (same canonical sort checkActiveSeriesLocked
+    // applies within a unit) before any unit processes; the per-unit guard
+    // calls then merely re-acquire held keys, which pg advisory xact locks
+    // allow without waiting (re-entrant within the owning transaction — see
+    // acquireSeriesCreateLocks).
+    //
+    // When seedsInOwnTransaction, each seeding step opens and COMMITS its own
+    // transaction, releasing its locks before the next unit starts — no step
+    // ever waits while holding another unit's locks, so the sequential
+    // acquisition is already deadlock-free AND a pre-pass would be inert
+    // anyway (its xact locks would die with whichever step transaction ran
+    // it). The pre-pass therefore applies to the caller-trx path only.
+    //
+    // The collected union is a SUPERSET of what the units will lock: reserved
+    // rows contribute their current identity plus every combo-route rewrite
+    // target, and catalog ids resolve through the same services.service_key
+    // lookups the units run. Extra keys only over-serialize a touch; a MISSED
+    // key is what would reopen a mid-hold wait. Single-service conversions
+    // (<2 units) skip the pre-pass entirely — their one sorted key-pair
+    // already conforms to the global order — keeping them behaviorally
+    // identical. Fail-open like the guard: a pre-pass failure degrades to
+    // today's per-unit locking and never blocks the acceptance.
+    if (!seedsInOwnTransaction && !suppressRecurringConversion && !skipAutoSchedule) {
+      try {
+        // SAVEPOINT (knex nested transaction): a pre-pass failure must not
+        // abort the caller's accept transaction, and the advisory xact locks
+        // taken inside survive savepoint release and hold to the outer
+        // commit — the same isolation trick checkActiveSeriesLocked uses.
+        await database.transaction(async (lockTrx) => {
+          const lockUnits = [];
+          const catalogIdByKey = new Map();
+          const catalogIdFor = async (serviceKey) => {
+            if (!serviceKey) return null;
+            if (!catalogIdByKey.has(serviceKey)) {
+              const catalogRow = await lockTrx('services').where({ service_key: serviceKey }).first('id');
+              catalogIdByKey.set(serviceKey, catalogRow?.id || null);
+            }
+            return catalogIdByKey.get(serviceKey);
+          };
+          const addUnit = async (serviceType, catalogServiceKey, knownServiceId = null) => {
+            const serviceId = knownServiceId != null ? knownServiceId : await catalogIdFor(catalogServiceKey);
+            if (!serviceType && serviceId == null) return;
+            lockUnits.push({ customerId, serviceType: serviceType || null, serviceId });
+          };
+          const { remaining, combos, standalone } = combinedScheduling;
+          if (reservationRowsExist) {
+            for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
+            const reservedStart = reservedRows[0] || null;
+            if (reservedStart) {
+              await addUnit(reservedStart.service_type, null, reservedStart.service_id || null);
+              for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
+            }
+          } else {
+            for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
+            for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
+            for (const svc of remaining) {
+              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc));
+            }
+          }
+          if (lockUnits.length > 1) {
+            await RecurringAppointmentSeeder.acquireSeriesCreateLocks(lockTrx, lockUnits);
+          }
+        });
+      } catch (preLockErr) {
+        logger.warn(`[estimate-converter] series-lock pre-pass failed (per-unit locking still applies): ${preLockErr.message}`);
+      }
+    }
 
     if (suppressRecurringConversion) {
       logger.info(
@@ -1550,11 +1757,7 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
-      const reservedRows = await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
-        .whereNotNull('customer_id')
-        .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc');
+      // reservedRows hoisted above the branch (lock pre-pass needs it).
       const reservedStart = reservedRows[0] || null;
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
@@ -1614,30 +1817,68 @@ const EstimateConverter = {
             } catch (lookupErr) {
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
             }
-            const inserted = await database('scheduled_services').insert(standaloneRow).returning('*');
-            const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
-              ? inserted[0]
-              : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+            // Duplicate-series guard (P0): this standalone creator was the
+            // third unguarded converter seeding path — a customer already
+            // holding an active bait-station series would get a second
+            // parent + quarterly series. Guard + insert + seed share one
+            // locked transaction (runSeedingStep); a hit skips the WHOLE
+            // unit (no orphan first visit) with the standard skip note.
+            const outcome = await runSeedingStep(async (trx) => {
+              const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+                customerId,
+                serviceId: standaloneRow.service_id || null,
+                serviceType: standaloneRow.service_type,
+              });
+              if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
+              if (matches.length > 0) return { kept: matches[0] };
+              const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
+              const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
+                ? inserted[0]
+                : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              let seedResult = null;
+              try {
+                seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, unit.service, {
+                  fallbackFrequency: unit.service.frequency,
+                  registerReminders: registerSeededRowsInline,
+                });
+              } catch (seedErr) {
+                logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
+              }
+              return { parentRow, seedResult };
+            });
+            if (outcome.kept) {
+              logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${unit.service.name}" (series ${outcome.kept.id}) — skipped scheduling a duplicate standalone series`);
+              try {
+                await database('activity_log').insert({
+                  customer_id: customerId,
+                  action: 'recurring_series_skipped',
+                  description: `Estimate #${estimateId}: existing recurring series kept (${outcome.kept.service_type}, series #${outcome.kept.id}${outcome.kept.next_upcoming_date ? `, next visit ${outcome.kept.next_upcoming_date}` : ''}) — no duplicate ${unit.service.name} series was scheduled. Review the existing series against the new agreement.`,
+                  metadata: JSON.stringify({ estimateId, existingParentId: outcome.kept.id, skippedService: unit.service.name }),
+                });
+              } catch (noteErr) {
+                logger.warn(`[estimate-converter] duplicate-series skip note failed: ${noteErr.message}`);
+              }
+              continue;
+            }
+            const { parentRow, seedResult } = outcome;
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
             // same fail-soft registration the seeded follow-ups use.
+            // Post-commit relative to the seeding transaction above: the
+            // reminder writer must only ever see a committed visit row.
             if (!deferFollowUpReminderRegistration && parentRow.id && standaloneRow.window_start) {
               await registerSeededFollowUpReminders([parentRow], customerId);
             } else if (deferFollowUpReminderRegistration && parentRow.id) {
               deferredFollowUpReminderRows.push(parentRow);
             }
-            try {
-              const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, unit.service, {
-                fallbackFrequency: unit.service.frequency,
-                registerReminders: !deferFollowUpReminderRegistration,
-              });
+            if (seedResult) {
               if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
                 deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+              } else if (seedsInOwnTransaction) {
+                await registerSeededFollowUpReminders(seedResult.insertedRows, customerId);
               }
               scheduledCount += seedResult.insertedCount || 0;
-            } catch (seedErr) {
-              logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
             }
             logger.info(`[estimate-converter] standalone "${unit.service.name}" scheduled alongside reserved accept for estimate ${estimateId}`);
           } catch (standaloneErr) {
@@ -1692,14 +1933,55 @@ const EstimateConverter = {
       if (reservedStart) {
         try {
           const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
-          const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
-            fallbackFrequency: inferredFrequencyKey,
-            registerReminders: !deferFollowUpReminderRegistration,
-          });
-          if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
-            deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+          // Duplicate-series guard on the RESERVED-slot path (P0): this
+          // branch — the common public-accept path — seeded with NO guard,
+          // so a customer already holding an active series of the family
+          // still got a second one minted here. Same skip-with-note behavior
+          // as the auto-schedule guard below; the reserved row itself (the
+          // visit the customer picked and committed) is excluded from
+          // matching and is always kept — only the follow-up series is
+          // skipped. Gated on the seeding pattern so accepts that would
+          // never seed a series don't take the lock or write skip notes.
+          // Guard re-check + seeding share one locked transaction
+          // (runSeedingStep) so concurrent creators serialize.
+          if (converterFollowUpSeedingPattern(seedSvc || {}, reservedStart, inferredFrequencyKey)) {
+            const outcome = await runSeedingStep(async (trx) => {
+              const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+                customerId,
+                serviceId: reservedStart.service_id || null,
+                serviceType: reservedStart.service_type || null,
+                excludeParentId: reservedStart.id,
+              });
+              if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
+              if (matches.length > 0) return { kept: matches[0] };
+              const seedResult = await seedRecurringFollowUpsForParent(trx, reservedStart, seedSvc, {
+                fallbackFrequency: inferredFrequencyKey,
+                registerReminders: registerSeededRowsInline,
+              });
+              return { seedResult };
+            });
+            if (outcome.kept) {
+              logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${reservedStart.service_type}" (series ${outcome.kept.id}) — reserved visit ${reservedStart.id} kept, duplicate follow-up series skipped`);
+              try {
+                await database('activity_log').insert({
+                  customer_id: customerId,
+                  action: 'recurring_series_skipped',
+                  description: `Estimate #${estimateId}: existing recurring series kept (${outcome.kept.service_type}, series #${outcome.kept.id}${outcome.kept.next_upcoming_date ? `, next visit ${outcome.kept.next_upcoming_date}` : ''}) — the reserved visit stays, but no duplicate ${reservedStart.service_type} follow-up series was seeded. Review the existing series against the new agreement.`,
+                  metadata: JSON.stringify({ estimateId, existingParentId: outcome.kept.id, skippedService: reservedStart.service_type, reservedServiceId: reservedStart.id }),
+                });
+              } catch (noteErr) {
+                logger.warn(`[estimate-converter] duplicate-series skip note failed: ${noteErr.message}`);
+              }
+            } else {
+              const seedResult = outcome.seedResult;
+              if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
+                deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+              } else if (seedsInOwnTransaction) {
+                await registerSeededFollowUpReminders(seedResult.insertedRows, customerId);
+              }
+              scheduledCount += seedResult.insertedCount || 0;
+            }
           }
-          scheduledCount += seedResult.insertedCount || 0;
         } catch (seedErr) {
           logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
         }
@@ -1783,26 +2065,69 @@ const EstimateConverter = {
           if (combinedServiceId) row.service_id = combinedServiceId;
           if (estimatedPrice) row.estimated_price = estimatedPrice;
           if (durationMinutes) row.estimated_duration_minutes = durationMinutes;
-          const inserted = await database('scheduled_services').insert(row).returning('*');
-          const insertedId = Array.isArray(inserted)
-            ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
-            : (typeof inserted === 'object' ? inserted?.id : inserted);
-          if (!firstScheduledServiceId && insertedId) firstScheduledServiceId = insertedId;
-          const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
-            ? inserted[0]
-            : { ...row, id: insertedId };
-          let insertedFollowUps = 0;
-          try {
-            const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, svc, {
-              fallbackFrequency: inferredFrequencyKey,
-              registerReminders: !deferFollowUpReminderRegistration,
-            });
-            if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
-              deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+          // Duplicate-series guard: the customer may ALREADY hold an active
+          // recurring series of this service family (a prior estimate, a
+          // self-booking, an admin booking). Seeding another parent+children
+          // here is the verified cause of customers carrying two live
+          // series — keep the existing series and surface the skip to the
+          // office instead. Fail-open: a guard failure must not block the
+          // conversion (checkActiveSeriesLocked never throws). The guard
+          // re-check runs INSIDE the same locked transaction as the parent
+          // insert + follow-up seeding (P0: check-then-insert race), so two
+          // concurrent accepts serialize per customer + service family and
+          // the loser skips instead of minting a second series.
+          const outcome = await runSeedingStep(async (trx) => {
+            if (pattern) {
+              const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+                customerId,
+                serviceId: combinedServiceId,
+                serviceType: serviceName,
+              });
+              if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
+              if (matches.length > 0) return { kept: matches[0] };
             }
-            insertedFollowUps = seedResult.insertedCount || 0;
-          } catch (seedErr) {
-            logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
+            const inserted = await trx('scheduled_services').insert(row).returning('*');
+            const insertedId = Array.isArray(inserted)
+              ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
+              : (typeof inserted === 'object' ? inserted?.id : inserted);
+            const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
+              ? inserted[0]
+              : { ...row, id: insertedId };
+            let seedResult = null;
+            try {
+              seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, svc, {
+                fallbackFrequency: inferredFrequencyKey,
+                registerReminders: registerSeededRowsInline,
+              });
+            } catch (seedErr) {
+              logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
+            }
+            return { insertedId, seedResult };
+          });
+          if (outcome.kept) {
+            const kept = outcome.kept;
+            logger.warn(`[estimate-converter] Estimate ${estimateId}: existing active recurring series kept for "${serviceName}" (series ${kept.id}) — skipped scheduling a duplicate series`);
+            try {
+              await database('activity_log').insert({
+                customer_id: customerId,
+                action: 'recurring_series_skipped',
+                description: `Estimate #${estimateId}: existing recurring series kept (${kept.service_type}, series #${kept.id}${kept.next_upcoming_date ? `, next visit ${kept.next_upcoming_date}` : ''}) — no duplicate ${serviceName} series was scheduled. Review the existing series against the new agreement.`,
+                metadata: JSON.stringify({ estimateId, existingParentId: kept.id, skippedService: serviceName }),
+              });
+            } catch (noteErr) {
+              logger.warn(`[estimate-converter] duplicate-series skip note failed: ${noteErr.message}`);
+            }
+            continue;
+          }
+          if (!firstScheduledServiceId && outcome.insertedId) firstScheduledServiceId = outcome.insertedId;
+          let insertedFollowUps = 0;
+          if (outcome.seedResult) {
+            if (deferFollowUpReminderRegistration && Array.isArray(outcome.seedResult.insertedRows)) {
+              deferredFollowUpReminderRows.push(...outcome.seedResult.insertedRows);
+            } else if (seedsInOwnTransaction) {
+              await registerSeededFollowUpReminders(outcome.seedResult.insertedRows, customerId);
+            }
+            insertedFollowUps = outcome.seedResult.insertedCount || 0;
           }
           scheduledCount += 1 + insertedFollowUps;
         } catch (e) {
@@ -2455,6 +2780,8 @@ module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeedi
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.resolveLawnProgramMinimumMonthlyForEstimate = resolveLawnProgramMinimumMonthlyForEstimate;
+module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;

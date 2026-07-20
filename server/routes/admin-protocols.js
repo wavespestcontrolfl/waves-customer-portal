@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const {
   buildPlanForService,
@@ -1799,7 +1799,7 @@ router.get('/completion-actions', async (req, res, next) => {
 });
 
 // POST /api/admin/protocols/lawn/drafts — clone active protocol into editable draft.
-router.post('/lawn/drafts', async (req, res, next) => {
+router.post('/lawn/drafts', requireAdmin, async (req, res, next) => {
   try {
     const draft = await db.transaction(async (trx) => {
       const active = await trx('lawn_protocols')
@@ -1824,7 +1824,7 @@ router.post('/lawn/drafts', async (req, res, next) => {
 });
 
 // POST /api/admin/protocols/lawn/drafts/:id/publish — promote draft to active protocol.
-router.post('/lawn/drafts/:id/publish', async (req, res, next) => {
+router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => {
   try {
     const published = await db.transaction(async (trx) => {
       const draft = await trx('lawn_protocols').where({ id: req.params.id }).first();
@@ -2206,7 +2206,7 @@ router.post('/lawn/readiness/:serviceId/assign', async (req, res, next) => {
 });
 
 // PUT /api/admin/protocols/lawn/products/:id — map/edit a protocol product row.
-router.put('/lawn/products/:id', async (req, res, next) => {
+router.put('/lawn/products/:id', requireAdmin, async (req, res, next) => {
   try {
     const existing = await db('lawn_protocol_products').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Protocol product not found' });
@@ -2261,7 +2261,7 @@ router.put('/lawn/products/:id', async (req, res, next) => {
 });
 
 // PUT /api/admin/protocols/lawn/windows/:windowKey — update current SOP/wiki bridge fields.
-router.put('/lawn/windows/:windowKey', async (req, res, next) => {
+router.put('/lawn/windows/:windowKey', requireAdmin, async (req, res, next) => {
   try {
     const protocolQuery = db('lawn_protocols').orderBy('effective_from', 'desc');
     if (req.body.protocolId) {
@@ -2310,7 +2310,7 @@ router.put('/lawn/windows/:windowKey', async (req, res, next) => {
 });
 
 // POST /api/admin/protocols/lawn/windows/:windowKey/wiki-sync — create/update the window SOP page.
-router.post('/lawn/windows/:windowKey/wiki-sync', async (req, res, next) => {
+router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res, next) => {
   try {
     const protocolQuery = db('lawn_protocols').orderBy('effective_from', 'desc');
     if (req.body.protocolId) {
@@ -2406,7 +2406,7 @@ router.post('/lawn/windows/:windowKey/wiki-sync', async (req, res, next) => {
 });
 
 // PUT /api/admin/protocols/lawn/gates/:id — edit an enforcement/reference gate.
-router.put('/lawn/gates/:id', async (req, res, next) => {
+router.put('/lawn/gates/:id', requireAdmin, async (req, res, next) => {
   try {
     const existing = await db('lawn_protocol_gates').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Protocol gate not found' });

@@ -371,6 +371,22 @@ function DayHeaderRow({ days, todayIso }) {
             <span style={{ fontSize: 14, color: today ? '#18181B' : '#3F3F46', fontWeight: today ? 700 : 500, fontVariantNumeric: 'tabular-nums' }}>
               {num}
             </span>
+            {/* Exception-based rain marker: only at ≥40% (amber), ≥50 red —
+                same thresholds as the desktop week grid / dispatch weather bar. */}
+            {day.rainChance != null && day.rainChance >= 40 && (
+              <span
+                title={`${day.rainChance}% chance of rain`}
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: 1,
+                  color: day.rainChance >= 50 ? '#DC2626' : '#B45309',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              >
+                {day.rainChance}%
+              </span>
+            )}
           </div>
         );
       })}

@@ -92,12 +92,12 @@ export default function AdminLoginPage() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT, padding: 20 }}>
+    <main style={{ minHeight: '100vh', background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT, padding: 20 }}>
       <div style={{ maxWidth: 400, width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 48, marginBottom: 12 }} />
           <div style={{ fontSize: 18, fontWeight: 800, color: D.white, fontFamily: ADMIN_FONT }}>Staff Portal</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Waves Pest Control Admin</div>
+          <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Waves Pest Control Admin</div>
         </div>
 
         <form onSubmit={handleLogin} style={{ background: D.card, borderRadius: 16, padding: 28, border: `1px solid ${D.border}` }}>
@@ -127,6 +127,6 @@ export default function AdminLoginPage() {
           <a href="/login" style={{ fontSize: 14, color: D.teal, textDecoration: 'none' }}>← Back to Customer Portal</a>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

@@ -21,6 +21,7 @@ import {
 } from "react";
 import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
+import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
@@ -286,6 +287,10 @@ function GlobalCommandPalette(_props, ref) {
   const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
+  // Dialog semantics: trap Tab focus inside the palette while open and restore
+  // focus to the opener on close. Escape stays handled by the palette's own
+  // key handlers, so no onEscape is passed here.
+  const paletteRef = useModalFocus(open);
 
   const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
@@ -461,6 +466,7 @@ function GlobalCommandPalette(_props, ref) {
   if (isMobile) {
     return (
       <MobileSheet
+        paletteRef={paletteRef}
         close={close}
         dragY={dragY}
         onTouchStart={onTouchStart}
@@ -503,6 +509,10 @@ function GlobalCommandPalette(_props, ref) {
         }}
       />{" "}
       <div
+        ref={paletteRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
         style={{
           position: "fixed",
           top: "10%",
@@ -846,6 +856,7 @@ function GlobalCommandPalette(_props, ref) {
 
 // ─── Mobile bottom sheet ───────────────────────────────────────
 function MobileSheet({
+  paletteRef,
   close,
   dragY,
   onTouchStart,
@@ -886,6 +897,10 @@ function MobileSheet({
       />
       {/* Sheet */}
       <div
+        ref={paletteRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
         style={{
           position: "fixed",
           left: 0,

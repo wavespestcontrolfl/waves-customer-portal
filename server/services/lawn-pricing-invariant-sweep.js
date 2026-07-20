@@ -52,17 +52,27 @@ function scanLadderGrid() {
   const violations = [];
   let cellsChecked = 0;
 
-  // The DB bridge deep-merges lawn config without validating this field, so a
-  // malformed live value must be a violation — `Number(...) || 0` would
-  // silently DISABLE the below-minimum check (and priceLawnCare stops
-  // enforcing the owner-mandated floor) while the sweep reports clean.
+  // The DB bridge deep-merges lawn config without validating this field, so
+  // a malformed live value must be a violation. A DELIBERATE zero is
+  // EXEMPT: 0 is the designed disarm value (every reader guards on > 0)
+  // and the shipped default since the 2026-07-17 owner ruling ("forget all
+  // floors") — a clean sweep must not ring a permanent critical bell over
+  // policy. Deliberate means the numeric 0 or a numeric-string zero
+  // ("0"/"0.00", how pg returns numerics) — null/false/''/whitespace/arrays
+  // also COERCE to 0 but mean a corrupted config row, and pricing readers
+  // would silently treat them as disabled while the sweep reported clean.
   const rawProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
   const programMinimumMonthly = Number(rawProgramMinimum);
-  if (!Number.isFinite(programMinimumMonthly) || programMinimumMonthly <= 0) {
+  const deliberateZero =
+    (typeof rawProgramMinimum === 'number' && rawProgramMinimum === 0)
+    || (typeof rawProgramMinimum === 'string'
+      && rawProgramMinimum.trim() !== ''
+      && Number(rawProgramMinimum.trim()) === 0);
+  if (!deliberateZero && !(Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0)) {
     violations.push({
       check: 'malformed_program_minimum',
       cell: 'lawn_pricing_v2.programMinimumMonthly',
-      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — the monthly floor is not being enforced`,
+      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — not a valid dollar amount (numeric 0 = disarmed by design)`,
     });
   }
   // Same class of guard for the collected-margin floor: a blanked/0 live
@@ -71,11 +81,21 @@ function scanLadderGrid() {
   // the 35% margin guarantee is silently disabled.
   const rawMarginFloor = LAWN_PRICING_V2.targetCollectedMarginFloor;
   const marginFloor = Number(rawMarginFloor);
-  if (!Number.isFinite(marginFloor) || marginFloor <= 0 || marginFloor >= 1) {
+  // Same deliberate-zero contract as the program minimum above: an explicit
+  // numeric/numeric-string 0 is disarmed-by-design (floors are surfaced,
+  // never enforced — owner ruling 2026-07-17), while null/false/''/arrays
+  // still mean a corrupted row. Without this exemption, a DB disarm of the
+  // margin floor would ring a permanent false CRITICAL.
+  const deliberateMarginZero =
+    (typeof rawMarginFloor === 'number' && rawMarginFloor === 0)
+    || (typeof rawMarginFloor === 'string'
+      && rawMarginFloor.trim() !== ''
+      && Number(rawMarginFloor.trim()) === 0);
+  if (!deliberateMarginZero && (!Number.isFinite(marginFloor) || marginFloor <= 0 || marginFloor >= 1)) {
     violations.push({
       check: 'malformed_margin_floor',
       cell: 'lawn_pricing_v2.targetCollectedMarginFloor',
-      detail: `live config collected-margin floor is ${JSON.stringify(rawMarginFloor)} — the cost floor's margin guarantee is not being enforced`,
+      detail: `live config collected-margin floor is ${JSON.stringify(rawMarginFloor)} — not a valid ratio (numeric 0 = disarmed by design)`,
     });
   }
 

@@ -346,7 +346,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   );
 }
 
-function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -355,14 +355,30 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatm
         className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between"
         style={{ padding: '8px 14px', height: 36 }}
       >
-        <span
-          className={
-            'uppercase tracking-label font-medium ' +
-            (today ? 'text-zinc-900' : 'text-ink-secondary')
-          }
-          style={{ fontSize: 11 }}
-        >
-          {headerLabel(dateStr)}
+        <span className="flex items-center" style={{ gap: 8 }}>
+          <span
+            className={
+              'uppercase tracking-label font-medium ' +
+              (today ? 'text-zinc-900' : 'text-ink-secondary')
+            }
+            style={{ fontSize: 11 }}
+          >
+            {headerLabel(dateStr)}
+          </span>
+          {/* Exception-based rain chip: only at ≥40% (amber), ≥50 alert-red —
+              same thresholds as the week grids / dispatch weather bar. */}
+          {rainChance != null && rainChance >= 40 && (
+            <span
+              className={
+                'u-nums font-medium ' +
+                (rainChance >= 50 ? 'text-alert-fg' : 'text-amber-700')
+              }
+              style={{ fontSize: 11 }}
+              title={`${rainChance}% chance of rain`}
+            >
+              {rainChance}% rain
+            </span>
+          )}
         </span>
         <span className="u-nums text-ink-tertiary" style={{ fontSize: 11 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
@@ -395,7 +411,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatm
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -445,6 +461,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
         <DaySegment
           dateStr={date}
           services={services || []}
+          rainChance={rainChance}
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
@@ -479,6 +496,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           key={d.date}
           dateStr={d.date}
           services={d.services || []}
+          rainChance={d.rainChance}
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}

@@ -1,14 +1,19 @@
-import { Link, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import {
   LogOut,
   ExternalLink,
   ChevronRight,
 } from "lucide-react";
 import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
+import useIsMobile from "../../hooks/useIsMobile";
 import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
 
 export default function MorePage() {
   const navigate = useNavigate();
+  // The "More" menu is a mobile-only nav surface (its root is `md:hidden`, so
+  // on desktop it rendered a blank page). Desktop uses the full sidebar — send
+  // it to the dashboard instead. Reactive: resizing to desktop redirects too.
+  const isMobile = useIsMobile();
   let currentRole = null;
   try {
     currentRole = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
@@ -16,6 +21,8 @@ export default function MorePage() {
     currentRole = null;
   }
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+
+  if (!isMobile) return <Navigate to="/admin" replace />;
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");

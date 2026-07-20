@@ -413,7 +413,8 @@ async function sendEmailReply({ email_id, body }) {
       email.gmail_thread_id
     );
 
-    logger.info(`[intelligence-bar:email] Sent reply to ${email.from_address}: ${result.id}`);
+    // Log internal ids, not the recipient address (PII stays out of logs).
+    logger.info(`[intelligence-bar:email] Sent reply to email ${email.id}: ${result.id}`);
 
     return {
       success: true,
@@ -493,7 +494,8 @@ async function replyViaSms({ email_id, customer_name, message }) {
       });
     }
 
-    logger.info(`[intelligence-bar:email] SMS reply to ${custName} at ${phone}`);
+    // Log internal ids, not the customer name/phone (PII stays out of logs).
+    logger.info(`[intelligence-bar:email] SMS reply for customer ${custId || 'lead'} (email ${email_id})`);
 
     return {
       success: true,

@@ -309,6 +309,12 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     if (rOpts.nth != null) row.recurring_nth = rOpts.nth;
     if (rOpts.weekday != null) row.recurring_weekday = rOpts.weekday;
     if (rOpts.intervalDays != null) row.recurring_interval_days = rOpts.intervalDays;
+    // Classify from the row's own service_type rather than copying
+    // parent.appointment_type: the AppointmentTagger stamps the parent
+    // post-insert (fire-and-forget on the accept paths), so the parent's
+    // tag may not exist yet when follow-ups seed in the same request.
+    row.appointment_type = require('./appointment-tagger')
+      .classifyAppointmentType(row.service_type).tag;
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
@@ -318,6 +324,25 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'service_id',
       'lat',
       'lng',
+      // Stamped service address (property linkage): a series booked for a
+      // secondary/rental property carries a visit-level stamp; follow-ups
+      // must inherit it or every reader's COALESCE(service_address_*,
+      // customers.address_*) falls back to the customer's PRIMARY address
+      // and the visit dispatches to the wrong property. Cols-guarded like
+      // the rest of the row — the insert path maps through filterByColumns.
+      'property_id',
+      'service_address_line1',
+      'service_address_line2',
+      'service_address_city',
+      'service_address_state',
+      'service_address_zip',
+      // Inert legacy names: scheduled_services has no plain
+      // address/city/state/zip columns, so a real parent row never carries
+      // these keys (copyIfPresent skips) and filterByColumns would strip
+      // them from the insert anyway. Left in place rather than removed —
+      // this exported builder is driven directly by other suites and the
+      // cleanup belongs to its own change; the service_address_* columns
+      // above are the live stamp.
       'address',
       'city',
       'state',
@@ -385,6 +410,172 @@ async function existingSeriesDates(conn, parent, columns) {
   return [...new Set(dates)];
 }
 
+// Find this customer's ACTIVE recurring series parents in the same service
+// family — the duplicate-series guard shared by the three series creators
+// (estimate-converter auto-schedule, booking.js self-book seeding, admin
+// POST /admin/schedule). A parent is a non-cancelled scheduled_services row
+// with is_recurring=true and no recurring_parent_id; it is ACTIVE when it is
+// flagged recurring_ongoing (auto-refills) or the series still has an
+// upcoming (pending/confirmed, today-or-later ET) visit. A fully-lapsed
+// series never blocks a new one.
+//
+// Service-family match: service_id equality when both sides carry one (the
+// catalog link survives renames), OR the serviceKeyFor normalization of
+// service_type. Exact service_type string equality is too narrow — the three
+// creators stamp different labels for the same program ("Quarterly Pest
+// Control" vs a catalog display name), so the family key is the shared
+// serviceKeyFor buckets.
+//
+// excludeParentId: callers that already inserted their own first-visit row
+// (booking.js) pass it so the fresh row can never match itself.
+// Returns [] when nothing matches; matches carry next_upcoming_date (ET
+// date string) when the series has a future visit.
+async function findActiveRecurringSeries(conn, {
+  customerId,
+  serviceId = null,
+  serviceType = null,
+  excludeParentId = null,
+} = {}) {
+  if (!conn || !customerId || (serviceId == null && !serviceType)) return [];
+  const columns = await scheduledServiceColumns(conn);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id) return [];
+  const query = conn('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
+  if (columns.service_id) query.select('service_id');
+  if (columns.recurring_ongoing) query.select('recurring_ongoing');
+  if (excludeParentId) query.whereNot('id', excludeParentId);
+  const parents = await query;
+  const targetKey = serviceType ? serviceKeyFor({ service_type: serviceType }) : null;
+  const matches = [];
+  for (const parent of parents || []) {
+    const idMatch = serviceId != null && parent.service_id != null
+      && String(parent.service_id) === String(serviceId);
+    const keyMatch = targetKey != null && parent.service_type
+      && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
+    if (!idMatch && !keyMatch) continue;
+    const upcoming = await conn('scheduled_services')
+      .where(function () {
+        this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });
+      })
+      .where('is_recurring', true)
+      .whereIn('status', ['pending', 'confirmed'])
+      .where('scheduled_date', '>=', etDateString())
+      .orderBy('scheduled_date', 'asc')
+      .first('scheduled_date');
+    const ongoing = columns.recurring_ongoing ? parent.recurring_ongoing === true : false;
+    if (!ongoing && !upcoming) continue; // lapsed series — a new one is legitimate
+    matches.push({
+      ...parent,
+      next_upcoming_date: upcoming ? dateOnly(upcoming.scheduled_date) : null,
+    });
+  }
+  return matches;
+}
+
+// Race-safe wrapper around findActiveRecurringSeries (P0: check-then-insert
+// race). Running the guard OUTSIDE the seeding transaction let two concurrent
+// creators both see "no series" and both seed. Callers invoke this INSIDE the
+// transaction that inserts the parent/follow-ups: it serializes series
+// creation on pg advisory xact locks (the hashed-key pattern shared with
+// booking's self-booking-confirm/slot-reserve locks and the per-parent
+// maintenance lock in admin-schedule) and re-runs the guard under the locks —
+// the loser blocks until the winner's transaction commits, then sees the
+// fresh series and skips.
+//
+// Lock keys mirror BOTH dimensions of the guard's OR-matcher (round 3, codex
+// P0: a single family-only key let two creators with the SAME service_id but
+// differently-normalized labels take different locks, both pass the re-check,
+// and both seed). The predicate matches on service_id equality OR
+// serviceKeyFor-family equality, so no single string covers every matching
+// path — instead we take one lock per dimension the caller carries:
+//   '<customerId>:family:<serviceKeyFor bucket>'   (when serviceType given)
+//   '<customerId>:svc:<serviceId>'                 (when serviceId given)
+// Two creators whose inserts the guard would cross-match share at least one
+// dimension, so they contend on at least one common lock. Keys are sorted
+// before acquisition so every creator takes them in the same order — two
+// creators holding one lock each while waiting on the other's (swap deadlock)
+// is impossible.
+//
+// The locks + guard query run in a SAVEPOINT (knex nested transaction) so a
+// guard failure can never abort the caller's outer transaction; the advisory
+// xact locks themselves survive savepoint release and hold until top-level
+// commit. Fail-open BY DESIGN (the guard is protective, not load-bearing):
+// errors are returned — never thrown — as { matches: [], guardError } so the
+// caller logs and proceeds with seeding.
+async function checkActiveSeriesLocked(trx, opts = {}) {
+  try {
+    const matches = await trx.transaction(async (guardTrx) => {
+      const lockKeys = seriesCreateLockKeys(opts).sort();
+      for (const lockKey of lockKeys) {
+        await guardTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['recurring-series-create', lockKey],
+        );
+      }
+      return findActiveRecurringSeries(guardTrx, opts);
+    });
+    return { matches: matches || [], guardError: null };
+  } catch (guardError) {
+    return { matches: [], guardError };
+  }
+}
+
+// The lock keys checkActiveSeriesLocked acquires for one series-creating
+// unit — extracted so the derivation lives in exactly one place (the
+// sorted-union pre-pass below must emit byte-identical keys or it stops
+// covering the per-unit acquisitions).
+function seriesCreateLockKeys({ customerId, serviceId = null, serviceType = null } = {}) {
+  const keys = [];
+  if (serviceType) {
+    keys.push(`${customerId}:family:${serviceKeyFor({ service_type: serviceType })}`);
+  }
+  if (serviceId != null) {
+    keys.push(`${customerId}:svc:${serviceId}`);
+  }
+  return keys;
+}
+
+// Sorted-union pre-acquisition for MULTI-UNIT series creators that hold their
+// locks to a shared outer commit (P1: cross-conversion deadlock).
+//
+// checkActiveSeriesLocked sorts WITHIN one unit's keys, so single-unit
+// creators can never swap-deadlock — but a caller-transaction conversion
+// seeding several units acquires each unit's keys sequentially and holds all
+// of them to the OUTER commit. Two such conversions processing the same
+// families in different unit order each hold one family's locks while
+// waiting on the other's → Postgres aborts one of them (deadlock detected)
+// and the acceptance fails. The fix is the classic total-order discipline:
+// collect EVERY unit's keys up front, sort the deduped union with the same
+// default lexicographic comparator checkActiveSeriesLocked uses, and acquire
+// them once before any unit processes. Each key is then > every key already
+// held, for every creator (single-unit creators' sorted pairs conform to the
+// same global order), so no hold-and-wait cycle can form.
+//
+// The per-unit checkActiveSeriesLocked calls that follow re-acquire keys the
+// pre-pass already holds. pg_advisory_xact_lock is re-entrant within the
+// owning session/transaction — "a lock can be acquired multiple times by its
+// owning process" (PostgreSQL docs, Advisory Locks); transaction-level locks
+// need no matching unlock and release at transaction end — so the re-acquire
+// succeeds immediately without ever waiting, and creates no new wait edges.
+//
+// Acquired directly on the caller's transaction (no savepoint needed — the
+// statement can only fail on connection loss, and callers treat this pass as
+// protective/fail-open like the guard itself). Returns the sorted key list
+// (asserted by the lane tests).
+async function acquireSeriesCreateLocks(conn, units = []) {
+  const keys = [...new Set(units.flatMap((unit) => seriesCreateLockKeys(unit)))].sort();
+  for (const lockKey of keys) {
+    await conn.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-create', lockKey],
+    );
+  }
+  return keys;
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -436,7 +627,11 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 }
 
 module.exports = {
+  acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
+  checkActiveSeriesLocked,
+  findActiveRecurringSeries,
+  seriesCreateLockKeys,
   inferRecurringPattern,
   markParentRecurring,
   normalizeRecurringPattern,

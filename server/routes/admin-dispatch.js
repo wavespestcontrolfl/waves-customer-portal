@@ -2035,28 +2035,43 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
       const terminalStatuses = ['completed', 'skipped', 'cancelled'];
-      const baseQuery = db('scheduled_services')
-        .where(function () {
-          this.where('id', parentId).orWhere('recurring_parent_id', parentId);
-        })
-        .where(function () {
-          this.whereIn('status', cancellableStatuses)
-            .orWhere(function () {
-              this.where('id', svc.id).whereNotIn('status', terminalStatuses);
-            });
-        });
-      if (scope === 'following') {
-        baseQuery.where('scheduled_date', '>=', svc.scheduled_date);
-      }
-
-      const targets = await baseQuery
-        .orderBy('scheduled_date', 'asc')
-        .select('id', 'status', 'customer_id', 'service_type');
-
-      if (!targets.length) return res.status(409).json({ error: 'No cancellable appointments found in this series' });
-
       const { transitionJobStatus } = require('../services/job-status');
+      let targets = [];
+      let ongoingStopped = 0;
       await db.transaction(async (trx) => {
+        // Serialize with the per-parent series-maintenance advisory lock
+        // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
+        // the cancel set (codex P0: completion hook recreated cancelled
+        // future visits). A concurrent completion's auto-extend either
+        // commits before the select below — so its fresh row lands in the
+        // cancel set — or blocks on this lock until our commit and then
+        // sees recurring_ongoing=false in its in-lock re-checks and no-ops.
+        // Without the lock, maintenance could interleave between the row
+        // cancels and the flag clear and re-extend (re-bill) the cadence
+        // the customer just cancelled.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['recurring-series-maintenance', String(parentId)],
+        );
+
+        const targetQuery = trx('scheduled_services')
+          .where(function () {
+            this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+          })
+          .where(function () {
+            this.whereIn('status', cancellableStatuses)
+              .orWhere(function () {
+                this.where('id', svc.id).whereNotIn('status', terminalStatuses);
+              });
+          });
+        if (scope === 'following') {
+          targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
+        }
+        targets = await targetQuery
+          .orderBy('scheduled_date', 'asc')
+          .select('id', 'status', 'customer_id', 'service_type');
+        if (!targets.length) return; // nothing written — 409 after commit
+
         for (const target of targets) {
           await transitionJobStatus({
             jobId: target.id,
@@ -2069,7 +2084,30 @@ router.put('/:serviceId/status', async (req, res, next) => {
             trx,
           });
         }
+
+        // Stop the plan ATOMICALLY with the row cancels: both 'following'
+        // and 'series' cancel the remainder of the series, so a parent left
+        // flagged recurring_ongoing would let a later completion of an
+        // earlier retained visit re-extend — and re-bill — the cancelled
+        // cadence. Cleared series-wide (parent + children carry the flag)
+        // in the SAME transaction, under the maintenance lock above.
+        // Single-occurrence cancels (scope 'this_only') never enter this
+        // branch and leave the flag intact. The per-row cancellation reason
+        // is already stamped by transitionJobStatus (notes →
+        // job_status_history); the activity_log line below records the
+        // plan stop.
+        const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
+        if (cols.recurring_ongoing) {
+          ongoingStopped = await trx('scheduled_services')
+            .where(function () {
+              this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+            })
+            .where('recurring_ongoing', true)
+            .update({ recurring_ongoing: false, updated_at: new Date() });
+        }
       });
+
+      if (!targets.length) return res.status(409).json({ error: 'No cancellable appointments found in this series' });
 
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
@@ -2118,7 +2156,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
         admin_user_id: req.technicianId,
         customer_id: svc.customer_id,
         action: 'status_changed',
-        description: `${svc.tech_name} cancelled ${targets.length} ${scope === 'series' ? 'series' : 'future'} appointments for ${svc.first_name}`,
+        description: `${svc.tech_name} cancelled ${targets.length} ${scope === 'series' ? 'series' : 'future'} appointments for ${svc.first_name}`
+          + (ongoingStopped > 0 ? ' and stopped the ongoing recurring plan' : ''),
       });
 
       return res.json({ success: true, cancelledCount: targets.length, scope });
@@ -2282,6 +2321,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
       } catch (leadErr) {
         logger.warn(`[lead-trigger] status-complete conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
+      }
+      // Recurring plan refill / end-of-plan flag — same maintenance the
+      // admin-schedule completion path runs. It historically lived ONLY on
+      // that route, which no production completion calls, so ongoing series
+      // completed through dispatch ran dry with no refill and no alert.
+      // Failure-isolated: never fails the committed status flip.
+      try {
+        const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+        await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_status_complete' });
+      } catch (seriesErr) {
+        logger.error(`[admin-dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
       }
     } else if (toStatus === 'cancelled') {
       try {
@@ -5077,6 +5127,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     if (isIncompleteVisit) {
+      // Recurring plan refill / end-of-plan flag — an incomplete-outcome
+      // completion still flips the scheduled_services row to 'completed'
+      // (only the service_record carries 'incomplete'), so the visit consumed
+      // its series slot and the refill check is due here too. This early
+      // return sits ABOVE the main maintenance hook below, so without this the
+      // series would never top up on incomplete completions. Same failure-
+      // isolated contract: never fails the committed completion.
+      try {
+        const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+        await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete_incomplete' });
+      } catch (seriesErr) {
+        logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
+      }
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
@@ -7113,6 +7176,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (leadErr) {
         logger.warn(`[lead-trigger] first-service conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }
+    }
+
+    // Recurring plan refill / end-of-plan flag — same maintenance the
+    // admin-schedule completion path runs (see recurring-series-extend).
+    // The row's status is 'completed' regardless of visitOutcome (the
+    // service_record carries 'incomplete'), so the visit consumed its series
+    // slot either way and the refill check is due. Idempotent on the durable
+    // resume path (it only tops up when upcoming < 2 and dedupes on dates).
+    // Failure-isolated: never fails the committed completion.
+    try {
+      const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+      await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
+    } catch (seriesErr) {
+      logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
     }
 
     const responsePayload = {
