@@ -50,6 +50,55 @@ function parseFiniteCoordinate(value) {
   return finiteNumber(value);
 }
 
+// ── Rain chip (GATE_CUSTOMER_RAIN_CHIP) ─────────────────────────────────
+// Office fallback point for the rain outlook (Lakewood Ranch HQ area,
+// matches feed.js / forecast-analyzer.js).
+const RAIN_OFFICE_LAT = 27.4217;
+const RAIN_OFFICE_LNG = -82.4065;
+
+// scheduled_date can arrive as a 'YYYY-MM-DD' string or a Date (driver
+// parses DATE to midnight-UTC Date) — normalize to the outlook's key shape.
+function scheduledDateKey(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const m = String(value).match(/^\d{4}-\d{2}-\d{2}/);
+  return m ? m[0] : null;
+}
+
+// Attach `rainChance` (0-100) for the visit's scheduled date to the formatted
+// tracker. Gated: with GATE_CUSTOMER_RAIN_CHIP off the field is never
+// included and the payload is byte-identical to today's. Coordinate
+// precedence: the canonical scheduled_services row's own lat/lng → the
+// customer's geocode → the office point. Fail-soft everywhere — a null or
+// failed outlook simply omits the field, never breaks the tracker read.
+async function attachRainChance(tracker, service, customer) {
+  if (!tracker) return tracker;
+  const featureGates = require('../config/feature-gates');
+  if (!featureGates.isEnabled('customerRainChip')) return tracker;
+  try {
+    const dateKey = scheduledDateKey(service?.scheduled_date);
+    if (!dateKey) return tracker;
+    // Pair-wise precedence — never mix one source's lat with another's lng.
+    let lat = finiteNumber(service?.lat);
+    let lng = finiteNumber(service?.lng);
+    if (lat == null || lng == null) {
+      lat = finiteNumber(customer?.latitude);
+      lng = finiteNumber(customer?.longitude);
+    }
+    if (lat == null || lng == null) {
+      lat = RAIN_OFFICE_LAT;
+      lng = RAIN_OFFICE_LNG;
+    }
+    const { getDailyRainOutlook } = require('../services/weather-forecast');
+    const outlook = await getDailyRainOutlook(lat, lng);
+    const chance = outlook?.[dateKey]?.rainChance;
+    if (Number.isFinite(chance)) tracker.rainChance = chance;
+  } catch {
+    // Preserve read availability; the rain chip is best-effort decoration.
+  }
+  return tracker;
+}
+
 async function attachTechPhoto(tracker, tech) {
   if (!tracker?.technician || !tech?.id) return tracker;
   const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
@@ -299,6 +348,7 @@ router.get('/active', async (req, res, next) => {
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
+      await attachRainChance(formatted, canonical, req.customer);
       return res.json({ tracker: formatted });
     }
 
@@ -317,6 +367,7 @@ router.get('/today', async (req, res, next) => {
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
+      await attachRainChance(formatted, canonical, req.customer);
       return res.json({ tracker: formatted });
     }
 

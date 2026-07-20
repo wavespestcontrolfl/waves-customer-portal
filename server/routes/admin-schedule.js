@@ -51,6 +51,12 @@ const {
 const {
   syncCustomerWaveGuardPlanFromScheduledServices,
 } = require('../services/self-booking-plan-sync');
+const { getDailyRainOutlook } = require('../services/weather-forecast');
+
+// Office coordinates for office-level rain outlooks (matches the NWS point
+// used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
+const OFFICE_LAT = 27.4217;
+const OFFICE_LNG = -82.4065;
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1408,6 +1414,20 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// City-center coordinates per getZone value, for the day board's per-zone
+// rain outlook. Values come from services/pest-forecast/locations.js
+// (parrish→Parrish, palmetto→Palmetto, lakewood_ranch→Lakewood Ranch,
+// bradenton_north→Bradenton, sarasota→Sarasota, venice_north_port→Venice).
+// The NWS cache keys on 2-decimal-rounded coords, so nearby zones dedupe.
+const ZONE_COORDS = {
+  parrish: { lat: 27.5897, lng: -82.4254 },
+  palmetto: { lat: 27.5214, lng: -82.5723 },
+  lakewood_ranch: { lat: 27.4225, lng: -82.4082 },
+  bradenton_north: { lat: 27.4989, lng: -82.5748 },
+  sarasota: { lat: 27.3364, lng: -82.5307 },
+  venice_north_port: { lat: 27.0998, lng: -82.4543 },
+};
+
 // Completion reuses a non-void invoice already attached to the visit
 // (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
 // AP) BEFORE any fresh billing decision (admin-dispatch preMintedInvoice +
@@ -1459,6 +1479,12 @@ function compactCheckoutInvoiceLines(rawLines) {
 router.get('/', async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
+
+    // NWS daily rain outlook (office point) — kicked off here so it runs in
+    // parallel with the DB work below. Fail-soft: the helper is fail-open
+    // (null on any timeout/error) and the .catch belts it — weather must
+    // never break or delay the schedule payload.
+    const rainOutlookPromise = getDailyRainOutlook(OFFICE_LAT, OFFICE_LNG).catch(() => null);
 
     // Server-resolved Bill-To for the completion banner: per-job payer, else
     // the customer default (unless the visit is pinned to self-pay), and only
@@ -1804,12 +1830,34 @@ router.get('/', async (req, res, next) => {
       }
     } catch { /* weather is optional */ }
 
+    // Requested-date rain chance (office point) + per-zone chances for the
+    // zones actually on this day's board. Fail-soft: any NWS failure leaves
+    // rainChance null / zoneRain values null — never blocks the payload.
+    let rainChance = null;
+    let zoneRain;
+    try {
+      const outlook = await rainOutlookPromise;
+      const officeChance = outlook?.[date]?.rainChance;
+      rainChance = Number.isFinite(officeChance) ? officeChance : null;
+      const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
+      if (zonesPresent.length > 0) {
+        const perZone = await Promise.all(zonesPresent.map(async (z) => {
+          const zoneOutlook = await getDailyRainOutlook(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
+          const chance = zoneOutlook?.[date]?.rainChance;
+          return [z, Number.isFinite(chance) ? chance : null];
+        }));
+        zoneRain = Object.fromEntries(perZone);
+      }
+    } catch { /* rain outlook is optional */ }
+
     res.json({
       date, services: enriched,
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
       weather,
+      rainChance,
+      ...(zoneRain ? { zoneRain } : {}),
       zoneColors: ZONE_COLORS, zoneLabels: ZONE_LABELS,
     });
   } catch (err) { next(err); }
@@ -1821,6 +1869,9 @@ router.get('/week', async (req, res, next) => {
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
+    // ONE office-point NWS outlook for the whole week, started before the
+    // per-day DB loop so it resolves in parallel. Fail-soft (see day view).
+    const rainOutlookPromise = getDailyRainOutlook(OFFICE_LAT, OFFICE_LNG).catch(() => null);
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
@@ -2075,6 +2126,18 @@ router.get('/week', async (req, res, next) => {
         count: services.length,
         zones,
       });
+    }
+
+    // Attach the office-point rain chance to each day (number|null). The NWS
+    // outlook covers ~7 days; dates past its horizon simply stay null.
+    try {
+      const outlook = await rainOutlookPromise;
+      for (const day of days) {
+        const chance = outlook?.[day.date]?.rainChance;
+        day.rainChance = Number.isFinite(chance) ? chance : null;
+      }
+    } catch {
+      for (const day of days) day.rainChance = null;
     }
 
     res.json({ startDate, days });

@@ -15,7 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
-import { ChevronLeft, ChevronRight, Leaf } from 'lucide-react';
+import { ChevronLeft, ChevronRight, CloudRain, Leaf } from 'lucide-react';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { etStartOfWeek } from '../../lib/timezone';
@@ -84,6 +84,25 @@ function formatMonthDay(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') return '';
   const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? `${m[2]}/${m[3]}` : '';
+}
+
+// Exception-based rain chip for the day header. Renders ONLY at ≥40% —
+// amber below 50, alert-red at ≥50 (same thresholds as DispatchPageV2's
+// weather bar: >40 rain alert, >50 spray hold). Below 40 / null → nothing.
+function DayRainChip({ rainChance }) {
+  if (rainChance == null || rainChance < 40) return null;
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-0.5 shrink-0 rounded-full px-1.5 py-px text-11 u-nums font-medium',
+        rainChance >= 50 ? 'bg-alert-bg text-alert-fg' : 'bg-amber-50 text-amber-800',
+      )}
+      title={`${rainChance}% chance of rain`}
+    >
+      <CloudRain size={11} strokeWidth={1.75} aria-hidden="true" />
+      {rainChance}%
+    </span>
+  );
 }
 
 function minutesToTopPx(min) {
@@ -369,8 +388,11 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
         className="sticky top-0 z-10 bg-white px-3 py-2 text-13 text-zinc-500 flex items-center justify-between"
         style={{ height: DAY_HEADER_HEIGHT, borderBottom: '1px solid #E4E4E7' }}
       >
-        <span className="truncate">
-          {day.dayOfWeek} {formatMonthDay(day.date)}
+        <span className="flex items-center gap-1.5 min-w-0">
+          <span className="truncate">
+            {day.dayOfWeek} {formatMonthDay(day.date)}
+          </span>
+          <DayRainChip rainChance={day.rainChance} />
         </span>
         <span className="u-nums text-11 text-zinc-400">{assignedServices.length}</span>
       </div>
