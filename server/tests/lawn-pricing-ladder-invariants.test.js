@@ -471,14 +471,25 @@ describe('sweep red paths — failures become alert violations, never silent gre
     }
   });
 
-  test('a blanked/zero margin floor is a violation — costFloorAnnual stays finite so only a config check catches it', () => {
+  test('a deliberate numeric-zero margin floor is DISARMED BY DESIGN, not a violation (floors surfaced never enforced)', () => {
     const prior = LAWN_PRICING_V2.targetCollectedMarginFloor;
     LAWN_PRICING_V2.targetCollectedMarginFloor = 0;
     try {
       const { sweep } = loadSweep({ priceLawnCare: cleanTiers });
       const { violations } = sweep.scanLadderGrid();
+      expect(violations.map((v) => v.check)).toEqual([]);
+    } finally {
+      LAWN_PRICING_V2.targetCollectedMarginFloor = prior;
+    }
+  });
+
+  test('a BLANKED margin floor (null/empty — corrupted row, not a deliberate 0) is still a violation', () => {
+    const prior = LAWN_PRICING_V2.targetCollectedMarginFloor;
+    LAWN_PRICING_V2.targetCollectedMarginFloor = null;
+    try {
+      const { sweep } = loadSweep({ priceLawnCare: cleanTiers });
+      const { violations } = sweep.scanLadderGrid();
       expect(violations.map((v) => v.check)).toEqual(['malformed_margin_floor']);
-      expect(violations[0].detail).toContain('0');
     } finally {
       LAWN_PRICING_V2.targetCollectedMarginFloor = prior;
     }

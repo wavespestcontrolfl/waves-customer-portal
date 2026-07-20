@@ -81,11 +81,21 @@ function scanLadderGrid() {
   // the 35% margin guarantee is silently disabled.
   const rawMarginFloor = LAWN_PRICING_V2.targetCollectedMarginFloor;
   const marginFloor = Number(rawMarginFloor);
-  if (!Number.isFinite(marginFloor) || marginFloor <= 0 || marginFloor >= 1) {
+  // Same deliberate-zero contract as the program minimum above: an explicit
+  // numeric/numeric-string 0 is disarmed-by-design (floors are surfaced,
+  // never enforced — owner ruling 2026-07-17), while null/false/''/arrays
+  // still mean a corrupted row. Without this exemption, a DB disarm of the
+  // margin floor would ring a permanent false CRITICAL.
+  const deliberateMarginZero =
+    (typeof rawMarginFloor === 'number' && rawMarginFloor === 0)
+    || (typeof rawMarginFloor === 'string'
+      && rawMarginFloor.trim() !== ''
+      && Number(rawMarginFloor.trim()) === 0);
+  if (!deliberateMarginZero && (!Number.isFinite(marginFloor) || marginFloor <= 0 || marginFloor >= 1)) {
     violations.push({
       check: 'malformed_margin_floor',
       cell: 'lawn_pricing_v2.targetCollectedMarginFloor',
-      detail: `live config collected-margin floor is ${JSON.stringify(rawMarginFloor)} — the cost floor's margin guarantee is not being enforced`,
+      detail: `live config collected-margin floor is ${JSON.stringify(rawMarginFloor)} — not a valid ratio (numeric 0 = disarmed by design)`,
     });
   }
 
