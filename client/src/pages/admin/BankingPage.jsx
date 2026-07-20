@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useCallback } from "react";
+import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import {
   CheckCircle2,
   Clock3,
@@ -1570,14 +1570,22 @@ export default function BankingPage() {
   const [stats, setStats] = useState(null);
   const [balanceError, setBalanceError] = useState(false);
   const [statsError, setStatsError] = useState(false);
+  const balanceReqIdRef = useRef(0);
+  const statsReqIdRef = useRef(0);
   const [payoutModalMethod, setPayoutModalMethod] = useState(null);
 
   const loadBalance = useCallback(async () => {
+    // Sequence guard: only the latest request's outcome applies, so a slow
+    // older request that fails after a newer one succeeded can't clobber the
+    // fresh balance or flip balanceError back on.
+    const reqId = ++balanceReqIdRef.current;
     try {
       const d = await adminFetch("/admin/banking/balance");
+      if (reqId !== balanceReqIdRef.current) return;
       setBalance(d);
       setBalanceError(false);
     } catch {
+      if (reqId !== balanceReqIdRef.current) return;
       // Drop any stale balance AND flag the error: a failed refresh must not
       // leave old numbers (or a coalesced $0.00) driving any balance-derived
       // field or payout action. Every such field also checks balanceError.
@@ -1587,11 +1595,14 @@ export default function BankingPage() {
   }, []);
 
   const loadStats = useCallback(async () => {
+    const reqId = ++statsReqIdRef.current;
     try {
       const d = await adminFetch("/admin/banking/stats");
+      if (reqId !== statsReqIdRef.current) return;
       setStats(d);
       setStatsError(false);
     } catch {
+      if (reqId !== statsReqIdRef.current) return;
       setStatsError(true);
     }
   }, []);
