@@ -1578,8 +1578,10 @@ export default function BankingPage() {
       setBalance(d);
       setBalanceError(false);
     } catch {
-      // Surface the failure instead of leaving balance null — the render
-      // must not present a fetch error as an authoritative $0.00.
+      // Drop any stale balance AND flag the error: a failed refresh must not
+      // leave old numbers (or a coalesced $0.00) driving any balance-derived
+      // field or payout action. Every such field also checks balanceError.
+      setBalance(null);
       setBalanceError(true);
     }
   }, []);
@@ -1759,7 +1761,7 @@ export default function BankingPage() {
               color: D.amber,
             }}
           >
-            {fmtM(pending)}
+            {balanceError ? "—" : fmtM(pending)}
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
             Processing
