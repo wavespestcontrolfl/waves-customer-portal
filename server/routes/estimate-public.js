@@ -14537,16 +14537,24 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
-  // Termite bait monitoring bills a flat monthly but stations are checked
-  // quarterly (owner directive 2026-07-10) — surface per-check pricing so the
-  // card leads with the price per station check like every other service
-  // ($29.75/mo → $89.25/check, 4 checks/yr). Display-only: the recurring row
-  // and billing stay monthly (the card notes "Billed $X/mo").
+  // Termite bait: stations are checked quarterly (owner directive
+  // 2026-07-10) and NEW estimates persist explicit perTreatment/visitsPerYear
+  // and are BILLED per application (owner 2026-07-20) — flag those so the
+  // card drops the "Billed $X/mo" note, which would misstate the charge.
+  // OLD payloads (perTreatment/visitsPerYear null) keep the display-only
+  // derivation ($29.75/mo → $89.25/check) AND the monthly note: their
+  // accept path still bills the flat monthly, so the note stays truthful
+  // for exactly the estimates it still applies to.
   let effectiveVisits = visitsPerYear;
-  if (key === 'termite_bait' && !(displayPrice && visitsPerYear) && monthly != null) {
-    const TERMITE_CHECKS_PER_YEAR = 4;
-    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
-    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
+  let billedPerApplication = false;
+  if (key === 'termite_bait') {
+    if (displayPrice && visitsPerYear) {
+      billedPerApplication = true;
+    } else if (monthly != null) {
+      const TERMITE_CHECKS_PER_YEAR = 4;
+      effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+      displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
+    }
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -14566,6 +14574,7 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     perTreatment: displayPrice || null,
     perVisit: key === 'pest_control' ? (anchorPrice || null) : null,
     visitsPerYear: effectiveVisits || null,
+    ...(billedPerApplication ? { billedPerApplication: true } : {}),
     included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
     addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
     quoteRequired: false,

@@ -180,3 +180,50 @@ describe('durationMinutesForRecurringService — tree & shrub', () => {
     )).toBe(90);
   });
 });
+
+describe('termite bait per-application billing (owner 2026-07-20)', () => {
+  const { supportsConverterFollowUpSeeding } = EstimateConverter;
+  const { inferFrequencyKeyFromEstimateData } = require('../services/billing-cadence');
+
+  // The persisted recurring row as the v1 mapper now emits it — the pricer's
+  // visitsPerYear/perApp forwarded onto the line as visitsPerYear/perTreatment.
+  const newTermiteRow = {
+    name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35,
+    perTreatment: 105, visitsPerYear: 4,
+  };
+  // Pre-change payloads carry the flat monthly only.
+  const legacyTermiteRow = { name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35 };
+  const estimateDataWith = (row) => ({ result: { recurring: { services: [row] } } });
+
+  test('new payload infers a quarterly billing cadence from the persisted visitsPerYear', () => {
+    expect(inferFrequencyKeyFromEstimateData(estimateDataWith(newTermiteRow))).toBe('quarterly');
+  });
+
+  test('legacy payload infers nothing — the flat-monthly fallback is preserved byte-identically', () => {
+    expect(inferFrequencyKeyFromEstimateData(estimateDataWith(legacyTermiteRow))).toBeNull();
+  });
+
+  test('quarterly cadence charges the exact per-application price: $420/yr -> $105/application', () => {
+    const cadence = resolveBillingCadence({
+      monthlyRate: 35,
+      annualRate: 420,
+      frequencyKey: null,
+      estimateData: estimateDataWith(newTermiteRow),
+    });
+    expect(cadence.frequencyKey).toBe('quarterly');
+    expect(cadence.amount).toBe(105);
+    const amount = perApplicationChargeAmount({
+      billingCadence: cadence, annualRate: 420, monthlyRate: 35, visitsPerYear: 4,
+    });
+    expect(amount).toBe(105);
+    // Four completions collect exactly the accepted annual — the flat-monthly
+    // fee stamped before this change collected 4 x $35 = $140 of the $420.
+    expect(Math.round(amount * 4 * 100) / 100).toBe(420);
+  });
+
+  test('standalone termite quarterly seeds its follow-up series; legacy pattern-less rows do not', () => {
+    expect(supportsConverterFollowUpSeeding(newTermiteRow, {}, 'quarterly')).toBe(true);
+    expect(supportsConverterFollowUpSeeding(legacyTermiteRow, {}, 'monthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding(newTermiteRow, {}, 'monthly')).toBe(false);
+  });
+});

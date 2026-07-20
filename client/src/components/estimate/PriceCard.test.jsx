@@ -269,3 +269,27 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
     expect(screen.getByText(/\$66.00 \/ application/)).toBeInTheDocument();
   });
 });
+
+describe('PriceCard — termite monitoring billing note', () => {
+  const termiteFrequency = (overrides = {}) => ({
+    key: 'recurring',
+    label: 'Termite Bait Monitoring',
+    monthly: 35,
+    annual: 420,
+    perTreatment: 105,
+    visitsPerYear: 4,
+    ...overrides,
+  });
+
+  it('legacy payloads (monthly-billed) keep the "Billed $X/mo" note under the per-application headline', () => {
+    render(<PriceCard frequency={termiteFrequency()} preferPerApplicationPrice />);
+    expect(screen.getByText(/Billed \$35\.00\/mo, spread across the year/)).toBeInTheDocument();
+  });
+
+  it('billedPerApplication payloads (owner 2026-07-20) drop the monthly note — the headline IS the charge', () => {
+    render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
+    expect(screen.queryByText(/spread across the year/)).toBeNull();
+    expect(screen.getByText('$105.00')).toBeInTheDocument();
+    expect(screen.getByText(/4 applications per year included/)).toBeInTheDocument();
+  });
+});
