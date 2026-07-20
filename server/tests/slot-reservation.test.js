@@ -650,6 +650,10 @@ describe('slot reservation helpers', () => {
         estimated_duration_minutes: 90,
         reservation_expires_at: '2027-05-20T13:05:00.000Z',
       }]);
+      // Committed-visit probe (codex P1): the refresh leg runs the same
+      // includeHolds:false probe as the fresh path before extending expiry.
+      // Clean window here — the refresh must stay idempotent.
+      const refreshProbeBuilder = makeGlobalProbeBuilder([]);
       const refreshBuilder = {
         where: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
@@ -658,7 +662,7 @@ describe('slot reservation helpers', () => {
           reservation_expires_at: '2027-05-20T13:30:00.000Z',
         }]),
       };
-      const scheduledBuilders = [liveHoldsBuilder, refreshBuilder];
+      const scheduledBuilders = [liveHoldsBuilder, refreshProbeBuilder, refreshBuilder];
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -674,11 +678,85 @@ describe('slot reservation helpers', () => {
         expiresAt: '2027-05-20T13:30:00.000Z',
       });
 
+      // The probe ran over the held window — committed visits only
+      // (includeHolds:false shape), the held row itself excluded, under the
+      // date lock granted before it.
+      expect(refreshProbeBuilder.where).toHaveBeenCalledWith('scheduled_date', '2027-05-20');
+      expect(refreshProbeBuilder.whereNotIn).toHaveBeenCalledWith('id', ['held-1']);
+      expect(refreshProbeBuilder.whereNotNull).toHaveBeenCalledWith('customer_id');
+      expect(refreshProbeBuilder.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
+      const occupancyRawIdx = trx.raw.mock.calls.findIndex(
+        (c) => Array.isArray(c[1]) && c[1][1] === 'occupancy:2027-05-20',
+      );
+      expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
+        .toBeLessThan(refreshProbeBuilder.where.mock.invocationCallOrder[0]);
       expect(refreshBuilder.where).toHaveBeenCalledWith({ id: 'held-1' });
       expect(refreshBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
         reservation_expires_at: expect.anything(),
       }));
       // No conflict check / insert consumed — the hold was reused.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot refuses to refresh a hold whose window a COMMITTED visit has since taken (codex P1)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-1',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-20T13:05:00.000Z',
+      }]);
+      // The call-booking writer (the one commit exempt from blocking on
+      // holds) landed a visit over the held window AFTER the hold was
+      // created. Refreshing would extend a hold commitReservation is
+      // guaranteed to reject — the offer→reserve→409 dead-end, moved to
+      // the accept click.
+      const refreshProbeBuilder = makeGlobalProbeBuilder([{
+        id: 'svc-call-booked', technician_id: null, window_start: '09:30:00',
+      }]);
+      const supersedeBuilder = {
+        where: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        del: jest.fn().mockResolvedValue(1),
+      };
+      const scheduledBuilders = [liveHoldsBuilder, refreshProbeBuilder, supersedeBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+
+      // The probe ran over the held window with the held row excluded,
+      // committed visits only.
+      expect(refreshProbeBuilder.where).toHaveBeenCalledWith('scheduled_date', '2027-05-20');
+      expect(refreshProbeBuilder.whereNotIn).toHaveBeenCalledWith('id', ['held-1']);
+      expect(refreshProbeBuilder.whereNotNull).toHaveBeenCalledWith('customer_id');
+      expect(refreshProbeBuilder.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
+      // The doomed hold was superseded with releaseReservation's narrow
+      // still-uncommitted predicate (a committed row can never match)...
+      expect(supersedeBuilder.where).toHaveBeenCalledWith({ id: 'held-1' });
+      expect(supersedeBuilder.whereNull).toHaveBeenCalledWith('customer_id');
+      expect(supersedeBuilder.whereNotNull).toHaveBeenCalledWith('reservation_expires_at');
+      expect(supersedeBuilder.del).toHaveBeenCalledTimes(1);
+      // ...and the hold's expiry was NEVER extended: every queued builder
+      // was consumed and no refresh UPDATE (or insert) ran.
       expect(scheduledBuilders).toHaveLength(0);
     } finally {
       jest.useRealTimers();

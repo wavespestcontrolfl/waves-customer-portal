@@ -155,8 +155,9 @@ function callBookingTimeSanityFlags({
 }
 
 // AUTHORITATIVE post-commit conflict recheck for a fresh call booking — a
-// short rung-1 transaction of its own: date lock + one shared-module read,
-// no row locks, nothing written. The in-txn advisory read races unlocked:
+// short rung-1 transaction of its own: date lock(s) + one shared-module
+// read PER ROW the call created, no row locks, nothing written. The in-txn
+// advisory read races unlocked:
 // two concurrent call bookings — or a call booking interleaving a rung-1
 // writer whose global predicate ran before this insert committed — can EACH
 // see no committed conflict and land overlapping rows with no card fired.
@@ -168,24 +169,56 @@ function callBookingTimeSanityFlags({
 // visible to this read (card fires). Of two concurrent call bookings, the
 // later recheck always sees the earlier insert. Detection-only: the booking
 // already committed and is never unwound here (owner's book+flag rule).
+//
+// `visits` is one entry per row THIS call created — the primary, plus the
+// auto-created follow-up child when there is one: the primary's date/window
+// says nothing about an overlap on the follow-up's OWN date (typically
+// +14d), so each row is rechecked against its own scheduled_date/window.
+// Rung-1 keys are taken one per DISTINCT date, ascending
+// (acquireOccupancyLocks — the contract's multi-date rule), before any
+// read; every probe excludes ALL of this call's fresh rows (the row being
+// checked plus its siblings). Each finding is annotated with WHICH created
+// visit it clashes (overlaps_visit: 'primary'|'follow_up' +
+// overlaps_service_id) so the triage card can say. The bare single-date
+// arguments remain supported as the one-visit form.
 async function recheckCallBookingConflicts({
+  visits,
   scheduledDate,
   windowStart,
   windowEnd,
   excludeCustomerId,
   excludeServiceIds,
 }) {
-  const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+  const { acquireOccupancyLocks, findConflictingVisits } = require('./scheduling/occupancy');
+  const targets = (Array.isArray(visits) && visits.length ? visits : [
+    { role: 'primary', scheduledDate, windowStart, windowEnd },
+  ]).filter((v) => v && v.scheduledDate && v.windowStart && v.windowEnd);
+  if (!targets.length) return [];
+  const freshRowIds = [...new Set([
+    ...(excludeServiceIds || []),
+    ...targets.map((v) => v.id),
+  ].filter(Boolean))];
   return db.transaction(async (trx) => {
-    await acquireOccupancyLock(trx, scheduledDate);
-    return findConflictingVisits({
-      db: trx,
-      date: scheduledDate,
-      windowStart,
-      windowEnd,
-      excludeCustomerId,
-      excludeServiceIds,
-    });
+    await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));
+    const findings = [];
+    for (const visit of targets) {
+      const rows = await findConflictingVisits({
+        db: trx,
+        date: visit.scheduledDate,
+        windowStart: visit.windowStart,
+        windowEnd: visit.windowEnd,
+        excludeCustomerId,
+        excludeServiceIds: freshRowIds,
+      });
+      for (const row of rows) {
+        findings.push({
+          ...row,
+          overlaps_visit: visit.role || 'primary',
+          overlaps_service_id: visit.id || null,
+        });
+      }
+    }
+    return findings;
   });
 }
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
@@ -7563,20 +7596,41 @@ const CallRecordingProcessor = {
               // schedule anomalies use (notification-service.notifyAdmin).
               if (!scheduleWasReused) {
                 // Re-run the occupancy read now that the insert is COMMITTED,
-                // under the date lock (see recheckCallBookingConflicts for
+                // under the date locks (see recheckCallBookingConflicts for
                 // why this one is authoritative where the in-txn read is
-                // only a fast path). Same exclusion semantics as the in-txn
-                // read (excludeCustomerId — the same-day guard owns
+                // only a fast path) — one probe PER ROW this call created:
+                // the primary, and the follow-up child against its OWN
+                // date/window (merely excluding it from the primary's query
+                // left an overlap on the follow-up's own date fireless).
+                // Same exclusion semantics as the in-txn read
+                // (excludeCustomerId — the same-day guard owns
                 // same-customer clashes) plus this run's own fresh rows,
                 // belt-and-braces: both carry customerId anyway. Best-effort
                 // in the same spirit as the in-txn read — a recheck failure
                 // falls back to the in-txn findings rather than dropping an
                 // already-detected card.
                 try {
-                  bookingTimeConflicts = await recheckCallBookingConflicts({
+                  const recheckVisits = [{
+                    id: svc.id,
+                    role: 'primary',
                     scheduledDate,
                     windowStart: windowStart || '09:00',
                     windowEnd: windowEnd || '10:00',
+                  }];
+                  if (followUpCreated) {
+                    recheckVisits.push({
+                      id: followUpCreated.id,
+                      role: 'follow_up',
+                      // returning('*') hands scheduled_date back as a Date —
+                      // normalize to the 'YYYY-MM-DD' the lock key + DATE
+                      // predicate expect.
+                      scheduledDate: callBookingDateOnly(followUpCreated.scheduled_date),
+                      windowStart: followUpCreated.window_start,
+                      windowEnd: followUpCreated.window_end,
+                    });
+                  }
+                  bookingTimeConflicts = await recheckCallBookingConflicts({
+                    visits: recheckVisits,
                     excludeCustomerId: customerId,
                     excludeServiceIds: [svc.id, followUpCreated?.id],
                   });
@@ -7618,7 +7672,22 @@ const CallRecordingProcessor = {
                           window_end: r.window_end,
                           service_type: r.service_type,
                           status: r.status,
+                          // WHICH of this call's rows it clashes — the
+                          // office can't act on "overlap" without knowing
+                          // whether it's visit 1 or the +14d follow-up. The
+                          // in-txn fallback rows carry no annotation; they
+                          // were probed against the primary's window only.
+                          overlaps_visit: r.overlaps_visit || 'primary',
                         })),
+                        // The follow-up child this call created (when one
+                        // was), so a follow_up-tagged clash above resolves
+                        // to a concrete visit on the card.
+                        follow_up: followUpCreated ? {
+                          scheduled_service_id: followUpCreated.id,
+                          scheduled_date: callBookingDateOnly(followUpCreated.scheduled_date),
+                          window_start: followUpCreated.window_start,
+                          window_end: followUpCreated.window_end,
+                        } : null,
                         time_sanity_flags: timeSanityFlags,
                       },
                     }))
@@ -7628,7 +7697,19 @@ const CallRecordingProcessor = {
                   try {
                     const conflictBits = [];
                     if (bookingTimeConflicts.length) {
-                      conflictBits.push(`overlaps ${bookingTimeConflicts.length} existing visit${bookingTimeConflicts.length === 1 ? '' : 's'}`);
+                      let overlapBit = `overlaps ${bookingTimeConflicts.length} existing visit${bookingTimeConflicts.length === 1 ? '' : 's'}`;
+                      // Say WHICH created visit clashes when the follow-up
+                      // child is involved — the headline names the primary's
+                      // date, so a follow-up-date clash is unreadable
+                      // without the attribution.
+                      const followUpClashes = bookingTimeConflicts.filter((r) => r.overlaps_visit === 'follow_up').length;
+                      if (followUpClashes) {
+                        const followUpDate = callBookingDateOnly(followUpCreated?.scheduled_date);
+                        overlapBit += followUpClashes === bookingTimeConflicts.length
+                          ? ` (all on the follow-up visit's date${followUpDate ? `, ${followUpDate}` : ''})`
+                          : ` (${followUpClashes} on the follow-up visit's date${followUpDate ? `, ${followUpDate}` : ''})`;
+                      }
+                      conflictBits.push(overlapBit);
                     }
                     if (timeSanityFlags.includes('outside_business_hours')) conflictBits.push('outside 8am–5pm');
                     if (timeSanityFlags.includes('weekend')) conflictBits.push('on a weekend');
@@ -7640,6 +7721,7 @@ const CallRecordingProcessor = {
                         link: '/admin/dispatch',
                         metadata: {
                           scheduledServiceId: svc.id,
+                          followUpScheduledServiceId: followUpCreated?.id || null,
                           callSid,
                           conflicting_visit_ids: bookingTimeConflicts.map((r) => r.id),
                           time_sanity_flags: timeSanityFlags,

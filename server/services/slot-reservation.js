@@ -318,7 +318,7 @@ async function reserveSlot({
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
 
   try {
-    return await db.transaction(async (trx) => {
+    const reserved = await db.transaction(async (trx) => {
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
       // status/expiry checks could be made against committed state that
@@ -465,10 +465,12 @@ async function reserveSlot({
       // self-exclusion, so this estimate's OWN live hold would 409 the
       // customer's retry (the client re-POSTs /reserve with the same slotId
       // after "go back"). Re-reserving the SAME slot refreshes the existing
-      // hold's expiry and returns it; a live hold for a DIFFERENT slot is
-      // superseded — released inside this txn with the same narrow predicate
-      // releaseReservation uses (still-uncommitted rows only), which also
-      // removes it from both the tech- and zone-conflict queries below.
+      // hold's expiry and returns it — but only after the same committed-
+      // visit probe the fresh path runs (see the refresh branch below); a
+      // live hold for a DIFFERENT slot is superseded — released inside this
+      // txn with the same narrow predicate releaseReservation uses
+      // (still-uncommitted rows only), which also removes it from both the
+      // tech- and zone-conflict queries below.
       const liveHolds = await trx('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNull('customer_id')
@@ -484,6 +486,47 @@ async function reserveSlot({
         const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
         if (staleIds.length) {
           await trx('scheduled_services').whereIn('id', staleIds).del();
+        }
+        // Committed-visit probe BEFORE the expiry is extended — the same
+        // rung-1 date lock the fresh path takes is already held (acquired
+        // above, ahead of this branch), so the ordering contract covers
+        // this leg too. The call-booking writer commits without blocking on
+        // live holds, so a committed visit can occupy this window AFTER the
+        // hold was created; refreshing then hands the customer a hold
+        // commitReservation is guaranteed to reject — the offer→reserve→409
+        // dead-end loop again, merely moved to the accept click.
+        // includeHolds:false + excluding the held row itself: committed
+        // visits only — hold-vs-hold semantics stay with the narrow checks,
+        // and this idempotent retry keeps its designed no-409 behavior when
+        // the window is still genuinely free.
+        const refreshClash = await findConflictingVisits({
+          db: trx,
+          date,
+          windowStart,
+          windowEnd,
+          excludeServiceIds: [sameSlotHold.id],
+          includeHolds: false,
+        });
+        if (refreshClash.length) {
+          // Do NOT refresh a doomed hold — supersede it (same narrow
+          // still-uncommitted predicate releaseReservation uses) so the
+          // window frees beyond the committed visit's own footprint. The
+          // release must SURVIVE while the reserve itself fails, so the 409
+          // is thrown after commit via the sentinel below — a plain throw
+          // here would roll the delete back and leave the phantom hold
+          // occupying route time until expiry.
+          await trx('scheduled_services')
+            .where({ id: sameSlotHold.id })
+            .whereNull('customer_id')
+            .whereNotNull('reservation_expires_at')
+            .del();
+          logger.warn('[slot-reservation] superseded hold over committed visit on same-slot refresh', {
+            estimateId,
+            slotId,
+            scheduledServiceId: sameSlotHold.id,
+            conflictIds: refreshClash.map((r) => r.id),
+          });
+          return { staleHoldSuperseded: true };
         }
         // Refresh expiry only — commitReservation recomputes service_type /
         // notes / window_end from the accept-time profile, so the hold's
@@ -628,6 +671,17 @@ async function reserveSlot({
 
       return { scheduledServiceId, expiresAt };
     });
+    if (reserved && reserved.staleHoldSuperseded) {
+      // Post-commit throw so the supersede above sticks (the finally still
+      // invalidates the availability cache). Same error shape as the
+      // fresh-reserve conflict path: the client re-fetches availability,
+      // which now excludes the occupied window.
+      const err = new Error('slot no longer available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+    return reserved;
   } finally {
     // Invalidate the slot-availability wrapper cache for this estimate so
     // subsequent /available-slots calls reflect the new occupancy. Cheap

@@ -119,7 +119,11 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     + probe per occurrence (excludes every sibling moving in the sweep).
 //   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
 //     + probe with includeHolds:false (committed visits only — see above;
-//     its own estimate's stale holds were already deleted in-txn).
+//     its own estimate's stale holds were already deleted in-txn). The
+//     same-slot REFRESH leg (idempotent retry) runs the same probe under
+//     the same rung-1 lock BEFORE extending the hold's expiry — a hold
+//     whose window a committed visit has since taken is superseded
+//     (released, delete-only) and the reserve throws instead of refreshing.
 //   services/slot-reservation.js commitReservation  1
 //     + probe with includeHolds:false excluding its own hold row — runs even
 //     when no accept-time duration resolved (the narrow tech-scoped check is
@@ -154,9 +158,11 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     inside commitReservation — holding rung 1 across the call txn would
 //     invert that order (deadlock-abort risk to a booking that must never
 //     fail on a lock). Reliable DETECTION is restored post-commit: a
-//     dedicated short rung-1 transaction (date lock + one
-//     findConflictingVisits read, no row locks) re-checks and feeds the
-//     triage card. Serializing just the CHECK suffices because every
+//     dedicated short rung-1 transaction (date locks — one per distinct
+//     date, sorted ascending — + one findConflictingVisits read PER ROW the
+//     call created, the primary and its follow-up child each against its
+//     own date/window; no row locks) re-checks and feeds the triage card.
+//     Serializing just the CHECK suffices because every
 //     committing writer runs the global predicate under rung 1: by the time
 //     the recheck's lock is granted, a concurrent writer either already saw
 //     the call booking's committed row (and aborted itself) or committed

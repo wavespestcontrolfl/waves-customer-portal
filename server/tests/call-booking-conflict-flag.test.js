@@ -183,7 +183,14 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
       excludeServiceIds: ['svc-fresh', undefined],
     });
 
-    expect(rows).toEqual([{ id: 'svc-existing', window_start: '09:30:00' }]);
+    // Findings carry the which-visit annotation (the one-visit legacy form
+    // is a primary-only recheck with no created-row id).
+    expect(rows).toEqual([{
+      id: 'svc-existing',
+      window_start: '09:30:00',
+      overlaps_visit: 'primary',
+      overlaps_service_id: null,
+    }]);
     // A dedicated transaction — not the booking txn.
     expect(transaction).toHaveBeenCalledTimes(1);
     // Rung 1 on the booking's date, same shared key shape as every writer...
@@ -223,7 +230,95 @@ describe('recheckCallBookingConflicts — the authoritative post-commit read', (
     // ...and the post-commit recheck — the read that feeds the triage card —
     // sees it.
     await expect(recheckCallBookingConflicts(args)).resolves.toEqual([
-      { id: 'svc-concurrent', window_start: '09:15:00' },
+      {
+        id: 'svc-concurrent',
+        window_start: '09:15:00',
+        overlaps_visit: 'primary',
+        overlaps_service_id: null,
+      },
+    ]);
+  });
+
+  // Per-probe FIFO wiring for the multi-visit form: each findConflictingVisits
+  // read consumes the next builder, so the two created rows' probes can
+  // resolve different committed truths.
+  function wireRecheckQueue(rowsPerProbe) {
+    const builders = [];
+    const trxs = [];
+    const transaction = jest.fn(async (callback) => {
+      const queue = rowsPerProbe.map((rows) => makeProbeBuilder(rows));
+      builders.push(...queue);
+      const trx = jest.fn(() => queue.shift());
+      trx.raw = jest.fn().mockResolvedValue(undefined);
+      trxs.push(trx);
+      return callback(trx);
+    });
+    patchTransaction(transaction);
+    return { builders, trxs, transaction };
+  }
+
+  test('multi-visit form (codex P1): the follow-up child is rechecked against its OWN date and the finding names it', async () => {
+    // Primary window clean — the overlap sits on the +14d follow-up's own
+    // date, which the old primary-window query could never see (the child
+    // was merely EXCLUDED from it).
+    const { builders, trxs } = wireRecheckQueue([
+      [], // primary probe
+      [{ id: 'svc-existing-fu', window_start: '09:30:00' }], // follow-up probe
+    ]);
+
+    const rows = await recheckCallBookingConflicts({
+      visits: [
+        { id: 'svc-primary', role: 'primary', scheduledDate: '2099-01-05', windowStart: '09:00', windowEnd: '10:00' },
+        { id: 'svc-followup', role: 'follow_up', scheduledDate: '2099-01-19', windowStart: '09:00', windowEnd: '10:00' },
+      ],
+      excludeCustomerId: 'cust-1',
+      excludeServiceIds: ['svc-primary', 'svc-followup'],
+    });
+
+    // The finding says WHICH created visit clashes — the card is unreadable
+    // without it (the headline names the primary's date).
+    expect(rows).toEqual([{
+      id: 'svc-existing-fu',
+      window_start: '09:30:00',
+      overlaps_visit: 'follow_up',
+      overlaps_service_id: 'svc-followup',
+    }]);
+    // One rung-1 key per distinct date, both granted BEFORE the first probe
+    // read (still one dedicated short transaction).
+    const lockCalls = trxs[0].raw.mock.calls
+      .filter((c) => String(c[0]).includes('pg_advisory_xact_lock'));
+    expect(lockCalls.map((c) => c[1])).toEqual([
+      ['slot-reserve', 'occupancy:2099-01-05'],
+      ['slot-reserve', 'occupancy:2099-01-19'],
+    ]);
+    expect(trxs[0].raw.mock.invocationCallOrder[1])
+      .toBeLessThan(builders[0].where.mock.invocationCallOrder[0]);
+    // EVERY probe excludes ALL of this call's fresh rows — the row being
+    // checked and its sibling (deduped against the belt-and-braces
+    // excludeServiceIds the call site also passes).
+    expect(builders[0].whereNotIn).toHaveBeenCalledWith('id', ['svc-primary', 'svc-followup']);
+    expect(builders[1].whereNotIn).toHaveBeenCalledWith('id', ['svc-primary', 'svc-followup']);
+  });
+
+  test('multi-date rung-1 keys are acquired in SORTED order regardless of visit order (deadlock-free contract)', async () => {
+    const { trxs } = wireRecheckQueue([[], []]);
+
+    // Follow-up entry FIRST — the lock sequence must still come out
+    // ascending (acquireOccupancyLocks dedups + sorts), or two concurrent
+    // multi-date lockers could grab a shared pair in opposite orders.
+    await recheckCallBookingConflicts({
+      visits: [
+        { id: 'svc-followup', role: 'follow_up', scheduledDate: '2099-01-19', windowStart: '09:00', windowEnd: '10:00' },
+        { id: 'svc-primary', role: 'primary', scheduledDate: '2099-01-05', windowStart: '09:00', windowEnd: '10:00' },
+      ],
+      excludeCustomerId: 'cust-1',
+    });
+
+    expect(trxs[0].raw.mock.calls
+      .filter((c) => String(c[0]).includes('pg_advisory_xact_lock'))
+      .map((c) => c[1])).toEqual([
+      ['slot-reserve', 'occupancy:2099-01-05'],
+      ['slot-reserve', 'occupancy:2099-01-19'],
     ]);
   });
 });
@@ -253,25 +348,32 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
   });
 
   test('the AUTHORITATIVE recheck runs post-commit under rung 1 and its result feeds the card', () => {
-    // Helper: its own db.transaction, date lock granted before the shared
-    // read, nothing else inside.
+    // Helper: its own db.transaction, the sorted multi-date rung-1
+    // acquisition granted before every per-row shared read, nothing else
+    // inside.
     const helperIdx = src.indexOf('async function recheckCallBookingConflicts(');
     expect(helperIdx).toBeGreaterThan(-1);
-    const helper = src.slice(helperIdx, helperIdx + 900);
+    const helper = src.slice(helperIdx, helperIdx + 1800);
     expect(helper).toContain('db.transaction');
-    expect(helper.indexOf('await acquireOccupancyLock(trx, scheduledDate);'))
-      .toBeLessThan(helper.indexOf('return findConflictingVisits({'));
-    expect(helper.indexOf('await acquireOccupancyLock(trx, scheduledDate);')).toBeGreaterThan(-1);
+    expect(helper.indexOf('await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));'))
+      .toBeLessThan(helper.indexOf('await findConflictingVisits({'));
+    expect(helper.indexOf('await acquireOccupancyLocks(trx, targets.map((v) => v.scheduledDate));')).toBeGreaterThan(-1);
 
     // Call site: fresh inserts only (inside the !scheduleWasReused card
     // block), REASSIGNS bookingTimeConflicts before the card condition reads
-    // it, excludes this run's own fresh rows, and falls back to the in-txn
+    // it, rechecks the follow-up child against its OWN date/window (codex
+    // P1 — it used to be merely excluded from the primary's query),
+    // excludes this run's own fresh rows, and falls back to the in-txn
     // findings on failure instead of dropping the card.
     const cardSlice = src.slice(
       src.indexOf("flag: 'unassigned_auto_booking'"),
       src.indexOf('const timeSanityFlags = callBookingTimeSanityFlags({'),
     );
     expect(cardSlice).toContain('bookingTimeConflicts = await recheckCallBookingConflicts({');
+    expect(cardSlice).toContain('visits: recheckVisits');
+    expect(cardSlice).toContain("role: 'follow_up'");
+    expect(cardSlice).toContain('scheduledDate: callBookingDateOnly(followUpCreated.scheduled_date)');
+    expect(cardSlice).toContain('windowEnd: followUpCreated.window_end');
     expect(cardSlice).toContain('excludeServiceIds: [svc.id, followUpCreated?.id]');
     expect(cardSlice).toContain('excludeCustomerId: customerId');
     expect(cardSlice).toContain('falling back to in-txn advisory findings');
@@ -280,6 +382,22 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(recheckIdx).toBeGreaterThan(src.indexOf('const insertData = {'));
     // ...and before the card condition that consumes the result.
     expect(recheckIdx).toBeLessThan(src.indexOf('if (bookingTimeConflicts.length || timeSanityFlags.length)'));
+  });
+
+  test('the card + bell say WHICH created visit clashes — primary vs the follow-up child', () => {
+    const cardSlice = src.slice(
+      src.indexOf('conflicting_visits: bookingTimeConflicts.map'),
+      src.indexOf('attachedManualBookingId && attachSkippedFollowUpPlan'),
+    );
+    // Each conflicting-visit entry is attributed (in-txn fallback rows were
+    // probed against the primary's window only, so 'primary' is the honest
+    // default there)...
+    expect(cardSlice).toContain("overlaps_visit: r.overlaps_visit || 'primary'");
+    // ...the card resolves a follow_up tag to the concrete child row...
+    expect(cardSlice).toContain('follow_up: followUpCreated ?');
+    // ...and the admin bell's message + metadata carry the attribution too.
+    expect(cardSlice).toContain("on the follow-up visit's date");
+    expect(cardSlice).toContain('followUpScheduledServiceId');
   });
 
   test('a fresh booking with findings gets the advisory triage card + admin bell', () => {
