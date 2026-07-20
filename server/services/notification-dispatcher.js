@@ -8,7 +8,9 @@ const TYPE_MAP = {
   service_reminder:  { toggle: 'service_reminder_24h', channel: 'service_reminder_channel' },
   en_route:          { toggle: 'tech_en_route',        channel: 'en_route_channel' },
   service_complete:  { toggle: 'service_completed',    channel: 'service_complete_channel' },
-  billing:           { toggle: 'billing_alerts',       channel: 'billing_channel' },
+  // billing_reminder is the REAL column (billing_alerts never existed — the
+  // toggle read undefined and billing sends never honored an opt-out).
+  billing:           { toggle: 'billing_reminder',     channel: 'billing_channel' },
   seasonal:          { toggle: 'seasonal_tips',        channel: 'seasonal_channel' },
   review_request:    { toggle: 'review_request',       channel: 'review_request_channel' },
   referral:          { toggle: 'referral_nudge',       channel: 'referral_channel' },

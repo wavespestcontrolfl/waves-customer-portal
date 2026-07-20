@@ -1724,6 +1724,7 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 ## 2026-07-16 — Pest pricing retires tree-density and large-driveway modifiers
 
 **Owner decision.** Tree density and the large-driveway flag no longer change recurring or one-time pest-control prices. Both observations remain in the property profile because they still provide operational context and legitimately feed other service-specific models (for example mosquito pressure, rodent diagnostics, tree-and-shrub counts, lawn production, and termite trenching). The server pricing function ignores the retired pest keys even if stale configuration sends them, the DB overlay no longer imports them, a migration removes them from `pest_features`, and the deprecated client estimator plus admin modifier fallbacks mirror the same rule.
+
 ## 2026-07-16 — Agent Estimate is a mobile workspace backed by the Intelligence Bar
 
 **Context.** Estimates are often built on the road. A command bar alone has the right reasoning/tool runtime, but it does not keep the selected lead, evidence state, draft preview, and explicit delivery controls visible enough for a phone workflow. The existing Create Estimate page remains the production fallback and is not replaced.
@@ -1733,6 +1734,14 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 **Visual language.** Tier-1 zinc/Roboto remains the page chrome, with 14px as the minimum text size. Agent-draft state uses neutral badge chrome and a 6px semantic dot: `#10B981` for a green/no-review draft and `#F59E0B` for a yellow/review draft. Red stays reserved for actual blocking/error states. This keeps confidence from becoming decorative color while making the one road-relevant distinction scannable.
 
 **Pricing and safety boundary.** `generateEstimate` remains the only dollar authority and re-runs server-side on confirmation; the stored payload has one engine input/result pair. Complete protocols, product information, inventory, neighborhood grass aggregates, and image observations can affect scope or review status but never price. Missing inventory is “untracked,” not “available.” Internal reasoning lives in `estimate_data.estimatorEngine`; `estimates.notes` remains null because it is customer-visible. Draft creation/revision is a server-backed two-step write and can never send automatically.
+
+## 2026-07-17 — Glass is the rule for the newsletter and every secondary customer page
+
+**Owner decision.** The newsletter — the email chrome AND every page a reader lands on from it (confirm, unsubscribe, quiz, feedback) — renders in the glass language, and so does every secondary customer-facing page in React. No customer surface ships in an ad-hoc palette again: new secondary pages start from the glass tokens (canonical navy `#04395E` ink, orb-scene background, frosted cards, gold action bars, nothing under 14px). The server-rendered newsletter landing pages (`renderConfirmPage` in `public-newsletter.js`) were the last non-glass customer surface and now mirror `GLASS_THEME` from `email-template.js`. React secondary pages already comply via `useGlassSurface` (e.g. `NewsletterArchivePage`); any future exception needs an explicit owner call logged here.
+
+## 2026-07-17 — Email body copy deepens to navy-slate
+
+**Owner decision.** The shared glass email palette's body (`#555B69`) and muted (`#626B7A`) greys read dull across every email surface. Body copy deepens to `#2A3F5F` and muted to `#4F5B70` — same hue family as the canonical navy ink, materially higher contrast, AA maintained (the rendering-contract test enforces ≥4.5:1 for muted on the page scene). Applied collectively: `GLASS_THEME`, the DB-template block palette, the newsletter palette, and the glass landing pages. Classic (gate-off) values untouched.
 
 ## 2026-07-18 — Glass UI: mobile gets the full glass material back; only the pop-out stays off (fix/mobile-glass-translucent)
 

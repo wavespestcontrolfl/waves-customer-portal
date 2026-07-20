@@ -14,6 +14,7 @@
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
+ *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
@@ -30,6 +31,7 @@
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
+ *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -74,6 +76,13 @@ const gates = {
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
+  // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
+  // /book funnel entries see zero conversions across a window — the July
+  // slot_sig outage signature. Opt-in in EVERY environment (it texts
+  // ADAM_PHONE; dev/test must not fire it by accident). Kill switch: unset —
+  // the scheduler tick no-ops and nothing else changes.
+  bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
+
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
   // that embeds corpus chunks (paid OpenAI embedding calls — pennies/run,
@@ -81,6 +90,13 @@ const gates = {
   // search instantly reverts to the lane-A1 FTS path, the nightly sync
   // no-ops, and existing embeddings stay in place for a later re-enable.
   hybridKnowledge: process.env.GATE_HYBRID_KNOWLEDGE === 'true',
+
+  // MCP read-only knowledge tools (lane C): the /api/mcp machine endpoint
+  // exposing hybrid knowledge search + catalog/protocol lookups to MCP
+  // clients (Claude Code sessions, agents) under MCP_SERVICE_TOKEN.
+  // Read-only by construction; opt-in in EVERY environment. Kill switch:
+  // unset — the endpoint 403s.
+  mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
@@ -153,6 +169,13 @@ const gates = {
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
+  // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
+  // verbatim double-redacted quote chunks from call transcripts into
+  // call_research_chunks (research taxonomy, reader-not-ingestor). Paid
+  // Gemini extraction per new call (pennies nightly). No sends, no
+  // customer-visible effect; prod opt-in per house pattern.
+  callResearchMiner: isProd ? process.env.GATE_CALL_RESEARCH_MINER === 'true' : true,
+
   // Call re-transcription backfill (voice-corpus training) — hourly, batched
   // upgrade of consented legacy call recordings to diarized transcripts via
   // the same pipeline new calls use; feeds the corpus miner. DEFAULT ON per
@@ -214,6 +237,15 @@ const gates = {
   // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
   // requires explicit opt-in; flip off (or leave — it no-ops) when done.
   shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
+
+  // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
+  // each draft_unsafe judgment into a fixed (harness surface × failure mode)
+  // cell, and weekly parks a harness-patch PROPOSAL card when a cell
+  // accumulates enough fresh evidence. Proposals never auto-apply — a prompt
+  // change is a human-shipped version bump. No sends, no customer-visible
+  // effect; burns one FAST call per unsafe judgment + ≤2 weekly DEEP calls,
+  // so prod requires explicit opt-in per house pattern.
+  smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
@@ -388,6 +420,14 @@ const gates = {
   // shadow-logs candidate counts so volume can be judged first. Flip
   // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
   clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
+
+  // Estimate Clarify Asks — when automated quote drafting dead-ends on a
+  // machine-readable missing item (no address / no concrete service), park
+  // ONE clarifying SMS in /admin/drafts (intent 'estimate_clarify') for the
+  // owner's one-click approval. The writer never sends; the approve route
+  // re-checks this gate before putting anything on the wire. Off → dead
+  // ends keep today's operator-bell-only behavior.
+  estimateClarifyAsks: process.env.GATE_ESTIMATE_CLARIFY_ASKS === 'true',
 
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
@@ -760,6 +800,20 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
+  // photo of the property; the traced path + snapshot replace the generic
+  // schematic on the customer's service report. Gates BOTH the tech capture
+  // routes (/api/tech/services/:id/treatment-zone) and the report payload's
+  // treatmentMap.traced block. Dev-open for local testing; dark in prod until
+  // Adam flips GATE_TREATMENT_ZONE_MAP=true. Kill switch: unset the var —
+  // reports instantly fall back to the schematic; stored rows are untouched.
+  treatmentZoneMap: isProd ? process.env.GATE_TREATMENT_ZONE_MAP === 'true' : true,
+
+  // WDO report attention sweep — admin bell for WDO reports stalled before
+  // send (uncompleted inspections, signed-but-unsent drafts, stuck holds).
+  // Admin-notification-only; no customer contact.
+  wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
 };
 
 function isEnabled(gate) {

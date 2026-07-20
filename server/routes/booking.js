@@ -663,12 +663,36 @@ const BOOKING_FUNNEL_SERVICE_ALIASES = {
   'rodent control': 'rodent',
   'bora-care wood treatment': 'bora_care',
 };
+// Canonical display label per funnel key — the ONLY label shape that ever
+// persists or renders from a client-supplied service value. The raw string
+// reaches the customer confirmation page (/status/:code), the owner-alert
+// SMS, and admin/tech dispatch, so an unrecognized label must fall back to a
+// server-owned value, never echo through.
+const BOOKING_FUNNEL_SERVICE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito Control',
+  tree_shrub: 'Tree & Shrub',
+  termite: 'Termite Inspection',
+  rodent: 'Rodent Control',
+  bora_care: 'Bora-Care Wood Treatment',
+};
 // Normalized funnel service key ('' when the value names no funnel service).
+// Own-property checks only: plain-object lookup would let "__proto__" /
+// "constructor" pass normalization and hand back inherited objects instead
+// of catalog values.
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 function normalizeBookingServiceKey(value) {
   const text = String(value || '').trim().toLowerCase();
   if (!text) return '';
-  if (BOOKING_FUNNEL_SERVICE_DURATIONS[text] !== undefined) return text;
-  return BOOKING_FUNNEL_SERVICE_ALIASES[text] || '';
+  if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, text)) return text;
+  return hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, text) ? BOOKING_FUNNEL_SERVICE_ALIASES[text] : '';
+}
+// Allowlisted display label for a client-supplied service value ('' when the
+// value names no funnel service).
+function canonicalBookingServiceLabel(value) {
+  const key = normalizeBookingServiceKey(value);
+  return key && hasOwn(BOOKING_FUNNEL_SERVICE_LABELS, key) ? BOOKING_FUNNEL_SERVICE_LABELS[key] : '';
 }
 
 // Stable location scope for signed offers: the server-resolved coordinates
@@ -1021,12 +1045,32 @@ router.get('/availability', async (req, res, next) => {
   }
 });
 
+// parseWhen below is a paid model call with no dedicated limiter — the
+// general API limit (1,500/15min) left a wide-open per-IP AI spend budget.
+// Generous for a real funnel session (a customer refines "when" a handful
+// of times), tight against scripted floods. Mirrors captureIntentLimiter's
+// two-layer style.
+const findSlotsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches — please try again in a minute.' },
+});
+const findSlotsHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches — please try again later.' },
+});
+
 // POST /api/booking/find-slots — Waves AI date/time search.
 //   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
 //   Parses the natural-language "when" into a date window + time-of-day, then
 //   returns the matching open slots (same shape as /availability) plus a short
 //   summary line and a `nearby` flag for the soft route-density message.
-router.post('/find-slots', async (req, res, next) => {
+router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) {
@@ -1535,10 +1579,16 @@ async function createSelfBooking(payload = {}) {
       c.toLowerCase() === (customer.city || '').toLowerCase()
     )) || null;
 
-    const resolvedServiceType = cleanBookingServiceLabel(quoted_service_label)
-      || cleanBookingServiceLabel(service_type)
-      || estimate?.services?.[0]
-      || estimate?.service_type
+    // ALLOWLIST, never echo: the persisted/displayed label derives from the
+    // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the
+    // posted values, then from the server-side estimate row. A crafted
+    // ?service_label= string ("FREE Termite Treatment call 941-…") must never
+    // land on the confirmation page, owner SMS, or dispatch surfaces.
+    const resolvedServiceType = BOOKING_FUNNEL_SERVICE_LABELS[serviceKey]
+      || canonicalBookingServiceLabel(quoted_service_label)
+      || canonicalBookingServiceLabel(service_type)
+      || cleanBookingServiceLabel(estimate?.services?.[0])
+      || cleanBookingServiceLabel(estimate?.service_type)
       || 'General Pest Control';
 
     // Pay-per-application (gated by bookingPayAtVisit): resolve a per-application
@@ -1568,7 +1618,10 @@ async function createSelfBooking(payload = {}) {
         // underbill — bookingVisits is 4 or nothing.
         const willSeedQuarterlyPestSeries = !isOneTimeBookingSource(source)
           && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
-          && bookedServiceKey === 'pest_control';
+          && bookedServiceKey === 'pest_control'
+          // Mirror the seeding gate's signed-service bind (see below): the
+          // pricing divisor must track the series that is actually created.
+          && RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
         const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
         // Pay-at-visit prices from the quote→book handoff estimate
         // (pricing_estimate_id) — deliberately SEPARATE from the identity
@@ -1918,9 +1971,19 @@ async function createSelfBooking(payload = {}) {
     // never seed future visits that would have no plan and no per-visit price to bill).
     // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
     // independently of WaveGuard plan state.
+    // Bind seeding to the SIGNED service, not just the client label. The
+    // slot_sig HMAC above proved `serviceKey` was the service actually
+    // OFFERED, whereas resolvedServiceType comes from the unsigned
+    // quoted_service_label — so a crafted label of "pest control" on a
+    // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
+    // Both must independently map to pest_control (a legit quarterly pest
+    // booking signs pest and labels pest, so this only tightens the gate).
+    const signedServiceKeyIsPest =
+      RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
+      && signedServiceKeyIsPest
       && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
@@ -2104,9 +2167,31 @@ function toPublicBookingShape(row) {
   return out;
 }
 
+// Confirm commits REAL calendar capacity (and can create a new customer
+// profile), and previously ran under only the general 1,500-request limit —
+// enough for one IP to hoard many days of caps across the 90-day horizon.
+// A household books a visit or two; 6/min absorbs double-submits and
+// back-and-forth, 20/day bounds hoarding from a single IP. (Signed slot
+// offers + per-day caps bound the damage further; a distributed attacker is
+// out of scope for an IP limiter.) Mirrors captureIntentLimiter's style.
+const bookingConfirmLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many booking attempts — please wait a minute and try again.' },
+});
+const bookingConfirmDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many booking attempts today — call (941) 297-5749 and a real person will help right away.' },
+});
+
 // POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
 // selfBooking gate lives here (a caller concern); the service is gate-agnostic.
-router.post('/confirm', async (req, res, next) => {
+router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) {
@@ -2231,7 +2316,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       zip: str(nc.zip, 20),
       lat: num(nc.lat),
       lng: num(nc.lng),
-      service_type: cleanBookingServiceLabel(b.quoted_service_label) || cleanBookingServiceLabel(b.service_type) || str(b.service_type, 120),
+      // Allowlisted only — this value feeds the recovery link/SMS prefill, so
+      // an unrecognized client string stays out (null, not an echo).
+      service_type: canonicalBookingServiceLabel(b.service_id)
+        || canonicalBookingServiceLabel(b.service_type)
+        || canonicalBookingServiceLabel(b.quoted_service_label)
+        || null,
       service_id: str(b.service_id, 60),
       slot_date: b.slot_date ? String(b.slot_date).split('T')[0].slice(0, 10) : null,
       slot_start: str(b.slot_start, 10),
@@ -2418,6 +2508,8 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  canonicalBookingServiceLabel,
+  BOOKING_FUNNEL_SERVICE_LABELS,
   addressMatchesCustomer,
   unitsConflict,
   stripInlineUnitFromLine,

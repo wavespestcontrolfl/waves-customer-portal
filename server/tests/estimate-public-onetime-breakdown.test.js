@@ -7503,12 +7503,28 @@ describe('public estimate one-time breakdown', () => {
   test('decline guard allows active estimates and makes declined idempotent', () => {
     const now = new Date('2026-05-06T12:00:00Z');
 
-    expect(resolveEstimateDeclineGuard({ status: 'draft', expires_at: null }, now)).toEqual({ ok: true });
     expect(resolveEstimateDeclineGuard({ status: 'viewed', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({ ok: true });
     expect(resolveEstimateDeclineGuard({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({
       ok: true,
       alreadyDeclined: true,
     });
+  });
+
+  test('decline guard 404s archived and unpublished rows — same contract as an unknown token', () => {
+    const now = new Date('2026-05-06T12:00:00Z');
+    const notFound = { ok: false, status: 404, error: 'Estimate not found' };
+
+    // Unpublished rows were never the customer's to act on. (The UPDATE's
+    // whereNotIn already excluded them; the guard now stops revealing that
+    // the token maps to a real estimate via a 409.)
+    expect(resolveEstimateDeclineGuard({ status: 'draft', expires_at: null }, now)).toEqual(notFound);
+    expect(resolveEstimateDeclineGuard({ status: 'scheduled', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual(notFound);
+    // Archived rows are office-retired — /data 404s them for every status,
+    // including declined: archived must win over the alreadyDeclined branch
+    // so the probe can't confirm the row exists, and the decline UPDATE
+    // mirrors this with whereNull('archived_at').
+    expect(resolveEstimateDeclineGuard({ status: 'viewed', expires_at: '2026-05-06T12:01:00Z', archived_at: '2026-05-01T00:00:00Z' }, now)).toEqual(notFound);
+    expect(resolveEstimateDeclineGuard({ status: 'declined', expires_at: '2026-05-06T12:01:00Z', archived_at: '2026-05-01T00:00:00Z' }, now)).toEqual(notFound);
   });
 
   test('accept success payload exposes invoice delivery state', () => {

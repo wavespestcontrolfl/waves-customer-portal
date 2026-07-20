@@ -1078,12 +1078,22 @@ function defaultReplayHelpers() {
 async function runReplayVariance(rawOptions = {}, context = {}) {
   const options = buildOptions(rawOptions);
 
-  if (context.requireGeminiKey !== false && !process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not present; the current v2 extractor cannot be replayed here');
-  }
-
   const db = context.db || require('../models/db');
   const CRP = context.CRP || require('../services/call-recording-processor');
+
+  // Preflight the CONFIGURED route's legs, not "any provider key" — a
+  // Gemini-only environment under the default openai→anthropic route would
+  // pass a loose check and then have every extraction return not_run.
+  const routeKeyFor = (provider) => {
+    if (provider === 'openai') return !!process.env.OPENAI_API_KEY;
+    if (provider === 'anthropic') return !!process.env.ANTHROPIC_API_KEY;
+    return !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  };
+  const extractionRoute = CRP._test.CALL_EXTRACTION_ROUTE;
+  if (context.requireGeminiKey !== false
+      && ![extractionRoute.primary, extractionRoute.fallback].some((leg) => routeKeyFor(leg.provider))) {
+    throw new Error('No API key for either leg of the configured v2 extraction route; the extractor cannot be replayed here');
+  }
   const helpers = context.helpers || defaultReplayHelpers();
   const fixture = Object.prototype.hasOwnProperty.call(context, 'fixture')
     ? context.fixture

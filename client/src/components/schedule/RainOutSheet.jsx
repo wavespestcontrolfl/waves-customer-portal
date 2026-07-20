@@ -1,7 +1,7 @@
 // Dispatch-side "Rain out" sheet — the admin equivalent of the tech app's
 // RainOutSheet (pages/tech/TechHomePage.jsx). Moves this visit (or the rest
 // of the assigned tech's route) off the weather and texts the customer a
-// reply-1-confirm / reply-2-switch message. All logic lives in
+// reply-1-confirm message with a self-serve reschedule link. All logic lives in
 // server/services/rain-out.js; this calls the admin endpoints:
 //   GET  /admin/dispatch/:id/rain-out-options
 //   POST /admin/dispatch/:id/rain-out
@@ -131,12 +131,6 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const selected = isCustom
     ? customOption
     : (allOptions.find((opt) => keyOf(opt) === selectedKey) || null);
-  // The SMS offers the best *other-day* option as the reply-2 alternate. Match
-  // by date+start rather than the selection key so a custom time that coincides
-  // with a day preset isn't offered as an alternate to itself.
-  const alt = selected
-    ? (options?.days || []).find((opt) => !(opt.date === selected.date && opt.window.start === selected.window.start)) || null
-    : null;
   const routeCount = options?.remainingRouteCount || 0;
 
   // Seed the custom date AND start from whatever preset was highlighted (or the
@@ -168,7 +162,6 @@ export default function RainOutSheet({ service, onClose, onDone }) {
           reasonCode: reason,
           scope,
           target: { date: selected.date, window: selected.window },
-          alt: alt ? { date: alt.date, window: alt.window } : null,
           notifyCustomer: notify,
         }),
       });

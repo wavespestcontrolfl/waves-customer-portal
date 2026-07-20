@@ -5,10 +5,10 @@
  * passes the same validation gate the manual Send button enforces, a proof
  * copy is emailed to the owner (contact@) with a [PROOF-<token>] subject.
  * Replying "approved" to that email — from an allowlisted owner address —
- * releases the real list send through the existing sendCampaign path. Any
- * other reply (or no reply) leaves the draft untouched: the flow fails
- * closed, and the list send still ultimately happens through the same
- * atomic draft→sending claim as a manual send.
+ * queues the issue for its linked Tuesday 6:00 AM ET target. Any other reply
+ * (or no reply) leaves the draft untouched: the flow fails closed, and the
+ * eventual list send still happens through the same atomic draft→sending
+ * claim as a manual send.
  *
  * Everything is gated behind GATE_NEWSLETTER_PROOF_APPROVAL (default OFF).
  * Kill switch: unset the gate — no proofs go out and approval replies are
@@ -22,7 +22,9 @@ const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter } = require('./email-template');
 const { validateNewsletterDraft } = require('./newsletter-validator');
-const { requiresClaimValidation } = require('../config/newsletter-types');
+const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
+const { isFlagshipTargetForWeek } = require('./event-freshness');
+const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
 const { assertInternalEmailRecipient, normalizeEmail } = require('../utils/internal-email-recipients');
 
 const PROOF_SUBJECT_RE = /\[PROOF-([0-9a-f]{8})\]/i;
@@ -34,6 +36,31 @@ function isProofApprovalEnabled() {
 
 function proofRecipient() {
   return normalizeEmail(process.env.NEWSLETTER_PROOF_EMAIL || DEFAULT_PROOF_RECIPIENT);
+}
+
+async function resolveFlagshipCalendarContext(send) {
+  if (!isFlagshipType(send?.newsletter_type) && send?.newsletter_type !== null) {
+    return { flagship: false, linkedCalendar: null, scheduledFor: null, valid: true };
+  }
+  const linkedCalendar = send?.id
+    ? await db('newsletter_calendar').where({ send_id: send.id }).first()
+    : null;
+  const flagship = isFlagshipType(send?.newsletter_type)
+    || (send?.newsletter_type === null && Boolean(linkedCalendar));
+  if (!flagship) {
+    return { flagship: false, linkedCalendar: null, scheduledFor: null, valid: true };
+  }
+  const scheduledFor = linkedCalendar?.target_send_at
+    ? new Date(linkedCalendar.target_send_at)
+    : null;
+  const valid = Boolean(
+    linkedCalendar
+    && scheduledFor
+    && !Number.isNaN(scheduledFor.getTime())
+    && scheduledFor.getTime() > Date.now()
+    && isFlagshipTargetForWeek(scheduledFor, linkedCalendar.week_of),
+  );
+  return { flagship: true, linkedCalendar, scheduledFor, valid };
 }
 
 /**
@@ -142,7 +169,7 @@ function isApprovalReply(text) {
   // closed — "not approved", "can't approve yet", and equally "approved?
   // no" / "approved — wait, don't send" must all leave the draft alone.
   // Ambiguity always loses; the owner can reply a clean "approved".
-  if (/\b(not|no|nope|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|hold|wait|stop|reject)\b/.test(t)) return false;
+  if (/\b(not|no|nope|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|nevermind|never\s+mind|hold|wait|stop|reject|cancel|abort|disregard|revoke)\b/.test(t)) return false;
   return true;
 }
 
@@ -164,8 +191,13 @@ async function renderSendPreview(send, toEmail) {
   // Demo unsubscribe URL — won't resolve to a real subscriber but the link
   // renders correctly and Gmail/Apple Mail will show the native unsub UI.
   const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
+  // Same reaction-footer ensure step the live sender runs, so a proof/test
+  // of a hand-composed campaign shows the footer the broadcast will carry
+  // (neutralized to inert chips below — no per-recipient token here).
+  const { ensureFeedbackToken } = require('./newsletter-feedback');
+  const ensured = ensureFeedbackToken({ html: send.html_body || '', text: send.text_body });
   let html = wrapNewsletter({
-    body: send.html_body || '',
+    body: ensured.html,
     unsubscribeUrl: demoUrl,
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
@@ -185,26 +217,27 @@ async function renderSendPreview(send, toEmail) {
       grassValue = pctx.grassLabel || DEFAULT_GRASS_LABEL;
     }
   }
-  const applyTokens = (s) => neutralizeQuizTokens(
+  const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
+  const applyTokens = (s) => neutralizeFeedbackTokens(neutralizeQuizTokens(
     String(s)
       .split(GREETING_NAME_TOKEN).join(greetingValue)
       .split(CITY_TOKEN).join(cityValue)
       .split(GRASS_TYPE_TOKEN).join(grassValue),
-  );
+  ));
   html = applyTokens(html);
-  const text = send.text_body ? applyTokens(send.text_body) : undefined;
+  const text = ensured.text ? applyTokens(ensured.text) : undefined;
   return { html, text, unsubscribeUrl: demoUrl };
 }
 
 function proofBannerHtml(recipientCount) {
   return `<div style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to this email and it goes out to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to queue this issue for <strong>Tuesday at 6:00 AM ET</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
 }
 
 function proofBannerText(recipientCount) {
-  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to this email and it goes out to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
+  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to queue this issue for Tuesday at 6:00 AM ET to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
 }
 
 async function countRecipients(send) {
@@ -226,8 +259,8 @@ async function notifyProof(type, payload) {
 
 /**
  * Send the proof email for a draft. Idempotent: a send that already has
- * proof_sent_at (or isn't a draft anymore) is skipped, so the Thu–Sun
- * catch-up cron re-running the autopilot can call this safely every tick.
+ * proof_sent_at (or isn't a draft anymore) is skipped, so the Monday/early-
+ * Tuesday catch-up jobs can call this safely every tick.
  *
  * @returns {{ sent?: boolean, skipped?: boolean, reason?: string }}
  */
@@ -265,6 +298,18 @@ async function sendNewsletterProof(sendId) {
       await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
       return { skipped: true, reason: 'validation_failed', errors };
     }
+  }
+  const calendarContext = await resolveFlagshipCalendarContext(send);
+  if (!calendarContext.valid) {
+    const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
+    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    return { skipped: true, reason: 'calendar_target_invalid', errors };
+  }
+  const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
+  const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
+  if (!eventSelection.valid) {
+    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
+    return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors };
   }
 
   // Atomic proof claim BEFORE the external SendGrid call: overlapping
@@ -345,7 +390,7 @@ async function sendNewsletterProof(sendId) {
 /**
  * Inbound-email hook (called from the Gmail sync on every newly stored
  * email). Detects a reply to a proof email and, when it is an allowlisted
- * owner saying "approved", releases the list send.
+ * owner saying "approved", queues the list send for Tuesday at 6:00 AM ET.
  *
  * Returns true when the email was recognized as proof-approval traffic
  * (whether or not it resulted in a send); false = not ours, continue the
@@ -438,18 +483,41 @@ async function maybeHandleProofApproval(email) {
     }
   }
 
+  const calendarContext = await resolveFlagshipCalendarContext(send);
+  if (!calendarContext.valid) {
+    await notifyProof('newsletter_proof_blocked', {
+      subject: send.subject,
+      errors: ['Approved, but the linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET. The draft was left unscheduled.'],
+    });
+    return true;
+  }
+  const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
+  const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
+  if (!eventSelection.valid) {
+    await notifyProof('newsletter_proof_blocked', {
+      subject: send.subject,
+      errors: ['Approved, but the locked event lineup is no longer eligible — nothing scheduled', ...eventSelection.errors],
+    });
+    return true;
+  }
+
+  let scheduledFor = new Date();
+  let linkedCalendar = null;
+  if (eventSelection.flagship) {
+    linkedCalendar = calendarContext.linkedCalendar;
+    scheduledFor = calendarContext.scheduledFor;
+  }
+
   // Atomic approval claim: two synced copies of the same reply (or a race
   // with a manual Send click) can't both dispatch. Version-guarded on the
   // exact row this approval was checked against — token, status, AND
   // updated_at — so an edit or re-proof landing between the staleness
   // check above and this write turns the claim into a 0-row no-op instead
   // of broadcasting content the owner never proofed.
-  // The claim also flips the row to 'scheduled' with scheduled_for = now:
-  // the scheduler's processScheduledSends tick is the DURABLE executor, so
-  // a process crash between this commit and the dispatch below can't
-  // strand an approved campaign as an unsendable draft. The immediate
-  // dispatch below is just the fast path — sendCampaign's atomic
-  // scheduled→sending claim keeps the two from double-sending.
+  // The claim also flips the row to 'scheduled'. Flagship approval uses the
+  // linked calendar's future Tuesday 6:00 AM ET target — never approval time:
+  // the scheduler's processScheduledSends tick is the durable executor. A
+  // process crash after this commit cannot strand an approved campaign.
   const approvalClaim = db('newsletter_sends')
     .where({ id: send.id, proof_token: token, status: send.status })
     .whereNull('proof_approved_at');
@@ -464,7 +532,7 @@ async function maybeHandleProofApproval(email) {
     proof_approved_at: new Date(),
     proof_approval_email_id: email.id || null,
     status: 'scheduled',
-    scheduled_for: new Date(),
+    scheduled_for: scheduledFor,
     updated_at: new Date(),
   });
   if (!claimed) {
@@ -472,25 +540,28 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
-  logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — dispatching campaign to ${recipientCount} subscribers`);
+  if (linkedCalendar) {
+    await db('newsletter_calendar').where({ id: linkedCalendar.id }).update({
+      status: 'scheduled',
+      updated_at: new Date(),
+    });
+  }
 
-  // Same fire-and-forget contract as the manual /send route: sendCampaign's
-  // atomic draft/scheduled→sending claim is the double-dispatch guard.
-  NewsletterSender.sendCampaign(send.id).catch(async (err) => {
-    if (err.code === 'ALREADY_CLAIMED') {
-      logger.info(`[newsletter-proof] campaign ${send.id} already claimed by another worker — no-op`);
-      return;
-    }
-    logger.error(`[newsletter-proof] approved campaign ${send.id} failed: ${err.message}`, { stack: err.stack });
-    try {
-      await db('newsletter_sends').where({ id: send.id }).update({ status: 'failed' });
-    } catch { /* swallow */ }
-  });
+  logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — scheduled for ${scheduledFor.toISOString()}`);
+
+  // The weekly flagship always waits for Tuesday's scheduler tick. Preserve
+  // the legacy fast path only for any non-flagship proof flow.
+  if (!eventSelection.flagship) {
+    NewsletterSender.sendCampaign(send.id).catch((err) => {
+      logger.error(`[newsletter-proof] approved campaign ${send.id} failed: ${err.message}`, { stack: err.stack });
+    });
+  }
 
   await notifyProof('newsletter_proof_approved', {
     subject: send.subject,
     approvedBy: maskEmail(from),
     recipientCount,
+    scheduledFor: scheduledFor.toISOString(),
   });
 
   return true;
@@ -501,6 +572,7 @@ module.exports = {
   proofRecipient,
   syncedApprovalMailbox,
   approvalSenders,
+  resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,
   extractTopReplyText,

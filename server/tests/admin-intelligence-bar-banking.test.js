@@ -150,7 +150,7 @@ describe('banking intelligence-bar action guard', () => {
         amount: 50,
         idempotencyKey: 'ipo_confirm_123',
         requestedBy: 'admin-1',
-      });
+      }, expect.objectContaining({ confirmed: true, isAdmin: true }));
     });
   });
 
@@ -203,7 +203,7 @@ describe('banking intelligence-bar action guard', () => {
         idempotency_key: 'spo_confirm_123',
         idempotencyKey: 'spo_confirm_123',
         requestedBy: 'admin-1',
-      });
+      }, expect.objectContaining({ confirmed: true, isAdmin: true }));
     });
   });
 });

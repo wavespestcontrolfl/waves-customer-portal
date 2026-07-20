@@ -43,7 +43,7 @@ const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
-const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
 const {
   generateEstimateProposalPDF,
   buildEstimateProposalEmailAttachment,
@@ -961,6 +961,16 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     .update(updatePayload);
   if (!sentCount) {
     logger.warn(`[admin-estimates] estimate ${estimate.id} left the 'sending' claim during send (likely accepted/declined concurrently); preserving its current state.`);
+    // The channels DID deliver — a customer accepting mid-flight is exactly
+    // the outcome the learning loop must not lose, so the first-send event
+    // still stamps on this path (idempotent via the ledger's unique
+    // constraint). Fail-soft: never turns a delivered send into an error.
+    try {
+      const { recordSentLearningEvent } = require('../services/estimate-learning');
+      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+    } catch (e) {
+      logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
+    }
     return {
       sent: true,
       superseded: true,
@@ -985,6 +995,18 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     });
   } catch (e) {
     logger.warn(`[admin-estimates] pricing audit snapshot failed for estimate ${estimate.id}: ${e.message}`);
+  }
+
+  // Learning loop: stamp the draft→sent edit-distance event for AI-composed
+  // drafts (first send only; the ledger's unique constraint makes resends
+  // no-ops). The claimed snapshot — not a re-read — feeds the diff so a
+  // customer accepting right after delivery can't have their own choices
+  // counted as operator edits. Fail-soft — never blocks the send result.
+  try {
+    const { recordSentLearningEvent } = require('../services/estimate-learning');
+    await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+  } catch (e) {
+    logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
   }
 
   // Fire-and-forget: enroll the customer in the estimate_sent follow-up
@@ -1072,6 +1094,21 @@ router.get('/win-loss-slices', async (req, res, next) => {
     const { winLossSlices } = require('../services/estimate-winloss');
     const slices = await winLossSlices({ days });
     res.json({ success: true, ...slices });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/estimates/source-performance — drafted→sent funnel, close
+// rate, send latency, and AI-draft edit stats per estimate source (learning
+// loop). Won/lost mirror win-loss-slices semantics; edit stats read the
+// estimate_learning_events ledger. Read-only analytics.
+router.get('/source-performance', async (req, res, next) => {
+  try {
+    const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 90));
+    const { sourcePerformance } = require('../services/estimate-source-performance');
+    const report = await sourcePerformance({ days });
+    res.json({ success: true, ...report });
   } catch (err) {
     next(err);
   }
@@ -1362,7 +1399,10 @@ router.get('/', async (req, res, next) => {
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
-          isCommercialProposal: estData?.proposal?.enabled === true,
+          // Scaffolds count: a disabled machine-seeded proposal must route
+          // to the proposal builder, not the normal edit flow (revise
+          // rejects COMMERCIAL rows).
+          isCommercialProposal: isCommercialProposalData(estData),
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           // Estimator-engine drafts keep their operator review material in
@@ -1374,6 +1414,27 @@ router.get('/', async (req, res, next) => {
               lane: estData.estimatorEngine.lane || null,
               laneReasons: estData.estimatorEngine.laneReasons || [],
               reviewNotes: estData.estimatorEngine.reviewNotes || null,
+            }
+            : null,
+          // ai_agent (IB quoting agent) drafts keep their reasoning /
+          // assumptions / uncertainty in estimate_data for the same reason —
+          // surface the operator review material so the pipeline can render
+          // it before send.
+          agentDraftReview: estData?.agentDraftReview
+            ? {
+              reasoning: estData.agentDraftReview.reasoning || null,
+              assumptions: Array.isArray(estData.agentDraftReview.assumptions)
+                ? estData.agentDraftReview.assumptions : [],
+              uncertainty: Array.isArray(estData.agentDraftReview.uncertainty)
+                ? estData.agentDraftReview.uncertainty : [],
+              sqftSource: estData.agentDraftReview.sqftSource || null,
+              belowTargetServices: Array.isArray(estData.agentDraftReview.marginCheck?.below_target_services)
+                ? estData.agentDraftReview.marginCheck.below_target_services : [],
+              // Priced lines whose margin could not be verified are a review
+              // signal too — dropping this would show an unflagged badge for
+              // a draft the engine could not fully vouch for.
+              unverifiedLineCount: Number(estData.agentDraftReview.marginCheck?.unverified_line_count || 0),
+              createdAt: estData.agentDraftReview.createdAt || null,
             }
             : null,
           pricingRisk: pricingRiskById.get(e.id) || null,
@@ -1412,6 +1473,10 @@ router.get('/:id/proposal', async (req, res, next) => {
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),
+      // Engine-composed prospect research (commercial proposal lane) — the
+      // builder page shows it read-only above the line items. Additive:
+      // null for operator-originated proposals.
+      prospectBrief: parseEstimateData(estimate.estimate_data)?.commercialProspect || null,
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
@@ -2113,19 +2178,12 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/estimates/cleanup-demo — remove seed/demo estimates
-router.post('/cleanup-demo', async (req, res, next) => {
-  try {
-    const demoNames = ['James Kowalski', 'Karen White', 'Robert Niles', 'Linda Chen', 'Tom Perez', 'Susan Park', 'Dave Richardson', 'Maria Santos'];
-    let deleted = 0;
-    for (const name of demoNames) {
-      const count = await db('estimates').where('customer_name', name).del();
-      deleted += count;
-    }
-    logger.info(`[estimates] Cleaned up ${deleted} demo estimates`);
-    res.json({ success: true, deleted });
-  } catch (err) { next(err); }
-});
+// The old POST /cleanup-demo endpoint (bulk-delete estimates matching a
+// hardcoded list of seed customer names) is intentionally GONE: it was live
+// in production, reachable by any staff token, and deleted by name match
+// alone — a real customer sharing a seed name would lose sent/accepted
+// estimates permanently. One-off seed cleanup belongs in ops/agents/ scripts,
+// not a standing route.
 
 router._internals = {
   clearQuoteRequirementFlags,

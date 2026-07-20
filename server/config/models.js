@@ -77,6 +77,16 @@ const EXTREME = process.env.MODEL_EXTREME || 'claude-fable-5';
 // registry. Override via MODEL_LAWN_CHALLENGE (registry convention) or LAWN_CHALLENGE_MODEL.
 const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
 
+// Call-research miner's Anthropic leg (fallback by default). Pinned here per
+// the registry convention rather than riding FLAGSHIP: extraction-model
+// changes must be deliberate (they mix corpus provenance without a
+// prompt-version bump), so tier/report env changes must not move this.
+const CALL_RESEARCH_ANTHROPIC = process.env.MODEL_CALL_RESEARCH_ANTHROPIC || 'claude-opus-4-8';
+
+// V2 call-extraction's Anthropic fallback leg — same pinning rationale, own
+// env so extraction and the research miner can diverge deliberately.
+const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC || 'claude-opus-4-8';
+
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
 const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
@@ -210,6 +220,8 @@ module.exports = {
   VOICE,
   VISION,
   LAWN_CHALLENGE,
+  CALL_RESEARCH_ANTHROPIC,
+  CALL_EXTRACTION_ANTHROPIC,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
@@ -247,8 +259,17 @@ module.exports = {
 //                                  default: gemini-2.5-flash
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
-//   GEMINI_EXTRACTION_MODEL        call extraction pipeline
+//   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary
+//   CALL_EXTRACTION_MODEL          default: openai / gpt-5.6-sol (25-call bake-off
+//                                  winner 2026-07-18), Claude Opus 4.8 fallback via
+//                                  dispatchWithFallback; kill = CALL_EXTRACTION_PROVIDER=gemini
+//   GEMINI_EXTRACTION_MODEL        the route's gemini-leg model (legacy env name)
 //                                  default: gemini-2.5-pro
+//   CALL_RESEARCH_PROVIDER /       call-research corpus miner (voice-of-customer,
+//   CALL_RESEARCH_MODEL            server/services/call-research-miner.js)
+//                                  default: openai / gpt-5.6-sol (7-arm bake-off
+//                                  winner 2026-07-18), Claude Opus 4.8 fallback
+//                                  via dispatchWithFallback
 //
 // Do NOT move these into the tier registry without also updating that
 // processor's provider-specific validation, fallback, and output-shape

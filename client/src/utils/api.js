@@ -185,16 +185,21 @@ export class ApiClient {
       if (!response.ok) {
         const contentType = response.headers.get('content-type') || '';
         let message = '';
+        let errorBody = null;
 
         if (contentType.includes('application/json')) {
-          const error = await response.json().catch(() => null);
-          message = error?.error || error?.message || '';
+          errorBody = await response.json().catch(() => null);
+          message = errorBody?.error || errorBody?.message || '';
         } else {
           message = (await response.text().catch(() => '')).trim();
         }
 
         const requestErr = new Error(message || `Request failed (${response.status})`);
         requestErr.status = response.status;
+        // Machine-readable discriminator (e.g. 'consent_required') — callers
+        // branch on this, never on the human-facing message string.
+        if (errorBody?.code) requestErr.code = errorBody.code;
+        if (errorBody?.method_type) requestErr.methodType = errorBody.method_type;
         throw requestErr;
       }
 
@@ -471,8 +476,12 @@ export class ApiClient {
     return this.request(`/billing/cards/${cardId}/bank-verification-link`);
   }
 
-  setDefaultCard(cardId) {
-    return this.request(`/billing/cards/${cardId}/default`, { method: 'PUT' });
+  setDefaultCard(cardId, opts) {
+    // opts carries consent_accepted on the retry after a consent_required 409.
+    return this.request(`/billing/cards/${cardId}/default`, {
+      method: 'PUT',
+      ...(opts ? { body: JSON.stringify(opts) } : {}),
+    });
   }
 
   // ---- Autopay ----

@@ -399,6 +399,35 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`Domain lead creation failed: ${e.message}`); }
     }
 
+    // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
+    // quote-flavored inbound text runs the estimator engine against the
+    // thread — priced DRAFT + one phone-scoped bell, never a send. Runs
+    // AFTER the domain/van tracking branch so a first-contact text to a
+    // tracking number has its customer row before the context builds (an
+    // earlier placement drafted unlinked). The AWAITED part is cheap and
+    // bounded (regex prefilter → FAST classifier with a webhook-safe
+    // timeout → one durable owed-quote bell); the DEEP composer detaches
+    // inside startSmsThreadDraft AFTER that bell exists, so a restart
+    // mid-compose leaves the manual task instead of a silent loss.
+    // Intake-machine replies return above and draft through lead-intake's
+    // own handoff.
+    try {
+      // Clarify-reply routing first: a text answering a recently sent
+      // clarifying question records the supplied fields onto the linked
+      // lead/customer and resumes drafting itself (intent gate + cooldown
+      // bypassed — the reply IS the new information). Only unanswered
+      // texts fall through to the general quote-intent trigger. The
+      // message continues into normal inbox handling either way.
+      const { handleClarifyReply } = require('../services/estimate-clarify-asks');
+      const clarifyReply = Body && String(Body).trim()
+        ? await handleClarifyReply({ phone: From, body: Body })
+        : { handled: false };
+      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
+      if (!clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+        await startSmsThreadDraft({ phone: From, triggerBody: Body });
+      }
+    } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
+
     // Log inbound message
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
@@ -460,7 +489,12 @@ router.post('/sms', async (req, res) => {
     setImmediate(() => { void (async () => {
      try {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
-    const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
+    // gbp_tracking is deliberately in this list: a known customer who replies
+    // to a GBP tracking number (the number Google shows them) used to skip the
+    // sms_reply thread bell entirely and surface only as the legacy
+    // "📩 New SMS" dashboard forward — the thread in /admin/communications
+    // never rang (observed 2026-07-17, customer texting three Waves numbers).
+    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
 
     // In-app + push notification for inbound SMS from known customers.
     // knownInboundNotified records whether this modern bell/push actually
@@ -854,6 +888,23 @@ router.post('/status', async (req, res) => {
           }).catch((e) => logger.error(`[twilio-status] landline suppression failed: ${e.message}`));
         } catch (e) {
           logger.error(`[twilio-status] landline suppression dispatch failed: ${e.message}`);
+        }
+
+        // Voicemail text-back bounce: the quote link never arrived (30006
+        // landline is the common case), so the lead has had NO first contact
+        // and nothing else surfaces that. Pull its follow-up to now and leave
+        // a call-instead breadcrumb on the lead timeline. Best-effort, off
+        // the 200 response path.
+        try {
+          const VoicemailLeadSms = require('../services/voicemail-lead-sms');
+          void VoicemailLeadSms.handleUndeliveredQuoteLink({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] voicemail quote-link bounce handling failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] voicemail quote-link bounce dispatch failed: ${e.message}`);
         }
       }
     }

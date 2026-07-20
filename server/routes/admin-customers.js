@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { addETDays } = require('../utils/datetime-et');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -29,6 +30,111 @@ const {
 } = require('../utils/intake-normalize');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// ─── Technician scoping ─────────────────────────────────────────────────────
+// requireTechOrAdmin admits technician tokens, but a tech must not be able to
+// browse arbitrary customers' profiles, payment methods, or CRM state — a
+// field token grants access only to the customers whose visits are assigned
+// to that tech. Admin requests are unscoped. Endpoints with no tech surface
+// at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
+// outright.
+// Assignment currency — ONE predicate for every technician access path
+// (per-customer proxy AND the directory subquery): dead statuses never
+// authorize, and everything else (pending/confirmed/en_route/on_site/
+// completed) must sit inside the ET date window. Completed visits stay
+// accessible for post-visit paperwork; a stale never-actioned pending row
+// or a years-old completion grants nothing.
+const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_WINDOW_DAYS = 7;
+const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
+
+function currentAssignmentFilter(q, technicianId) {
+  return q
+    .where('scheduled_services.technician_id', technicianId)
+    .whereNotIn('scheduled_services.status', TECH_ACCESS_DEAD_STATUSES)
+    .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
+}
+
+async function technicianServicesCustomer(req, customerId) {
+  if (req.techRole !== 'technician') return true;
+  const assigned = await currentAssignmentFilter(
+    db('scheduled_services').where({ customer_id: customerId }),
+    req.technicianId,
+  ).first('id');
+  return !!assigned;
+}
+
+// Fields stripped from list rows for technician tokens. The field flows
+// that search customers (estimate builder, project-report picker) render
+// identity, contact, address, and service context — not account financials
+// or CRM/marketing state.
+const TECH_LIST_STRIPPED_FIELDS = [
+  'lifetimeRevenue', 'balanceOwed', 'cardsOnFile', 'healthScore',
+  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
+  'lastRating', 'tags',
+  // Account pricing is office-only — the field flows that search customers
+  // never render plan price, and the server-priced estimate builder doesn't
+  // take it from directory rows.
+  'monthlyRate',
+];
+
+function techSafeListRow(mapped) {
+  const out = { ...mapped };
+  for (const field of TECH_LIST_STRIPPED_FIELDS) delete out[field];
+  return out;
+}
+
+// Filters and sorts a technician token may drive the directory with:
+// identity/service context only. CRM/financial filters (stage, tag, source,
+// cards, hasBalance) and sorts over stripped fields (revenue, lead_score,
+// last_contact) would otherwise leak exactly what techSafeListRow removes —
+// result membership and `total` under `?hasBalance=true` IS the balance
+// field.
+function techSafeListFilters(filters) {
+  const { search, tier, area, city, lastVisited } = filters;
+  return { search, tier, area, city, lastVisited };
+}
+
+// 'rate' is NOT safe: sorting by a stripped field (monthlyRate) is the same
+// inference channel as filtering by one.
+const TECH_SAFE_SORTS = new Set(['name']);
+
+function techSafeSort(sort) {
+  return TECH_SAFE_SORTS.has(sort) ? sort : 'name';
+}
+
+// 360 payload keys a technician token never receives: payment instruments,
+// billing/consent/contract records, comms history, and CRM/marketing state.
+// /comms and /timeline are requireAdmin — the 360 endpoint must not
+// re-expose the same data to an assigned tech.
+const TECH_360_STRIPPED_KEYS = [
+  'interactions', 'smsLog', 'payments', 'invoices', 'cards',
+  'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
+  'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
+  'tags',
+  // Sibling properties on the account: authorization is per-customer, so an
+  // assignment at ONE property must not expose the addresses of the others.
+  'accountProperties',
+  // Estimate rows carry permanent public bearer tokens (customer-facing
+  // accept/decline actions) plus decline data — office-only. No tech
+  // surface reads estimates from the 360 payload.
+  'estimates',
+];
+const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
+  'payerId', 'billingMode', 'monthlyRate', 'annualValue', 'lifetimeRevenue',
+  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
+  'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
+];
+
+function techSafe360Payload(payload) {
+  const out = { ...payload };
+  for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
+  out.customer = { ...payload.customer };
+  for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  return out;
+}
 
 function dateOnlyForApi(value) {
   if (!value) return null;
@@ -1294,9 +1400,29 @@ router.get('/', async (req, res, next) => {
 
     if (stage && !isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
-    const filters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    // Technician tokens must not be able to enumerate the customer base:
+    // the directory (list + count) is limited to customers with a visit
+    // assigned to the requesting tech, rows are trimmed below
+    // (techSafeListRow), and the drivable filters/sorts are reduced to the
+    // identity/service-safe set (techSafeListFilters / techSafeSort).
+    // Admin requests are unscoped.
+    const isTechRequest = req.techRole === 'technician';
+    const scopeTechAssigned = (q) => {
+      if (isTechRequest) {
+        q.whereIn('customers.id', currentAssignmentFilter(
+          db('scheduled_services').select('customer_id'),
+          req.technicianId,
+        ));
+      }
+      return q;
+    };
+
+    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    const filters = isTechRequest ? techSafeListFilters(allFilters) : allFilters;
+    const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
     const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
-    let query = applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters).select(
+
+    let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters)).select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -1320,21 +1446,21 @@ router.get('/', async (req, res, next) => {
     // on last name or other columns. NULLS LAST keeps blank-first-name
     // rows pinned to the end of the list instead of the top.
     const dir = order === 'desc' ? 'desc' : 'asc';
-    if (sort === 'name') {
+    if (effectiveSort === 'name') {
       query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
-    } else if (sort === 'revenue') {
+    } else if (effectiveSort === 'revenue') {
       // Sort by the computed net, not the writer-less lifetime_revenue column.
       // `dir` is sanitized to asc/desc above.
       query = query.orderByRaw(`lifetime_revenue_net ${dir}`);
     } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[sort] || 'first_name';
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[effectiveSort] || 'first_name';
       query = query.orderBy(sortCol, dir);
     }
 
-    const total = await applyCustomerListFilters(
+    const total = await scopeTechAssigned(applyCustomerListFilters(
       db('customers').whereNull('customers.deleted_at'),
       filters
-    ).count('* as count').first();
+    )).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
     const customers = await query.limit(limit).offset(offset);
@@ -1349,14 +1475,18 @@ router.get('/', async (req, res, next) => {
     const allSources = await db('customers').whereNull('deleted_at').select('lead_source').whereNotNull('lead_source').groupBy('lead_source');
     const allAreas = await db('customers').whereNull('deleted_at').select('city').whereNotNull('city').where('city', '!=', '').groupBy('city').orderBy('city');
 
+    // Technician tokens get trimmed rows (no financial/CRM fields) and no
+    // pipeline/marketing aggregates — same response shape so the shared
+    // search UIs keep working.
+    const mappedRows = customers.map(mapCustomerListRow);
     res.json({
-      customers: customers.map(mapCustomerListRow),
+      customers: isTechRequest ? mappedRows.map(techSafeListRow) : mappedRows,
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
-      pipelineCounts: pipelineMap,
+      pipelineCounts: isTechRequest ? {} : pipelineMap,
       filters: {
-        tags: allTags.map(t => t.tag),
-        sources: allSources.map(s => s.lead_source).filter(Boolean),
+        tags: isTechRequest ? [] : allTags.map(t => t.tag),
+        sources: isTechRequest ? [] : allSources.map(s => s.lead_source).filter(Boolean),
         areas: allAreas.map(a => a.city).filter(Boolean),
       },
     });
@@ -1364,7 +1494,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/pipeline — kanban view
-router.get('/pipeline/view', async (req, res, next) => {
+router.get('/pipeline/view', requireAdmin, async (req, res, next) => {
   try {
     const limitPerStage = Math.min(500, Math.max(1, parseInt(req.query.limitPerStage) || 100));
     const result = {};
@@ -1405,6 +1535,11 @@ router.get('/pipeline/view', async (req, res, next) => {
 // services, etc.) every time the tech opens the payment sheet.
 router.get('/:id/cards', async (req, res, next) => {
   try {
+    // Payment methods stay visible to the tech checkout/project flows, but
+    // only for customers with a visit assigned to this tech.
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const cards = await db('payment_methods')
       .where({ customer_id: req.params.id })
       .orderBy('is_default', 'desc')
@@ -1426,7 +1561,10 @@ router.get('/:id/cards', async (req, res, next) => {
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
 // Lazily backfills a primary property for customers created after the migration.
-router.get('/:id/properties', async (req, res, next) => {
+// requireAdmin: returns every active property address on the account — a
+// per-customer assignment must not reveal sibling addresses, and no tech
+// surface calls this (the property writes below were already admin-only).
+router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
@@ -1500,7 +1638,7 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
 });
 
 // GET /api/admin/customers/:id/timeline — unified customer timeline
-router.get('/:id/timeline', async (req, res, next) => {
+router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -1620,7 +1758,7 @@ router.get('/:id/timeline', async (req, res, next) => {
 // GET /api/admin/customers/:id/comms — unified per-customer SMS + voice
 // thread (PR 3 of comms unification). Replaces the SMS-only feed that
 // fed the Comms tab from `data.smsLog`. Email lands in PR 5.
-router.get('/:id/comms', async (req, res, next) => {
+router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
@@ -1684,7 +1822,10 @@ router.get('/:id/comms', async (req, res, next) => {
 // `status` so the UI can show whether it's accepted yet. This keeps the UI
 // from guessing at estimate_data shapes and returns service-library ids when
 // we can match the quoted line to a schedulable service.
-router.get('/:id/schedule-estimates', async (req, res, next) => {
+// requireAdmin: office booking data — sent/accepted quote pricing, payment
+// posture, and permanent estimate bearer tokens. Its only consumer is
+// CreateAppointmentModal, and appointment creation is already admin-only.
+router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers')
       .where({ id: req.params.id })
@@ -1829,6 +1970,9 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
 // which pulls 16 parallel tables; this endpoint is the 4 we actually need.
 router.get('/:id/estimates-summary', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customer = await db('customers')
       .where({ id: req.params.id })
       .whereNull('deleted_at')
@@ -1841,6 +1985,15 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
       )
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Technician tokens: the tech CreateProjectModal consumes only
+    // `customer`. Office analytics — estimate history (with bearer tokens
+    // and decline reasons), conversion stats, the last-SMS preview — and
+    // lead attribution stay office-only, same boundary as /comms.
+    if (req.techRole === 'technician') {
+      const { lead_source, lead_source_detail, ...techCustomer } = customer;
+      return res.json({ customer: techCustomer, estimates: [], stats: null, lastContact: null });
+    }
 
     const [estimates, lastMessage] = await Promise.all([
       db('estimates')
@@ -1894,9 +2047,18 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
 
 router.get('/:id/latest-scheduled-service', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const service = await db('scheduled_services')
       .where({ customer_id: req.params.id })
       .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
+      // Same predicate as the existence gate: the prefill must be the
+      // TECH'S OWN latest visit — without this, an office-scheduled
+      // follow-up assigned to another tech leaks into the project modal.
+      .modify((q) => {
+        if (req.techRole === 'technician') currentAssignmentFilter(q, req.technicianId);
+      })
       .orderBy('scheduled_date', 'desc')
       .orderBy('created_at', 'desc')
       .first('id', 'service_type', 'scheduled_date', 'status');
@@ -1915,6 +2077,12 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {
+    // The 360 payload below includes billing history, stored payment
+    // methods, consents, and contracts — a technician token gets it only
+    // for customers whose visits are assigned to them.
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
@@ -2084,7 +2252,7 @@ router.get('/:id', async (req, res, next) => {
       }
     }));
 
-    res.json({
+    const payload = {
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
         accountId: c.account_id,
@@ -2229,7 +2397,8 @@ router.get('/:id', async (req, res, next) => {
         rows: nutrientLedgerRows || [],
       },
       customerDiscounts: customerDiscounts || [],
-    });
+    };
+    res.json(req.techRole === 'technician' ? techSafe360Payload(payload) : payload);
   } catch (err) { next(err); }
 });
 
@@ -2718,7 +2887,7 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id/stage
-router.put('/:id/stage', async (req, res, next) => {
+router.put('/:id/stage', requireAdmin, async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
     if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
@@ -2768,7 +2937,7 @@ router.put('/:id/stage', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/tags
-router.post('/:id/tags', async (req, res, next) => {
+router.post('/:id/tags', requireAdmin, async (req, res, next) => {
   try {
     await db('customer_tags').insert({ customer_id: req.params.id, tag: req.body.tag }).onConflict(['customer_id', 'tag']).ignore();
     res.json({ success: true });
@@ -2776,7 +2945,7 @@ router.post('/:id/tags', async (req, res, next) => {
 });
 
 // DELETE /api/admin/customers/:id/tags/:tag
-router.delete('/:id/tags/:tag', async (req, res, next) => {
+router.delete('/:id/tags/:tag', requireAdmin, async (req, res, next) => {
   try {
     await db('customer_tags').where({ customer_id: req.params.id, tag: req.params.tag }).del();
     res.json({ success: true });
@@ -2784,7 +2953,7 @@ router.delete('/:id/tags/:tag', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/interactions
-router.post('/:id/interactions', async (req, res, next) => {
+router.post('/:id/interactions', requireAdmin, async (req, res, next) => {
   try {
     const { type, subject, body } = req.body;
     await db('customer_interactions').insert({
@@ -2797,7 +2966,7 @@ router.post('/:id/interactions', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/follow-up
-router.post('/:id/follow-up', async (req, res, next) => {
+router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
   try {
     await db('customers').where({ id: req.params.id }).update({
       next_follow_up_date: req.body.date, follow_up_notes: req.body.notes,
@@ -3488,7 +3657,7 @@ router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
 });
 
 // GET /:id/credits — account credit balance + ledger history for Customer 360.
-router.get('/:id/credits', async (req, res, next) => {
+router.get('/:id/credits', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).first('id');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -3607,6 +3776,15 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  technicianServicesCustomer,
+  techSafeListRow,
+  techSafeListFilters,
+  techSafeSort,
+  techSafe360Payload,
+  TECH_LIST_STRIPPED_FIELDS,
+  TECH_360_STRIPPED_KEYS,
+  TECH_360_STRIPPED_CUSTOMER_FIELDS,
+  TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

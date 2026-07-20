@@ -56,6 +56,7 @@ const {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
   WAVES_ADDRESS_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -1925,6 +1926,8 @@ const FRIENDLY_QUOTE_REASONS = {
     'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.',
   commercial_low_confidence_site_confirmation:
     'This commercial estimate needs a quick site confirmation — your Waves account manager will confirm the price with you before it’s finalized.',
+  unit_in_multi_unit_building:
+    'Condo and multi-unit pricing is set per unit, not per building — your Waves account manager will confirm the exact price for your unit before it’s finalized.',
   retired_lawn_cadence_requote:
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
   retired_lawn_cadence_selection:
@@ -4548,6 +4551,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <div class="estimate-ask-prompts" aria-label="Example questions">
       ${askPrompts.map((prompt) => `<button type="button" data-estimate-ask-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join('')}
     </div>
+    <div class="estimate-ask-safety">Prefer to read it yourself? See exactly what we apply and why: <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a></div>
     <div class="estimate-ask-answer" id="estimate-ask-answer" aria-live="polite" hidden></div>
   </section>` : '';
 
@@ -4735,6 +4739,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .estimate-ask-prompts{display:flex;flex-wrap:wrap;gap:8px}
   .estimate-ask-prompts button{appearance:none;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:999px;padding:8px 12px;font:700 12px/1 Inter,system-ui,sans-serif;cursor:pointer}
   .estimate-ask-prompts button:hover{background:#121E3D;border-color:#121E3D}
+  .estimate-ask-safety{font-size:14px;color:#3F4A65;line-height:1.5;text-align:center}
+  .estimate-ask-safety a{color:#1B2C5B;font-weight:600;white-space:nowrap}
   .estimate-ask-answer{border-left:4px solid ${ESTIMATE_BUTTON_BLUE};background:#F8FCFE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:14px;line-height:1.55;white-space:pre-line}
   .estimate-ask-answer[data-state="error"]{border-left-color:#C8102E;background:#FFF5F5}
   @media(max-width:640px){.estimate-ask-form{grid-template-columns:1fr}.estimate-ask-form button{width:100%}}
@@ -5251,6 +5257,8 @@ ${shellTopBar()}
       <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
+      <span class="dot">&middot;</span>
+      <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a>
     </div>
     <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
@@ -6910,18 +6918,97 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const estData = isString
       ? JSON.parse(estimate.estimate_data)
       : (estimate.estimate_data || null);
-    const snapshot = estData && estData.membershipSnapshot;
-    if (!snapshot || !snapshot.isExistingCustomer) return;
+    if (!estData) return;
+    const snapshot = estData.membershipSnapshot;
+    const frozenSnapshot = !!(snapshot && snapshot.isExistingCustomer);
+    // EVERY membership artifact the cleanup below removes must also arm the
+    // trigger, or an estimate carrying only that artifact returns before the
+    // live plan check and keeps the discount: SERVER-stamped recurring flags
+    // in any replay shape (admin persistence writes them for a verified
+    // active-plan member — including one-time-only members with NO qualifying
+    // priors, whose snapshot may be absent), prior-service lists nested in a
+    // replay shape (legacy rows predating the save-time sanitizer), and the
+    // top-level priorQualifyingServices even without a snapshot.
+    // extractEngineInputs() replays all of them on every reprice.
+    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+      .filter((shape) => shape && typeof shape === 'object');
+    // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
+    // recurring value (boolean true, 'true', legacy strings, form 'YES') as
+    // recurring, so the trigger must too — only explicit negatives are inert.
+    // Over-triggering is safe: an active member early-returns on the live
+    // check, and a lapsed one gets exactly the cleanup+reprice it needs.
+    const truthyRecurringFlag = (value) => {
+      if (value == null || value === false) return false;
+      const normalized = String(value).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    };
+    const frozenRecurring = replayShapes.some((shape) => truthyRecurringFlag(shape.recurringCustomer)
+      || truthyRecurringFlag(shape.isRecurringCustomer)
+      || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
+      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
+    if (!frozenSnapshot && !frozenRecurring) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
     // Drop every frozen artifact derived from the stale "existing customer"
     // classification, not just the snapshot: priorQualifyingServices is
     // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), and sendSnapshot.pricingBundle is consulted by
-    // buildPricingBundle() before the runtime cache (returning the old bundle
-    // with no waivable setup fee). Leaving either behind lets the lead keep
-    // member pricing / undercharge even after the snapshot is gone.
+    // combined-tier discount), the recurring flags in the stored replay
+    // shapes re-grant the member perk the same way, and
+    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+    // the runtime cache (returning the old bundle with no waivable setup
+    // fee). Leaving any behind lets the lead keep member pricing /
+    // undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
     delete estData.priorQualifyingServices;
+    for (const shape of replayShapes) {
+      delete shape.recurringCustomer;
+      delete shape.isRecurringCustomer;
+      // A prior-service list NESTED in a replay shape (legacy rows predate
+      // the save-time sanitizer) replays straight through extractEngineInputs
+      // and restores the combined-tier discount the top-level delete just
+      // removed.
+      delete shape.priorQualifyingServices;
+    }
+    // Clearing the flags alone is not enough: the discount is already BAKED
+    // INTO the stored result/totals from save-time, and buildPricingBundle's
+    // v1 path (readV1Shape) + normalizeOneTimeBreakdown serve those stored
+    // prices verbatim — the lapsed member could still view and accept the
+    // member price. Reprice in-memory from the sanitized replay inputs with
+    // non-member identity (empty deps = no priors, no recurring forcing; the
+    // engine still auto-derives the perk from a cart that itself buys a
+    // recurring service). When no trustworthy reprice is possible (legacy row
+    // with no replayable engine input, or an engine error), fail CLOSED:
+    // membershipLapsedRequote makes resolveEstimateQuoteRequirement mark the
+    // bundle quote-required on every path, so accept/deposit refuse instead
+    // of charging the stale member price.
+    // Frozen per-tier discount RATES were snapshotted under the stale member
+    // classification — accept-time tier math (snapshotTierDiscount) prefers
+    // them over live rates, so they must go with the rest of the artifacts.
+    if (estData.sendSnapshot && typeof estData.sendSnapshot === 'object') {
+      delete estData.sendSnapshot.tierDiscounts;
+    }
+    if (estData.pricingContext && typeof estData.pricingContext === 'object') {
+      delete estData.pricingContext.tierDiscounts;
+    }
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    if (reprice.recomputed) {
+      estData.result = reprice.serverResult;
+      // A successful authoritative reprice supersedes any earlier fail-closed
+      // flag — without this a transient failure would leave the estimate
+      // permanently quote-required.
+      delete estData.membershipLapsedRequote;
+      estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
+      estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
+      estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
+      // Acceptance reads the ROW tier for discount math — leaving the stale
+      // member tier would reapply e.g. a Platinum discount to Bronze-priced
+      // data at invoice time.
+      estimate.waveguard_tier = reprice.serverResult?.recurring?.waveGuardTier
+        || reprice.serverResult?.recurring?.tier
+        || null;
+    } else {
+      estData.membershipLapsedRequote = true;
+    }
     invalidateSendSnapshotPricingBundle(estData);
     estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
     // The runtime pricing cache key ignores estimate_data content, so bust it
@@ -6939,6 +7026,29 @@ async function handleEstimateView(req, res, next) {
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
+
+    // Centralized-viewability gate, SSR half. GET /:token/data owns this gate
+    // for the React path (isEstimateCustomerViewable); the legacy server-HTML
+    // renderer below prints contact details and pricing with NO staff auth,
+    // so the classes /data withholds must never reach it either: draft/
+    // scheduled (unpublished — a leaked bearer URL is pre-publication
+    // exposure), archived (office-retired), and send_failed. On the
+    // /estimate/ mount, fall through to the React shell — /data 404s these
+    // for customers and owns the ONLY sanctioned draft bypass
+    // (?adminPreview=1 + verifyStaffBearer), so the estimate tool's "Customer
+    // View" and the estimates list's Preview keep working. On the
+    // /api/estimates mount (no SPA to fall through to) they read as
+    // not found. Runs BEFORE reconcileFrozenMembershipSnapshot — a row we're
+    // rejecting needs no membership reconcile. Expired PUBLISHED rows are
+    // deliberately NOT gated here: they keep the personalized SSR expired
+    // page below (the customer once legitimately held that link).
+    if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      || estimate.archived_at
+      || estimate.status === 'send_failed') {
+      if (req.path.startsWith('/estimate/')) return next();
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
     await reconcileFrozenMembershipSnapshot(estimate);
 
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
@@ -6996,26 +7106,19 @@ async function handleEstimateView(req, res, next) {
         billByInvoice: effectiveInvoiceMode,
         paymentMethodPreference: null,
       })).required;
-    // Staff can request the REAL React renderer for an unpublished row via
-    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
-    // list's Preview). The param is NOT authorization — this route only
-    // serves the SPA shell; GET /:token/data does the staff-JWT check and
-    // still 404s the draft for anyone else, so a non-staff hit on the URL
-    // renders the React "link isn't valid" screen (strictly less exposure
-    // than the SSR draft page below).
+    // ?adminPreview=1 is the staff draft-preview param (the estimate tool's
+    // "Customer View" + the estimates list's Preview). The param is NOT
+    // authorization — GET /:token/data does the staff-JWT check. The
+    // non-viewable classes (unpublished/archived/send_failed) never reach
+    // this point (the SSR viewability gate above routed them to the React
+    // shell / not-found), so it no longer factors into the renderer decision;
+    // it still excludes staff preview hits from the GrowthBook experiment
+    // assignment below.
     const adminPreviewRequested = req.query.adminPreview === '1';
-    let shouldUseReactEstimateView = (estimate.use_v2_view === true
+    let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
-      || recurringCardForcesReactView)
-      // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
-      // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent — UNLESS the staff preview param asks for the React
-      // page (the renderer the customer actually gets once it's sent; the
-      // /:token/data staff gate makes that path draft-safe). The use_v2_view
-      // default flip otherwise only takes effect once the estimate is
-      // actually published.
-      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
+      || recurringCardForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -7066,24 +7169,25 @@ async function handleEstimateView(req, res, next) {
     const requestIp = clientIp(req);
     const countThisView = shouldCountView(req, requestIp, estimate);
     if (countThisView) {
-      try {
-        await db('estimates').where({ id: estimate.id }).update({
-          view_count: db.raw('COALESCE(view_count, 0) + 1'),
-          last_viewed_at: db.fn.now(),
-        });
-      } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
-
-      // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
-      // Wrapped so a schema drift can't break the public estimate page.
+      // ONE transaction for the counter + the per-open row (Estimates v2 spec
+      // §4) — separate writes let a single failure leave view_count diverged
+      // from COUNT(estimate_views) forever (dashboard vs engagement engine).
+      // Still wrapped so schema drift can't break the public estimate page.
       try {
         const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db('estimate_views').insert({
-          estimate_id: estimate.id,
-          viewed_at: db.fn.now(),
-          ip: requestIp || null,
-          user_agent: ua || null,
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: requestIp || null,
+            user_agent: ua || null,
+          });
         });
-      } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+      } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook: a real customer open may complete a
       // qualifying session boundary (return visit / dark-then-return /
@@ -8013,6 +8117,18 @@ router.put('/:token/accept', async (req, res, next) => {
         reason: 'retired_lawn_cadence_selection',
       });
     }
+    // Retired Tree & Shrub cadence backstop (v4.5 six-visit mandate; audit
+    // 2026-07-18 P2): the 9-visit Enhanced / 12-visit Premium tiers are
+    // retired — pricing normalizes them to Standard, but a stale sent
+    // estimate still renders its stored enhanced row and accepting it books
+    // a retired-cadence program at pre-reprice prices. Mirrors the lawn
+    // backstop above.
+    if (!treatAsOneTime && recurringTreeShrubRowAtRetiredCadence(acceptedEstDataForPricing)) {
+      return res.status(409).json({
+        error: 'This estimate’s tree & shrub plan uses a retired schedule — pick one of the current plan options, or call Waves and we’ll refresh your quote.',
+        reason: 'retired_tree_shrub_cadence_selection',
+      });
+    }
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
@@ -8090,9 +8206,23 @@ router.put('/:token/accept', async (req, res, next) => {
       const perApplication = visits > 0 ? Math.round((recurringAnnual / visits) * 100) / 100 : 0;
       return { label, recurringAnnual, perApplication };
     })();
+    // Tier accepts bill per visit at the plan's true per-application price —
+    // the cadence amount is the MONTHLY display rate for tier plans
+    // (billingFrequencyKey 'monthly' with visits != 12), and stamping it as
+    // the row price undercollects every completion (T&S audit 2026-07-18 P1).
+    // Mirrors the converter's perApplicationAmount so the reserved-slot row
+    // and converter-inserted rows carry the identical per-visit charge.
+    const selectedTierPerApplicationPrice = selectedServiceTierBillsMonthly
+      ? BillingCadence.perApplicationChargeAmount({
+          billingCadence: effectiveBillingCadence,
+          annualRate: effectiveAnnualTotal,
+          monthlyRate: effectiveMonthlyTotal,
+          visitsPerYear: Number(selectedFrequency?.visitsPerYear) || null,
+        })
+      : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
+      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || selectedTierPerApplicationPrice || effectiveBillingCadence?.amount));
     const acceptedOneTimeServiceLabel = treatAsOneTime
       ? buildOneTimeInvoiceServiceLabel({
           estimate,
@@ -8292,6 +8422,20 @@ router.put('/:token/accept', async (req, res, next) => {
             trx,
           });
           reservationCommitted = true;
+          // T&S tier accepts: stamp the accepted tier's catalog identity
+          // (see treeShrubTierCatalogStamp — codex P2 r2: this fresh-slotId
+          // path was missed by the r1 fix).
+          if (committedAppointment?.id) {
+            const tierStamp = await treeShrubTierCatalogStamp(trx, {
+              selectedFrequency,
+              estData: acceptedEstDataForPricing,
+              rowServiceType: committedAppointment.service_type,
+            });
+            if (tierStamp) {
+              await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+              Object.assign(committedAppointment, tierStamp);
+            }
+          }
           if (committedAppointment?.id) {
             acceptedAppointmentsToRegister.push(committedAppointment);
           }
@@ -8331,6 +8475,19 @@ router.put('/:token/accept', async (req, res, next) => {
               trx,
             });
             reservationCommitted = true;
+            // T&S tier accepts: stamp the accepted tier's catalog identity
+            // (see treeShrubTierCatalogStamp).
+            if (committedAppointment?.id) {
+              const tierStamp = await treeShrubTierCatalogStamp(trx, {
+                selectedFrequency,
+                estData: acceptedEstDataForPricing,
+                rowServiceType: committedAppointment.service_type,
+              });
+              if (tierStamp) {
+                await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+                Object.assign(committedAppointment, tierStamp);
+              }
+            }
             if (committedAppointment?.id) {
               acceptedAppointmentsToRegister.push(committedAppointment);
             }
@@ -8357,6 +8514,15 @@ router.put('/:token/accept', async (req, res, next) => {
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
           }
+          // T&S tier accepts adopting an existing (non-held) appointment:
+          // stamp the accepted tier's catalog identity (see
+          // treeShrubTierCatalogStamp).
+          const adoptedTierStamp = await treeShrubTierCatalogStamp(trx, {
+            selectedFrequency,
+            estData: acceptedEstDataForPricing,
+            rowServiceType: existingAppointmentRow.service_type,
+          });
+          if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])
@@ -9675,7 +9841,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
 
-    logger.info(`[estimate] ${estimate.customer_name} selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
+    logger.info(`[estimate] ${estimate.id}: selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
     res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
   } catch (err) { next(err); }
 });
@@ -9825,7 +9991,7 @@ router.put('/:token/preferences', async (req, res, next) => {
 
     const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeManualAndPrefs) * 100) / 100);
 
-    logger.info(`[estimate] ${estimate.customer_name} toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
+    logger.info(`[estimate] ${estimate.id}: toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
     res.json({
       success: true,
       preferences: nextPrefs,
@@ -10042,12 +10208,20 @@ router.put('/:token/decline', async (req, res, next) => {
     const declinedCount = await db('estimates')
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+      // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
+      // archive committed between the pre-read and this write must not be
+      // mutated back to life as a decline.
+      .whereNull('archived_at')
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
     if (!declinedCount) {
-      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at');
+      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+      // Honor the guard's own status: a row archived mid-flight must return
+      // the same generic 404 as the pre-read path, not a "no longer active"
+      // hint that the token maps to a real estimate.
+      if (!freshGuard.ok) return res.status(freshGuard.status).json({ error: freshGuard.error });
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
 
@@ -11020,6 +11194,32 @@ function retiredLawnRequoteNeeded(estData = null) {
   return recurringKeys.includes('lawn_care');
 }
 
+// Tree & Shrub twin of retiredLawnRequoteNeeded (codex P1 r4): the retired
+// 9x Enhanced / 12x Premium T&S condition must be part of the SHARED quote
+// requirement, not only the accept-time 409 — /data (canAccept),
+// /deposit-intent, and /recurring-card-intent all read this gate, and an
+// accept-only check would let a stale estimate collect a deposit or save a
+// card before PUT /accept rejects (deposit mirror contract). Estimates that
+// still render a current (light/standard) tier card keep self-serve accept —
+// selecting one restamps the row and passes the accept backstop.
+function retiredTreeShrubRequoteNeeded(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats?.ts) ? resultStats.ts : [];
+  const tierKeys = rows
+    .map((row) => treeShrubTierKey(row))
+    .filter((key) => ['light', 'standard', 'enhanced', 'premium'].includes(key));
+  if (tierKeys.length) {
+    if (tierKeys.some((key) => key === 'light' || key === 'standard')) return false;
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    return (recurringSvcList || []).map(recurringServiceKey).includes('tree_shrub');
+  }
+  // No tier rows (legacy/mixed shape): a stored row explicitly at a retired
+  // cadence requotes up front. Cadence-less legacy rows keep self-serve —
+  // the converter schedules them at the current bi-monthly program.
+  return recurringTreeShrubRowAtRetiredCadence(estData);
+}
+
 // Does the estimate STORE a recurring lawn price below the program minimum?
 // The React view re-clamps stored rows at render (clampLawnLadderEntry), but
 // the legacy SSR page derives its hero/billing figures straight from the
@@ -11081,6 +11281,39 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
+// Retired T&S tiers = anything that isn't the 6x Standard mandate or the 4x
+// Light downsell (v4.5). Detection mirrors the accept restamp: a selected
+// Enhanced card restamps the row to the tree_shrub_6week key, older stored
+// rows carry a 9/12 visit count or 6-week wording.
+function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
+  if (!estDataLike || typeof estDataLike !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'tree_shrub') return false;
+    const key = String(svc?.serviceKey || svc?.service_key || '').trim();
+    if (key === 'tree_shrub_6week') return true;
+    // Explicit cadence FIELDS first — the converter reads these before any
+    // visit count or display text (explicitServiceCadence), so a crafted
+    // row like { frequency: 'monthly' } with no visit count would schedule
+    // the retired 12x Premium cadence while passing the checks below
+    // (codex P2 r1). Only the two live tiers' patterns are acceptable;
+    // field-less legacy rows fall through to the visit/text checks.
+    const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
+      .map((value) => normalizeRecurringPattern(value))
+      .find(Boolean) || null;
+    if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
+    // Same alias set the converter's visitsPerYearForRecurringService reads
+    // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
+    const visits = Number(
+      svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
+    );
+    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
+    const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
+    return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
+  });
+}
+
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown
     || (estData ? normalizeOneTimeBreakdown(estData) : null);
@@ -11116,6 +11349,16 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const retiredLawnRequote = retiredLawnRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  const retiredTreeShrubRequote = retiredTreeShrubRequoteNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
+  // A lapsed member whose stored member-priced result could not be repriced
+  // (reconcileFrozenMembershipSnapshot found no replayable engine input) must
+  // not self-serve accept the stale member price — fail closed to a manual
+  // quote.
+  const membershipLapsedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.membershipLapsedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -11123,7 +11366,9 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialProposal
     || commercialRiskTypeReview
     || commercialLowConfidenceSiteQuote
-    || retiredLawnRequote;
+    || retiredLawnRequote
+    || retiredTreeShrubRequote
+    || membershipLapsedRequote;
 
   return {
     quoteRequired,
@@ -11133,7 +11378,9 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
-        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)),
+        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
+        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -11563,6 +11810,15 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   if (!estimate) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // Archived rows are office-retired and unpublished (draft/scheduled) rows
+  // were never the customer's to act on — every other public surface
+  // (/data, accept, tier-select, preferences) already withholds both, so the
+  // decline probe must not reveal or mutate them either. Generic 404, same
+  // contract as an unknown token; checked BEFORE alreadyDeclined so an
+  // archived declined row doesn't confirm its own existence.
+  if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   if (estimate.status === 'declined') {
@@ -12594,9 +12850,13 @@ function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
   if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
-  // 'enhanced' (9x) is retired but kept here so previously-saved estimates that
-  // still carry an Enhanced row render unchanged (legacy estimates aren't re-priced).
+  // 'enhanced' (9x) and 'premium' (12x) are retired but kept here so
+  // previously-saved estimates that still carry those rows render unchanged
+  // (legacy estimates aren't re-priced) AND the shared quote gate can see
+  // them as retired tiers (codex P1 r5: a Premium-only ladder produced an
+  // empty tierKeys set and slipped the requote gate).
   if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
+  if (raw.includes('premium') || raw === '12' || raw === '12x') return 'premium';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -13592,12 +13852,65 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
   return row;
 }
 
+// Catalog identity for a T&S tier accept adopting a reserved/existing
+// scheduled row. commitReservation canonicalizes rows to the generic
+// reservation label with no service_id, so without this stamp typed-profile
+// resolution falls back to the generic report and the WaveGuard plan sync
+// misreads a Light (4x) accept as the bimonthly program (codex P2 r1/r2 —
+// ALL THREE adoption paths must stamp: fresh slotId reservation, held
+// existing appointment, and the direct-update branch). Returns null for
+// non-T&S rows; seeded follow-ups copy service_id from the parent.
+async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '' } = {}) {
+  // Only a row that IS the T&S visit gets stamped — in a split bundle
+  // (pest + T&S) the adopted slot can be the pest visit (codex P2 r5).
+  if (recurringServiceKey({ name: rowServiceType, service_type: rowServiceType }) !== 'tree_shrub') return null;
+  // Tier source 1: a directly-selected T&S tier card.
+  let serviceKey = null;
+  let serviceName = null;
+  if (selectedFrequency?.serviceCategory === 'tree_shrub') {
+    const meta = treeShrubTierRuntimeMeta(selectedFrequency.key);
+    if (meta) { serviceKey = meta.serviceKey; serviceName = meta.name; }
+  }
+  // Tier source 2 — split bundles: selectedFrequency is the pest/top-level
+  // card and the T&S tier choice rides serviceCadences, already applied to
+  // the accepted estimate data's recurring row, which carries the tier's
+  // real catalog key + restamped name (codex P2 r5).
+  if (!serviceKey && estData) {
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    const tsRow = (recurringSvcList || []).find((svc) => /^tree_shrub(_program|_quarterly|_6week)$/
+      .test(String(svc?.serviceKey || svc?.service_key || '').trim()));
+    if (tsRow) {
+      serviceKey = String(tsRow.serviceKey || tsRow.service_key).trim();
+      serviceName = tsRow.name || tsRow.label || tsRow.displayName || null;
+    }
+  }
+  if (!serviceKey) return null;
+  const stamp = serviceName ? { service_type: serviceName } : {};
+  const catalogRow = await trx('services')
+    .where({ service_key: serviceKey })
+    .first('id', 'name')
+    .catch(() => null);
+  if (catalogRow) {
+    stamp.service_id = catalogRow.id;
+    if (!stamp.service_type && catalogRow.name) stamp.service_type = catalogRow.name;
+  }
+  return Object.keys(stamp).length ? stamp : null;
+}
+
 function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {
   if (!Array.isArray(services)) return { services, changed: false };
   let changed = false;
   const nextServices = services.map((svc) => {
     const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
     if (!isTreeShrubServiceName(name)) return svc;
+    // isTreeShrubServiceName includes palm_injection (deliberate for the
+    // grouping helper), but a PALM recurring row is its own program — the
+    // tier rewrite must never replace it with the selected T&S tier row
+    // (audit 2026-07-18 P2). Substring match, not \bpalm\b: '_' is a word
+    // character, so a key-only row carrying 'palm_injection' would slip a
+    // word-boundary test (codex P2 r1); 'palmetto'-named rows are pest
+    // rows that should never be tier-rewritten either.
+    if (/palm/i.test(String(name || ''))) return svc;
     changed = true;
     return selectedTreeShrubServiceRow(svc, frequency);
   });
@@ -15962,6 +16275,11 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
   } catch (err) { next(err); }
 });
 
+// In-process SMS send claims for /:token/service-details/send —
+// estimate:service:phone → epoch ms. See the dedup comment at the SMS branch.
+const serviceDetailsSmsClaims = new Map();
+const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
+
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -16044,13 +16362,124 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
     const TwilioService = require('../services/twilio');
-    const smsResult = await TwilioService.sendSMS(
-      contact.customerPhone,
-      `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
-      { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
-    );
-    if (!smsResult?.success) return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
-    return res.json({ ok: true, channel: 'sms' });
+    // Retry/retap dedup, scoped to THIS estimate+service+recipient: the email
+    // branch is idempotency-keyed per day, but TwilioService has no
+    // idempotency support, so a double-tap or client retry would stack
+    // duplicate packet texts. The in-process claim is set SYNCHRONOUSLY
+    // before any await, so concurrent requests on this replica (the deploy
+    // runs one) can never both pass it — no DB lock is held across the
+    // external Twilio call. A failed send releases the claim so a retry
+    // works. The sms_log check (strpos on the deterministic pdfUrl — unique
+    // per estimate+service, underscore-safe; never a different packet)
+    // covers restarts, best-effort: its failure never blocks the send.
+    const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
+    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
+    if (priorClaim?.promise) {
+      // A send for this exact packet is in flight — share ITS outcome rather
+      // than declaring success for a text that may still fail.
+      const shared = await priorClaim.promise.catch(() => null);
+      if (shared?.success) return res.json({ ok: true, channel: 'sms', deduped: true });
+      return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
+    }
+    if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
+      return res.json({ ok: true, channel: 'sms', deduped: true });
+    }
+    // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
+    // upsert — no bucket edges) covers rolling-deploy overlap and any future
+    // multi-replica config, where the Map only covers one process.
+    const claimKey = dedupKey;
+    const recentPacketSend = async () => db('sms_log')
+      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+      .whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+      .whereRaw("created_at >= NOW() - interval '10 minutes'")
+      .first();
+    const sendPromise = (async () => {
+      // Claim acquired = fresh insert OR takeover of a claim older than the
+      // window (a crashed winner never blocks forever). Claim-infra failure
+      // fails OPEN to sending — dedup is protection, not a send gate.
+      let claimAcquired = true;
+      try {
+        const claim = await db.raw(
+          `INSERT INTO sms_send_claims (claim_key) VALUES (?)
+           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+           WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
+           RETURNING id`,
+          [claimKey],
+        );
+        claimAcquired = (claim.rows || []).length > 0;
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim skipped: ${e.message}`); }
+      if (!claimAcquired) {
+        // Another process holds a live claim. Only DURABLE proof (the
+        // winner's sms_log row) earns a deduped success — a still-in-flight
+        // or failed winner must NOT be reported as sent, so poll briefly and
+        // otherwise return a retryable failure.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await new Promise((resolve) => { setTimeout(resolve, 1500); });
+          try {
+            if (tenDigits.length === 10 && await recentPacketSend()) {
+              return { success: true, deduped: true };
+            }
+          } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup poll skipped: ${e.message}`); }
+        }
+        return { success: false, claimHeldElsewhere: true };
+      }
+      // Cross-restart cover (a pre-restart send has a log row but no Map
+      // entry; its claim row was taken over above), best-effort — a dedup
+      // query failure never blocks the send.
+      try {
+        if (tenDigits.length === 10 && await recentPacketSend()) {
+          return { success: true, deduped: true };
+        }
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      return TwilioService.sendSMS(
+        contact.customerPhone,
+        `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
+      );
+    })();
+    serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
+    const releaseClaims = () => {
+      serviceDetailsSmsClaims.delete(dedupKey);
+      // Fire-and-forget: a failed send must not stay claimed for the rest of
+      // the bucket, or the customer's real retry silently no-ops.
+      db('sms_send_claims').where({ claim_key: claimKey }).del()
+        .catch((e) => logger.warn(`[estimate-public] service-details SMS claim release failed: ${e.message}`));
+    };
+    let smsResult;
+    try {
+      smsResult = await sendPromise;
+    } catch (err) {
+      // Provider throw: release the claims so a real retry can send, then
+      // keep the route's pre-dedup error contract (500 via the outer handler).
+      releaseClaims();
+      throw err;
+    }
+    if (!smsResult?.success) {
+      // Never release a claim we never held — deleting the WINNER's live
+      // claim would reopen the duplicate window it is guarding.
+      if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
+      else releaseClaims();
+      return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
+    }
+    // Confirmed success only: start the dedup window and prune stale entries
+    // (Map here; expired claim rows fire-and-forget — one row per send, so a
+    // daily horizon keeps the table trivial).
+    const sentAt = Date.now();
+    serviceDetailsSmsClaims.set(dedupKey, { sentAt });
+    if (serviceDetailsSmsClaims.size > 500) {
+      for (const [key, claim] of serviceDetailsSmsClaims) {
+        if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
+          serviceDetailsSmsClaims.delete(key);
+        }
+      }
+    }
+    void db('sms_send_claims')
+      .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
+      .del()
+      .catch(() => {});
+    return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -16091,8 +16520,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // send_failed / archived rows stay 404 even for staff, and every view
     // side effect below is skipped — a preview must not count views or flip
     // a draft's status.
-    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+    // Verified staff preview, independent of publish status: a staff
+    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
+    // Bearer) must not count as a customer view or fire first-view side
+    // effects — without this, previewing from a device without the marker
+    // cookie and off the admin IP inflates view_count and pings the
+    // "Estimate viewed" notification. adminDraftPreview stays the narrow
+    // unpublished-only gate for serving drafts + the payload flag. (The
+    // legacy SSR path can't get this guard: full-page navigations carry no
+    // Bearer header, so it stays on the cookie/IP heuristics.)
+    const verifiedStaffPreview = req.query.adminPreview === '1'
       && Boolean(await verifyStaffBearer(req));
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && verifiedStaffPreview;
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
@@ -16121,23 +16561,28 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
-      try {
-        await db('estimates').where({ id: estimate.id }).update({
-          view_count: db.raw('COALESCE(view_count, 0) + 1'),
-          last_viewed_at: db.fn.now(),
-        });
-      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
-
+    if (!verifiedStaffPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
+      // ONE transaction for the aggregate counter + the per-open row: written
+      // separately, a failure of either half leaves view_count permanently
+      // diverged from COUNT(estimate_views) — the dashboard count and the
+      // engagement engine (which sessionizes off estimate_views) would then
+      // disagree forever. Still one defensive catch so schema drift or a
+      // locked row never breaks the customer-facing endpoint.
       try {
         const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db('estimate_views').insert({
-          estimate_id: estimate.id,
-          viewed_at: db.fn.now(),
-          ip: ip || null,
-          user_agent: ua || null,
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: ip || null,
+            user_agent: ua || null,
+          });
         });
-      } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook — same contract as the legacy HTML view
       // site: fire-and-forget, never blocks the response.
@@ -16153,7 +16598,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // The staff draft preview is hard-excluded above IP/UA heuristics: the
     // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
     // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!verifiedStaffPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -16668,6 +17113,10 @@ module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
+module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
+module.exports.retiredTreeShrubRequoteNeeded = retiredTreeShrubRequoteNeeded;
+module.exports.treeShrubTierCatalogStamp = treeShrubTierCatalogStamp;
+module.exports.rewriteTreeShrubRecurringServices = rewriteTreeShrubRecurringServices;
 module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;

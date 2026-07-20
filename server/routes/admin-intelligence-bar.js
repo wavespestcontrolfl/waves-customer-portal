@@ -50,7 +50,8 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
-const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
+const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -62,11 +63,9 @@ const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
 const SEO_CONFIRMED_ACTION_TOOL_NAMES = new Set(['run_seo_pipeline', 'approve_seo_action']);
-const CONFIRMED_ACTION_TOOL_NAMES = new Set([
-  'request_instant_payout',
-  'request_standard_payout',
-  ...SEO_CONFIRMED_ACTION_TOOL_NAMES,
-]);
+// Membership lives in write-gates.js so the contract-test registry flags the
+// same tools sideEffects — one source, no drift.
+const CONFIRMED_ACTION_TOOL_NAMES = new Set(CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -119,6 +118,7 @@ const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
 const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
+const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -137,8 +137,10 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // Base toolset for every admin context: core customer/schedule/revenue tools
 // plus read-only comms tools and the email read+reply subset, so SMS/call
 // history and the inbox are visible from any page — not just the
-// Communications/Email pages.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
+// Communications/Email pages. Call-research rides here too: voice-of-customer
+// questions ("what do callers say about X?") come from any page, and the
+// tool surfaces only redacted text — no names, no customer ids.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
 
 function toolsNamed(tools, names) {
   const allowed = new Set(names);
@@ -199,6 +201,10 @@ const PII_TOOL_NAMES = new Set([
   // compute_estimate carries the full service address + selected lead id —
   // same PII class as lookup_property and the draft writer.
   'compute_estimate',
+  // search_call_research RETURNS only redacted text, but its free-form query
+  // input can carry whatever the operator typed (a name, phone, address) —
+  // taint so inputs/telemetry are redacted like the comms tools.
+  'search_call_research',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -914,8 +920,8 @@ HARD CONSTRAINTS:
 4. NEVER send. You have no access to send tools. Drafts are created with status='draft', source='ai_agent' — admin sends through EstimatePage manually.
 
 ENGINE FAILURE RULES:
-- If compute_estimate returns an error or zero price: still create the draft, but in the reasoning field write "Engine output uncertain — manual review required." and list the inputs you used. The admin needs the draft to exist as an anchor even when the engine couldn't price it.
-- If the scenario is clearly outside engine scope (commercial property over 10,000 sqft, non-standard property type, services the engine doesn't support): DO NOT create a draft. Report back: "This scenario requires manual quoting. Info gathered: [list everything you collected]. Recommended next step: [suggestion]." Let the admin handle it in EstimatePage directly.
+- If compute_estimate returns an error or zero price: DO NOT call create_pending_estimate — the server re-runs the engine at write time and refuses zero-price, unpriced-line, and error scenarios. Report back: "This scenario requires manual quoting. Info gathered: [list everything you collected]. Recommended next step: [suggestion]." Let the admin handle it in EstimatePage directly.
+- The same applies when the scenario is clearly outside engine scope (commercial property over 10,000 sqft, non-standard property type, services the engine doesn't support): no draft, report back with what you gathered.
 
 QUOTING WORKFLOW:
 1. Address → call lookup_property to enrich (sqft, lot size, year built)
@@ -924,7 +930,7 @@ QUOTING WORKFLOW:
 4. Compute → call compute_estimate with normalized inputs
 5. Show the operator: engine output, your assumptions (sqft source, service inferences), uncertainty flags
 6. Confirm → "Draft this estimate? y/n"
-7. On yes → call create_pending_estimate (notes are auto-built from the inputs you pass; do NOT pre-format the notes string)
+7. On yes → call create_pending_estimate with the SAME leadId you gave compute_estimate and compute_estimate's engine_input + totals UNCHANGED — the server reprices from them and refuses any mismatch. Your reasoning/assumptions/uncertainty are stored as operator review material on the draft (shown in the pipeline's AI review modal; never customer-visible — nothing you pass reaches the customer notes)
 
 ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
@@ -1040,8 +1046,9 @@ function getToolsForContext(context, isAdmin = false) {
     return [...base, ...REVIEW_TOOLS, ...infra];
   }
   if (context === 'comms') {
-    // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...infra];
+    // Full comms set already includes the read tools — don't double-load.
+    // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...CALL_RESEARCH_TOOLS, ...infra];
   }
   if (context === 'tax') {
     return [...base, ...TAX_TOOLS, ...infra];
@@ -1050,8 +1057,9 @@ function getToolsForContext(context, isAdmin = false) {
     return [...base, ...LEADS_TOOLS, ...infra];
   }
   if (context === 'email') {
-    // Full email set already includes the shared subset — don't double-load
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...infra] : base;
+    // Full email set already includes the shared subset — don't double-load.
+    // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
     return [...base, ...BANKING_QUERY_TOOLS, ...infra];
@@ -1088,7 +1096,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeEmailTool(toolName, input);
   }
   if (BANKING_TOOL_NAMES.has(toolName)) {
-    return executeBankingTool(toolName, input);
+    return executeBankingTool(toolName, input, actionContext);
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
     return executeEstimateTool(toolName, input, actionContext);
@@ -1158,6 +1166,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
     return executeJobHealthTool(toolName, input);
+  }
+  if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
+    return executeCallResearchTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);

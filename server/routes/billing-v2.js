@@ -9,7 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
-const { isBankMethodType } = require('../services/autopay-eligibility');
+const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 
 router.use(authenticate);
 
@@ -225,6 +225,12 @@ router.get('/cards/:id/bank-verification-link', async (req, res, next) => {
           paymentMethodId: row.id,
           source: 'portal_add_bank',
           details: { via: 'bank_verification_link_heal', setup_intent_id: row.stripe_setup_intent_id },
+          // Delayed-completion path like the webhooks: this heal recovers a
+          // missed setup_intent.succeeded, possibly days after the customer
+          // authorized at signup — an Auto Pay disable recorded since must
+          // win over that stale authorization. Clicking the verify link is
+          // a status check, not a fresh enrollment consent.
+          authorizedAt: si.created ? new Date(si.created * 1000) : null,
         });
         enrolled = enrollment.enrolled || enrollment.reason === 'already_enrolled';
         if (!enrolled) {
@@ -723,12 +729,62 @@ router.put('/cards/:id/default', async (req, res, next) => {
       }
     }
 
+    // An expired card can't take the default role either: this route CARRIES
+    // Auto Pay onto the new default, and pointing collection at an expired
+    // card guarantees the next charge declines while the UI shows Active.
+    // Same ET-calendar predicate as collection (autopay-eligibility): the
+    // old inline UTC math flipped a card expired hours early at the ET month
+    // boundary and silently allowed malformed expiry values through. Legacy
+    // rows carry 2-digit years — normalize BEFORE the check so a valid
+    // '12/32' card isn't read as year 32 (isExpiredCardMethod fails closed
+    // on anything non-sensible).
+    if (!isBankMethodType(card.method_type)) {
+      const rawYear = parseInt(card.exp_year, 10);
+      const normalizedCard = {
+        ...card,
+        exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : card.exp_year,
+      };
+      if (isExpiredCardMethod(normalizedCard)) {
+        return res.status(400).json({ error: 'That card has expired — update it or choose a current card before making it your default.' });
+      }
+    }
+
     // Auto Pay eligibility requires the DEFAULT method to carry
     // autopay_enabled, so a bare default swap silently stopped charging
     // while the AutopayCard still showed Active. Carry the flag to the new
     // default when it's chargeable; otherwise disable autopay honestly.
     const carriesAutopay = !!currentDefault?.autopay_enabled && currentDefault.id !== card.id;
     const newCardChargeable = card.processor === 'stripe' && !!card.stripe_payment_method_id;
+
+    // Consent scope: carrying Auto Pay onto the new default puts it in
+    // charge of recurring billing — same v8+ enrollment gate as the autopay
+    // routes. A hold-only card (estimate_card_hold consent) or a pre-v8 save
+    // never authorized recurring charges; without this, "Set default" was a
+    // silent enrollment path around hasEnrollmentScopedConsent. The client
+    // shows the full authorization copy and re-submits with consent_accepted;
+    // the acceptance is recorded BEFORE any flag moves.
+    if (carriesAutopay && newCardChargeable) {
+      const ConsentService = require('../services/payment-method-consents');
+      const hasConsent = await ConsentService.hasEnrollmentScopedConsent(req.customerId, card.stripe_payment_method_id);
+      if (!hasConsent) {
+        if (req.body?.consent_accepted !== true) {
+          return res.status(409).json({
+            error: 'Your default method is on Auto Pay, and this payment method has not been authorized for Auto Pay yet. Review and accept the authorization to continue.',
+            code: 'consent_required',
+            method_type: card.method_type || 'card',
+          });
+        }
+        await ConsentService.recordConsent({
+          customerId: req.customerId,
+          paymentMethodId: card.id,
+          stripePaymentMethodId: card.stripe_payment_method_id,
+          source: 'portal_set_default',
+          methodType: card.method_type || 'card',
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+        });
+      }
+    }
 
     await db.transaction(async (trx) => {
       await trx('payment_methods')
@@ -745,17 +801,30 @@ router.put('/cards/:id/default', async (req, res, next) => {
           await trx('customers').where({ id: req.customerId }).update({ autopay_payment_method_id: card.id });
         } else {
           await trx('customers').where({ id: req.customerId }).update({ autopay_enabled: false, autopay_payment_method_id: null });
+          // The opt-out EVENT commits with the opt-out STATE — this row is
+          // guard input for enrollConsentedMethod's
+          // opted_out_after_authorization check, so a post-commit
+          // best-effort write left a gap where a delayed enrollment could
+          // overwrite the disable.
+          await logAutopay(req.customerId, 'autopay_disabled', {
+            details: {
+              source: 'set_default_card',
+              old_payment_method_id: currentDefault.id,
+              new_payment_method_id: null,
+            },
+            db: trx,
+            required: true,
+          });
         }
       }
     });
 
-    if (carriesAutopay) {
-      const event = newCardChargeable ? 'autopay_method_changed' : 'autopay_disabled';
-      logAutopay(req.customerId, event, {
+    if (carriesAutopay && newCardChargeable) {
+      logAutopay(req.customerId, 'autopay_method_changed', {
         details: {
           source: 'set_default_card',
           old_payment_method_id: currentDefault.id,
-          new_payment_method_id: newCardChargeable ? card.id : null,
+          new_payment_method_id: card.id,
         },
       }).catch((logErr) => {
         logger.warn(`[billing-v2] autopay log failed for customer ${req.customerId}: ${logErr.message}`);

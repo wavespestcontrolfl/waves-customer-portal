@@ -532,15 +532,110 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
   );
 }
 
+// Failure pathology — the standing (harness surface × failure mode) ledger.
+// The nightly classifier buckets every unsafe judgment; cells with enough
+// fresh evidence earn a parked patch-proposal card. Accepting a proposal
+// records a go-ahead only — nothing changes generation until a human ships
+// a new prompt version.
+function cellLabel(surface, failureMode) {
+  return `${String(surface || '').replace(/_/g, ' ')} · ${String(failureMode || '').replace(/_/g, ' ')}`;
+}
+
+function ProposalCard({ proposal, busy, onReview }) {
+  const [expanded, setExpanded] = useState(false);
+  const pending = proposal.status === 'pending';
+  return (
+    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>{cellLabel(proposal.surface, proposal.failure_mode)}</span>
+        <Chip tone={pending ? { bg: "#FEF3C7", fg: "#92400E" } : { bg: "#DCFCE7", fg: D.green }}>
+          {pending ? "Proposed patch — review" : `Accepted${proposal.reviewed_by ? ` by ${proposal.reviewed_by}` : ""}`}
+        </Chip>
+        <span style={{ fontSize: 12, color: D.muted }}>{proposal.evidence_count} failures behind it</span>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${D.border}`, color: D.text, borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+        >
+          {expanded ? "Collapse" : "Read proposal"}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: expanded ? "none" : 72, overflow: "hidden" }}>
+        {proposal.proposal}
+      </div>
+      {pending && (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onReview(proposal, "accept")}
+            style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+          >
+            Accept — worth building (ships as a new prompt version)
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onReview(proposal, "dismiss")}
+            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PathologySection({ data, busy, onReview }) {
+  if (!data) return null;
+  const cells = data.cells || [];
+  const proposals = data.proposals || [];
+  if (!cells.length && !proposals.length) return null;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Failure pathology</div>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Every unsafe draft is filed by where the fix lives and what it invented. Recurring cells earn a proposed patch below — nothing applies without you.
+        </div>
+      </div>
+      {data.gateEnabled === false && (
+        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+          GATE_SMS_PATHOLOGY_LEDGER is off — the ledger shows history but no new failures are being classified.
+        </div>
+      )}
+      {cells.length > 0 && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {cells.slice(0, 8).map((c) => (
+            <span
+              key={`${c.surface}:${c.failureMode}`}
+              style={{ fontSize: 12, fontWeight: 750, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "4px 9px" }}
+            >
+              {cellLabel(c.surface, c.failureMode)} <strong>{c.total}</strong>
+              {c.currentVersion > 0 && <span style={{ color: D.red }}> ({c.currentVersion} on {data.currentVersion})</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {proposals.map((p) => (
+        <ProposalCard key={p.id} proposal={p} busy={busy} onReview={onReview} />
+      ))}
+    </div>
+  );
+}
+
 export default function AgentShadowDraftsPage({ embedded = false }) {
   const [data, setData] = useState(null);
   const [scores, setScores] = useState(null);
   const [modes, setModes] = useState(null);
   const [profiles, setProfiles] = useState(null);
   const [exam, setExam] = useState(null);
+  const [pathology, setPathology] = useState(null);
   const [modeBusy, setModeBusy] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [examBusy, setExamBusy] = useState(false);
+  const [pathologyBusy, setPathologyBusy] = useState(false);
   const [intentFilter, setIntentFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -573,6 +668,13 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         setExam(await adminFetch("/admin/agents/sealed-eval"));
       } catch {
         setExam(null);
+      }
+      // Pathology ledger is additive the same way — a failure (migration not
+      // yet run) degrades to "no section", never a blank tab.
+      try {
+        setPathology(await adminFetch("/admin/agents/pathology"));
+      } catch {
+        setPathology(null);
       }
     } catch (err) {
       setError(err.message || "Failed to load shadow drafts.");
@@ -691,6 +793,28 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
       setExamBusy(false);
     }
   }, [refreshExam]);
+
+  const reviewProposal = useCallback(async (proposal, action) => {
+    if (action === "accept") {
+      const ok = window.confirm(
+        `Accept this patch proposal (${cellLabel(proposal.surface, proposal.failure_mode)})?\n\nThis records your go-ahead — the change itself still ships as a new prompt version you review as a PR. Nothing changes today.`
+      );
+      if (!ok) return;
+    }
+    setPathologyBusy(true);
+    setError("");
+    try {
+      await adminFetch(`/admin/agents/pathology/proposals/${proposal.id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+      setPathology(await adminFetch("/admin/agents/pathology"));
+    } catch (err) {
+      setError(err.message || "Failed to review the patch proposal.");
+    } finally {
+      setPathologyBusy(false);
+    }
+  }, []);
 
   const toggleMode = useCallback(async (row) => {
     // Step shadow⇄suggest, or demote auto_send→suggest — always an explicit,
@@ -820,6 +944,8 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
             ))}
           </div>
         )}
+
+        <PathologySection data={pathology} busy={pathologyBusy} onReview={reviewProposal} />
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <button

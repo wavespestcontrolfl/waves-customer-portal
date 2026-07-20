@@ -30,7 +30,7 @@ async function autoUnsubscribe(email) {
   // exact failure silently knocked contact@ off our own list twice.
   const { isOperationalDomain, domainFromAddress } = require('./spam-blocker');
   if (isOperationalDomain(domainFromAddress(email.from_address))) {
-    logger.info(`[unsubscribe] Refused: operational sender ${email.from_address}`);
+    logger.info(`[unsubscribe] Refused: operational sender (email ${email.id})`);
     return { method: 'none', note: 'operational sender — never unsubscribe' };
   }
 
@@ -69,7 +69,7 @@ async function autoUnsubscribe(email) {
           unsubscribe_url: urlMatch[1],
           status: 'attempted',
         });
-        logger.info(`[unsubscribe] Hit List-Unsubscribe URL for ${email.from_address}`);
+        logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id})`);
         return { method: 'list_header_url', url: urlMatch[1] };
       } catch (err) {
         logger.warn(`[unsubscribe] List-Unsubscribe URL failed: ${err.message}`);
@@ -102,7 +102,7 @@ async function autoUnsubscribe(email) {
         unsubscribe_url: unsubUrl,
         status: 'attempted',
       });
-      logger.info(`[unsubscribe] Hit body unsubscribe link for ${email.from_address}`);
+      logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id})`);
       return { method: 'body_link', url: unsubUrl };
     } catch (err) {
       logger.warn(`[unsubscribe] Body link failed: ${err.message}`);

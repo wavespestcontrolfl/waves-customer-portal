@@ -13,6 +13,7 @@ const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
   inferFrequencyKeyFromEstimateData,
+  perApplicationChargeAmount,
   resolveBillingCadence,
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
@@ -430,12 +431,18 @@ function roundMoney(value) {
 function resolveFirstApplicationAmount({
   firstApplicationAmount,
   billingCadence,
+  perApplicationAmount,
   monthlyRate,
   allowFallback = true,
 } = {}) {
   const explicit = roundMoney(firstApplicationAmount);
   if (explicit > 0) return explicit;
   if (allowFallback === false) return 0;
+  // The plan's true per-visit price outranks the cadence amount — the two
+  // differ exactly when the billing display cadence isn't the visit cadence
+  // (see perApplicationChargeAmount in billing-cadence.js).
+  const perApp = roundMoney(perApplicationAmount);
+  if (perApp > 0) return perApp;
   const cadenceAmount = roundMoney(billingCadence?.amount);
   if (cadenceAmount > 0) return cadenceAmount;
   return roundMoney(monthlyRate);
@@ -1160,7 +1167,23 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
   if (key === 'pest_control' && pattern === 'quarterly') return 60;
+  // Tree & Shrub visits book flat 60-minute slots (owner directive — the
+  // same value estimate-slot-availability uses), so seeded follow-ups match
+  // what a self-booked T&S slot would reserve.
+  if (key === 'tree_shrub') return 60;
   return null;
+}
+
+// Restamped Tree & Shrub tier rows carry their real catalog service_key
+// (tree_shrub_program / tree_shrub_quarterly / tree_shrub_6week) — pass it
+// through so the scheduled row links service_id and typed-profile
+// resolution survives catalog renames (audit 2026-07-18 P2: converted T&S
+// rows had no service_id and rode an exact name-string match). Other lines
+// keep name-based resolution until their keys are verified against the
+// catalog — an absent key would only add lookup-warn noise.
+function remainingUnitCatalogKey(svc = {}) {
+  const key = String(svc.serviceKey || svc.service_key || '').trim();
+  return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
 }
 
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
@@ -1185,6 +1208,19 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // old combined row keyed as pest_control and seeded; a standalone row
   // keying rodent_bait must not stop after the first check (Codex P1).
   if (key === 'rodent_bait') return pattern === 'quarterly';
+  // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
+  // a sold program produced ONE visit and no series). The 6x Standard accept
+  // restamps to the bi-monthly catalog row and the 4x Light downsell to
+  // quarterly — seed those. The retired 9-visit 6-week tier has no
+  // month-interval pattern (visit-count inference would mislabel it
+  // bimonthly and seed 2-month gaps), so a legacy accept still leaves
+  // scheduling to the office — the visits check keeps it out.
+  if (key === 'tree_shrub') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'bimonthly') return visits == null || visits === 6;
+    if (pattern === 'quarterly') return visits == null || visits === 4;
+    return false;
+  }
   return false;
 }
 
@@ -1418,6 +1454,28 @@ const EstimateConverter = {
           fallbackFrequencyKey: inferredFrequencyKey,
         })
       : null;
+    // True per-visit charge for per_application billing. billingCadence.amount
+    // is the per-CHARGE amount at the accepted billing cadence — identical to
+    // the per-visit price only when the billing interval matches the visit
+    // cadence (quarterly pest). Tier plans present a monthly price but deliver
+    // a different visit count (tree & shrub 6x/4x, lawn ladders, mosquito
+    // seasonal); stamping the monthly rate on per-visit billing collects only
+    // visits/12 of the accepted annual (T&S audit 2026-07-18 P1). Single
+    // recurring unit only — the same gate the fee and estimated_price writers
+    // use; a standalone supplement beside it means the plan annual isn't this
+    // unit's annual, so the cadence fallback (status quo) applies.
+    const singleRecurringUnitVisits = (recurringServicesForConversion.length === 1
+      && supplementStandaloneUnits.length === 0)
+      ? visitsPerYearForRecurringService(recurringServicesForConversion[0])
+      : null;
+    const perApplicationAmount = billingCadence
+      ? perApplicationChargeAmount({
+          billingCadence,
+          annualRate: parseFloat(estimate.annual_total || 0),
+          monthlyRate,
+          visitsPerYear: singleRecurringUnitVisits,
+        })
+      : null;
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
     // their membership model — an unconditional per_application stamp would
@@ -1515,7 +1573,7 @@ const EstimateConverter = {
                 ? Number(customer.per_application_fee)
                 : ((recurringUnitCount === 1
                   && billingCadence && Number(billingCadence.amount) > 0)
-                  ? Number(billingCadence.amount)
+                  ? Number(perApplicationAmount)
                   : (recurringUnitCount === 1 && Number(monthlyRate) > 0
                     ? Number(monthlyRate)
                     : null))),
@@ -1762,7 +1820,7 @@ const EstimateConverter = {
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
-        ...remaining.map((svc) => ({ svc })),
+        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc) })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
@@ -1798,7 +1856,7 @@ const EstimateConverter = {
         // plan amount on BOTH rows would double-charge at completion.
         // Multi-unit plans leave rows unpriced for manual allocation.
         const estimatedPrice = billingCadence && recurringUnitCount === 1
-          ? billingCadence.amount
+          ? perApplicationAmount
           : null;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
@@ -1891,6 +1949,7 @@ const EstimateConverter = {
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
           billingCadence,
+          perApplicationAmount,
           monthlyRate,
           allowFallback: opts.allowFirstApplicationFallback !== false,
         })
@@ -2485,6 +2544,8 @@ module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
+module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
+module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;

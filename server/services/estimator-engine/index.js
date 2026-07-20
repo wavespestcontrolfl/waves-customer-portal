@@ -143,13 +143,17 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
-  const link = estimateId
-    ? '/admin/estimates'
-    : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications');
+  // Callers may pass a specific link (the proposal builder deep-link);
+  // otherwise derive the historical default from what the bell references.
+  link = link
+    || (estimateId
+      ? '/admin/estimates'
+      : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications'));
   const metadata = {
     callSid,
+    ...(threadKey ? { smsThreadKey: threadKey } : {}),
     estimator_engine: true,
     // Only a real agent commitment counts as an owed quote — a mere pricing
     // question must not create a false "send it" task.
@@ -157,43 +161,84 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     lane: lane || null,
     estimateId,
   };
+  // SMS-origin bells dedupe on the phone-scoped thread key the way call
+  // bells dedupe on callSid — repeated quote-flavored texts upgrade ONE
+  // bell instead of ringing per message. Unlike a callSid, the thread key
+  // is permanent for the phone, so its dedupe is TIME-BOUNDED to the open
+  // life of an estimate: an independent quote request months later must
+  // mint a fresh bell, not vanish behind a long-read one.
+  const SMS_BELL_DEDUPE_MS = 7 * 86400000;
+  const dedupe = callSid
+    ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null }
+    : (threadKey
+      ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey, since: new Date(Date.now() - SMS_BELL_DEDUPE_MS) }
+      : null);
+  // Returns true only when a bell durably exists for this event (fresh
+  // insert, in-place upgrade, or a standing prior bell) — callers that
+  // treat the bell as their restart-loss artifact must know it landed.
   try {
-    if (callSid) {
+    if (dedupe) {
       // Any prior bell for this call counts: the generic promised bell OR a
       // prior estimator bell (request-only bells carry quote_promised=false
       // but still have the estimator_engine marker — matching only promised
       // bells would duplicate on every reprocess).
-      const existing = await db('notifications')
-        .whereRaw("metadata->>'callSid' = ?", [callSid])
+      let existingQuery = db('notifications')
+        .whereRaw(dedupe.clause, [dedupe.value])
         .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
-        .orderBy('created_at', 'desc')
-        .first();
+        .orderBy('created_at', 'desc');
+      if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
+      const existing = await existingQuery.first();
       if (existing) {
         let existingMeta = {};
         try {
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
-        // A prior estimator bell stands UNLESS this call now has a draft the
-        // old bell doesn't know about (transient red → later success): the
-        // stale "send it manually" text must upgrade to the draft link.
-        if (existingMeta.estimator_engine === true && (!estimateId || existingMeta.estimateId)) return;
-        await db('notifications')
-          .where({ id: existing.id })
-          .update({
-            title,
-            body,
-            link,
-            metadata: JSON.stringify({ ...existingMeta, ...metadata }),
-            // The content changed materially — an already-read bell must
-            // come back unread or the upgrade is invisible.
-            read_at: null,
-          });
-        return;
+        let insertFresh = false;
+        if (existingMeta.estimator_engine === true) {
+          if (callSid) {
+            // Same callSid = same request. A prior estimator bell stands
+            // UNLESS this run now has a draft the old bell doesn't know
+            // about (transient red → later success): the stale "send it
+            // manually" text must upgrade to the draft link.
+            if (!estimateId || existingMeta.estimateId) return true;
+          } else {
+            // A thread key spans REQUESTS on one phone. Only a true retry
+            // stands (same draft again, or both sides still-open
+            // owed-quotes). An open placeholder upgrades to its outcome —
+            // but a bell that already tells a COMPLETED draft's story is
+            // history: a new request or a different draft gets a FRESH
+            // bell instead of overwriting it.
+            const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
+            const bothOpen = !estimateId && !existingMeta.estimateId;
+            if (sameDraft || bothOpen) return true;
+            if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
+          }
+        }
+        if (!insertFresh) {
+          await db('notifications')
+            .where({ id: existing.id })
+            .update({
+              title,
+              body,
+              link,
+              metadata: JSON.stringify({ ...existingMeta, ...metadata }),
+              // The content changed materially — an already-read bell must
+              // come back unread or the upgrade is invisible.
+              read_at: null,
+            });
+          return true;
+        }
       }
     }
-    await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
+    // notifyAdmin catches insert failures and returns null — that is NOT a
+    // durable bell, and callers gating detached work on durability (the SMS
+    // handoff) must hear about it. Intentional suppression returns a truthy
+    // sentinel and correctly counts as handled.
+    const created = await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
+    return !!created;
   } catch (err) {
     logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -203,6 +248,25 @@ function callerLabel(intent, context) {
     || [context?.customer?.first_name, context?.customer?.last_name].filter(Boolean).join(' ')
     || 'Unknown caller';
 }
+
+// Origin descriptor for the call channel. The strings are byte-identical to
+// the pre-refactor call-only pipeline — the refactor into runDraftPipeline
+// must not change one character of the live call bells.
+const CALL_ORIGIN = {
+  channel: 'call',
+  noun: 'call',
+  threadKey: null,
+  strings: {
+    redTitle: 'Quote promised on call — send it',
+    redBody: (label, reasons) => `${label}: quote promised, no auto-draft (${reasons}). Send it manually before end of day.`,
+    composerFailBody: (label) => `${label}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
+    errorBody: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
+    blockedTitle: 'Quote promised on call — estimate already open',
+    blockedBody: (label) => `${label}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+    proposalTitle: 'Commercial prospect on call — proposal scaffold ready',
+    proposalBody: (label) => `${label}: commercial relationship quote — prospect research and an unpriced proposal scaffold are drafted. Price it in the proposal builder.`,
+  },
+};
 
 /**
  * Main entry. Non-throwing by contract: every path resolves to a result
@@ -250,26 +314,75 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         // the generic quote-promised bells suppressed behind the gate, that
         // would leave a silent draft forever. notify() dedupes internally,
         // so this is a no-op when the bell already rang.
-        const existingLane = (() => {
+        const existingMeta = (() => {
           try {
             const data = typeof existing.estimate_data === 'string'
               ? JSON.parse(existing.estimate_data) : existing.estimate_data;
-            return data?.estimatorEngine?.lane || 'yellow';
-          } catch { return 'yellow'; }
+            return {
+              lane: data?.estimatorEngine?.lane || 'yellow',
+              commercialProposal: data?.estimatorEngine?.commercialProposal === true,
+            };
+          } catch { return { lane: 'yellow', commercialProposal: false }; }
         })();
+        if (existingMeta.commercialProposal) {
+          // A proposal scaffold recovered on re-entry must keep its proposal
+          // semantics: the generic draft bell would read "$0/mo" (the row is
+          // deliberately unpriced) and link the estimates list instead of
+          // the proposal builder.
+          await notify({
+            call: context.call,
+            context,
+            lane: existingMeta.lane,
+            quotePromised,
+            estimateId: existing.id,
+            link: `/admin/estimates/${existing.id}/proposal`,
+            title: CALL_ORIGIN.strings.proposalTitle,
+            body: CALL_ORIGIN.strings.proposalBody(callerLabel(null, context)),
+          });
+          return result;
+        }
         await notify({
           call: context.call,
           context,
-          lane: existingLane,
+          lane: existingMeta.lane,
           quotePromised,
           estimateId: existing.id,
-          title: `AI estimate draft ${existingLane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
-          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingLane).toUpperCase()}). Review in admin/estimates and send.`,
+          title: `AI estimate draft ${existingMeta.lane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
+          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingMeta.lane).toUpperCase()}). Review in admin/estimates and send.`,
         });
         return result;
       }
     }
+  } catch (err) {
+    logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
+    result.lane = LANES.RED;
+    result.reasons = [`engine error: ${err.message}`];
+    if (!dryRun && context?.call && quotePromised) {
+      await notify({
+        call: context.call,
+        context,
+        lane: LANES.RED,
+        quotePromised,
+        title: CALL_ORIGIN.strings.redTitle,
+        body: CALL_ORIGIN.strings.errorBody,
+      });
+    }
+    return result;
+  }
+  return runDraftPipeline({ context, origin: CALL_ORIGIN, result, dryRun, refreshLookup, quotePromised });
+}
 
+/**
+ * Channel-agnostic draft pipeline: property signals → composed intent →
+ * deterministic pricing → lane classification → draft + one bell. `origin`
+ * carries the channel's dedupe key and notification strings — the call
+ * origin's strings are byte-identical to the pre-refactor call pipeline.
+ * Non-throwing: same red-lane degradation contract as the entries above it.
+ */
+async function runDraftPipeline({ context, origin, result, dryRun = false, refreshLookup = false, quotePromised = true }) {
+  const S = origin.strings;
+  const threadKey = origin.threadKey || null;
+  try {
     const { address, propertyRecord, enriched, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
@@ -297,8 +410,9 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           context,
           lane: LANES.RED,
           quotePromised,
-          title: 'Quote promised on call — send it',
-          body: `${callerLabel(null, context)}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
+          threadKey,
+          title: S.redTitle,
+          body: S.composerFailBody(callerLabel(null, context)),
         });
       }
       return result;
@@ -426,7 +540,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const draftable = intent.decision === 'draft'
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
-    const { lane, reasons } = (engineResult || !draftable)
+    const { lane, reasons, causes = [] } = (engineResult || !draftable)
       ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
@@ -436,15 +550,107 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (dryRun) return result;
 
     if (lane === LANES.RED) {
+      // Commercial/HOA proposal lane (GATE_ESTIMATOR_COMMERCIAL_PROPOSALS,
+      // default OFF): the relationship-quote red produces a prospect
+      // research brief + unpriced proposal scaffold instead of a bell-only
+      // dead end. Routed on classifyLane's machine-readable CAUSE, not the
+      // raw commercial predicate — a commercial property that redded for an
+      // unrelated reason (no line items, pricing failure) must keep the
+      // standard red + clarify path. Strictly fail-soft — any miss (gate
+      // off, no address, duplicate block, insert failure) falls through to
+      // the standard red path below, so the owed-quote bell can never be
+      // lost to this lane.
+      try {
+        const { commercialProposalsEnabled, maybeBuildCommercialProposalDraft } = require('./commercial-proposal');
+        if (commercialProposalsEnabled() && causes.includes('commercial_relationship_quote')) {
+          const proposalOutcome = await maybeBuildCommercialProposalDraft({
+            intent,
+            propertyFacts,
+            parcelView: effectiveSignals.parcelView,
+            propertyRecord: effectiveSignals.propertyRecord,
+            context,
+            origin,
+            model,
+            reasons,
+          });
+          if (proposalOutcome?.created) {
+            result.created = true;
+            result.estimateId = proposalOutcome.estimateId;
+            result.commercialProposal = true;
+            // Unconditional like the created-draft bell below — an artifact
+            // now exists either way; the scaffold deep-links the builder.
+            await notify({
+              call: context.call,
+              context,
+              lane,
+              quotePromised,
+              threadKey,
+              estimateId: proposalOutcome.estimateId,
+              link: `/admin/estimates/${proposalOutcome.estimateId}/proposal`,
+              title: S.proposalTitle,
+              body: S.proposalBody(callerLabel(intent, context)),
+            });
+            return result;
+          }
+          if (proposalOutcome?.blocked) {
+            // Mirror the created-draft blocked path below: an open estimate
+            // already covers this prospect, and the generic red "send it
+            // manually" bell would prompt the operator to build a duplicate.
+            result.blocked = true;
+            if (quotePromised) {
+              await notify({
+                call: context.call,
+                context,
+                lane,
+                quotePromised,
+                threadKey,
+                estimateId: proposalOutcome.existingEstimateId || null,
+                title: S.blockedTitle,
+                body: S.blockedBody(callerLabel(intent, context)),
+              });
+            }
+            return result;
+          }
+        }
+      } catch (proposalErr) {
+        logger.warn(`[estimator-engine] commercial proposal lane failed (red bell takes over): ${proposalErr.message}`);
+      }
       if (quotePromised) {
         await notify({
           call: context.call,
           context,
           lane,
           quotePromised,
-          title: 'Quote promised on call — send it',
-          body: `${callerLabel(intent, context)}: quote promised, no auto-draft (${reasons.join('; ')}). Send it manually before end of day.`,
+          threadKey,
+          title: S.redTitle,
+          body: S.redBody(callerLabel(intent, context), reasons.join('; ')),
         });
+        // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the two
+        // machine-readable red causes are askable — park an approval-gated
+        // clarifying SMS ALONGSIDE the operator bell, never instead of it.
+        // Fail-soft: a clarify hiccup must not change the red-lane result.
+        if (!dryRun) {
+          try {
+            const missing = [];
+            if (!intent.address) missing.push('street_address');
+            if (!Object.keys(intent.services || {}).length) missing.push('specific_service');
+            if (missing.length && context.phone) {
+              const { parkClarifyAsk } = require('../estimate-clarify-asks');
+              await parkClarifyAsk({
+                missing,
+                phone: context.phone,
+                firstName: context.lead?.first_name || context.customer?.first_name || null,
+                customerId: (!context.customerPhoneAmbiguous && context.customer?.id) || null,
+                leadId: (context.leadIsForThisCall && context.lead?.id) || null,
+                source: origin.channel === 'sms_thread' ? 'estimator_engine_sms_red' : 'estimator_engine_red',
+                // They texted or called Waves from this number themselves.
+                channelProvenance: origin.channel === 'sms_thread' ? 'sms' : 'voice',
+              });
+            }
+          } catch (askErr) {
+            logger.warn(`[estimator-engine] clarify ask failed: ${askErr.message}`);
+          }
+        }
       }
       return result;
     }
@@ -452,7 +658,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices,
+      membershipSnapshot, priorQualifyingServices, origin,
     });
 
     if (draft.blocked) {
@@ -465,8 +671,9 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           context,
           lane,
           quotePromised,
-          title: 'Quote promised on call — estimate already open',
-          body: `${callerLabel(intent, context)}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+          threadKey,
+          title: S.blockedTitle,
+          body: S.blockedBody(callerLabel(intent, context)),
         });
       }
       return result;
@@ -480,28 +687,30 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       context,
       lane,
       quotePromised,
+      threadKey,
       estimateId: draft.estimate.id,
       title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — $${totals.monthly}/mo`,
-      body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the call (${lane.toUpperCase()} — ${laneWord}). `
+      body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the ${origin.noun} (${lane.toUpperCase()} — ${laneWord}). `
         + `$${totals.monthly}/mo · $${totals.annual}/yr${totals.oneTime ? ` · $${totals.oneTime} one-time` : ''}. `
         + `${lane === LANES.YELLOW ? `Flags: ${reasons.slice(0, 3).join('; ')}. ` : ''}Review in admin/estimates and send.`,
     });
     logger.info('[estimator-engine] draft created', {
-      estimateId: draft.estimate.id, lane, monthly: totals.monthly,
+      estimateId: draft.estimate.id, lane, monthly: totals.monthly, origin: origin.channel,
     });
     return result;
   } catch (err) {
     logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
     result.lane = LANES.RED;
     result.reasons = [`engine error: ${err.message}`];
-    if (!dryRun && context?.call && quotePromised) {
+    if (!dryRun && (context?.call || threadKey) && quotePromised) {
       await notify({
-        call: context.call,
+        call: context?.call || null,
         context,
         lane: LANES.RED,
         quotePromised,
-        title: 'Quote promised on call — send it',
-        body: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
+        threadKey,
+        title: S.redTitle,
+        body: S.errorBody,
       });
     }
     return result;
@@ -517,5 +726,9 @@ function generateEstimateSafely(engineInput) {
 module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
+  // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
+  // bell plumbing instead of re-implementing the lane/notify contract.
+  runDraftPipeline,
+  notify,
   _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality },
 };

@@ -9,6 +9,9 @@ const mockAnthropicCreate = jest.fn();
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
+  // Photo mutations wrap insert/update/delete + the WDO staleness flag in one
+  // transaction; the mock trx dispatches through the same per-table map.
+  mock.transaction = jest.fn(async (cb) => cb(mock));
   return mock;
 });
 jest.mock('../config', () => ({
@@ -109,10 +112,11 @@ function chain(overrides = {}) {
     limit: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
-    returning: jest.fn(),
+    returning: jest.fn().mockResolvedValue([{ id: 'row-1' }]),
     del: jest.fn().mockResolvedValue(1),
     ...overrides,
   };
@@ -264,7 +268,9 @@ describe('admin projects routes', () => {
     const projectUpdated = chain({
       first: jest.fn().mockResolvedValue({ id: 'project-1', title: 'Updated title' }),
     });
-    const projectQueries = [projectRead, projectUpdate, projectUpdated];
+    // PUT persists inside a locked transaction now — the lock read consumes
+    // one projects slot before the update.
+    const projectQueries = [projectRead, chain(), projectUpdate, projectUpdated];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'service_records') return serviceRead;
@@ -1289,7 +1295,12 @@ describe('admin projects routes', () => {
         email: null,
       }),
     });
-    const projectQueries = [projectRead, projectColumnInfo, markSent, updatedProjectRead, sequenceRead, persistDelivery];
+    // sendClaim = the delivery_status 'sending' concurrency claim taken
+    // before any side effect; its update resolving 1 means "claim won".
+    // stillOwned = the pre-delivery ownership recheck (must find the row).
+    const sendClaim = chain();
+    const stillOwned = chain({ first: jest.fn().mockResolvedValue({ id: 'project-1' }) });
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markSent, updatedProjectRead, sequenceRead, stillOwned, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -1367,7 +1378,9 @@ describe('admin projects routes', () => {
         email: 'van@example.com',
       }),
     });
-    const projectQueries = [projectRead, projectColumnInfo, markToken, updatedProjectRead, sequenceRead, persistDelivery];
+    const sendClaim = chain();
+    const stillOwned = chain({ first: jest.fn().mockResolvedValue({ id: 'project-1' }) });
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markToken, updatedProjectRead, sequenceRead, stillOwned, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -1648,9 +1661,12 @@ describe('admin projects routes', () => {
     });
   });
 
-  test('photo delete does not drop database row when storage delete fails', async () => {
+  // DB record first, bytes second: a storage failure AFTER the committed
+  // delete leaves an orphaned S3 object (logged for cleanup), never a live
+  // DB row pointing at permanently-gone evidence.
+  test('photo delete commits the DB delete even when the storage delete fails', async () => {
     const projectRead = chain({
-      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+      first: jest.fn().mockResolvedValue({ id: 'project-1', customer_id: 'customer-1', created_by_tech_id: 'tech-1' }),
     });
     const photoRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -1660,14 +1676,15 @@ describe('admin projects routes', () => {
       }),
     });
     const photoDelete = chain();
+    const activityInsert = chain();
     const storageError = new Error('S3 timeout');
     mockS3Send.mockRejectedValue(storageError);
 
+    const photoQueries = [photoRead, photoDelete];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectRead;
-      if (table === 'project_photos') return table === 'project_photos' && photoRead.first.mock.calls.length === 0
-        ? photoRead
-        : photoDelete;
+      if (table === 'project_photos') return photoQueries.shift();
+      if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1677,9 +1694,17 @@ describe('admin projects routes', () => {
         headers: { Authorization: 'Bearer tech-1' },
       });
       const body = await res.json();
-      expect(res.status).toBe(502);
-      expect(body.error).toMatch(/storage/);
-      expect(photoDelete.del).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(photoDelete.del).toHaveBeenCalledTimes(1);
+      const logger = require('../services/logger');
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('orphaned after delete'));
+      // Durable tombstone: the orphaned key is recorded where a cleanup pass
+      // can find it (the plaintext log above carries IDs only).
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'project_photo_delete_orphaned',
+        metadata: expect.objectContaining({ s3_key: 'project-photos/project-1/photo.jpg' }),
+      }));
     });
   });
 

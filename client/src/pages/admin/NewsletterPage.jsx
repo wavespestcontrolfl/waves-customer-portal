@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
+import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -64,7 +65,7 @@ function adminFetch(path, options = {}) {
 
 const TABS = [
   { key: "dashboard", label: "Dashboard", desc: "Overview", Icon: TrendingUp },
-  { key: "calendar", label: "Calendar", desc: "Editorial plan", Icon: CalendarDays },
+  { key: "calendar", label: "Calendar", desc: NEWSLETTER_UI_COPY.sendCadence, Icon: CalendarDays },
   { key: "compose", label: "Compose", desc: "Draft + send", Icon: MailPlus },
   { key: "history", label: "History", desc: "Performance", Icon: FileText },
   { key: "subscribers", label: "Subscribers", desc: "Audience", Icon: Users },
@@ -796,8 +797,13 @@ function EventInboxView({ onDraftFromEvent }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selected, setSelected] = useState(new Set());
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const eventsAbortRef = useRef(null);
+  const [actionStatus, setActionStatus] = useState("");
 
   const fetchEvents = () => {
+    eventsAbortRef.current?.abort();
+    const controller = new AbortController();
+    eventsAbortRef.current = controller;
     setLoading(true);
     const params = new URLSearchParams({ limit: "100" });
     if (statusFilter && statusFilter !== "all")
@@ -805,14 +811,15 @@ function EventInboxView({ onDraftFromEvent }) {
     if (freshnessFilter) params.set("freshness", freshnessFilter);
     if (zoneFilter) params.set("zone", zoneFilter);
     if (searchQuery) params.set("q", searchQuery);
-    adminFetch(`/admin/newsletter/events/inbox?${params}`)
+    adminFetch(`/admin/newsletter/events/inbox?${params}`, { signal: controller.signal })
       .then((d) => {
+        if (controller.signal.aborted) return;
         setEvents(d.events || []);
         setCounts(d.counts || {});
         setSelected(new Set());
       })
-      .catch(() => setEvents([]))
-      .finally(() => setLoading(false));
+      .catch((e) => { if (e.name !== "AbortError") setEvents([]); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
   };
 
   const fetchSources = () => {
@@ -824,25 +831,39 @@ function EventInboxView({ onDraftFromEvent }) {
   useEffect(() => {
     fetchEvents();
     fetchSources();
+    return () => eventsAbortRef.current?.abort();
   }, [statusFilter, freshnessFilter, zoneFilter]);
 
   const doSearch = () => fetchEvents();
 
   const patchEvent = async (id, body) => {
-    await adminFetch(`/admin/newsletter/events/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    });
-    fetchEvents();
+    setActionStatus("Saving event…");
+    try {
+      await adminFetch(`/admin/newsletter/events/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setActionStatus("Event updated.");
+      fetchEvents();
+    } catch (e) {
+      setActionStatus("Event update failed: " + e.message);
+    }
   };
 
   const bulkAction = async (action) => {
     if (selected.size === 0) return;
-    await adminFetch("/admin/newsletter/events/bulk-action", {
-      method: "POST",
-      body: JSON.stringify({ action, ids: [...selected] }),
-    });
-    fetchEvents();
+    if (action === "reject" && !confirm(`Reject ${selected.size} selected event${selected.size === 1 ? "" : "s"}?`)) return;
+    setActionStatus(`${action} in progress…`);
+    try {
+      await adminFetch("/admin/newsletter/events/bulk-action", {
+        method: "POST",
+        body: JSON.stringify({ action, ids: [...selected] }),
+      });
+      setActionStatus(`${selected.size} event${selected.size === 1 ? "" : "s"} updated.`);
+      fetchEvents();
+    } catch (e) {
+      setActionStatus(`Bulk ${action} failed: ${e.message}`);
+    }
   };
 
   // Merge duplicates. The survivor is chosen by a visible, deterministic rule
@@ -1074,6 +1095,12 @@ function EventInboxView({ onDraftFromEvent }) {
         )}
       </div>
 
+      {actionStatus && (
+        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-12 text-ink-secondary">
+          {actionStatus}
+        </div>
+      )}
+
       {/* Event Table */}
       <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
         {loading ? (
@@ -1193,6 +1220,14 @@ function EventInboxView({ onDraftFromEvent }) {
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onDraftFromEvent?.(ev)}
+                        className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                        title="Draft a newsletter with this event preloaded"
+                      >
+                        <FileText size={13} strokeWidth={2} />
+                      </button>
                       {ev.adminStatus !== "approved" &&
                         ev.adminStatus !== "featured" && (
                           <button
@@ -1353,6 +1388,7 @@ function CalendarView() {
   const [currentWeek, setCurrentWeek] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(null); // weekOf being saved
+  const [calendarStatus, setCalendarStatus] = useState("");
   const [draftingWeek, setDraftingWeek] = useState(null); // weekOf being drafted
 
   const fetchCalendar = () => {
@@ -1370,6 +1406,7 @@ function CalendarView() {
 
   const saveEntry = async (weekOf, updates) => {
     setSaving(weekOf);
+    setCalendarStatus("Saving calendar…");
     try {
       const entry = calendar.find(c => c.weekOf === weekOf);
       if (entry && entry.id) {
@@ -1384,8 +1421,9 @@ function CalendarView() {
         });
       }
       fetchCalendar();
+      setCalendarStatus("Calendar saved.");
     } catch (e) {
-      console.error('Save failed:', e.message);
+      setCalendarStatus(`Calendar save failed: ${e.message}`);
     } finally {
       setSaving(null);
     }
@@ -1393,6 +1431,7 @@ function CalendarView() {
 
   const handleDraft = async (row) => {
     setDraftingWeek(row.weekOf);
+    setCalendarStatus("Drafting newsletter…");
     try {
       let calendarId = row.id;
 
@@ -1426,8 +1465,9 @@ function CalendarView() {
       });
 
       fetchCalendar();
+      setCalendarStatus("Draft created. Open Compose to review it.");
     } catch (e) {
-      console.error('Draft failed:', e.message);
+      setCalendarStatus(`Draft failed: ${e.message}`);
     } finally {
       setDraftingWeek(null);
     }
@@ -1454,11 +1494,16 @@ function CalendarView() {
 
   return (
     <div className="space-y-4 mt-4">
+      {calendarStatus && (
+        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-12 text-ink-secondary">
+          {calendarStatus}
+        </div>
+      )}
       <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
         <table className="w-full text-left">
           <thead>
             <tr className="border-b border-zinc-100">
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Week</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-44">{NEWSLETTER_UI_COPY.calendarWeekHeading}</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">Topic</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-40">Homeowner Tip</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">Status</th>
@@ -1510,7 +1555,7 @@ export default function NewsletterPage() {
   // Cross-tab handoff for "Draft newsletter" clicks on EventCard.
   // DashboardView calls onDraftFromEvent(event) → we stash the event +
   // switch to the Compose tab. ComposeView consumes pendingDraftEvent
-  // on mount (applies the Weekend Lineup template + opens the AI Draft
+  // on mount (applies the flagship template + opens the AI Draft
   // modal pre-filled with the event facts), then clears it via
   // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
@@ -1586,6 +1631,10 @@ export default function NewsletterPage() {
     const newParams = new URLSearchParams(searchParams);
     if (next === "dashboard") newParams.delete("tab");
     else newParams.set("tab", next);
+    // Draft deep links are single-compose context. Normal navigation to a new
+    // campaign (or away from Compose) must not silently rehydrate an old row.
+    newParams.delete("draftId");
+    if (next === "compose") newParams.delete("autopilotType");
     setSearchParams(newParams, { replace: true });
   };
 

@@ -34,22 +34,50 @@ class RescheduleSMS {
     // matched whatever pending offer row existed and booked its (possibly
     // long-past) date. 7 days comfortably covers a real reschedule
     // conversation.
-    const pending = await db('reschedule_log')
+    const pendingRows = await db('reschedule_log')
       .where({ customer_id: customerId })
       .whereNull('customer_response')
       .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
-      .orderBy('created_at', 'desc')
-      .first();
+      .orderBy('created_at', 'desc');
+    if (!pendingRows || !pendingRows.length) return null;
 
-    if (!pending) return null;
-
-    let options = {};
-    try {
-      options = typeof pending.notes === 'string' ? JSON.parse(pending.notes) : (pending.notes || {});
-    } catch (e) {
-      logger.warn(`[reschedule-sms] Failed to parse notes for log ${pending.id}: ${e.message}`);
-    }
     const reply = (messageBody || '').trim().toLowerCase();
+    const isOptionReply = ['1', 'one', '2', 'two'].includes(reply)
+      || /^[12][ .]/.test(reply);
+
+    const parseOptions = (row) => {
+      try {
+        return (typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {})) || {};
+      } catch (e) {
+        logger.warn(`[reschedule-sms] Failed to parse notes for log ${row.id}: ${e.message}`);
+        return {};
+      }
+    };
+
+    // Modern rain-outs attach no options (the moved SMS asks for no reply,
+    // only a self-serve link), so their rows can never be acted on here.
+    // When the NEWEST pending row is such a no-reply rain-out, only an
+    // explicit option reply digs deeper for an older still-answerable
+    // offer — a call request or freeform text belongs to normal inbound
+    // handling (office alert), not to a stale offer's canned flows. The
+    // scan walks the whole 7-day window: any number of no-reply rain-outs
+    // may sit between the reply and its offer.
+    let pending = pendingRows[0];
+    let options = parseOptions(pending);
+    if (!options.option1 && !options.option2) {
+      if (!isOptionReply) return null;
+      pending = null;
+      options = {};
+      for (const row of pendingRows.slice(1)) {
+        const parsed = parseOptions(row);
+        if (parsed.option1 || parsed.option2) {
+          pending = row;
+          options = parsed;
+          break;
+        }
+      }
+      if (!pending) return null;
+    }
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 
     let selectedOption = null;

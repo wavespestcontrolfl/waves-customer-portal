@@ -381,8 +381,33 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
+// body parsing, then parse with its own 256kb cap — same reason as staff
+// auth above; unauthenticated callers must not force big JSON parse work.
+app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+
+// Base64 media payloads (service/job photos, call-recording snippets, the
+// photo lead magnets' customer uploads) only travel on the staff surfaces and
+// the two public photo-analyze funnels — mount the big parser there ONLY.
+// Everything else gets a tight default: the old global 50 MB ceiling let any
+// anonymous endpoint force 50 MB of JSON parsing work per request.
+// (/api/admin/auth keeps its stricter cap — mounted above, first parser wins.)
+const LARGE_BODY_LIMIT = '50mb';
+// The public photo funnels get the big parser ONLY on their /analyze
+// route — the base64 uploads travel there alone, and a prefix-wide mount
+// handed the anonymous /:id/claim and read endpoints 50 MB of JSON parse
+// work per bogus request too (Codex #2853 r2).
+for (const largeBodyPrefix of ['/api/admin', '/api/tech', '/api/public/lawn-assessment/analyze', '/api/public/pest-identifier/analyze']) {
+  app.use(largeBodyPrefix, express.json({ limit: LARGE_BODY_LIMIT }));
+}
+// Customer service requests carry up to 3 base64 photos (validate caps each at
+// 8 MB of encoded chars — see utils/request-photo-validation.js), so a valid
+// authenticated body can approach ~25 MB. Give the route its own bounded
+// parser so those uploads don't 413 under the 1 MB default, without widening
+// the ceiling for everything else. Authenticated + per-customer throttled.
+app.use('/api/requests', express.json({ limit: '30mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Public assets used by server-rendered customer pages. In production Vite
 // copies these into client/dist; in local API-only dev they still need to be
@@ -613,6 +638,8 @@ app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
 app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
+// MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
+app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
@@ -654,9 +681,11 @@ app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
-// Health check
+// Health check. Public and unauthenticated (Railway probes it), so it must
+// not enumerate internal state: the full feature-gate map told anyone which
+// dark lanes exist and which kill switches are live. Staff surfaces read
+// gates through their authenticated APIs, not from here.
 app.get('/api/health', (req, res) => {
-  const { gates } = require('./config/feature-gates');
   res.set('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
@@ -664,7 +693,6 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
     staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
-    gates,
   });
 });
 
@@ -788,10 +816,13 @@ if (config.nodeEnv === 'production') {
 // ERROR HANDLING
 // =========================================================================
 
-// Sentry debug/test route
-app.get("/debug-sentry", function mainHandler(req, res) {
-  throw new Error("My first Sentry error!");
-});
+// Sentry debug/test route — dev-only. In production this was a public,
+// unauthenticated error generator (Sentry-quota noise on demand).
+if (config.nodeEnv !== 'production') {
+  app.get("/debug-sentry", function mainHandler(req, res) {
+    throw new Error("My first Sentry error!");
+  });
+}
 
 // Sentry error handler — must be before other error middleware
 Sentry.setupExpressErrorHandler(app);
@@ -940,6 +971,41 @@ httpServer.listen(PORT, () => {
       };
       setTimeout(runReportHoldSweep, 45 * 1000).unref();
       setInterval(runReportHoldSweep, 60 * 1000).unref();
+    }
+
+    // WDO report attention sweep — exception-based bell for reports stalled
+    // BEFORE send (inspection never closed out, signed-but-unsent drafts,
+    // holds failing release). Quiet when clean; gated + cross-replica
+    // serialized inside the sweep itself. Every 6h with an early first run
+    // so a fresh deploy surfaces existing stalls the same morning.
+    {
+      const runWdoAttentionSweep = async () => {
+        try {
+          const { runWdoReportAttentionSweep } = require('./services/wdo-report-attention');
+          await runWdoReportAttentionSweep();
+        } catch (err) {
+          logger.error(`[wdo-report-attention] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runWdoAttentionSweep, 2 * 60 * 1000).unref();
+      setInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
+    }
+
+    // Orphaned-photo reclaim — drains project_photo_delete_orphaned
+    // tombstones (DB-first photo deletes whose post-commit S3 delete
+    // failed). Ungated hygiene: only touches objects whose DB rows the
+    // operator already deleted; serialized inside the sweep.
+    {
+      const runPhotoOrphanReclaim = async () => {
+        try {
+          const { reclaimOrphanedPhotoObjects } = require('./services/photo-orphan-reclaim');
+          await reclaimOrphanedPhotoObjects();
+        } catch (err) {
+          logger.error(`[photo-orphan-reclaim] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runPhotoOrphanReclaim, 3 * 60 * 1000).unref();
+      setInterval(runPhotoOrphanReclaim, 6 * 60 * 60 * 1000).unref();
     }
 
     // Call recordings are processed by the every-5-minute scheduler.js

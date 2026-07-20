@@ -94,6 +94,11 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+
+// Project types whose project_date lands on a dated legal filing (FDACS-13645
+// / pre-treat certificate) — a future date can't be attested, so create/edit
+// reject it instead of trusting the keyboard.
+const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 // project_photos.caption is varchar(200): a longer caption would fail the
 // INSERT after the image is already in S3, stranding an orphan object and
 // blocking every Save retry. Clamp rather than reject — losing the tail of a
@@ -1627,6 +1632,17 @@ router.post('/', async (req, res, next) => {
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
+    // A WDO / pre-treat certificate is a legal document dated the day the
+    // inspection/treatment actually happened — a future date can't be attested.
+    // A typo'd future date has already shipped on a signed prod filing
+    // (2027-03-13 for a 2026 inspection), so reject rather than trust.
+    if (LEGAL_DOC_DATE_TYPES.has(project_type) && projectDate > etDateString()) {
+      return res.status(422).json({
+        error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
+        code: 'project_date_in_future',
+      });
+    }
+
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
     // sheet for already-linked visits, and nothing here prevented a second
@@ -2077,6 +2093,14 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    // Mirror of the create-path clamp: a dated legal filing can't carry a
+    // future inspection/treatment date (one already shipped in prod).
+    if (updates.project_date && LEGAL_DOC_DATE_TYPES.has(project.project_type) && updates.project_date > etDateString()) {
+      return res.status(422).json({
+        error: `The inspection/treatment date can't be in the future (${updates.project_date}) — use the date the work was actually performed.`,
+        code: 'project_date_in_future',
+      });
+    }
     // Durable inspection-fee guard: an admin-saved narrative/title can't
     // persist the internal fee (legacy rows cleaned at rest by migration
     // 20260717000001, codex #2817). Cue AND recorded-value passes — a
@@ -2095,21 +2119,39 @@ router.put('/:id', async (req, res, next) => {
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
-    await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
-    const updated = await db('projects').where({ id: req.params.id }).first();
-
-    // If this edit changed the content a captured WDO signature attests to,
-    // flag the signature stale so the send gates force a re-sign. Best-effort:
-    // the send gates re-verify the content hash themselves, so a bookkeeping
-    // failure here can't let a hashed signature stamp edited content (only
-    // legacy pre-hash signatures rely on this flag — hence the loud warn).
+    // Serialized with in-flight deliveries the same way photo mutations are:
+    // a findings/date edit landing while a send (or the payment-hold release)
+    // is building would make the emailed signed PDF differ from the live
+    // public report, or race the staleness bookkeeping.
+    // The staleness refresh rides the SAME locked transaction, computed from
+    // the LOCKED row's signature — a post-commit refresh from a refetch could
+    // overwrite a concurrently saved replacement signature with the old one
+    // marked stale. Best-effort within the edit (the send gates re-verify the
+    // content hash themselves; only legacy pre-hash signatures rely on this
+    // flag — hence the loud warn).
     let signatureStale = null;
-    if (updates.findings !== undefined || updates.project_date !== undefined) {
-      signatureStale = await refreshWdoSignatureStaleness(req, project, updated).catch((err) => {
-        logger.warn(`[projects] WDO signature staleness update failed for ${updated.id}: ${err.message}`);
-        return null;
+    try {
+      await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx, 'the edit', null);
+        await trx('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
+        if (updates.findings !== undefined || updates.project_date !== undefined) {
+          const before = locked || project;
+          signatureStale = await refreshWdoSignatureStaleness(
+            req,
+            before,
+            { ...before, ...updates, id: project.id },
+            { connection: trx },
+          ).catch((err) => {
+            logger.warn(`[projects] WDO signature staleness update failed for ${project.id}: ${err.message}`);
+            return null;
+          });
+        }
       });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
     }
+    const updated = await db('projects').where({ id: req.params.id }).first();
 
     await logProjectActivity(
       req,
@@ -2170,6 +2212,7 @@ function loadWdoSignature(project) {
     signerIdCard: sig.signer_id_card || '',
     signedAt: sig.signed_at || null,
     contentHash: sig.content_hash || null,
+    photoSetHash: sig.photo_set_hash || null,
     contentStale: Boolean(sig.content_stale),
   };
 }
@@ -2297,7 +2340,11 @@ function wdoCoreFindingsIncomplete(project) {
 // is edited back to exactly what was signed). The send gates re-verify the
 // hash themselves, so this flag is the UX signal plus the only protection for
 // legacy un-hashed signatures.
-async function refreshWdoSignatureStaleness(req, before, after) {
+// `connection` lets the findings-edit path run this INSIDE its locked
+// transaction with the locked row's signature — a post-commit refresh from a
+// refetch could overwrite a concurrently saved replacement signature with
+// the old one marked stale.
+async function refreshWdoSignatureStaleness(req, before, after, { connection = db } = {}) {
   if (after.project_type !== 'wdo_inspection') return null;
   let sig = after.wdo_signature;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
@@ -2309,7 +2356,7 @@ async function refreshWdoSignatureStaleness(req, before, after) {
     // stays stale until the licensee re-signs.
     : (Boolean(sig.content_stale) || wdoContentHash(before) !== newHash);
   if (Boolean(sig.content_stale) === stale) return stale;
-  await db('projects').where({ id: after.id }).update({
+  await connection('projects').where({ id: after.id }).update({
     wdo_signature: JSON.stringify({ ...sig, content_stale: stale }),
     updated_at: db.fn.now(),
   });
@@ -2323,6 +2370,89 @@ async function refreshWdoSignatureStaleness(req, before, after) {
     );
   }
   return stale;
+}
+
+// The signature's content hash covers findings + project_date only — the photo
+// addendum (captions, categories, order, membership) is rendered LIVE into the
+// FDACS PDF at send time and sits outside the hash. Any photo mutation on a
+// signed WDO therefore flags the signature stale directly: the licensee
+// attested a report whose photo pages just changed, and must re-sign before
+// send. The flag write rides the SAME transaction as the photo mutation so a
+// crash can't land the photo change while losing the stale flag. Unlike the
+// findings hash, this doesn't self-heal on revert — a photo edit is a re-sign.
+// Returns false (no signature / not a WDO), 'already_stale', or 'flagged'
+// (newly flagged by THIS mutation — the caller logs the activity entry).
+// Locks the project row for the duration of a content mutation's transaction
+// (photos, findings edits, signature saves) and rejects while a send claim is
+// active: a change landing between the send's freshness check and its
+// render/snapshot would otherwise ride into the emailed filing unattested.
+// The locked row (not the request-scope snapshot, which a concurrent
+// signature save can invalidate) also feeds the staleness decision below.
+// Applies to every project type — any in-flight send is rendering content it
+// already validated.
+// Pass columns = null to lock and return the FULL row (the findings-edit
+// path needs it to compute staleness from locked state).
+async function lockProjectForPhotoMutation(project, trx, what = 'the photo change', columns = ['wdo_signature', 'delivery_status', 'project_type', 'report_hold_status']) {
+  const query = trx('projects').where({ id: project.id }).forUpdate();
+  const cols = columns ? [...new Set([...columns, 'updated_at'])] : null;
+  const locked = await (cols ? query.first(...cols) : query.first());
+  const sendInProgress = () => {
+    const err = new Error(`This report is being sent right now — retry ${what} in a moment.`);
+    err.code = 'send_in_progress';
+    throw err;
+  };
+  // Two in-flight delivery claims to respect: the shared send claim
+  // (delivery_status) AND the payment-hold release sweep's claim
+  // (report_hold_status='releasing') — the release path builds and emails
+  // the FDACS addendum without ever setting delivery_status. The release
+  // claim needs no expiry here: the release sweep recovers its own stalls.
+  if (String(locked?.report_hold_status || '') === 'releasing') sendInProgress();
+  if (String(locked?.delivery_status || '') === 'sending') {
+    // Mirror the send routes' 10-minute stale recovery: without it a
+    // CRASHED send claim would 409 every edit/photo/signature change
+    // indefinitely — the operator couldn't fix the very report that's
+    // stuck. Unknown/unparseable age counts as fresh (reject) — the safe
+    // direction. Recovery normalizes to 'failed', same as the send revert.
+    const claimedAtMs = locked?.updated_at ? new Date(locked.updated_at).getTime() : Date.now();
+    const ageMs = Date.now() - claimedAtMs;
+    if (!(ageMs > 10 * 60 * 1000)) sendInProgress();
+    await trx('projects').where({ id: project.id }).update({
+      delivery_status: 'failed',
+      delivery_claim_token: null,
+      updated_at: db.fn.now(),
+    });
+  }
+  return locked;
+}
+
+async function flagWdoSignatureStaleForPhotos(project, trx, lockedRow) {
+  if (!project || project.project_type !== 'wdo_inspection') return false;
+  let sig = lockedRow ? lockedRow.wdo_signature : null;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  if (!sig || !sig.image) return false;
+  if (sig.content_stale) return 'already_stale';
+  await trx('projects').where({ id: project.id }).update({
+    wdo_signature: JSON.stringify({ ...sig, content_stale: true }),
+    updated_at: db.fn.now(),
+  });
+  return 'flagged';
+}
+
+// Activity-trail companion to flagWdoSignatureStaleForPhotos — logged AFTER
+// the mutation's transaction commits (best-effort, like every activity write).
+async function logWdoPhotoStaleness(req, project, changeSummary) {
+  // Post-commit truth, not the request snapshot — a concurrent signature
+  // save may have changed whose name belongs in the trail.
+  const row = await db('projects').where({ id: project.id }).first('wdo_signature').catch(() => null);
+  let sig = row ? row.wdo_signature : project.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  await logProjectActivity(
+    req,
+    project,
+    'project_wdo_signature_stale',
+    `WDO photos changed after signing (${changeSummary}) — ${sig?.signer_name || 'licensee'} must re-sign before send`,
+    { signer_name: sig?.signer_name || null, photo_change: changeSummary },
+  ).catch(() => {});
 }
 
 // The FDACS Print Name / ID Card No must match whoever actually signed, which
@@ -2404,12 +2534,31 @@ function wdoAddendumPhotoCaption(photo = {}, project = null) {
 // anything else). Failures on individual photos are skipped so one bad object
 // can't sink the whole report; anything past the count/byte budget is
 // omitted (and logged).
-async function loadWdoAddendumPhotos(project) {
-  const rows = await db('project_photos')
+// Extracted row loader — shared by the addendum renderer and the photo-set
+// hash so the signature check covers exactly the rows the PDF will render.
+function loadWdoAddendumPhotoRows(project, connection = db) {
+  return connection('project_photos')
     .where({ project_id: project.id })
     .orderBy('sort_order', 'asc')
     .orderBy('created_at', 'asc')
-    .catch(() => []);
+    .select('id', 's3_key', 'caption', 'category', 'visit');
+}
+
+// Hash of the photo-addendum identity the licensee attests to: membership,
+// captions, categories, visit, and render order. Captured onto the signature
+// at sign time (under the project lock) and re-verified at the PDF build
+// choke point — the mutation-time content_stale flag is the UX signal; this
+// is the gate that survives a lost-update race on the flag itself (a
+// signature save that read before a photo change committed).
+function wdoPhotoSetHash(rows) {
+  const payload = JSON.stringify((rows || []).map((ph) => [
+    String(ph.id), String(ph.caption || ''), String(ph.category || ''), String(ph.visit || ''),
+  ]));
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+async function loadWdoAddendumPhotos(project, preloadedRows) {
+  const rows = preloadedRows || await loadWdoAddendumPhotoRows(project).catch(() => []);
   const out = [];
   let totalBytes = 0;
   for (const ph of rows) {
@@ -2486,10 +2635,23 @@ async function buildWdoPdfAttachment(project, customer) {
     err.code = 'signature_stale';
     throw err;
   }
-  const [baseApplicator, photos] = await Promise.all([
+  // The photo-row read propagates failure: a signature hashed over an EMPTY
+  // photo set would otherwise collide with an errored-read-as-[] and slip an
+  // unverified addendum through — a read failure must abort the build, never
+  // masquerade as "no photos" (Codex P2 on #2887).
+  const [baseApplicator, photoRows] = await Promise.all([
     resolveProjectApplicator(project),
-    loadWdoAddendumPhotos(project),
+    loadWdoAddendumPhotoRows(project),
   ]);
+  // Photo-set verification (the findings hash's sibling): refuse to stamp
+  // the signature onto a photo addendum the licensee never saw. Legacy
+  // signatures without a photo_set_hash rely on the content_stale flag alone.
+  if (signature.photoSetHash && signature.photoSetHash !== wdoPhotoSetHash(photoRows)) {
+    const err = new Error('Photos changed after signing — the licensee must re-sign before sending');
+    err.code = 'signature_stale';
+    throw err;
+  }
+  const photos = await loadWdoAddendumPhotos(project, photoRows);
   const applicator = applicatorForReport(baseApplicator, signature);
   const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
   // Callers need the raw buffer too (to archive the exact emailed bytes), not
@@ -2879,6 +3041,13 @@ function normalizeInvoiceLineItemsForPdf(lineItems) {
 // but status only moves to 'sent' after at least one customer channel works.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
+  // Hoisted so the outer catch can release the send claim on an unexpected
+  // throw — otherwise a crash mid-send would 409 every later attempt for
+  // 10 minutes (the claim's stale-recovery window). The manual hold revert
+  // is hoisted with it and MUST run first in the catch: it is fenced on the
+  // claim token, which the send-claim revert clears.
+  let revertSendClaimOnError = null;
+  let revertManualHoldClaimOnError = null;
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -2929,6 +3098,76 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
     const projectCols = await db('projects').columnInfo().catch(() => ({}));
 
+    // dry_run: routing preview for the confirm dialog — who receives the
+    // report email and which "Report Sent to Requestor and to:" third parties
+    // get a report-only copy. Mirrors send-with-invoice's preview so the
+    // report-only send is no longer a blind fire. No side effects: nothing
+    // claimed, no token minted, nothing sent.
+    if (req.body?.dry_run) {
+      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+      let previewCopies = [];
+      if (project.project_type === 'wdo_inspection') {
+        const prefs = customer
+          ? await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null)
+          : null;
+        const [billing] = getInvoiceEmailRecipients(customer || {}, prefs || {});
+        previewCopies = wdoReportCopyEmails(
+          parseFindings(project),
+          [previewRecipient.email, customer?.email, billing?.email],
+        );
+      }
+      return res.json({
+        dry_run: true,
+        email_routing: {
+          recipient: previewRecipient.email || null,
+          report_copies: previewCopies,
+        },
+        releases_payment_hold: reportHoldColumnsPresent(projectCols)
+          && ['held', 'releasing'].includes(String(project.report_hold_status || '')),
+      });
+    }
+
+    // Send claim: /send previously had NO concurrency guard, so two
+    // overlapping POSTs (double-click, impatient retry) each passed the gates
+    // and both built + archived + emailed the FDACS filing — the customer got
+    // two copies and the project two identical archived filings. Claim the
+    // row as 'sending' before any side effect (mirrors the send-with-invoice
+    // invoice claim); a crashed claim self-recovers after 10 minutes.
+    // Ordering matters: this claim runs BEFORE the manual hold claim below —
+    // the hold claim refreshes projects.updated_at, which would permanently
+    // defeat this claim's staleness window on a crashed held send (every
+    // retry re-stamps updated_at, then 409s, forever).
+    // A recovered STALE claim normalizes its revert target to 'failed' — an
+    // abort must never write 'sending' back with a fresh updated_at, which
+    // would re-lock retries for another 10 minutes per failure, indefinitely.
+    const previousDeliveryStatus = project.delivery_status === 'sending'
+      ? 'failed'
+      : (project.delivery_status || null);
+    // Ownership fence: the stale takeover reuses the same 'sending' value, so
+    // without a per-claim token a stalled-but-alive original request could
+    // revert or finalize over the takeover's claim. Every revert/finalize
+    // below conditions on this token.
+    const sendClaimToken = crypto.randomBytes(12).toString('hex');
+    const sendClaim = await db('projects')
+      .where({ id: project.id })
+      .where((q) => q
+        .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
+        .orWhereRaw("updated_at < now() - interval '10 minutes'"))
+      .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
+    if (!sendClaim) {
+      return res.status(409).json({
+        error: 'This report is already being sent — give it a moment, then refresh.',
+        code: 'send_in_progress',
+      });
+    }
+    const revertSendClaim = async () => {
+      await db('projects')
+        .where({ id: project.id, delivery_status: 'sending', delivery_claim_token: sendClaimToken })
+        .update({ delivery_status: previousDeliveryStatus, delivery_claim_token: null, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] send claim revert failed for ${project.id}: ${err.message}`));
+    };
+    revertSendClaimOnError = revertSendClaim;
+
     // Payment-hold mutual exclusion (Codex P2 on #2753): a manual send on a
     // HELD report is the manual release, and it must take the SAME atomic
     // claim the payment sweep takes — otherwise an admin click while the
@@ -2942,6 +3181,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         .where({ id: project.id, report_hold_status: 'held' })
         .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
       if (!claimed) {
+        await revertSendClaim();
         return res.status(409).json({
           error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
           code: 'release_in_progress',
@@ -2950,14 +3190,21 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       manualHoldClaim = true;
     }
     // Return the manual claim to 'held' on any abort so the sweep can retry
-    // and a later manual send isn't blocked behind a stale claim.
+    // and a later manual send isn't blocked behind a stale claim. Fenced on
+    // the delivery claim token: after a stale takeover the 'releasing' row
+    // may belong to a NEWER claimant, and resetting THEIR claim to 'held'
+    // would let the release sweep deliver concurrently with them. Losing the
+    // fence leaves the row for the sweep's 10-minute recovery — the safe
+    // direction. (Call sites revert the hold BEFORE the send claim so the
+    // token is still present when this runs.)
     const revertManualHoldClaim = async () => {
       if (!manualHoldClaim) return;
       await db('projects')
-        .where({ id: project.id, report_hold_status: 'releasing' })
+        .where({ id: project.id, report_hold_status: 'releasing', delivery_claim_token: sendClaimToken })
         .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
     };
+    revertManualHoldClaimOnError = revertManualHoldClaim;
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -2977,7 +3224,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
       tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
     }
-    await db('projects').where({ id: req.params.id }).update(tokenUpdate);
+    // Token-fenced like the finalize below: a stalled request that resumes
+    // after a stale takeover must not overwrite the new owner's
+    // report_token / portal fields with its own pre-delivery stamp.
+    const stamped = await db('projects')
+      .where({ id: req.params.id, delivery_claim_token: sendClaimToken })
+      .update(tokenUpdate);
+    if (!stamped) {
+      await revertManualHoldClaim();
+      logger.error(`[projects] send superseded before token stamp for ${project.id} — claim taken over by a newer request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
 
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
@@ -2992,6 +3252,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
       await revertManualHoldClaim();
+      await revertSendClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -3003,6 +3264,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
       await revertManualHoldClaim();
+      await revertSendClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
@@ -3021,6 +3283,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         });
       } catch (e) {
         await revertManualHoldClaim();
+        await revertSendClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
       }
@@ -3028,17 +3291,46 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const channels = {};
 
+    // Ownership recheck + LEASE RENEWAL immediately before the external
+    // sends: the token fences every DB write, but a stalled request that
+    // resumes after a takeover could otherwise still EMAIL — and resend keys
+    // don't collide across owners, so the provider wouldn't dedupe the pair.
+    // Re-stamping updated_at here restarts the 10-minute takeover window at
+    // the moment delivery begins, so the build phase (PDF render, archive)
+    // can no longer eat the lease out from under the provider calls.
+    const stillOwned = await db('projects')
+      .where({ id: project.id, delivery_claim_token: sendClaimToken })
+      .update({ updated_at: db.fn.now() });
+    if (!stillOwned) {
+      await revertManualHoldClaim();
+      logger.error(`[projects] send superseded before delivery for ${project.id} — claim taken over; nothing emailed by this request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
+
     // Email first (through editable Waves template library). For WDO it carries
     // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+    const isResendSend = Boolean(project.sent_at || project.status === 'sent');
     if (emailRecipient.email) {
       try {
+        // Recipient-hashed idempotency key (same pattern as the hold release):
+        // the claim stops concurrent duplicates, this stops crash-retry
+        // duplicates at the provider layer. A resend keys on the claim token —
+        // deterministic within this attempt, distinct across attempts.
+        const recipientHash = crypto.createHash('sha1')
+          .update(String(emailRecipient.email).toLowerCase())
+          .digest('hex')
+          .slice(0, 12);
         const result = await ProjectEmail.sendProjectReportReady({
           project: updatedProject,
           customer,
           reportUrl,
-          isResend: Boolean(project.sent_at || project.status === 'sent'),
+          isResend: isResendSend,
           attachments: wdoPdf ? [wdoPdf.attachment] : [],
+          idempotencyKey: `project.report_ready:${project.id}:${isResendSend ? `resend-${sendClaimToken}` : 'initial'}:${recipientHash}`,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -3162,12 +3454,23 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
-    await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
-
     // Nothing went out — return the manual claim so the sweep (or a retry
-    // of this endpoint) can deliver later.
+    // of this endpoint) can deliver later. BEFORE the finalize: the finalize
+    // clears the delivery claim token this revert is fenced on.
     if (manualHoldClaim && !delivered) {
       await revertManualHoldClaim();
+    }
+
+    // Fenced finalize: only the request that still owns the claim may write
+    // the outcome. Zero rows = a stale takeover superseded this request —
+    // the emails above already went out, but the row's state belongs to the
+    // new owner now; recording over it would corrupt THEIR in-flight send.
+    deliveryUpdate.delivery_claim_token = null;
+    const finalized = await db('projects')
+      .where({ id: req.params.id, delivery_claim_token: sendClaimToken })
+      .update(deliveryUpdate);
+    if (!finalized) {
+      logger.error(`[projects] send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
     }
 
     const sendAction = delivered
@@ -3206,7 +3509,13 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       sent: delivered,
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Hold revert FIRST — it is fenced on the claim token, which the
+    // send-claim revert below clears.
+    if (revertManualHoldClaimOnError) await revertManualHoldClaimOnError().catch(() => {});
+    if (revertSendClaimOnError) await revertSendClaimOnError().catch(() => {});
+    next(err);
+  }
 });
 
 function projectEmailFailureMessage(result) {
@@ -3676,18 +3985,23 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
-    const [baseApplicator, photos] = await Promise.all([
+    const [baseApplicator, photoRows] = await Promise.all([
       resolveProjectApplicator(project),
-      loadWdoAddendumPhotos(project),
+      loadWdoAddendumPhotoRows(project),
     ]);
     // Never stamp a signature onto content that isn't sendable — even in this
     // admin preview, which can be downloaded and filed manually. Render unsigned
-    // when the signature is stale OR when the Section 2 hard gates (contradiction
-    // / incomplete) would 422 the send, so a downloadable preview can't become a
-    // signed FDACS filing that the send routes themselves refuse to emit.
+    // when the signature is stale (findings hash, mutation flag, OR photo-set
+    // hash — the same checks the send choke point enforces) or when the
+    // Section 2 hard gates (contradiction / incomplete) would 422 the send,
+    // so a downloadable preview can't become a signed FDACS filing that the
+    // send routes themselves refuse to emit.
     const { fresh, signature } = wdoSignatureFreshness(project);
+    const photosFresh = !signature?.photoSetHash
+      || signature.photoSetHash === wdoPhotoSetHash(photoRows);
     const sendBlocked = wdoSectionTwoContradiction(project) || wdoCoreFindingsIncomplete(project);
-    const stampSignature = (fresh && !sendBlocked) ? signature : null;
+    const stampSignature = (fresh && photosFresh && !sendBlocked) ? signature : null;
+    const photos = await loadWdoAddendumPhotos(project, photoRows);
     const applicator = applicatorForReport(baseApplicator, stampSignature);
     const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature: stampSignature, photos });
     res.setHeader('Content-Type', 'application/pdf');
@@ -3748,16 +4062,18 @@ const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
 // which would flip the WDO send gate to "signed" and emit an officially signed
 // FDACS-13645 with no actual signature. Reject any image with ~zero variance on
 // every channel — a real signature, even a faint one, moves at least one channel
-// well past this floor. Can't decode? Don't block (we already validated the
-// magic bytes); the UI's hasDrawn gate is the primary guard, this is depth.
+// well past this floor. Can't decode? Fail closed: an image sharp can't read
+// here will also fail at PDF stamp time, and saving it would assert "signed"
+// on an unverifiable image — reject now while the signer is still holding the
+// pen instead of at send time.
 async function signatureHasInk(buffer) {
   try {
     const sharp = require('sharp');
     const stats = await sharp(buffer).stats();
     return stats.channels.some((ch) => ch.stdev > 1.5);
   } catch (err) {
-    logger.warn(`[projects] signature ink check skipped (decode failed): ${err.message}`);
-    return true;
+    logger.warn(`[projects] signature ink check failed (decode error): ${err.message}`);
+    return false;
   }
 }
 
@@ -3791,7 +4107,7 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
     }
     if (!(await signatureHasInk(decoded))) {
-      return res.status(400).json({ error: 'Signature looks blank — please sign before saving', code: 'signature_blank' });
+      return res.status(400).json({ error: 'Signature looks blank or unreadable — please clear the pad and sign again', code: 'signature_blank' });
     }
 
     const applicator = await resolveProjectApplicator(project);
@@ -3819,7 +4135,24 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       return res.status(400).json({ error: "Inspector's FDACS ID card number is required to sign", code: 'signer_id_required' });
     }
 
-    await db('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
+    // Serialized with photo mutations and sends: the write locks the project
+    // row (photo transactions hold the same lock) and rejects mid-send, and
+    // the photo-set hash is computed INSIDE the lock — so the signature
+    // records exactly the addendum that exists at the moment it lands, and a
+    // photo change racing this save can't be silently covered (the PDF choke
+    // point re-verifies the hash) nor erase a stale flag it never saw.
+    try {
+      await db.transaction(async (trx) => {
+        // Same lock/guard as photo mutations — including the crashed-claim
+        // recovery, so a dead send can't block re-signing indefinitely.
+        await lockProjectForPhotoMutation(project, trx, 'the signature');
+        signature.photo_set_hash = wdoPhotoSetHash(await loadWdoAddendumPhotoRows(project, trx));
+        await trx('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
     await logProjectActivity(req, project, 'project_wdo_signed', `WDO report signed by ${signature.signer_name || 'licensee'}`, { signer_name: signature.signer_name });
     res.json({ ok: true, signed_at: signature.signed_at, signer_name: signature.signer_name });
   } catch (err) { next(err); }
@@ -3835,8 +4168,21 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
     }
     const cols = await db('projects').columnInfo().catch(() => ({}));
     if (cols.wdo_signature) {
-      const prior = loadWdoSignature(project);
-      await db('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+      // Same lock + in-flight-delivery guard as capture and photo mutations:
+      // clearing mid-send would revoke a signature the send already
+      // validated; the locked row (not the request snapshot) is what gets
+      // logged, so a concurrently saved replacement is never misattributed.
+      let prior = null;
+      try {
+        await db.transaction(async (trx) => {
+          const locked = await lockProjectForPhotoMutation(project, trx, 'the signature change');
+          prior = loadWdoSignature(locked || project);
+          await trx('projects').where({ id: project.id }).update({ wdo_signature: null, updated_at: db.fn.now() });
+        });
+      } catch (e) {
+        if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+        throw e;
+      }
       // Clearing the licensee's e-signature on a legal filing must leave a
       // trail — capture logs project_wdo_signed, so removal logs too.
       if (prior) {
@@ -3868,6 +4214,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // Tracks an invoice claimed as 'sending' so any abort (a throw before the
   // normal finalize/restore path) releases it instead of stranding it.
   let claimedInvoice = null;
+  // Tracks the SHARED project delivery claim (delivery_status='sending') this
+  // route takes alongside /send — the invoice claim alone can't stop a
+  // concurrent report-only /send from emailing + archiving the same FDACS
+  // report. The delivered branches resolve the claim by writing the final
+  // delivery_status; the guarded revert only touches a still-'sending' row.
+  let deliveryClaim = null;
+  const revertDeliveryClaimOnAbort = async (projectId) => {
+    if (!deliveryClaim) return;
+    await db('projects')
+      .where({ id: projectId, delivery_status: 'sending', delivery_claim_token: deliveryClaim.token })
+      .update({ delivery_status: deliveryClaim.previousStatus, delivery_claim_token: null, updated_at: db.fn.now() })
+      .catch((err) => logger.warn(`[projects] combined-send delivery claim revert failed for ${projectId}: ${err.message}`));
+    deliveryClaim = null;
+  };
   // Tracks a held→releasing claim taken for an UN-HELD delivery of a
   // currently-held report (Codex P2 on #2753) — hoisted like claimedInvoice
   // so the outer catch returns the row to 'held' on any abort. The revert
@@ -3875,8 +4235,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   let heldReportClaim = null;
   const revertHeldReportClaimOnAbort = async () => {
     if (!heldReportClaim) return;
+    // Fenced on the delivery claim token (same reasoning as /send's manual
+    // hold revert): after a stale takeover the 'releasing' row may belong to
+    // a newer claimant — resetting THEIRS to 'held' would let the release
+    // sweep deliver concurrently. No provable ownership → leave the row for
+    // the sweep's 10-minute recovery. Call sites run this BEFORE the
+    // delivery-claim revert so the token is still present.
+    if (!deliveryClaim?.token) { heldReportClaim = null; return; }
     await db('projects')
-      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing' })
+      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing', delivery_claim_token: deliveryClaim.token })
       .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
       .catch((err) => logger.warn(`[projects] combined-send hold claim revert failed for ${heldReportClaim.projectId}: ${err.message}`));
     heldReportClaim = null;
@@ -4157,6 +4524,34 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus };
 
+    // Shared project delivery claim (see hoist comment): one claim namespace
+    // across /send and /send-with-invoice so the two routes can't race each
+    // other into duplicate FDACS emails/archives. Taken AFTER the invoice
+    // claim; losing it returns the invoice claim before 409ing. Same stale-
+    // recovery normalization as /send: never revert back to 'sending'.
+    const previousDeliveryStatus = project.delivery_status === 'sending'
+      ? 'failed'
+      : (project.delivery_status || null);
+    // Same ownership fence as /send: token per claim, conditioned reverts.
+    const deliveryClaimToken = crypto.randomBytes(12).toString('hex');
+    const deliveryClaimRows = await db('projects')
+      .where({ id: project.id })
+      .where((q) => q
+        .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
+        .orWhereRaw("updated_at < now() - interval '10 minutes'"))
+      .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
+    if (!deliveryClaimRows) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after lost delivery claim failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      return res.status(409).json({
+        error: 'This report is already being sent — give it a moment, then refresh.',
+        code: 'send_in_progress',
+      });
+    }
+    deliveryClaim = { previousStatus: previousDeliveryStatus, token: deliveryClaimToken };
+
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
     // 'sent' legacy-visible path in documents.js.
@@ -4203,7 +4598,23 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
       tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
     }
-    await db('projects').where({ id: project.id }).update(tokenUpdate);
+    // Token-fenced like /send's stamp: a resumed stalled request must not
+    // overwrite the takeover owner's token/portal/hold fields.
+    const stamped = await db('projects')
+      .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
+      .update(tokenUpdate);
+    if (!stamped) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after superseded stamp failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      await reverseProjectCreditOnAbort();
+      logger.error(`[projects] combined send superseded before token stamp for ${project.id} — claim taken over by a newer request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
     const refreshed = await db('projects').where({ id: project.id }).first();
     const reportPath = await projectReportPathForProject(db, refreshed, customer);
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
@@ -4261,6 +4672,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         await db('invoices').where({ id: invoice.id, status: 'sending' })
           .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
         await reverseProjectCreditOnAbort();
+        await revertDeliveryClaimOnAbort(project.id);
         return res.status(409).json({
           error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
           code: 'release_in_progress',
@@ -4306,6 +4718,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
         await reverseProjectCreditOnAbort();
         await revertHeldReportClaimOnAbort();
+        await revertDeliveryClaimOnAbort(project.id);
         logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
       }
@@ -4330,6 +4743,26 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const typeLabel = getProjectType(project.project_type)?.label || 'Report';
     const firstName = customer.first_name || 'there';
     const channels = {};
+
+    // Ownership recheck + lease renewal immediately before the external
+    // sends (same contract as /send): re-stamping updated_at restarts the
+    // takeover window at the moment delivery begins.
+    const stillOwned = await db('projects')
+      .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
+      .update({ updated_at: db.fn.now() });
+    if (!stillOwned) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after superseded delivery failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      await reverseProjectCreditOnAbort();
+      await revertHeldReportClaimOnAbort();
+      logger.error(`[projects] combined send superseded before delivery for ${project.id} — claim taken over; nothing sent by this request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
 
     // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
     // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
@@ -4640,20 +5073,24 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await revertHeldReportClaimOnAbort();
     }
 
+    // Both delivered-branch finalizes are fenced on the claim token (same
+    // contract as /send): zero rows = a stale takeover owns the row now.
+    let finalized = !delivered;
     if (delivered && holdActive) {
       // Invoice is out. The hold itself was stamped BEFORE delivery (in the
       // token update — see the Codex P1 note there), so this records only
       // the delivery bookkeeping. The project stays in its pre-send
       // lifecycle (no status='sent' / sent_at — the report has not been
       // delivered) and the release sweep owns the next transition.
-      await db('projects').where({ id: project.id }).update({
+      finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
+        delivery_claim_token: null,
         updated_at: db.fn.now(),
       });
     } else if (delivered) {
-      await db('projects').where({ id: project.id }).update({
+      finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
         // Resending a closed project's report must not regress its lifecycle
         // (closed_at stays set and closeout artifacts key on status='closed').
         status: project.status === 'closed' ? project.status : 'sent',
@@ -4661,6 +5098,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
+        delivery_claim_token: null,
         updated_at: db.fn.now(),
         ...(wdoFiling && projectCols.wdo_sent_filings ? {
           // Atomic jsonb append — never read-modify-write the filing index.
@@ -4684,6 +5122,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // Released atomically above — nothing left for the outer catch to revert.
       heldReportClaim = null;
     }
+    if (delivered && !finalized) {
+      logger.error(`[projects] combined-send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
+    }
+    // Delivered branches resolved the claim by writing the final
+    // delivery_status; anything short of delivered restores the pre-claim
+    // value so a failed send doesn't 409 retries for 10 minutes.
+    if (delivered) deliveryClaim = null;
+    else await revertDeliveryClaimOnAbort(project.id);
 
     await logProjectActivity(
       req, project,
@@ -4720,6 +5166,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
+    // Hold revert BEFORE the delivery-claim revert — the hold revert is
+    // fenced on the delivery token, which the claim revert clears.
+    await revertHeldReportClaimOnAbort();
+    // Return the shared project delivery claim too (guarded: only reverts a
+    // row still parked at 'sending', so a post-delivery throw can't clobber
+    // the final delivery_status).
+    await revertDeliveryClaimOnAbort(req.params.id);
     // Return this send's seam-applied credit too — a throw between apply and the
     // explicit WDO/no-delivery guards (e.g. while building the PDF or composing
     // the message) would otherwise leave the invoice settled-by-credit with no
@@ -5090,14 +5543,33 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       ContentType: contentType,
     }));
 
-    const [row] = await db('project_photos').insert({
-      project_id: project.id,
-      s3_key: key,
-      category: req.body.category || null,
-      caption: clampPhotoCaption(req.body.caption),
-      visit: req.body.visit === 'followup' ? 'followup' : 'primary',
-      uploaded_by_tech_id: req.technicianId,
-    }).returning('*');
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const [inserted] = await trx('project_photos').insert({
+          project_id: project.id,
+          s3_key: key,
+          category: req.body.category || null,
+          caption: clampPhotoCaption(req.body.caption),
+          visit: req.body.visit === 'followup' ? 'followup' : 'primary',
+          uploaded_by_tech_id: req.technicianId,
+        }).returning('*');
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { row: inserted, staleness: stale };
+      });
+    } catch (e) {
+      // The object went to S3 before this transaction — reclaim it on any
+      // post-upload failure so a rejected mutation can't strand an
+      // unreferenced customer photo in storage forever.
+      if (config.s3?.bucket) {
+        await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }))
+          .catch((cleanupErr) => logger.warn(`[projects] orphan upload cleanup failed for project ${project.id}: ${cleanupErr.message}`));
+      }
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { row, staleness } = mutation;
 
     await logProjectActivity(
       req,
@@ -5106,7 +5578,8 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       `Project photo uploaded: ${req.file.originalname}`,
       { photo_id: row.id, category: row.category, visit: row.visit },
     );
-    res.json({ photo: row });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo added');
+    res.json({ photo: row, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -5132,21 +5605,74 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const photo = await db('project_photos').where({ id: req.params.photoId, project_id: req.params.id }).first();
     if (!photo) return res.status(404).json({ error: 'Photo not found' });
+    // DB record first, bytes second: destroying the S3 object before the
+    // transaction meant a rolled-back delete (lock conflict, staleness-flag
+    // failure) left a live DB row pointing at permanently-gone evidence on a
+    // legal filing. The deletion-job tombstone rides the SAME transaction —
+    // after commit it is the only surviving reference to the object, so it
+    // must not be a best-effort write (a swallowed insert would strand the
+    // object with nothing left to find it by). The post-commit S3 delete
+    // below retires it; any failure leaves it queued for the
+    // photo-orphan-reclaim sweep.
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const count = await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .del();
+        if (!count) return { deleted: 0, staleness: false };
+        let tombstoneId = null;
+        if (config.s3?.bucket && photo.s3_key) {
+          const [tombstone] = await trx('activity_log').insert({
+            admin_user_id: req.technicianId || null,
+            customer_id: project.customer_id,
+            action: 'project_photo_delete_orphaned',
+            description: `Photo storage object pending deletion (photo ${photo.id})`,
+            metadata: { project_id: project.id, photo_id: photo.id, s3_key: photo.s3_key },
+          }).returning('id');
+          tombstoneId = (tombstone && tombstone.id) || tombstone || null;
+        }
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { deleted: count, staleness: stale, tombstoneId };
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { deleted, staleness, tombstoneId } = mutation;
+    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
+    // Best-effort is fine for RETIRING the tombstone (a missed stamp just
+    // means the reclaim sweep re-deletes an already-missing key — a no-op on
+    // S3 — and stamps it then); it was NOT fine for creating it.
+    const retireTombstone = async (note) => {
+      if (!tombstoneId) return;
+      await db('activity_log').where({ id: tombstoneId }).update({
+        metadata: JSON.stringify({
+          project_id: project.id,
+          photo_id: photo.id,
+          s3_key: photo.s3_key,
+          reclaimed_at: new Date().toISOString(),
+          ...(note ? { reclaim_note: note } : {}),
+        }),
+      }).catch(() => {});
+    };
     if (config.s3?.bucket && photo.s3_key) {
       try {
         await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: photo.s3_key }));
+        await retireTombstone();
       } catch (err) {
         if (!isMissingS3ObjectError(err)) {
-          logger.warn(`[projects] failed to delete photo object ${photo.id}: ${err.message}`);
-          return res.status(502).json({ error: 'Could not delete photo from storage. Please retry.' });
+          // Row is gone; the durable tombstone keeps the object reclaimable.
+          // Plaintext log carries IDs only: s3 keys embed the original
+          // filename, which can carry PII.
+          logger.warn(`[projects] photo object orphaned after delete ${photo.id} (project ${req.params.id}); tombstone ${tombstoneId || 'n/a'} queued: ${err.message}`);
+        } else {
+          logger.warn(`[projects] photo object already missing ${photo.id} (project ${req.params.id})`);
+          await retireTombstone('already_missing');
         }
-        logger.warn(`[projects] photo object already missing ${photo.id}: ${photo.s3_key}`);
       }
     }
-    const deleted = await db('project_photos')
-      .where({ id: req.params.photoId, project_id: req.params.id })
-      .del();
-    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     await logProjectActivity(
       req,
       project,
@@ -5154,7 +5680,8 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
       `Project photo deleted: ${photo.caption || photo.category || photo.id}`,
       { photo_id: photo.id, category: photo.category, visit: photo.visit },
     );
-    res.json({ ok: true });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo removed');
+    res.json({ ok: true, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -5170,10 +5697,39 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
       }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
-    await db('project_photos')
-      .where({ id: req.params.photoId, project_id: req.params.id })
-      .update({ ...updates, updated_at: db.fn.now() });
-    res.json({ ok: true });
+    let mutation;
+    try {
+      mutation = await db.transaction(async (trx) => {
+        const locked = await lockProjectForPhotoMutation(project, trx);
+        const current = await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .first();
+        if (!current) return { changed: 0, staleness: false };
+        // Only persist values that actually differ — Postgres reports a
+        // matched row as updated even when nothing changed, and a no-op save
+        // (open the caption editor, hit save) must never force a legal
+        // re-sign on a signed WDO.
+        const realChanges = {};
+        for (const [field, value] of Object.entries(updates)) {
+          if (String(current[field] ?? '') !== String(value ?? '')) realChanges[field] = value;
+        }
+        if (Object.keys(realChanges).length === 0) return { changed: 1, staleness: false };
+        await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .update({ ...realChanges, updated_at: db.fn.now() });
+        // Caption/category/order all render into the FDACS photo addendum —
+        // an edit to any of them on a signed WDO requires a re-sign.
+        const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
+        return { changed: 1, staleness: stale };
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+    const { changed, staleness } = mutation;
+    if (!changed) return res.status(404).json({ error: 'Photo not found' });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo details edited');
+    res.json({ ok: true, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 

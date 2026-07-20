@@ -18,3 +18,7 @@ export const WAVES_SUPPORT_SMS_TEL = 'sms:+19412975749';
 // Registered business address — keep in sync with WAVES_ADDRESS_LINE in
 // server/constants/business.js (the client bundle can't import it).
 export const WAVES_ADDRESS_LINE = '13649 Luxe Ave #110, Bradenton, FL 34211';
+
+// Marketing-site Products & Safety page — what we apply, re-entry guidance,
+// household/pet notes. Keep in sync with server/constants/business.js.
+export const WAVES_PRODUCTS_SAFETY_URL = 'https://www.wavespestcontrol.com/products-and-safety/';

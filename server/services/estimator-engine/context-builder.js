@@ -238,6 +238,7 @@ async function buildCallContext(callLogId) {
   // The processor's own shared-phone/slot/address disambiguation already ran
   // — when it resolved a customer for this call, that beats a phone rematch.
   let customerMatch = { customer: null, ambiguous: false };
+  let resolvedLoadFailed = false;
   if (call.customer_id) {
     try {
       const resolved = await db('customers')
@@ -247,14 +248,36 @@ async function buildCallContext(callLogId) {
         .where({ id: call.customer_id })
         .whereNull('deleted_at')
         .first();
-      if (resolved) customerMatch = { customer: resolved, ambiguous: false };
+      if (resolved) {
+        customerMatch = { customer: resolved, ambiguous: false };
+      } else {
+        // The processor DID resolve a customer but the row is gone (deleted
+        // or stale reference). A phone rematch could select another
+        // shared-line profile or price the known caller as a prospect —
+        // same exposure as a thrown query, so it fails closed the same way.
+        resolvedLoadFailed = true;
+        logger.warn(`[estimator-engine] resolved customer ${call.customer_id} not found — failing closed`);
+      }
     } catch (err) {
+      // The processor DID resolve a customer; a failed load means we cannot
+      // honor that resolution — falling through to a phone rematch here
+      // would price a known customer as whoever the phone happens to match.
+      resolvedLoadFailed = true;
       logger.warn(`[estimator-engine] resolved-customer load failed: ${err.message}`);
     }
   }
 
-  if (!customerMatch.customer) {
+  if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
+  }
+  // Fail CLOSED on lookup failure, exactly like the SMS-origin path: a
+  // failed query is not a no-match — an existing member could be hiding
+  // behind the error, and continuing would quote them as a new prospect
+  // (dropping membership discounts/fee waivers) while loading phone-scoped
+  // history whose shared-line safety cannot be established. The red-lane
+  // bell in maybeDraftEstimateForCall owns the manual path.
+  if (resolvedLoadFailed || customerMatch.unavailable) {
+    return { error: 'customer_lookup_unavailable', call };
   }
   const customer = customerMatch.customer;
 
@@ -304,8 +327,68 @@ async function buildCallContext(callLogId) {
   };
 }
 
+// SMS-origin context: the thread IS the conversation, so it becomes the
+// transcript (and smsThread stays empty — duplicating it would double-weight
+// the same evidence in the composer prompt). Ambiguous shared-phone lines
+// error out entirely: unlike a call, there is no independent transcript —
+// the thread history itself cannot be attributed to one profile, and no
+// caller-name extraction exists to disambiguate.
+async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
+  if (!last10(phone)) return { error: 'no_usable_phone' };
+  const customerMatch = await loadCustomerByPhone(phone, null);
+  if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
+  // A FAILED lookup is not a no-match: an existing member could be hiding
+  // behind the error, and pricing them as a prospect would drop membership
+  // discounts and fee waivers. Red out; the bell owns the manual path.
+  if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
+  const customer = customerMatch.customer;
+  const before = new Date(triggerAt);
+  const smsSince = new Date(before.getTime() - 30 * 86400000);
+  const [leadMatch, smsThread, priorEstimates] = await Promise.all([
+    // call=null: skips the sid + reused-lead branches; pure phone fallback.
+    loadLeadForCall(null, phone, { phoneFallback: true }),
+    loadSmsThread(phone, { limit: 40, before, since: smsSince }),
+    loadPriorEstimates(phone),
+  ]);
+  // The webhook records the TRIGGERING inbound message to sms_log after the
+  // handlers run, so the thread read here can miss exactly the text that
+  // asked for the quote (or supplied the address). Append it when the
+  // thread doesn't already end with it.
+  const trigger = String(triggerBody || '').trim().slice(0, 500);
+  if (trigger && smsThread[smsThread.length - 1]?.body !== trigger) {
+    smsThread.push({ direction: 'inbound', body: trigger, at: before });
+  }
+  const transcript = smsThread
+    .map((m) => `[${m.direction === 'inbound' ? 'Customer' : 'Waves'}] ${m.body}`)
+    .join('\n');
+  if (transcript.trim().length < 40) return { error: 'no_usable_thread' };
+  return {
+    call: null,
+    transcript,
+    // The joined transcript is for the composer PROMPT; evidence
+    // verification needs the per-message boundaries or a fabricated quote
+    // could pass by stitching words across two texts (verifyEvidenceQuotes
+    // prefers transcriptRecords when present).
+    transcriptRecords: smsThread.map((m) => m.body),
+    extraction: null,
+    // 'none' keeps the lane classifier's non-enriched flag — an SMS draft
+    // can never land green, which is the right floor for text-only evidence.
+    extractionSource: 'none',
+    phone,
+    customer: customer || null,
+    customerPhoneAmbiguous: false,
+    lead: leadMatch.lead || null,
+    leadIsForThisCall: false,
+    smsThread: [],
+    priorEstimates,
+    isExistingCustomer: !!(customer
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+  };
+}
+
 module.exports = {
   buildCallContext,
+  buildSmsThreadContext,
   existingDraftForCall,
   // Origin-specific context builders reuse these reads so call, web-lead,
   // and SMS sessions all resolve contacts/history with the same shared-line

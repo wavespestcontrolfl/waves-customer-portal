@@ -464,3 +464,61 @@ describe('_internalLinksFor conversion link', () => {
     expect(links).not.toContain('/contact/');
   });
 });
+
+describe('buildRetryDirectives — gate-retry feedback for the one autonomous redraft', () => {
+  const { buildRetryDirectives } = require('../services/content/content-brief-builder')._internals;
+
+  test('known codes map to corrective instructions; the header marks it final', () => {
+    const directives = buildRetryDirectives({
+      findings: [
+        { severity: 'P0', code: 'HARDCODED_PRICE', message: 'body contains $199' },
+        { severity: 'P0', code: 'FAQ_BLOCKED_SERVICE', message: 'FAQ on blocked service' },
+      ],
+    });
+    expect(directives[0]).toContain('PREVIOUS ATTEMPT REJECTED');
+    expect(directives.join(' ')).toContain('/pest-control-calculator/');
+    expect(directives.join(' ')).toContain('FAQ');
+  });
+
+  test('unknown codes fall back to the finding text and duplicates collapse', () => {
+    const directives = buildRetryDirectives({
+      findings: [
+        { severity: 'P1', code: 'SOMETHING_NEW', message: 'novel failure' },
+        { severity: 'P1', code: 'SOMETHING_NEW', message: 'novel failure' },
+      ],
+    });
+    expect(directives).toHaveLength(2); // header + one deduped directive
+    expect(directives[1]).toContain('SOMETHING_NEW');
+    expect(directives[1]).toContain('novel failure');
+  });
+
+  test('composed brief carries retry_directives inside voice_constraints when gate_retry is present', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp1',
+        bucket: 'competitor_gap',
+        query: 'ants in kitchen',
+        service: 'pest',
+        city: null,
+        signal_metadata: { gate_retry: { findings: [{ severity: 'P0', code: 'HARDCODED_PRICE' }] } },
+      },
+      signals: {},
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 80, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(Array.isArray(brief.voice_constraints.retry_directives)).toBe(true);
+    expect(brief.voice_constraints.retry_directives[0]).toContain('PREVIOUS ATTEMPT REJECTED');
+  });
+
+  test('no gate_retry → voice_constraints untouched (no retry_directives key)', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: { id: 'opp2', bucket: 'competitor_gap', query: 'ants in kitchen', service: 'pest', city: null, signal_metadata: {} },
+      signals: {},
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 80, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(brief.voice_constraints.retry_directives).toBeUndefined();
+  });
+});

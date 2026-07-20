@@ -131,6 +131,9 @@ async function normalizeRow(row) {
         && new Date(row.end_at || row.start_at) >= etMidnightToday) {
       const { freshness_status, freshness_score } = classifyFreshness({
         event_type: row.event_type,
+        recurrence_type: row.recurrence_type,
+        title: row.title,
+        description: row.description,
         times_featured: row.times_featured || 0,
         start_at: row.start_at,
         end_at: row.end_at,
@@ -190,6 +193,9 @@ async function normalizeRow(row) {
 
       const { freshness_status, freshness_score } = classifyFreshness({
         event_type: extracted.eventType,
+        recurrence_type: extracted.recurrenceType,
+        title: row.title,
+        description: row.description,
         times_featured: row.times_featured || 0,
         start_at: row.start_at,
         end_at: row.end_at,

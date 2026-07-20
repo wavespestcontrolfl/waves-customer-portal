@@ -39,6 +39,8 @@ import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -58,6 +60,7 @@ import {
   glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
+  useGlassCopyActive,
   GLASS_COPY,
 } from '../lib/estimate-glass-copy';
 import {
@@ -1303,6 +1306,18 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             {prompt}
           </button>
         ))}
+      </div>
+
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
+        Prefer to read it yourself? See exactly what we apply and why:{' '}
+        <a
+          href={WAVES_PRODUCTS_SAFETY_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: ESTIMATE_TEXT, fontWeight: 600, whiteSpace: 'nowrap' }}
+        >
+          Products &amp; Safety
+        </a>
       </div>
 
       {answer ? (
@@ -3313,6 +3328,10 @@ export function ServiceSection({
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
 }) {
+  // On phones the corner-pinned WaveGuard badge's 170px heading clearance
+  // eats most of the card width and crunches the headline — stack the badge
+  // in flow instead. Hook must precede the early return (rules of hooks).
+  const compactTierBadge = useIsMobile(560);
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
   const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
@@ -3357,17 +3376,22 @@ export function ServiceSection({
           render like" the Waves AI card). */}
       <div style={estimateCard({ position: 'relative' })}>
         {/* WaveGuard membership badge pinned to the box's top-right corner
-            (owner directive 2026-07-10 — was inline next to the price). */}
+            (owner directive 2026-07-10 — was inline next to the price). On
+            phones it stacks above the headline in flow (owner 2026-07-19 —
+            the pinned badge's clearance crunched the headline). */}
         {showTierBadge ? (
-          <span style={{
-            position: 'absolute', top: 16, right: 16,
-            display: 'inline-block', padding: '4px 12px',
-            ...waveGuardChipStyle(waveGuardTier),
-            borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-            whiteSpace: 'nowrap',
-          }}>
-            WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-          </span>
+          <div style={compactTierBadge
+            ? { display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }
+            : { position: 'absolute', top: 16, right: 16 }}>
+            <span style={{
+              display: 'inline-block', padding: '4px 12px',
+              ...waveGuardChipStyle(waveGuardTier),
+              borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+              whiteSpace: 'nowrap',
+            }}>
+              WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
+            </span>
+          </div>
         ) : null}
         {servicesLength > 1 ? (
           <h3 style={{
@@ -3376,8 +3400,9 @@ export function ServiceSection({
             margin: '0 0 16px',
             // Keep clear of the absolutely-positioned corner badge — sized
             // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
-            // padding + the 16px corner inset).
-            paddingRight: showTierBadge ? 170 : 0,
+            // padding + the 16px corner inset). No clearance needed when the
+            // badge stacks in flow on phones.
+            paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
@@ -3392,7 +3417,7 @@ export function ServiceSection({
           color: '#04395E', margin: '0 0 4px',
           // Same corner-badge clearance as the h3 above; only needed when
           // this headline is the first line in the card (single-service).
-          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
+          paddingRight: servicesLength > 1 || !showTierBadge || compactTierBadge ? 0 : 170,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
@@ -3519,8 +3544,28 @@ export function ServiceSection({
 // and every path back to them clears the reservation first.
 const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
 
+// Remount the estimate view whenever the bearer :token changes, so NO state
+// survives an A→B navigation: reservation, the live Stripe deposit / card-hold
+// / recurring-card / inline-card intents (and their setup-intent id refs), the
+// CTA phase, the success/accept result, the selected slot, and every child
+// component's own state. React reuses this instance when only the :token param
+// changes, so without the remount those atoms carry A's held reservation and
+// payment intents into B. It also neutralizes a slow /:token/data fetch: a
+// response for A that resolves after navigating to B lands on the unmounted
+// old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
 export default function EstimateViewPage() {
   const { token } = useParams();
+  return <EstimateViewPageInner key={token || 'no-token'} />;
+}
+
+function EstimateViewPageInner() {
+  const { token } = useParams();
+  // Root subscription to the module-global glass-copy flag: a change
+  // (setGlassDefault from a /data load) re-renders this tree, so every
+  // descendant's render-time glassCopyActive() read stays consistent — no
+  // memo boundaries exist below. Without this, a flag flip never scheduled a
+  // re-render and siblings painted torn glass/plain copy.
+  useGlassCopyActive();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -3569,6 +3614,8 @@ export default function EstimateViewPage() {
   // Every phase transition goes through setCtaPhase below, keeping the ref
   // in lockstep on all submit/exit paths.
   const ctaPhaseRef = useRef('configure');
+  // Serializes add-on toggle PUT+reload sequences (see onToggleAddOn).
+  const addOnMutationChainRef = useRef(Promise.resolve());
   const setCtaPhase = useCallback((phase) => {
     ctaPhaseRef.current = phase;
     setCtaPhaseState(phase);
@@ -3767,7 +3814,14 @@ export default function EstimateViewPage() {
     setAddServiceRequestState({ status: 'idle', message: '' });
   }, [token, addServiceOffer?.serviceKey]);
 
+  // Component-lifetime abort controller, owned by the fetch-on-mount effect
+  // below. EVERY loadEstimate call reads it — mount fetch, preference refresh,
+  // accept/reserve recovery, retry, extension refresh — so navigating away
+  // aborts whichever load is in flight, not just the mount-time one.
+  const lifetimeAbortRef = useRef(null);
+
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+    const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
     // skeleton — a failed refresh used to leave the skeleton up forever
@@ -3786,7 +3840,7 @@ export default function EstimateViewPage() {
       const staffToken = localStorage.getItem('waves_admin_token');
       if (staffToken) fetchOpts = { headers: { Authorization: `Bearer ${staffToken}` } };
     }
-    const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
+    const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, { ...fetchOpts, signal });
     if (r.status === 404) {
       const notFoundBody = await r.json().catch(() => ({}));
       setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
@@ -3806,6 +3860,12 @@ export default function EstimateViewPage() {
     setNotFound(false);
     setExtensionEligible(false);
     const body = await r.json();
+    // Aborted mid-flight (the caller navigated to a different :token and this
+    // instance is unmounting): stop before ANY side effect. React drops
+    // setState on the unmounted tree, but setGlassDefault mutates MODULE-GLOBAL
+    // state that would otherwise survive the remount and make the new token's
+    // page render this (stale) token's glass-copy mode.
+    if (signal?.aborted) return;
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
     // page. The marketing copy stays category-scoped server-side; the old
@@ -3849,16 +3909,23 @@ export default function EstimateViewPage() {
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
 
-  // Fetch on mount
+  // Fetch on mount. This effect owns the component-lifetime AbortController
+  // (lifetimeAbortRef): unmounting (= a token change, via the key={token}
+  // remount) aborts whichever /data request is in flight — otherwise a late
+  // response for the previous token would still run loadEstimate's global
+  // side effects (setGlassDefault) after unmount. An AbortError is swallowed
+  // (not a load error) since the abort is deliberate.
   useEffect(() => {
+    const controller = new AbortController();
+    lifetimeAbortRef.current = controller;
     let cancelled = false;
-    loadEstimate().catch(() => {
-      if (!cancelled) {
+    loadEstimate().catch((err) => {
+      if (!cancelled && err?.name !== 'AbortError') {
         setLoadError(true);
         setLoading(false);
       }
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [loadEstimate]);
 
   // Rebuild add-on defaults when the customer changes frequency — but
@@ -3913,26 +3980,41 @@ export default function EstimateViewPage() {
       if (nextForSection.has(key)) nextForSection.delete(key); else nextForSection.add(key);
       return { ...prev, [sectionKey]: nextForSection };
     });
-    try {
-      const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: nextChecked }),
-      });
-      if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
-      await loadEstimate({ preserveSelection: true });
-      // The toggles sit below the schedule card — jump back up so the
-      // customer sees the price adjust (owner directive).
-      scrollToPriceSection();
-    } catch (err) {
-      setError(err.message);
-      setSelectedAddOns((prev) => {
-        const current = prev[sectionKey] || new Set();
-        const nextForSection = new Set(current);
-        if (nextChecked) nextForSection.delete(key); else nextForSection.add(key);
-        return { ...prev, [sectionKey]: nextForSection };
-      });
-    }
+    // The optimistic flip above stays immediate; the PUT + reload SEQUENCE is
+    // serialized through the chain ref so two rapid toggles order
+    // deterministically — un-sequenced, an earlier toggle's reload could win
+    // and the displayed price/discount would reflect an add-on set the
+    // switches no longer show.
+    const run = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: nextChecked }),
+        });
+        if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
+        await loadEstimate({ preserveSelection: true });
+        // The toggles sit below the schedule card — jump back up so the
+        // customer sees the price adjust (owner directive).
+        scrollToPriceSection();
+      } catch (err) {
+        setError(err.message);
+        setSelectedAddOns((prev) => {
+          const current = prev[sectionKey] || new Set();
+          const nextForSection = new Set(current);
+          if (nextChecked) nextForSection.delete(key); else nextForSection.add(key);
+          return { ...prev, [sectionKey]: nextForSection };
+        });
+        // Resync the displayed price to server truth: the PUT may have
+        // landed despite the error surfacing here (e.g. a network blip after
+        // the server applied), and the old revert-only path left the price
+        // showing a set the server no longer prices.
+        await loadEstimate({ preserveSelection: true }).catch(() => {});
+      }
+    };
+    const chained = addOnMutationChainRef.current.then(run, run);
+    addOnMutationChainRef.current = chained;
+    await chained;
   }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {

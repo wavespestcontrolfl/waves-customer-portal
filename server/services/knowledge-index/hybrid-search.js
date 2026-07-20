@@ -42,14 +42,16 @@ const CHUNK_FETCH_LIMIT = 100;
 // text-embedding-3-small — on-topic pairs typically score well above it.
 const MIN_VECTOR_SIMILARITY = 0.30;
 const MAX_PER_SOURCE = 6;
-// Resolution artifacts halve in fused score every ~8 months. Only the
-// 'resolution' source decays (see module doc).
+// Observational sources halve in fused score every ~8 months. Only
+// 'resolution' and 'call_research' decay (see module doc) — curated
+// corpora don't expire.
 const RESOLUTION_HALF_LIFE_DAYS = 240;
+const DECAYED_SOURCES = new Set(['resolution', 'call_research']);
 
 const docKey = (source, sourceId) => `${source}:${sourceId}`;
 
 function applyRecencyDecay(doc, now = Date.now()) {
-  if (doc.source !== 'resolution') return doc.score;
+  if (!DECAYED_SOURCES.has(doc.source)) return doc.score;
   const occurredAt = doc.metadata && doc.metadata.occurredAt ? Date.parse(doc.metadata.occurredAt) : NaN;
   if (!Number.isFinite(occurredAt)) return doc.score;
   const ageDays = Math.max(0, (now - occurredAt) / 86400000);

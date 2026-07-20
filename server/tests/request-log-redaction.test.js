@@ -45,4 +45,47 @@ describe('request URL log redaction', () => {
       '/api/path?%E0%A4%A=value&token=[REDACTED]',
     );
   });
+
+  test('redacts bearer tokens riding the PATH (hex tokens, JWTs, booking codes)', () => {
+    const hex64 = 'a'.repeat(64);
+    const hex32 = '0123456789abcdef0123456789abcdef';
+    expect(redactRequestUrl(`/api/pay/${hex64}`)).toBe('/api/pay/[REDACTED]');
+    expect(redactRequestUrl(`/api/reports/${hex32}/events`)).toBe('/api/reports/[REDACTED]/events');
+    expect(redactRequestUrl(`/api/receipt/${hex64}/pdf?download=1`)).toBe('/api/receipt/[REDACTED]/pdf?download=1');
+    expect(redactRequestUrl('/api/booking/status/WPC-ABCDEFGH23')).toBe('/api/booking/status/[REDACTED]');
+    expect(redactRequestUrl('/estimate/eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0.sig')).toBe('/estimate/[REDACTED]');
+  });
+
+  test('redacts base64url bearer tokens (contract + service-outline, 43-char)', () => {
+    // crypto.randomBytes(32).toString('base64url') → 43 chars [A-Za-z0-9_-]
+    const b64url = 'Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MFFXRVJUWVVJT1A_-x';
+    expect(redactRequestUrl(`/api/contracts/${b64url}`)).toBe('/api/contracts/[REDACTED]');
+    expect(redactRequestUrl(`/api/service-outlines/${b64url}/cta-click`)).toBe('/api/service-outlines/[REDACTED]/cta-click');
+  });
+
+  test('redacts legacy estimate slug tokens (nameSlug-8hex) under estimate parents', () => {
+    // Pre-estimate-versions admin share links — estimate-public and
+    // estimate-slots-public TOKEN_REs still accept them, so they are live
+    // bearer credentials the hex/base64url length rules never match.
+    expect(redactRequestUrl('/estimate/jane-doe-9f8e7d6c')).toBe('/estimate/[REDACTED]');
+    expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/data')).toBe('/api/estimates/[REDACTED]/data');
+    expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/pdf?download=1')).toBe('/api/estimates/[REDACTED]/pdf?download=1');
+    // Scoped to estimate parents: the same shape elsewhere is a slug, not
+    // a token, and admin fixed children / row ids stay readable.
+    expect(redactRequestUrl('/learn/pest-guide-deadbeef')).toBe('/learn/pest-guide-deadbeef');
+    const uuid = '123e4567-e89b-42d3-a456-426614174000';
+    expect(redactRequestUrl(`/api/admin/estimates/${uuid}`)).toBe(`/api/admin/estimates/${uuid}`);
+    expect(redactRequestUrl('/api/admin/estimates/slots')).toBe('/api/admin/estimates/slots');
+  });
+
+  test('keeps non-credential path segments (row-id UUIDs, invoice numbers, short ids)', () => {
+    const uuid = '123e4567-e89b-42d3-a456-426614174000';
+    expect(redactRequestUrl(`/api/admin/customers/${uuid}`)).toBe(`/api/admin/customers/${uuid}`);
+    expect(redactRequestUrl('/api/admin/invoices/WPC-2026-0001')).toBe('/api/admin/invoices/WPC-2026-0001');
+    expect(redactRequestUrl('/api/admin/call-recordings/audio/RE123')).toBe('/api/admin/call-recordings/audio/RE123');
+    // …but a UUID directly after a newsletter bearer prefix IS the credential
+    // (feedback reaction links share the quiz tokens' randomUUID class).
+    expect(redactRequestUrl(`/api/public/newsletter/unsubscribe/${uuid}`)).toBe('/api/public/newsletter/unsubscribe/[REDACTED]');
+    expect(redactRequestUrl(`/api/public/newsletter/feedback/${uuid}/loved`)).toBe('/api/public/newsletter/feedback/[REDACTED]/loved');
+  });
 });

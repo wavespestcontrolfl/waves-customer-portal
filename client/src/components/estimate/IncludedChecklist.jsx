@@ -12,7 +12,7 @@ export default function IncludedChecklist({ included }) {
 
   return (
     <div style={estimateCard()}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+      <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
         What's included
       </div>
@@ -30,12 +30,12 @@ export default function IncludedChecklist({ included }) {
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 width: 22, height: 22, flexShrink: 0, marginTop: 1,
                 borderRadius: '50%', background: W.green, color: W.white,
-                fontSize: 13, fontWeight: 700,
+                fontSize: 14, fontWeight: 700,
               }}>✓</span>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 15, fontWeight: 500, color: W.navy }}>{item.label}</div>
                 {item.detail ? (
-                  <div style={{ fontSize: 13, color: W.textCaption, marginTop: 2 }}>{item.detail}</div>
+                  <div style={{ fontSize: 14, color: W.textCaption, marginTop: 2 }}>{item.detail}</div>
                 ) : null}
               </div>
             </li>

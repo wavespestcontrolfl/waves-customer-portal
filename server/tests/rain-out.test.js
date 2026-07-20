@@ -8,18 +8,30 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
+  // A real provider send always carries a Twilio sid — sent:true with a
+  // sentinel/absent providerMessageId is an upstream suppression, which
+  // sendMovedSms must report as NOT sent.
+  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SMtest' }),
 }));
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
+  getHourlyRainOutlook: jest.fn().mockResolvedValue(null),
   forecastLinkForZip: jest.fn((zip) => (zip ? `https://forecast.weather.gov/zipcity.php?inputstring=${zip}` : null)),
+}));
+jest.mock('../services/reschedule-link', () => ({
+  buildRescheduleLink: jest.fn().mockResolvedValue({
+    url: 'https://waves.test/r/tok123',
+    line: 'Need a different time? Reschedule online: https://waves.test/r/tok123\n\n',
+  }),
 }));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook } = require('../services/weather-forecast');
+const { buildRescheduleLink } = require('../services/reschedule-link');
+const { etDateString } = require('../utils/datetime-et');
 const RainOut = require('../services/rain-out');
 
 const SERVICE = {
@@ -75,6 +87,158 @@ describe('rain-out service', () => {
     jest.useRealTimers();
   });
 
+  describe('weather lead composition', () => {
+    const lead = RainOut._test.composeWeatherLead;
+
+    test('same-day push speaks present tense with part of day', () => {
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: true, hour: 9, todayChance: 85 }))
+        .toBe('rain is moving through your area this morning');
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: true, hour: 14, todayChance: null }))
+        .toBe('rain is moving through your area this afternoon');
+    });
+
+    test('day move quotes the NWS chance when meaningful', () => {
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: false, hour: 9, todayChance: 85 }))
+        .toBe('storms are likely today (85% chance)');
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: false, hour: 9, todayChance: 45 }))
+        .toBe("rain is in today's forecast (45% chance)");
+    });
+
+    test('no forecast degrades to an honest generic, never a weather claim', () => {
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: false, hour: 9, todayChance: null }))
+        .toBe("the weather isn't cooperating today");
+      expect(lead({ reasonCode: 'weather_rain', isSameDay: false, hour: 9, todayChance: 10 }))
+        .toBe("the weather isn't cooperating today");
+    });
+
+    test('non-rain reasons state the operational constraint', () => {
+      expect(lead({ reasonCode: 'weather_wind', isSameDay: true, hour: 9 }))
+        .toBe('winds are too high to spray safely today');
+      expect(lead({ reasonCode: 'weather_lightning', isSameDay: false, hour: 9 }))
+        .toBe("there's lightning in the area");
+      expect(lead({ reasonCode: 'weather_heat', isSameDay: false, hour: 9 }))
+        .toBe("today's heat is too extreme to treat safely");
+    });
+  });
+
+  describe('better-day clause', () => {
+    const clause = RainOut._test.composeBetterDayClause;
+    const base = {
+      reasonCode: 'weather_rain', isSameDay: false, todayStr: '2026-06-11', chosenDate: '2026-06-13',
+    };
+
+    test('fires only when the forecast supports it, with tiered wording', () => {
+      expect(clause({ ...base, todayChance: 85, newChance: 20 }))
+        .toBe(' Saturday looks a lot better — just a 20% chance of rain.');
+      expect(clause({ ...base, todayChance: 85, newChance: 35 }))
+        .toBe(' Saturday looks better — a 35% chance of rain.');
+      // Unknown today still allows a low-chance claim about the new day.
+      expect(clause({ ...base, todayChance: null, newChance: 15 }))
+        .toBe(' Saturday looks a lot better — just a 15% chance of rain.');
+    });
+
+    test('tomorrow is called Tomorrow', () => {
+      expect(clause({ ...base, chosenDate: '2026-06-12', todayChance: 85, newChance: 10 }))
+        .toBe(' Tomorrow looks a lot better — just a 10% chance of rain.');
+    });
+
+    test('stays silent on weak or unsupported forecasts', () => {
+      expect(clause({ ...base, todayChance: 85, newChance: 45 })).toBe('');        // new day not good enough
+      expect(clause({ ...base, todayChance: 50, newChance: 35 })).toBe('');        // delta too small
+      expect(clause({ ...base, todayChance: 85, newChance: null })).toBe('');      // no data
+      expect(clause({ ...base, isSameDay: true, todayChance: 85, newChance: 10 })).toBe('');
+      expect(clause({ ...base, reasonCode: 'weather_heat', todayChance: 85, newChance: 10 })).toBe('');
+    });
+
+    test('hourly window chance upgrades the claim to morning/afternoon specificity', () => {
+      expect(clause({ ...base, todayChance: 85, windowChance: 10, windowStart: '08:00' }))
+        .toBe(' Saturday morning looks a lot better — just a 10% chance of rain around your new time.');
+      expect(clause({ ...base, todayChance: 85, windowChance: 35, windowStart: '13:00' }))
+        .toBe(' Saturday afternoon looks better — a 35% chance of rain around your new time.');
+      expect(clause({ ...base, chosenDate: '2026-06-12', todayChance: 85, windowChance: 15, windowStart: '15:00' }))
+        .toBe(' Tomorrow afternoon looks a lot better — just a 15% chance of rain around your new time.');
+    });
+
+    test('same-day push can promise later today, with a tighter cap', () => {
+      const sameDay = { ...base, isSameDay: true, chosenDate: '2026-06-11' };
+      expect(clause({ ...sameDay, todayChance: 85, windowChance: 15, windowStart: '15:00' }))
+        .toBe(' Later today looks a lot better — just a 15% chance of rain around your new time.');
+      // Same storm system: window claims over 30% stay silent on same-day moves.
+      expect(clause({ ...sameDay, todayChance: 85, windowChance: 35, windowStart: '15:00' })).toBe('');
+    });
+
+    test('window claims still respect the today-delta rule and fall back to day-level without hourly data', () => {
+      expect(clause({ ...base, todayChance: 45, windowChance: 30, windowStart: '08:00' })).toBe(''); // delta < 20
+      expect(clause({ ...base, todayChance: 85, windowChance: null, newChance: 20 }))
+        .toBe(' Saturday looks a lot better — just a 20% chance of rain.'); // day-level fallback
+    });
+  });
+
+  describe('windowRainChance', () => {
+    const windowChance = RainOut._test.windowRainChance;
+    const HOURS = [
+      { startTime: '2026-06-13T07:00:00-04:00', rainChance: 60 },
+      { startTime: '2026-06-13T08:00:00-04:00', rainChance: 10 },
+      { startTime: '2026-06-13T09:00:00-04:00', rainChance: 25 },
+      { startTime: '2026-06-13T10:00:00-04:00', rainChance: 70 },
+      { startTime: '2026-06-14T08:00:00-04:00', rainChance: 5 },
+    ];
+
+    test('takes the max over the 2-hour arrival window on the right date', () => {
+      expect(windowChance(HOURS, '2026-06-13', '08:00')).toBe(25); // hours 8+9
+      expect(windowChance(HOURS, '2026-06-13', '09:00')).toBe(70); // hours 9+10
+      expect(windowChance(HOURS, '2026-06-14', '08:00')).toBe(5);  // other date's periods ignored
+    });
+
+    test('a half-hour start samples every hour the window touches', () => {
+      // 08:30 arrival window runs 08:30-10:30 → hours 8, 9 AND 10; missing
+      // hour 10 (70%) would have understated the claim.
+      expect(windowChance(HOURS, '2026-06-13', '08:30')).toBe(70);
+    });
+
+    test('null on missing coverage or bad input', () => {
+      expect(windowChance(HOURS, '2026-06-13', '14:00')).toBeNull(); // no periods for that window
+      expect(windowChance(null, '2026-06-13', '08:00')).toBeNull();
+      expect(windowChance(HOURS, '2026-06-13', 'garbage')).toBeNull();
+    });
+  });
+
+  describe('efficacy clause (GATE_RAINOUT_EFFICACY_NOTE)', () => {
+    const clause = RainOut._test.composeEfficacyClause;
+    afterEach(() => { delete process.env.GATE_RAINOUT_EFFICACY_NOTE; });
+
+    test('dark by default', () => {
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Quarterly Pest Control' })).toBe('');
+    });
+
+    test('gated on: rain + spray service gets the why-note; exempt work and non-rain do not', () => {
+      process.env.GATE_RAINOUT_EFFICACY_NOTE = 'true';
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Quarterly Pest Control' }))
+        .toContain('rain-free hours to bond');
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Termite Bait Check' })).toBe('');
+      expect(clause({ reasonCode: 'weather_rain', serviceType: 'Interior Flea Treatment' })).toBe('');
+      expect(clause({ reasonCode: 'weather_wind', serviceType: 'Quarterly Pest Control' })).toBe('');
+    });
+  });
+
+  describe('rain_out_moved_v2 template migration', () => {
+    const { transformBody } = require('../models/migrations/20260719000010_rain_out_moved_v2_template')._test;
+    // Verbatim prod body of the LEGACY row (read-only prod query, 2026-07-18)
+    // — the v2 body is derived from it so admin copy edits carry over.
+    const PROD_BODY = 'Hello {first_name} — {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.';
+
+    test('derives the v2 body from the live legacy body, preserving surrounding copy', () => {
+      const next = transformBody(PROD_BODY);
+      expect(next).toBe('Hello {first_name} — {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.');
+      expect(transformBody(next)).toBe(next); // idempotent
+    });
+
+    test('a diverged legacy body passes through untouched', () => {
+      const custom = 'Totally rewritten by the admin.';
+      expect(transformBody(custom)).toBe(custom);
+    });
+  });
+
   describe('sameDayOptions', () => {
     test('mid-morning offers +2h and +4h on-the-hour 1-hour windows', () => {
       // 14:10Z = 10:10 ET → +2h = 12:10 → nearest hour 12:00; +4h = 14:10 → 14:00.
@@ -95,17 +259,24 @@ describe('rain-out service', () => {
 
   describe('commit — single job', () => {
     function wireSingle() {
-      const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
-      const logUpdate = chain();
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
-        reschedule_log: [logRow, logUpdate],
       });
-      return { logUpdate };
     }
 
-    test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, alt + forecast link', async () => {
-      const { logUpdate } = wireSingle();
+    test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, reschedule + forecast links', async () => {
+      wireSingle();
+      // Day move (2026-06-11 is not the real today): the lead should quote
+      // today's chance and the better-day clause should sell the booked
+      // window specifically (hourly beats the day-level 20%).
+      getDailyRainOutlook.mockResolvedValueOnce({
+        [etDateString()]: { rainChance: 85, shortForecast: 'Thunderstorms' },
+        '2026-06-11': { rainChance: 20, shortForecast: 'Mostly Sunny' },
+      });
+      getHourlyRainOutlook.mockResolvedValueOnce([
+        { startTime: '2026-06-11T13:00:00-04:00', rainChance: 10 },
+        { startTime: '2026-06-11T14:00:00-04:00', rainChance: 5 },
+      ]);
 
       const result = await RainOut.commit({
         serviceId: 'svc-1',
@@ -114,7 +285,6 @@ describe('rain-out service', () => {
         scope: 'job',
         // On-the-hour 1-hour internal slots (what the dispatcher picked).
         target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
-        alt: { date: '2026-06-12', window: { start: '08:00', end: '09:00' } },
         notifyCustomer: true,
       });
 
@@ -129,28 +299,126 @@ describe('rain-out service', () => {
 
       // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
       // start (13:00 → 1:00-3:00 PM), never the internal 1-hour end.
+      // Renders the forecast-grounded v2 template seeded by this PR's
+      // migration; the untouched legacy row is only a fallback.
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
       const vars = renderSmsTemplate.mock.calls[0][1];
-      expect(vars.weather_phrase).toBe('heavy rain');
+      expect(vars.weather_lead).toBe('storms are likely today (85% chance)');
+      expect(vars.better_day_clause).toBe(' Thursday afternoon looks a lot better — just a 10% chance of rain around your new time.');
+      expect(vars.efficacy_clause).toBe(''); // gate dark
+      expect(getDailyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
+      expect(getHourlyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
       expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
-      expect(vars.alt_clause).toContain('Reply 1 to confirm, or 2 to switch');
-      expect(vars.alt_clause).toContain('8:00 AM - 10:00 AM');
+      // Moved-first: nothing to confirm by reply — the message carries only
+      // the same tokenized self-serve link the 72h/24h reminders send.
+      expect(vars.alt_clause).toBe(' Need a different time? Reschedule online: https://waves.test/r/tok123');
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
 
-      // Reply options carry the tight 1-hour internal slot in start/end (a reply
-      // re-books or confirms exactly that — never widened), while `display` is
-      // the customer-facing 2-hour arrival window. A late reply inside the quoted
-      // window is kept valid by reschedule-sms's confirm-in-place path, not by
-      // widening the stored booking window.
-      const notes = JSON.parse(logUpdate.update.mock.calls[0][0].notes);
-      expect(notes.option1).toEqual({
-        date: '2026-06-11',
-        window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
+    test('an ABSENT v2 template row falls back to the legacy row with legacy variables', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls and the row is truly gone (rolled-back migration).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
       });
-      expect(notes.option2).toEqual({
-        date: '2026-06-12',
-        window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
       });
+
+      expect(result.results[0].smsSent).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(2);
+      expect(renderSmsTemplate.mock.calls[1][0]).toBe('rain_out_moved');
+      const legacyVars = renderSmsTemplate.mock.calls[1][1];
+      expect(legacyVars.weather_phrase).toBe('heavy rain');
+      expect(legacyVars.weather_lead).toBeUndefined();
+    });
+
+    test('a DISABLED v2 template row is the kill switch — no legacy reroute, no SMS', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls but the row EXISTS (admin disabled it).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ id: 'tpl-v2' }) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // The move still commits; the send is stopped, not rerouted.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('stamps the v2 key as the per-template kill-switch messageType, never the retired legacy key', async () => {
+      wireSingle();
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // twilio.js isTemplateActive keys on original_message_type. The legacy
+      // rain_out_moved row is retired (is_active=false), so stamping the
+      // legacy key suppresses every send as a sentinel "success" — the
+      // 2026-07-19 incident where the first real rain-out never texted.
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+        reason_code: 'weather_rain',
+      });
+    });
+
+    test('a suppression sentinel provider id reports smsSent:false, not a phantom send', async () => {
+      wireSingle();
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'template-disabled' });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // The move still commits; the sheet must show the customer was NOT told.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'template-disabled' });
+    });
+
+    test('no reschedule token falls back to a reply-to-adjust clause', async () => {
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.alt_clause).toBe(' Need a different time? Reply to this message.');
     });
 
     test('same-day route push shifts siblings by the anchor window delta', async () => {
@@ -174,7 +442,6 @@ describe('rain-out service', () => {
         reasonCode: 'weather_rain',
         scope: 'route',
         target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
-        alt: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
         notifyCustomer: true,
       });
 
@@ -333,7 +600,7 @@ describe('rain-out service', () => {
       return { routeChain };
     }
 
-    test('day move shifts all stops to the new date keeping each window; anchor gets the alt', async () => {
+    test('day move shifts all stops to the new date keeping each window; every texted stop gets the link', async () => {
       wireRoute();
 
       const result = await RainOut.commit({
@@ -342,7 +609,6 @@ describe('rain-out service', () => {
         reasonCode: 'weather_rain',
         scope: 'route',
         target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
-        alt: { date: '2026-06-13', window: { start: '09:00', end: '11:00' } },
         notifyCustomer: true,
       });
 
@@ -357,14 +623,41 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech', { allowLive: true });
 
-      // Anchor SMS carries reply-2 alt; sibling SMS does not; no-phone
-      // sibling skipped.
+      // Anchor and sibling both get the self-serve link — no reply ask;
+      // no-phone sibling skipped.
       expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
-      expect(renderSmsTemplate.mock.calls[0][1].alt_clause).toContain('Reply 1 to confirm');
-      expect(renderSmsTemplate.mock.calls[1][1].alt_clause).toContain('Reply to this message');
+      expect(renderSmsTemplate.mock.calls[0][1].alt_clause).toContain('Reschedule online:');
+      expect(renderSmsTemplate.mock.calls[0][1].alt_clause).not.toContain('Reply 1');
+      expect(renderSmsTemplate.mock.calls[1][1].alt_clause).toContain('Reschedule online:');
       const noPhone = result.results.find((r) => r.id === 'svc-3');
       expect(noPhone.smsSent).toBe(false);
       expect(noPhone.smsReason).toBe('no_phone');
+    });
+
+    test('a slow NWS pair degrades forecast decoration for the rest of the rain-out', async () => {
+      wireRoute();
+      // NWS hangs: the anchor's decoration attempt burns the 1.5s budget,
+      // then every remaining stop skips the lookup entirely — texts still
+      // go out, with the generic lead.
+      getDailyRainOutlook.mockImplementation(() => new Promise(() => {}));
+      getHourlyRainOutlook.mockImplementation(() => new Promise(() => {}));
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: true,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe("the weather isn't cooperating today");
+      expect(getDailyRainOutlook).toHaveBeenCalledTimes(1); // sibling skipped after degradation
+
+      getDailyRainOutlook.mockResolvedValue(null);
+      getHourlyRainOutlook.mockResolvedValue(null);
     });
 
     test('route scope is bounded to the anchor route position — earlier stops are never swept', async () => {

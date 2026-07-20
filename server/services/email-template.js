@@ -38,8 +38,12 @@ const { formatDisplayDate } = require('../utils/date-only');
 const GLASS_THEME = {
   ink: '#04395E', // canonical glass navy (--brand)
   link: '#0A7EC2', // glass accent blue (--accent)
-  body: '#555B69', // rgba(12,21,40,.7) over white
-  muted: '#81858F', // rgba(12,21,40,.52) over white
+  // Body copy sits in the ink's hue family, deepened for punch (owner call
+  // 2026-07-17: the old grey-slate #555B69 read dull across every email).
+  body: '#2A3F5F',
+  // Dark enough to keep secondary/footer copy AA-readable on the pale scene
+  // (darkened alongside body, same owner call; was #626B7A).
+  muted: '#4F5B70',
   // The scene — the glass-engine orb language, tuned to how the live
   // estimate/report pages actually READ (their orbs render through
   // heavy blur + grain, so the result is far softer than the raw
@@ -88,8 +92,8 @@ const GLASS_THEME = {
   blocks: {
     font: "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Inter,Arial,sans-serif",
     heading: '#04395E',
-    text: '#555B69',
-    mutedText: '#81858F',
+    text: '#2A3F5F',
+    mutedText: '#4F5B70',
     rule: '#D8E4EF',
     calloutBorder: '#F4B014',
     calloutBg: '#FFF8E4',
@@ -103,10 +107,19 @@ const GLASS_THEME = {
     navy: '#04395E',
     blue: '#0A7EC2',
     gold: '#F4B014',
-    muted: '#81858F',
+    muted: '#4F5B70',
     cardBg: '#F4F9FD',
     homeownerBg: '#E9F3FB',
     rule: '#D8E4EF',
+    // Deterministic section bands for generated newsletters. Each pairing
+    // keeps at least WCAG AA contrast for normal text while extending the
+    // Waves coastal palette beyond a wall of identical navy headings.
+    sectionHeaders: [
+      { name: 'waves-blue', text: '#04395E', background: '#E3F5FD', accent: '#009CDE' },
+      { name: 'deep-water', text: '#1B2C5B', background: '#F0F7FC', accent: '#1B2C5B' },
+      { name: 'sunshine', text: '#664500', background: '#FFF9D6', accent: '#F4B014' },
+      { name: 'waves-red', text: '#C8102E', background: '#FDECEF', accent: '#C8102E' },
+    ],
   },
 };
 
@@ -133,6 +146,17 @@ function blockPalette() {
  */
 function newsletterPalette() {
   return activeTheme().newsletter;
+}
+
+function newsletterSectionTheme(index = 0) {
+  const palette = newsletterPalette();
+  const themes = palette.sectionHeaders || [];
+  if (!themes.length) {
+    return { name: 'waves-blue', text: palette.navy, background: palette.cardBg, accent: palette.blue };
+  }
+  const numericIndex = Number(index);
+  const safeIndex = Number.isFinite(numericIndex) ? Math.abs(Math.trunc(numericIndex)) : 0;
+  return themes[safeIndex % themes.length];
 }
 
 // Style fragments shared by all three wrappers, kept as helpers so the
@@ -185,6 +209,25 @@ function ctaButton(href, label) {
 
 const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
 
+// Edition identity by newsletter type (owner directive 2026-07-17): the
+// flagship weekly masthead is "Fresh This Week — A local weekend guide from
+// the Waves crew", rendered under the 2026 Waves logo. The beehiiv-hosted
+// masthead IMAGE stays retired — header art must never depend on the old
+// beehiiv account's CDN. Every other lane (Pest Insider, automation drips)
+// keeps the generic publication identity.
+const FLAGSHIP_NEWSLETTER_TYPE = 'local-weekly-fresh-events';
+const NEWSLETTER_IDENTITIES = {
+  [FLAGSHIP_NEWSLETTER_TYPE]: {
+    title: 'Fresh This Week',
+    tagline: 'A local weekend guide from the Waves crew',
+  },
+  default: { title: 'Waves Newsletter', tagline: '' },
+};
+
+function newsletterIdentity(newsletterType) {
+  return NEWSLETTER_IDENTITIES[newsletterType] || NEWSLETTER_IDENTITIES.default;
+}
+
 // Waves app promo row rendered in every email footer (owner ask
 // 2026-07-05). Badges are the portal-hosted store art the app_intro
 // template already uses; store URLs match account-membership-email.js.
@@ -198,7 +241,7 @@ function appFooterHtml(T) {
   // its baked-in 41px margin) runs visually denser — 36px next to Apple's
   // 40px is the optical match. The 16px bottom margin keeps the badges
   // clear of the business fine-print lines that follow.
-  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:13px;font-weight:700;color:${T.ink};text-align:center;">
+  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
           <div style="text-align:center;margin:0 0 16px 0;">
@@ -271,17 +314,36 @@ const SOCIALS = [
 ];
 
 function socialRowHtml() {
-  return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 7px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="18" height="18" style="width:18px;height:18px;border:0;vertical-align:middle;opacity:0.8;" /></a>`).join('')}</div>`;
+  return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 3px;padding:4px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="20" height="20" style="width:20px;height:20px;border:0;vertical-align:middle;opacity:0.9;" /></a>`).join('')}</div>`;
 }
 
 function glassFinePrint(T, extra = '') {
   // Balanced, centered stack: business+address / site·email·phone /
   // license — then socials and the logo (owner footer spec 07-06).
-  return `${extra}<div style="font-family:${T.font};font-size:11px;letter-spacing:0.02em;color:${T.muted};line-height:1.8;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
+  // Every fine-print item stacks on its own line (owner calls 2026-07-17:
+  // on mobile the address sits BELOW the LLC line and website/email/phone
+  // read vertically; email clients can't be trusted with media queries,
+  // so the stack applies everywhere — centered, it reads intentional on
+  // desktop too).
+  return `${extra}<div style="font-family:${T.font};font-size:14px;letter-spacing:0.01em;color:${T.muted};line-height:1.65;text-align:center;">
+            ${WAVES_BUSINESS_NAME}<br/>${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a><br/><a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a><br/><a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
           </div>
           ${socialRowHtml()}
           <div style="margin:12px 0 0 0;text-align:center;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BUSINESS_NAME}" width="44" height="44" style="width:44px;height:44px;border:0;" /></div>`;
+}
+
+// The complete universal Waves footer. Wrappers call this helper instead of
+// independently composing app links, company details, social links, and logo.
+function universalWavesFooterHtml(T) {
+  return glassFinePrint(T, appFooterHtml(T));
+}
+
+// Web-page variant for server-rendered customer pages (newsletter confirm /
+// unsubscribe / quiz / feedback landing pages). Always the glass theme —
+// pages follow the glass rule (docs/design/DECISIONS.md 2026-07-17)
+// regardless of the email chrome gate.
+function glassUniversalFooterHtml() {
+  return universalWavesFooterHtml(GLASS_THEME);
 }
 
 // Trailing filler after the preheader text: without it, clients that build
@@ -351,7 +413,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
           </div>
         </td></tr>` : ''}
         <tr><td align="center" style="padding:20px 4px 0 4px;">
-          ${glassFinePrint(T, appFooterHtml(T))}
+          ${universalWavesFooterHtml(T)}
         </td></tr>
       </table>`;
 
@@ -375,31 +437,34 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
           </div>
         </td></tr>` : ''}
         <tr><td align="center" style="padding:18px 4px 0 4px;">
-          ${glassFinePrint(T, appFooterHtml(T))}
+          ${universalWavesFooterHtml(T)}
         </td></tr>
       </table>`;
   return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
 }
 
-function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
+function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
   const T = GLASS_THEME;
-  const isLocalGuide = newsletterType === 'local-weekly-fresh-events';
-  const unsubLine = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a> · `
+  const identity = newsletterIdentity(newsletterType);
+  const unsubscribeLine = unsubscribeUrl
+    ? `<div style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a></div>`
     : '';
   const preferredSourcesLine = preferredSourcesCta
-    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:12px;line-height:1.6;color:${T.body};text-align:center;">
+    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.body};text-align:center;">
             Like what we send? <a href="https://www.google.com/preferences/source?q=${WAVES_WEBSITE_HOST}" style="color:${T.link};text-decoration:underline;font-weight:600;">Make Waves a preferred source on Google</a> — one tap, and you'll see more of us in your searches.
           </div>`
     : '';
 
-  // Newsletter identity sits directly on the scene like the page heroes.
-  const heroBlock = isLocalGuide
-    ? `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;border:0;" /></a>
-          <div style="margin-top:12px;font-family:${T.headingFont};font-size:26px;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">Fresh This Week</div>
-          <div style="margin-top:4px;font-family:${T.font};font-size:11px;letter-spacing:0.11em;text-transform:uppercase;color:${T.muted};font-weight:700;">A local weekend guide from the Waves crew</div>`
-    : `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;border:0;" /></a>
-          <div style="margin-top:10px;font-family:${T.font};font-size:11px;letter-spacing:0.11em;text-transform:uppercase;color:${T.ink};font-weight:700;">The Waves Newsletter</div>`;
+  // Per-lane masthead: 2026 Waves logo + the lane's title/tagline. The same
+  // logo repeats small in the universal footer — that mirrors the reference
+  // editions, where header art and footer brand were both fixed furniture.
+  const heroBlock = `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="${identity.title}" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:100%;border:0;" /></a>
+          <h1 style="margin:10px 0 0 0;font-family:${T.headingFont};font-size:28px;line-height:1.15;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
+          <p style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
+
+  const footerExtras = `${preferredSourcesLine}${unsubscribeLine}${footerNote
+    ? `<div style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
+    : ''}`;
 
   const contentHtml = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;">
         <tr><td align="center" style="padding:6px 4px 0 4px;">
@@ -408,20 +473,15 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslett
         <tr><td style="padding:24px 0 0 0;">
           ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px')}
         </td></tr>
-        <tr><td align="center" style="padding:24px 4px 0 4px;">
-          ${preferredSourcesLine}<div style="font-family:${T.font};font-size:12px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
-          </div>
-          ${footerNote ? `<div style="margin-top:8px;font-family:${T.font};font-size:11px;color:${T.muted};text-align:center;">${footerNote}</div>` : ''}
-        </td></tr>
+        ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">
-          ${glassFinePrint(T, appFooterHtml(T))}
+          ${universalWavesFooterHtml(T)}
         </td></tr>
       </table>`;
 
   return glassPage(T, {
     preheader,
-    title: isLocalGuide ? 'Fresh This Week — Waves' : 'Waves Pest Control',
+    title: identity.title,
     contentHtml,
     msoWidth: 640,
   });
@@ -482,18 +542,19 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // via the List-Unsubscribe header).
  *   preheader?: string,            // hidden inbox preview text
  *   footerNote?: string,           // optional small print under unsub
- *   newsletterType?: string,       // when 'local-weekly-fresh-events',
- *                                  // renders the local guide header
- *                                  // instead of "The Waves Newsletter"
  *   preferredSourcesCta?: boolean, // newsletter broadcasts only — renders
  *                                  // the Google Preferred Sources opt-in
  *                                  // line above the unsub footer. Off by
  *                                  // default so automation drips and
  *                                  // library templates stay unchanged.
+ *   newsletterType?: string,       // selects the edition masthead — the
+ *                                  // flagship weekly renders "Fresh This
+ *                                  // Week"; omitted/unknown types get the
+ *                                  // generic publication identity.
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
-  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta });
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
+  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType });
 }
 
 /**
@@ -560,7 +621,9 @@ module.exports = {
   blockPalette,
   ctaChip,
   stripeFooterLine,
+  glassUniversalFooterHtml,
   newsletterPalette,
+  newsletterSectionTheme,
   currency,
   formatDate,
   plainText,

@@ -60,6 +60,7 @@ import {
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import useModalFocus from '../../hooks/useModalFocus';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -159,6 +160,11 @@ export default function AutopayCard({ onStateChange }) {
   // setup-intent response decides whether the bank tab exists at all, and
   // bankPending renders the micro-deposit notice after a deferred save.
   const [addMethodType, setAddMethodType] = useState('card');
+  // Server said the selected method has no enrollment-qualifying consent
+  // row (409 consent_required) — hold the patch, show the authorization
+  // copy, and re-submit with consent_accepted once the box is ticked.
+  const [consentPrompt, setConsentPrompt] = useState(null); // { patch, methodType } | null
+  const [consentChecked, setConsentChecked] = useState(false);
   const [achOffered, setAchOffered] = useState(false);
   const [bankPending, setBankPending] = useState(false);
   const [bankVerifyUrl, setBankVerifyUrl] = useState('');
@@ -168,19 +174,27 @@ export default function AutopayCard({ onStateChange }) {
   const mountRef = useRef(null);
   const processedReturnRef = useRef(false);
 
-  const load = () =>
-    api.getAutopay()
+  // Monotonic sequence: the setup-return effect's load() races the mount
+  // load() — a slow pre-save response resolving last would repaint the card
+  // with stale Auto Pay state. Only the latest-issued load may write.
+  const loadSeqRef = useRef(0);
+  const load = () => {
+    const seq = ++loadSeqRef.current;
+    return api.getAutopay()
       .then((d) => {
+        if (seq !== loadSeqRef.current) return;
         setData(d);
         setSelectedCard(d.autopay_payment_method_id || '');
         setSelectedDay(d.billing_day || 1);
         onStateChange?.(d);
       })
       .catch((e) => {
+        if (seq !== loadSeqRef.current) return;
         setErr(e.message || 'Failed to load autopay');
         onStateChange?.({ state: 'unknown', loadError: true });
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (seq === loadSeqRef.current) setLoading(false); });
+  };
 
   useEffect(() => { load(); }, []);
 
@@ -305,7 +319,15 @@ export default function AutopayCard({ onStateChange }) {
       await load();
       setModal(null);
     } catch (e) {
-      setErr(e.message || 'Update failed');
+      if (e.status === 409 && e.code === 'consent_required') {
+        // Not an error state — the method just needs its recurring-charge
+        // authorization on record. Fresh unchecked box every time: the tick
+        // IS the consent event being recorded.
+        setConsentChecked(false);
+        setConsentPrompt({ patch, methodType: e.methodType || 'card' });
+      } else {
+        setErr(e.message || 'Update failed');
+      }
     }
     setSaving(false);
   };
@@ -667,6 +689,37 @@ export default function AutopayCard({ onStateChange }) {
           )}
         </Modal>
       )}
+
+      {consentPrompt && (
+        <Modal title="Authorize Auto Pay" onClose={() => setConsentPrompt(null)}>
+          <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.5 }}>
+            This payment method was saved without an Auto Pay authorization.
+            Review and accept the authorization below to use it for automatic billing.
+          </div>
+          <SaveCardConsent
+            checked={consentChecked}
+            onChange={setConsentChecked}
+            methodType={consentPrompt.methodType}
+            headline="Use this payment method for Auto Pay"
+          />
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setConsentPrompt(null)}>Cancel</button>
+            <button
+              type="button"
+              {...btnGlass('primary')}
+              style={btn('primary')}
+              disabled={saving || !consentChecked}
+              onClick={() => {
+                const patch = { ...consentPrompt.patch, consent_accepted: true };
+                setConsentPrompt(null);
+                runUpdate(patch);
+              }}
+            >
+              {saving ? 'Saving...' : 'Agree & Turn On'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -675,6 +728,10 @@ function Modal({ title, children, onClose }) {
   // Mounted only while open, so lock unconditionally — the page behind the
   // scrim shouldn't scroll on iOS while the dialog is up.
   useLockBodyScroll(true);
+  // Dialog contract for keyboard/AT users: focus is trapped, Escape closes,
+  // and the overlay announces as a modal — click-the-scrim alone left
+  // keyboard users stranded behind an unlabeled layer.
+  const dialogRef = useModalFocus(true, onClose);
   // Portaled to <body>: under glass the host card carries backdrop-filter
   // (and a hover transform), which turns it into the containing block for
   // position:fixed children — the scrim would cover only the card.
@@ -683,7 +740,7 @@ function Modal({ title, children, onClose }) {
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
-      <div data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,

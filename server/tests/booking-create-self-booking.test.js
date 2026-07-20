@@ -55,3 +55,42 @@ describe('createSelfBooking — validation contract (no DB)', () => {
     expect(agreeing).toEqual({ ok: false, status: 400, error: 'customer_id, estimate_id, or new_customer required' });
   });
 });
+
+// Estimator audit P2: the persisted/displayed service label must be
+// ALLOWLISTED, never an echo of the client string — the raw value reaches the
+// customer confirmation page (/status/:code), the owner-alert SMS, and
+// admin/tech dispatch.
+describe('canonicalBookingServiceLabel — the label allowlist', () => {
+  const { canonicalBookingServiceLabel, BOOKING_FUNNEL_SERVICE_LABELS } = require('../routes/booking')._internals;
+
+  test('catalog keys and display-label aliases resolve to the canonical label', () => {
+    expect(canonicalBookingServiceLabel('pest_control')).toBe('Pest Control');
+    expect(canonicalBookingServiceLabel('Pest Control')).toBe('Pest Control');
+    expect(canonicalBookingServiceLabel('  mosquito control ')).toBe('Mosquito Control');
+    expect(canonicalBookingServiceLabel('TERMITE INSPECTION')).toBe('Termite Inspection');
+    expect(canonicalBookingServiceLabel('bora-care wood treatment')).toBe('Bora-Care Wood Treatment');
+  });
+
+  test('a crafted label never echoes through', () => {
+    expect(canonicalBookingServiceLabel('FREE Termite Treatment call 941-555-0000')).toBe('');
+    expect(canonicalBookingServiceLabel('<script>alert(1)</script>')).toBe('');
+    expect(canonicalBookingServiceLabel('Pest Control!!!')).toBe('');
+    expect(canonicalBookingServiceLabel('')).toBe('');
+    expect(canonicalBookingServiceLabel(null)).toBe('');
+  });
+
+  test('prototype-chain keys never resolve (own-property lookups only)', () => {
+    expect(canonicalBookingServiceLabel('__proto__')).toBe('');
+    expect(canonicalBookingServiceLabel('constructor')).toBe('');
+    expect(canonicalBookingServiceLabel('toString')).toBe('');
+    expect(canonicalBookingServiceLabel('hasOwnProperty')).toBe('');
+  });
+
+  test('every funnel key has a canonical label (map stays in sync with the catalog)', () => {
+    const { BOOKING_FUNNEL_SERVICE_DURATIONS } = require('../routes/booking')._internals;
+    for (const key of Object.keys(BOOKING_FUNNEL_SERVICE_DURATIONS)) {
+      expect(typeof BOOKING_FUNNEL_SERVICE_LABELS[key]).toBe('string');
+      expect(BOOKING_FUNNEL_SERVICE_LABELS[key].length).toBeGreaterThan(0);
+    }
+  });
+});

@@ -333,12 +333,14 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
-  posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer — rate-limited,
-  read-only for posts/rss, double-opt-in for subscribe; the quiz token is a
+  posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
+  feedback/:token/:reaction — rate-limited, read-only for posts/rss,
+  double-opt-in for subscribe; the quiz and feedback tokens are the same
   per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
-  renders a confirm page only and the subscriber-tag write happens on a
-  deliberate POST form submission (scanner-safe, mirrors confirm), answer key
-  validated against the server-side quiz config, 30 req/min per IP, always
+  renders a confirm page only and the delivery-row write happens on a
+  deliberate POST form submission (scanner-safe, mirrors confirm), answer/
+  reaction keys validated against the server-side config allowlists
+  (newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
   returns 200 so it can't probe which tokens/answers are real),
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
@@ -796,6 +798,20 @@ finding and warns on P1. Reviewers must return JSON matching
   `setup_intent.succeeded` webhook backstop are mutually exclusive;
   failures revert and stay retryable). Treat the token, the verification
   gates, and the claim mechanics as security-critical).
+  `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
+  server exposing the knowledge index (hybrid search, catalog service +
+  static protocol lookups, corpus stats) to MCP clients such as Claude Code
+  sessions and agents. Fail-closed in three ordered layers: 403 unless
+  `GATE_MCP_READ_TOOLS=true`, 503 unless `MCP_SERVICE_TOKEN` is configured,
+  401 unless the `Authorization: Bearer` / `X-MCP-Token` credential matches
+  via constant-time compare — the endpoint is unusable until deliberately
+  armed in an environment. Tools are READ-ONLY and free of generative LLM
+  calls by construction (the only model call is the query embedding, which
+  degrades to FTS-only when unavailable); no customer-PII tools and no write
+  tools may be added here — the write surface stays IB-only behind
+  write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
+  server, no SSE). Treat the auth ordering and the read-only tool surface as
+  security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

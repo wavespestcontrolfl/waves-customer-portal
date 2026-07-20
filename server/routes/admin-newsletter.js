@@ -16,14 +16,35 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
-const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const crypto = require('crypto');
+const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType, requiresClaimValidation, getNewsletterType } = require('../config/newsletter-types');
-const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
+const { isFlagshipType, requiresClaimValidation, FLAGSHIP_TYPE_KEY, getNewsletterType } = require('../config/newsletter-types');
+const {
+  isEligibleForFreshDigest,
+  scoreFreshEvent,
+  dedupeDigestEvents,
+  excludeRoutineRecurringFromQuery,
+  getCurrentNewsletterTuesday,
+  getActiveNewsletterTuesday,
+  defaultTargetSendAt,
+  isFlagshipTargetForWeek,
+  getNewsletterDraftWindowStart,
+  isFlagshipScheduledTime,
+  isFlagshipDeliveryWindow,
+  weekLockKey,
+} = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
-const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
+const {
+  validateFlagshipEventSelection,
+  filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
+  isFlagshipSend,
+} = require('../services/newsletter-event-selection');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -53,6 +74,17 @@ const aiDraftLimiter = rateLimit({
 const FROM_EMAIL_ALLOWLIST = (process.env.NEWSLETTER_FROM_ALLOWLIST
   || 'newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
 ).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Every :id route in this router addresses a UUID-backed newsletter row.
+// Reject malformed input before Knex/Postgres tries to cast it, yielding a
+// stable client error instead of an avoidable database 500. Integer-keyed
+// rows use their own param (see /subscribers/:subscriberId) — adding an
+// integer route under :id would 400 before its handler runs.
+router.param('id', (req, res, next, id) => {
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
+  next();
+});
 
 function normalizeFromEmail(email) {
   if (!email) return 'newsletter@wavespestcontrol.com';
@@ -190,7 +222,7 @@ router.get('/subscribers.csv', async (req, res, next) => {
 // Designed for a Beehiiv CSV export → POST flow.
 router.post('/subscribers/import', async (req, res, next) => {
   try {
-    const { subscribers, source = 'beehiiv_import', preConsented = true } = req.body;
+    const { subscribers, source = 'admin_import', preConsented = false } = req.body;
     if (!Array.isArray(subscribers) || subscribers.length === 0) {
       return res.status(400).json({ error: 'subscribers[] required' });
     }
@@ -204,7 +236,7 @@ router.post('/subscribers/import', async (req, res, next) => {
     // subscribers) land 'active'. Pass preConsented:false to import an
     // unverified list as 'pending' so it can't be mailed until each address
     // double-opts-in, rather than silently becoming a sendable audience.
-    const importStatus = preConsented === false ? 'pending' : 'active';
+    const importStatus = preConsented === true ? 'active' : 'pending';
 
     // Two-pass: filter to valid rows in JS (so we have a clean count of
     // bad inputs), then a single bulk INSERT ... ON CONFLICT DO NOTHING
@@ -214,7 +246,7 @@ router.post('/subscribers/import', async (req, res, next) => {
     const rows = [];
     for (const s of subscribers) {
       const email = (s.email || '').trim().toLowerCase();
-      if (!email || !email.includes('@')) continue;
+      if (!EMAIL_RE.test(email)) continue;
       if (seen.has(email)) continue;  // dedupe within this CSV
       seen.add(email);
       rows.push({
@@ -223,6 +255,10 @@ router.post('/subscribers/import', async (req, res, next) => {
         last_name: s.lastName || s.last_name || null,
         source,
         status: importStatus,
+        // Pending imports must be double-opt-in-ABLE: without a confirmation
+        // token the row can never leave 'pending' (and the DOI email below
+        // would have no link to send).
+        ...(importStatus === 'pending' ? { confirmation_token: crypto.randomUUID() } : {}),
       });
     }
 
@@ -250,14 +286,56 @@ router.post('/subscribers/import', async (req, res, next) => {
     }
     const skipped = subscribers.length - inserted;
 
-    res.json({ success: true, inserted, skipped, total: subscribers.length });
+    // Default (non-preConsented) imports land 'pending' — meaningless unless
+    // each address gets its double-opt-in email. Send them here (the import
+    // IS the signup event for this list), fire-and-forget and sequential so
+    // a big CSV can't stampede SendGrid; each success stamps
+    // confirmation_sent_at so the DOI TTL and stale-pending lifecycle apply.
+    // Also covers rows stranded pending by older imports (token backfilled).
+    let confirmationsQueued = 0;
+    if (importStatus === 'pending' && rows.length) {
+      const pendingUnconfirmed = await db('newsletter_subscribers')
+        .whereIn('email', rows.map((r) => r.email))
+        .where({ status: 'pending' })
+        .whereNull('confirmation_sent_at')
+        .select('id', 'email', 'first_name', 'confirmation_token');
+      confirmationsQueued = pendingUnconfirmed.length;
+      if (pendingUnconfirmed.length) {
+        (async () => {
+          let sent = 0;
+          for (const sub of pendingUnconfirmed) {
+            try {
+              if (!sub.confirmation_token) {
+                sub.confirmation_token = crypto.randomUUID();
+                await db('newsletter_subscribers').where({ id: sub.id }).update({ confirmation_token: sub.confirmation_token, updated_at: new Date() });
+              }
+              await sendConfirmationEmail(sub);
+              await db('newsletter_subscribers').where({ id: sub.id }).update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+              sent++;
+            } catch (e) {
+              logger.error(`[newsletter] import confirmation failed for subscriber id=${sub.id}: ${e.message}`);
+            }
+          }
+          logger.info(`[newsletter] import confirmation drip done: ${sent}/${pendingUnconfirmed.length} sent`);
+        })().catch(() => {});
+      }
+    }
+
+    res.json({ success: true, inserted, skipped, total: subscribers.length, confirmationsQueued });
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/newsletter/subscribers/:id — admin unsubscribe
-router.delete('/subscribers/:id', async (req, res, next) => {
+// DELETE /api/admin/newsletter/subscribers/:subscriberId — admin unsubscribe.
+// Deliberately NOT the shared :id param — newsletter_subscribers.id is an
+// INTEGER, and the router-level :id validator rejects non-UUIDs (correct for
+// every other row in this router). Same URL shape; integer-validated here.
+router.delete('/subscribers/:subscriberId', async (req, res, next) => {
   try {
-    await db('newsletter_subscribers').where({ id: req.params.id }).update({
+    const subscriberId = Number(req.params.subscriberId);
+    if (!Number.isInteger(subscriberId) || subscriberId <= 0) {
+      return res.status(400).json({ error: 'invalid subscriber id' });
+    }
+    await db('newsletter_subscribers').where({ id: subscriberId }).update({
       status: 'unsubscribed',
       unsubscribed_at: new Date(),
       updated_at: new Date(),
@@ -299,9 +377,10 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
       const mm = String(nowET.month).padStart(2, '0');
       windowStart = parseETDateTime(`${nowET.year}-${mm}-01T00:00:00`);
     } else {
-      // Current Thursday-anchored week.
-      const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
-      windowStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
+      // Flagship drafts are created Monday for Tuesday's issue. Include that
+      // Monday in the freshness window so Compose auto-loads the new draft.
+      const issueTuesday = parseETDateTime(`${getActiveNewsletterTuesday(now)}T12:00:00`);
+      windowStart = parseETDateTime(`${etDateString(addETDays(issueTuesday, -1))}T00:00:00`);
     }
 
     let draftQuery = db('newsletter_sends')
@@ -329,7 +408,11 @@ router.get('/sends', async (req, res, next) => {
     // Attach derived engagement rates per send so the History view renders
     // open/click/bounce/unsub/complaint rates without re-deriving the math
     // client-side.
-    const sends = rows.map((row) => ({ ...row, rates: computeSendRates(row) }));
+    const sends = rows.map((row) => ({
+      ...row,
+      rates: computeSendRates(row),
+      sending_stale: NewsletterSender.sendingClaimIsStale(row),
+    }));
 
     // Pooled aggregate is summed across ALL sent campaigns in the DB — not
     // the capped 500-row window above — so accounts with >500 rows still get
@@ -416,7 +499,39 @@ router.get('/sends/:id', async (req, res, next) => {
       }
     }
 
-    res.json({ send, deliveries, variantStats });
+    // Reaction-footer rollup — 👍/😐/👎 counts plus the 👎 "what was
+    // missing?" tallies. One delivery row per recipient, so these count
+    // people (a changed mind overwrites, never double-counts).
+    let feedback = null;
+    const reactionRows = await db('newsletter_send_deliveries')
+      .where({ send_id: req.params.id })
+      .whereNotNull('feedback_reaction')
+      .select('feedback_reaction')
+      .count('* as n')
+      .groupBy('feedback_reaction');
+    if (reactionRows.length) {
+      feedback = { reactions: {}, missing: {} };
+      for (const r of reactionRows) feedback.reactions[r.feedback_reaction] = Number(r.n);
+      const missingRows = await db('newsletter_send_deliveries')
+        .where({ send_id: req.params.id })
+        .whereNotNull('feedback_missing')
+        .select('feedback_missing')
+        .limit(5000);
+      for (const row of missingRows) {
+        let keys = row.feedback_missing;
+        if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch { keys = []; } }
+        for (const k of (Array.isArray(keys) ? keys : [])) {
+          feedback.missing[k] = (feedback.missing[k] || 0) + 1;
+        }
+      }
+    }
+
+    // Explicit flagship flag so the composer can hydrate legacy NULL-typed
+    // rows correctly: only calendar-LINKED null rows are promoted flagships;
+    // an unlinked null draft stays untyped (forcing it to flagship would
+    // wrongly apply the event-id/Tuesday gates on its next save).
+    const flagship = await isFlagshipSend(send);
+    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback });
   } catch (err) { next(err); }
 });
 
@@ -489,10 +604,14 @@ router.patch('/sends/:id', async (req, res, next) => {
     // /send gate and the scheduler tick only run findHallucinatedClaims for the
     // flagship type, so flipping a flagship send's type away from flagship would
     // silently disable the hard-block ($-amount / efficacy claims would ship).
-    // Refuse the change — delete + recreate to genuinely retype.
+    // Refuse the change — delete + recreate to genuinely retype. Legacy
+    // pre-registry rows (newsletter_type NULL, promoted to flagship via the
+    // calendar link) get the same protection: PATCHing them to a non-flagship
+    // type would silently drop the cadence/lineup/claim-validation gates.
     if (newsletterType !== undefined
-        && isFlagshipType(send.newsletter_type)
-        && !isFlagshipType(newsletterType)) {
+        && !isFlagshipType(newsletterType)
+        && (isFlagshipType(send.newsletter_type)
+          || (send.newsletter_type === null && await isFlagshipSend(send)))) {
       return res.status(400).json({
         error: 'Cannot change a fresh-events (flagship) newsletter to another type — it would bypass the factual-locking send gate. Delete and recreate instead.',
       });
@@ -548,7 +667,20 @@ router.patch('/sends/:id', async (req, res, next) => {
           .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
       : (typeof send.event_ids === 'string' ? send.event_ids : JSON.stringify(send.event_ids ?? []));
 
-    await db('newsletter_sends').where({ id: req.params.id }).update({
+    // A content edit to a proof-APPROVED scheduled row invalidates the
+    // approval: what the owner signed off is no longer what the scheduler
+    // would send. The row drops back to draft (schedule + proof fields
+    // cleared) and must be re-proofed. Metadata-only PATCHes (ai_prompt,
+    // auto_share_social) leave an approval intact.
+    const contentChanged = [subject, subjectB, htmlBody, textBody, previewText,
+      fromName, fromEmail, replyTo, segmentFilter, newsletterType, eventIds]
+      .some((value) => value !== undefined);
+    const invalidatesProof = send.status === 'scheduled' && !!send.proof_approved_at && contentChanged;
+
+    const updatedCount = await db('newsletter_sends')
+      .where({ id: req.params.id })
+      .whereIn('status', ['draft', 'scheduled'])
+      .update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
       html_body: htmlBody ?? send.html_body,
@@ -563,10 +695,26 @@ router.patch('/sends/:id', async (req, res, next) => {
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       event_ids: nextEventIds,
       updated_at: new Date(),
+      ...(invalidatesProof ? {
+        status: 'draft',
+        scheduled_for: null,
+        proof_token: null,
+        proof_sent_at: null,
+        proof_approved_at: null,
+      } : {}),
     });
+    if (!updatedCount) {
+      return res.status(409).json({ error: 'campaign changed while it was being saved; reload before editing' });
+    }
+    if (invalidatesProof) {
+      // Calendar in lockstep, same as cancel-schedule: the send is draft
+      // again, so its calendar row rolls back to 'drafted'.
+      await db('newsletter_calendar').where({ send_id: req.params.id }).update({ status: 'drafted', updated_at: new Date() });
+      logger.warn(`[newsletter] send ${req.params.id} content edited after proof approval — schedule cancelled, proof reset, re-proof required`);
+    }
 
     const updated = await db('newsletter_sends').where({ id: req.params.id }).first();
-    res.json({ success: true, send: updated });
+    res.json({ success: true, send: updated, ...(invalidatesProof ? { proofInvalidated: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -576,9 +724,33 @@ router.delete('/sends/:id', async (req, res, next) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'draft') return res.status(400).json({ error: 'can only delete drafts' });
-    await db('newsletter_sends').where({ id: req.params.id }).del();
+    await db.transaction(async (trx) => {
+      const calendarIds = await trx('newsletter_calendar')
+        .where({ send_id: req.params.id })
+        .pluck('id');
+      const deleted = await trx('newsletter_sends')
+        .where({ id: req.params.id, status: 'draft' })
+        .del();
+      if (!deleted) {
+        const err = new Error('campaign changed while it was being deleted');
+        err.code = 'SEND_STATE_CONFLICT';
+        throw err;
+      }
+      if (calendarIds.length) {
+        // A deliberately deleted weekly campaign stays retired. Leaving a
+        // calendar row as drafted + send_id=NULL makes autopilot resurrect it.
+        await trx('newsletter_calendar').whereIn('id', calendarIds).update({
+          status: 'skipped',
+          send_id: null,
+          updated_at: new Date(),
+        });
+      }
+    });
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'SEND_STATE_CONFLICT') return res.status(409).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/newsletter/sends/:id/test — send preview to one email
@@ -648,6 +820,22 @@ router.post('/sends/:id/send', async (req, res) => {
     if (!send.html_body && !send.text_body) {
       return res.status(400).json({ error: 'body required' });
     }
+    // Fail synchronously on the classic pre-claim throw: with SendGrid
+    // unconfigured the fire-and-forget below would 202, sendCampaign would
+    // throw before claiming the row, and the campaign would sit
+    // draft/scheduled with no failure signal anywhere in History.
+    if (!sendgrid.isConfigured()) {
+      return res.status(503).json({ error: 'SendGrid is not configured (SENDGRID_API_KEY) — cannot send' });
+    }
+    const eventSelection = await validateFlagshipEventSelection(send);
+    if (!eventSelection.valid) {
+      return res.status(400).json({ error: 'Flagship event selection is no longer eligible.', errors: eventSelection.errors });
+    }
+    if (eventSelection.flagship && !isFlagshipDeliveryWindow(new Date())) {
+      return res.status(400).json({
+        error: 'The flagship newsletter can only be delivered Tuesday at 6:00 AM ET.',
+      });
+    }
 
     // Pre-flight 0-recipient guard for synchronous feedback. sendCampaign
     // itself re-checks (defense in depth + scheduler-tick coverage), but
@@ -666,12 +854,18 @@ router.post('/sends/:id/send', async (req, res) => {
     // Server-side validation gate for AI-generated sends (flagship +
     // Pest Insider). Hard errors (no subject, no body, hallucinated
     // claims) always block. force=true skips only the 0-recipient check
-    // (existing contract) — not structural errors.
-    if (requiresClaimValidation(send.newsletter_type)) {
+    // (existing contract) — not structural errors. Promoted legacy rows
+    // (newsletter_type NULL, flagship via the calendar link) validate as
+    // flagship — keying off the raw type alone skipped the
+    // hallucinated-claim hard block for them.
+    if (requiresClaimValidation(send.newsletter_type) || eventSelection.flagship) {
+      const typedSend = requiresClaimValidation(send.newsletter_type)
+        ? send
+        : { ...send, newsletter_type: FLAGSHIP_TYPE_KEY };
       const recipientCount = force ? 1 : Number(
         (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
       );
-      const { errors } = validateNewsletterDraft(send, { recipientCount });
+      const { errors } = validateNewsletterDraft(typedSend, { recipientCount });
       if (errors.length > 0) {
         return res.status(400).json({ error: 'Validation failed', errors });
       }
@@ -690,7 +884,17 @@ router.post('/sends/:id/send', async (req, res) => {
       }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
-        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+        const flipped = await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
+        if (!flipped) {
+          // Pre-claim throw: the row never reached 'sending'. Flip
+          // draft/scheduled → failed so History surfaces it with Resume.
+          // The status guard can't clobber a rival worker's live claim
+          // ('sending') or a completed run ('sent').
+          await db('newsletter_sends')
+            .where({ id: req.params.id })
+            .whereIn('status', ['draft', 'scheduled'])
+            .update({ status: 'failed', updated_at: new Date() });
+        }
       } catch { /* swallow */ }
     });
 
@@ -720,6 +924,10 @@ router.post('/sends/:id/resume', async (req, res) => {
       preserveSentAt: true,
       existingDeliveriesOnly: prepared.existingDeliveriesOnly,
       preclaimed: prepared.preclaimed,
+      // The prepared claim's owner token — without it sendCampaign would
+      // mint a different token, fail its own first heartbeat, and strand
+      // the campaign in 'sending' until the stale lease.
+      claimToken: prepared.claimToken,
     }).catch(async (err) => {
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background resume ${req.params.id} already claimed by another worker — no-op`);
@@ -727,7 +935,7 @@ router.post('/sends/:id/resume', async (req, res) => {
       }
       logger.error(`[newsletter] background resume ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
-        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+        await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
       } catch { /* swallow */ }
     });
 
@@ -757,12 +965,33 @@ router.post('/sends/:id/schedule', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'draft') return res.status(400).json({ error: 'can only schedule drafts' });
     if (!send.html_body && !send.text_body) return res.status(400).json({ error: 'body required before scheduling' });
+    const eventSelection = await validateFlagshipEventSelection(send, { reference: when });
+    if (!eventSelection.valid) {
+      return res.status(400).json({ error: 'Flagship event selection is no longer eligible.', errors: eventSelection.errors });
+    }
+    if (eventSelection.flagship && !isFlagshipScheduledTime(when)) {
+      return res.status(400).json({
+        error: 'Flagship newsletters must be scheduled for exactly Tuesday at 6:00 AM ET.',
+      });
+    }
+    if (eventSelection.flagship) {
+      const linkedCalendar = await db('newsletter_calendar').where({ send_id: send.id }).first();
+      if (linkedCalendar && (
+        !isFlagshipTargetForWeek(linkedCalendar.target_send_at, linkedCalendar.week_of)
+        || new Date(linkedCalendar.target_send_at).getTime() !== when.getTime()
+      )) {
+        return res.status(400).json({
+          error: 'Scheduled time must exactly match the linked calendar issue Tuesday at 6:00 AM ET.',
+        });
+      }
+    }
 
-    await db('newsletter_sends').where({ id: send.id }).update({
+    const scheduled = await db('newsletter_sends').where({ id: send.id, status: 'draft' }).update({
       status: 'scheduled',
       scheduled_for: when,
       updated_at: new Date(),
     });
+    if (!scheduled) return res.status(409).json({ error: 'campaign changed before it could be scheduled' });
     // Keep the calendar lifecycle in lockstep with the linked send so the
     // documented state machine self-drives (drafted → scheduled → sent)
     // instead of relying on manual PATCHes.
@@ -778,11 +1007,19 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'scheduled') return res.status(400).json({ error: 'not scheduled' });
-    await db('newsletter_sends').where({ id: send.id }).update({
+    const cancelled = await db('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
       status: 'draft',
       scheduled_for: null,
+      // Cancelling an approved schedule invalidates the approval (same as
+      // the PATCH and scheduler reverts): the draft must be re-proofed —
+      // stale fields would both block a fresh proof (the claim requires
+      // NULL proof_sent_at) and let a re-schedule ride the old approval.
+      proof_token: null,
+      proof_sent_at: null,
+      proof_approved_at: null,
       updated_at: new Date(),
     });
+    if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });
     // Roll the linked calendar row back to 'drafted' to match the send.
     await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
@@ -800,10 +1037,13 @@ router.post('/preview', async (req, res) => {
     const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
     // Previews have no recipient — neutralize every merge tag so the operator
     // never sees a literal {{greeting-name}}/{{city}}/{{grass-type}} in the
-    // dialog (city/grass fall back to their neutral defaults).
+    // dialog (city/grass fall back to their neutral defaults). The reaction
+    // footer is ensured first (same step as the live sender), so the preview
+    // shows the block the broadcast will carry even on hand-composed bodies.
     const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+    const { ensureFeedbackToken } = require('../services/newsletter-feedback');
     const html = wrapNewsletter({
-      body: stripPersonalizationTokens(htmlBody || ''),
+      body: stripPersonalizationTokens(ensureFeedbackToken({ html: htmlBody || '' }).html),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
@@ -874,7 +1114,7 @@ router.post('/segment-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/newsletter/draft-ai — Claude drafts a newsletter
-// Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA? }
+// Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA?, issueReference? }
 //   newsletterType: when 'local-weekly-fresh-events', uses the flagship
 //     Phase 3 system prompt with structured section output + voice profile.
 //   template: 'weekend' (only remaining template). Used when
@@ -884,7 +1124,12 @@ router.post('/segment-preview', async (req, res, next) => {
 //     Claude drafts from real event data instead of inventing.
 router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
-    const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
+    // No provider guard: draft generation cross-provider-dispatches with an
+    // automatic fallback (llm/call), so a missing single-provider key is no
+    // longer a 400 here.
+    const {
+      prompt, template, newsletterType, eventIds, audience, tone, includeCTA, issueReference,
+    } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
     }
@@ -908,7 +1153,10 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // DB-locked event facts — AI-supplied dates/venues/URLs are overwritten
     // from events_raw, not trusted from the model.
     if (isFlagshipType(newsletterType)) {
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let editorialReference = issueReference ? new Date(issueReference) : null;
+      if (editorialReference && Number.isNaN(editorialReference.getTime())) {
+        return res.status(400).json({ error: 'issueReference must be a valid date' });
+      }
       let resolvedEventIds;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
         resolvedEventIds = eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id));
@@ -920,7 +1168,9 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // approved/eligible events (same query the autopilot uses) so the
         // flagship draft stays DB-locked instead of inviting the model to
         // invent events.
-        const { scored } = await buildDigestPlan();
+        const plan = await buildDigestPlan({ reference: editorialReference || new Date() });
+        const { scored } = plan;
+        editorialReference = editorialReference || plan.startDate;
         resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
       }
 
@@ -937,6 +1187,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         audience,
         tone,
         includeCTA,
+        issueReference: editorialReference || undefined,
         persist: false,
       });
       // Return the locked event ids so the Compose flow can carry them into
@@ -964,7 +1215,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // ── Legacy flow: template-guided or free-form ─────────────────────
     const TEMPLATE_GUIDANCE = {
       weekend: `
-TEMPLATE: Weekend Lineup
+TEMPLATE: Waves Newsletter
 - Lead with an emoji + a punchy, FOMO-friendly weekend headline (think "Your No-Lame-Plans Weekend Starts Here", not "Weekly Update").
 - Open with a casual, irreverent hook (1-2 sentences).
 - Body: 3-5 SWFL events. Each event uses <h2>[Event name]</h2> followed by <p><strong>[City] · [Day, time]</strong> — [one or two sentences on why it's worth going]</p>.
@@ -1266,7 +1517,7 @@ router.patch('/events/:id', async (req, res, next) => {
     const VALID_ADMIN_STATUSES = ['pending', 'approved', 'rejected', 'featured'];
     const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
     const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
-    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_series_launch', 'fresh_special_edition', 'stale_recurring', 'expired', 'needs_review'];
+    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_special_edition', 'fresh_series_launch', 'stale_recurring', 'expired', 'needs_review'];
     const VALID_ZONES = ['south_sarasota', 'sarasota', 'manatee', 'pinellas', 'tampa'];
 
     if (adminStatus !== undefined && !VALID_ADMIN_STATUSES.includes(adminStatus)) return res.status(400).json({ error: `invalid adminStatus: ${adminStatus}` });
@@ -1278,11 +1529,11 @@ router.patch('/events/:id', async (req, res, next) => {
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
-      // Only increment times_featured on transition TO featured
-      if (adminStatus === 'featured' && event.admin_status !== 'featured') {
-        updates.last_featured_at = new Date();
-        updates.times_featured = db.raw('COALESCE(times_featured, 0) + 1');
-      }
+      // Featuring is an editorial STAR for the upcoming issue — not ship
+      // history. times_featured/last_featured_at advance only in
+      // markEventsFeatured when an issue actually sends; incrementing on
+      // the click made isEligibleForFreshDigest reject the starred event
+      // before it ever shipped (Codex r3 P1).
     }
     if (eventType !== undefined) updates.event_type = eventType;
     if (recurrenceType !== undefined) updates.recurrence_type = recurrenceType;
@@ -1293,9 +1544,12 @@ router.patch('/events/:id', async (req, res, next) => {
     if (regionZone !== undefined) updates.region_zone = regionZone;
     if (priceText !== undefined) updates.price_text = priceText;
 
-    // Recompute freshness when type, status, or times_featured changes
-    const featureTransition = adminStatus === 'featured' && event.admin_status !== 'featured';
-    if (eventType !== undefined || freshnessStatus !== undefined || featureTransition) {
+    // Recompute freshness when type, recurrence, or explicit status changes —
+    // a recurrence-only correction (weekly → none, or the reverse) must
+    // re-derive freshness_status or the digest SQL gate keeps acting on the
+    // stale classification. (Featuring no longer touches the counters, so it
+    // no longer triggers a recompute.)
+    if (eventType !== undefined || recurrenceType !== undefined || freshnessStatus !== undefined) {
       const { classifyFreshness } = require('../services/event-freshness');
 
       if (freshnessStatus !== undefined) {
@@ -1310,18 +1564,23 @@ router.patch('/events/:id', async (req, res, next) => {
           const STATUS_TO_TYPE = {
             fresh_one_time: 'one_time', fresh_annual: 'annual',
             fresh_limited_run_opening: 'limited_run', fresh_limited_run_closing: 'limited_run',
-            fresh_series_launch: 'recurring_series', fresh_special_edition: 'special_edition',
+            fresh_special_edition: 'special_edition',
+            // Manually curated series debut (single-use carve-out) — the
+            // digest gate expects the recurring metadata to be honest.
+            fresh_series_launch: 'recurring_series',
           };
           if (STATUS_TO_TYPE[freshnessStatus]) {
             updates.event_type = STATUS_TO_TYPE[freshnessStatus];
           }
         }
       } else {
-        // Derive freshness from event type (use incremented count if featuring)
-        const nextFeatured = featureTransition ? (event.times_featured || 0) + 1 : event.times_featured;
+        // Derive freshness from event type (counters untouched by featuring)
         const { freshness_status, freshness_score } = classifyFreshness({
           event_type: eventType || event.event_type,
-          times_featured: nextFeatured,
+          recurrence_type: recurrenceType !== undefined ? recurrenceType : event.recurrence_type,
+          title: event.title,
+          description: event.description,
+          times_featured: event.times_featured,
           start_at: event.start_at,
           end_at: event.end_at,
         });
@@ -1366,28 +1625,17 @@ router.post('/events/bulk-action', async (req, res, next) => {
     if (action === 'approve' || action === 'reset') {
       updates.suppression_reason = null;
     }
-    if (action === 'feature') {
-      updates.last_featured_at = new Date();
-    }
+    // Featuring is an editorial star, not ship history — counters advance
+    // only in markEventsFeatured when an issue actually sends (Codex r3 P1).
+    const count = await db('events_raw').whereIn('id', safeIds).update(updates);
 
-    let query = db('events_raw').whereIn('id', safeIds);
-    if (action === 'feature') {
-      // Only increment times_featured on rows not already featured
-      query = query.whereNot('admin_status', 'featured').update({
-        ...updates,
-        times_featured: db.raw('COALESCE(times_featured, 0) + 1'),
-      });
-    } else {
-      query = query.update(updates);
-    }
-    const count = await query;
-
-    // Recompute freshness for bulk-featured rows so times_featured
-    // changes are reflected in freshness_status/score
+    // Freshness recompute kept for parity with the single-event PATCH: the
+    // counters didn't move, but a bulk feature over rows with stale
+    // classifications refreshes them from current metadata.
     if (action === 'feature' && count > 0) {
       const { classifyFreshness } = require('../services/event-freshness');
       const featured = await db('events_raw')
-        .select('id', 'event_type', 'times_featured', 'start_at', 'end_at')
+        .select('id', 'title', 'description', 'event_type', 'recurrence_type', 'times_featured', 'start_at', 'end_at')
         .whereIn('id', safeIds)
         .where('admin_status', 'featured');
       for (const row of featured) {
@@ -1401,8 +1649,6 @@ router.post('/events/bulk-action', async (req, res, next) => {
     res.json({ success: true, updated: count });
   } catch (err) { next(err); }
 });
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // POST /api/admin/newsletter/events/merge — collapse cross-source duplicate
 // events into one survivor. The losing rows are marked admin_status='rejected'
@@ -1553,19 +1799,27 @@ router.get('/events/approved-ids', async (req, res, next) => {
     const todayET = parseETDateTime(`${etDateString()}T00:00:00`);
     const cutoffET = parseETDateTime(`${etDateString(addETDays(new Date(), days))}T23:59:59`);
 
-    const rows = await db('events_raw')
-      .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
-      .whereIn('admin_status', ['approved', 'featured'])
-      .whereNull('merged_into')
-      .where('start_at', '>=', todayET)
-      .where('start_at', '<=', cutoffET)
-      .whereNotNull('event_url')
-      .whereNotIn('freshness_status', ['expired', 'stale_recurring'])
-      .orderByRaw('CASE WHEN admin_status = \'featured\' THEN 0 ELSE 1 END')
-      .orderByRaw('freshness_score DESC NULLS LAST')
+    const query = db('events_raw as e')
+      .select(
+        'e.id', 'e.title', 'e.description', 'e.admin_status', 'e.start_at', 'e.end_at',
+        'e.event_url', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
+        'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+      )
+      .whereIn('e.admin_status', ['approved', 'featured'])
+      .whereNull('e.merged_into')
+      .where('e.start_at', '>=', todayET)
+      .where('e.start_at', '<=', cutoffET)
+      .whereNotNull('e.event_url')
+      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      .orderByRaw('CASE WHEN e.admin_status = \'featured\' THEN 0 ELSE 1 END')
+      .orderByRaw('e.freshness_score DESC NULLS LAST')
       .limit(20);
 
-    const eligible = rows.filter((r) => isEligibleForFreshDigest(r)).slice(0, 12);
+    const rows = await excludeRoutineRecurringFromQuery(query);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
+
+    const eligible = dedupeDigestEvents(historicallyNewRows.filter((r) => isEligibleForFreshDigest(r))).slice(0, 12);
     res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
   } catch (err) { next(err); }
 });
@@ -1575,24 +1829,21 @@ router.get('/events/approved-ids', async (req, res, next) => {
 router.post('/events/digest-plan', async (req, res, next) => {
   try {
     const { weekStart, weekEnd } = req.body || {};
-    const now = new Date();
-    const nowET = etParts(now);
-    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7; // 0 on Thu, 3 on Mon, 6 on Fri
-    const defaultStart = addETDays(now, daysUntilThursday);
+    const defaultWeekOf = getActiveNewsletterTuesday();
     const startDate = weekStart
       ? parseETDateTime(`${weekStart}T00:00:00`)
-      : parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
+      : parseETDateTime(`${defaultWeekOf}T00:00:00`);
     const endDate = weekEnd
       ? parseETDateTime(`${weekEnd}T23:59:59`)
       : parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
 
-    const rows = await db('events_raw as e')
+    const query = db('events_raw as e')
       .leftJoin('event_sources as s', 's.id', 'e.source_id')
       .select(
         'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
         'e.venue_name', 'e.city', 'e.event_url',
-        'e.event_type', 'e.freshness_status', 'e.freshness_score',
-        'e.admin_status', 'e.times_featured',
+        'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
+        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
         'e.region_zone', 'e.family_friendly', 'e.is_free',
         's.name as source_name', 's.priority_tier as source_priority_tier',
       )
@@ -1604,9 +1855,15 @@ router.post('/events/digest-plan', async (req, res, next) => {
       .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
       .orderByRaw('e.freshness_score DESC NULLS LAST');
 
-    const eligible = rows.filter((r) => isEligibleForFreshDigest(r));
-    const scored = eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
-      .sort((a, b) => b.compositeScore - a.compositeScore);
+    const rows = await excludeRoutineRecurringFromQuery(query);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+
+    const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
+    const scored = dedupeDigestEvents(
+      eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
+        .sort((a, b) => b.compositeScore - a.compositeScore),
+    );
     const suppressed = rows.filter((r) => !isEligibleForFreshDigest(r))
       .map((r) => ({ id: r.id, title: r.title, reason: r.freshness_status }));
 
@@ -1637,7 +1894,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
 
     const sections = {
       fresh_this_week: pick((ev) => ['one_time', 'annual', 'limited_run', 'special_edition'].includes(ev.event_type), 6).map(fmt),
-      just_starting: pick((ev) => ev.event_type === 'recurring_series' && (ev.times_featured || 0) <= 2, 2).map(fmt),
+      just_starting: pick((ev) => !ev.last_featured_at && (ev.times_featured || 0) === 0, 2).map(fmt),
       weekend_picks: pick((ev) => isWeekend(ev), 3).map(fmt),
       family_or_low_key_pick: pick((ev) => ev.family_friendly === true || ev.is_free === true, 1).map(fmt),
       road_trip_pick: pick((ev) => ev.region_zone && ev.region_zone !== majorityZone, 1).map(fmt),
@@ -1647,7 +1904,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
     if (sections.fresh_this_week.length < 5) warnings.push(`Only ${sections.fresh_this_week.length} fresh events (recommended minimum 5)`);
     if (sections.family_or_low_key_pick.length === 0) warnings.push('No family-friendly or free pick found');
     if (sections.road_trip_pick.length === 0) warnings.push('No road trip pick found');
-    if (sections.just_starting.length === 0) warnings.push('No new recurring series for "Just Starting"');
+    if (sections.just_starting.length === 0) warnings.push('No newly discovered events for "Just Starting"');
 
     res.json({
       weekStart: etDateString(startDate), weekEnd: etDateString(endDate),
@@ -1753,12 +2010,6 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
         sent_at: send.sent_at,
       },
     };
-
-    // Mark as exported
-    await db('newsletter_sends').where({ id: send.id }).update({
-      blog_exported_at: new Date(),
-      updated_at: new Date(),
-    });
 
     const escYaml = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 
@@ -1884,10 +2135,10 @@ router.get('/calendar', async (req, res, next) => {
     const rawFuture = Number(req.query.futureWeeks ?? 12);
     const futureWeeks = Math.min(26, Math.max(1, Math.floor(Number.isNaN(rawFuture) ? 12 : rawFuture)));
 
-    const currentThursday = getCurrentNewsletterThursday();
+    const currentTuesday = getActiveNewsletterTuesday();
 
-    // Generate all Thursday dates in the window (ET-safe)
-    const baseDate = parseETDateTime(`${currentThursday}T12:00:00`);
+    // Generate all Tuesday dates in the window (ET-safe)
+    const baseDate = parseETDateTime(`${currentTuesday}T12:00:00`);
     const allWeeks = [];
     for (let i = -pastWeeks; i < futureWeeks; i++) {
       allWeeks.push(etDateString(addETDays(baseDate, i * 7)));
@@ -1960,7 +2211,7 @@ router.get('/calendar', async (req, res, next) => {
       };
     });
 
-    res.json({ calendar, currentWeek: currentThursday });
+    res.json({ calendar, currentWeek: currentTuesday });
   } catch (err) { next(err); }
 });
 
@@ -1972,14 +2223,14 @@ router.post('/calendar', async (req, res, next) => {
       return res.status(400).json({ error: 'weekOf must be YYYY-MM-DD format' });
     }
 
-    // Validate Thursday
+    // Validate Tuesday
     const d = new Date(weekOf + 'T12:00:00Z');
     if (isNaN(d.getTime())) return res.status(400).json({ error: 'weekOf is not a valid date' });
     // Round-trip check: ensure the date didn't normalize (e.g. Feb 30 → Mar 2)
     if (d.toISOString().split('T')[0] !== weekOf) {
       return res.status(400).json({ error: 'weekOf is not a valid calendar date' });
     }
-    if (d.getUTCDay() !== 4) return res.status(400).json({ error: 'weekOf must be a Thursday' });
+    if (d.getUTCDay() !== 2) return res.status(400).json({ error: 'weekOf must be a Tuesday' });
 
     // Validate eventIds
     if (eventIds !== undefined) {
@@ -1998,6 +2249,9 @@ router.post('/calendar', async (req, res, next) => {
       if (isNaN(sendAt.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
     } else {
       sendAt = defaultTargetSendAt(weekOf);
+    }
+    if (!isFlagshipTargetForWeek(sendAt, weekOf)) {
+      return res.status(400).json({ error: 'targetSendAt must match weekOf at exactly Tuesday 6:00 AM ET' });
     }
 
     const [row] = await db('newsletter_calendar')
@@ -2041,6 +2295,9 @@ router.patch('/calendar/:id', async (req, res, next) => {
       if (typeof targetSendAt !== 'string') return res.status(400).json({ error: 'targetSendAt must be a string' });
       const parsed = parseETDateTime(targetSendAt);
       if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
+      if (!isFlagshipTargetForWeek(parsed, entry.week_of)) {
+        return res.status(400).json({ error: 'targetSendAt must match this entry week at exactly Tuesday 6:00 AM ET' });
+      }
       updates.target_send_at = parsed;
     }
     if (status !== undefined) {
@@ -2048,7 +2305,7 @@ router.patch('/calendar/:id', async (req, res, next) => {
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
       // 'scheduled'/'sent' are system-derived from the linked send lifecycle
       // (POST /schedule and sendCampaign drive them). Hand-setting them on a
-      // row with no send_id makes the Thursday autopilot skip that week — it
+      // row with no send_id makes the flagship autopilot skip that week — it
       // treats scheduled/sent as "already handled" and returns early — while
       // no newsletter actually exists, a silent missed week with no alert.
       if (['scheduled', 'sent'].includes(status) && !entry.send_id) {
@@ -2077,19 +2334,44 @@ router.patch('/calendar/:id', async (req, res, next) => {
 
 router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, next) => {
   try {
+    // Snapshot + generate before opening the advisory-locked transaction.
+    // Image/LLM calls can take tens of seconds and must not pin a DB
+    // connection, row lock, and per-week advisory lock for their duration.
+    const wk = await db('newsletter_calendar')
+      .where({ id: req.params.id })
+      .first(db.raw("to_char(week_of, 'YYYY-MM-DD') as week_of"));
+    if (!wk) return res.status(404).json({ error: 'not found' });
+    const snapshot = await db('newsletter_calendar').where({ id: req.params.id }).first();
+    if (!snapshot) return res.status(404).json({ error: 'not found' });
+    if (snapshot.send_id) {
+      const existingSend = await db('newsletter_sends').where({ id: snapshot.send_id }).first();
+      return res.json({ success: true, existing: true, send: existingSend });
+    }
+    if (snapshot.status === 'skipped') return res.status(400).json({ error: 'Cannot draft a skipped week' });
+    if (!isFlagshipTargetForWeek(snapshot.target_send_at, wk.week_of)) {
+      return res.status(400).json({ error: 'Calendar target must match this issue Tuesday at exactly 6:00 AM ET' });
+    }
+
+    const eventIds = Array.isArray(snapshot.event_ids) ? snapshot.event_ids : [];
+    const prompt = snapshot.topic
+      ? `This weekend's theme: ${snapshot.topic}. New events from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`
+      : `New events for the weekend ahead from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`;
+    const generated = await createNewsletterDraft({
+      prompt,
+      eventIds,
+      homeownerMinuteTopic: snapshot.homeowner_minute_topic,
+      topic: snapshot.topic,
+      newsletterType: 'local-weekly-fresh-events',
+      audience: 'Waves subscribers — North Port to Tampa',
+      tone: 'Neighborly, FOMO-driven, local friend energy',
+      includeCTA: true,
+      issueReference: snapshot.target_send_at || wk.week_of,
+      persist: false,
+    });
+
     const result = await db.transaction(async (trx) => {
-      // Read week_of first (no row lock) to derive the per-week advisory-lock
-      // key, then take that lock BEFORE the forUpdate. Acquiring the advisory
-      // lock first in BOTH this path and the autopilot avoids a lock-order
-      // deadlock (autopilot takes the advisory lock before touching any row).
-      const wk = await trx('newsletter_calendar')
-        .where({ id: req.params.id })
-        .first(trx.raw("to_char(week_of, 'YYYY-MM-DD') as week_of"));
-      if (!wk) {
-        const err = new Error('not found');
-        err.status = 404;
-        throw err;
-      }
+      // Take the shared per-week lock BEFORE the row lock; autopilot uses the
+      // same order. The transaction now contains DB work only.
       await trx.raw('SELECT pg_advisory_xact_lock(?)', [weekLockKey(wk.week_of)]);
 
       const calendar = await trx('newsletter_calendar')
@@ -2111,14 +2393,20 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
         throw err;
       }
 
+      if (new Date(calendar.updated_at).getTime() !== new Date(snapshot.updated_at).getTime()) {
+        const err = new Error('Calendar changed while the draft was generating; review the latest plan and try again');
+        err.status = 409;
+        throw err;
+      }
+
       // Adopt an autopilot draft created for this same week instead of making a
-      // second one. The Thursday cron may have produced a draft while this
+      // second one. The Tuesday cron may have produced a draft while this
       // request waited on the advisory lock, and it links the calendar OUTSIDE
       // its lock — so calendar.send_id can still read null here even though a
       // draft exists. Same dedup the autopilot uses (flagship, status draft,
       // created_by NULL), bounded to this week's window so drafting a non-current
       // week can't adopt the current week's draft.
-      const weekStart = parseETDateTime(`${wk.week_of}T00:00:00`);
+      const weekStart = getNewsletterDraftWindowStart(wk.week_of);
       const weekEnd = parseETDateTime(`${etDateString(addETDays(weekStart, 7))}T00:00:00`);
       const autopilotDraft = await trx('newsletter_sends')
         .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
@@ -2133,22 +2421,11 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
         return { existing: true, send: autopilotDraft };
       }
 
-      // Build prompt from calendar plan
-      const eventIds = Array.isArray(calendar.event_ids) ? calendar.event_ids : [];
-      const prompt = calendar.topic
-        ? `This week's theme: ${calendar.topic}. Fresh events from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`
-        : `Fresh events this week from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`;
-
-      const { send } = await createNewsletterDraft({
+      const send = await persistNewsletterDraft({
+        draft: generated.draft,
         prompt,
-        eventIds,
-        homeownerMinuteTopic: calendar.homeowner_minute_topic,
-        topic: calendar.topic,
         newsletterType: 'local-weekly-fresh-events',
-        audience: 'Waves subscribers — North Port to Tampa',
-        tone: 'Neighborly, FOMO-driven, local friend energy',
-        includeCTA: true,
-        trx,
+        knex: trx,
       });
 
       // Link send to calendar

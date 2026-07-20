@@ -35,7 +35,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime, etWeekStart, addETDays } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS, CITY_TO_LOCATION } = require('../../config/locations');
 const { THRESHOLDS } = require('./scoring-config');
 
@@ -217,7 +217,16 @@ class AutonomousRunner {
     const initialProtected = await this._checkProtectedPage(opp);
     if (initialProtected?.protected) {
       const finalized = await finalize(run, t0, protectedPagePatch(initialProtected));
-      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+      // By-design protection (money page, manual protect list) is a refusal,
+      // not an exception — there is nothing for a human to decide, so it must
+      // not occupy the review queue (owner directive 2026-07-18: review queue
+      // is exceptions-only). A protected-check ERROR is an engine fault and
+      // still parks for a human.
+      if (initialProtected.is_error) {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+      } else {
+        await this._skipClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+      }
       return finalized;
     }
     if (initialProtected) run.protected_check = initialProtected;
@@ -239,6 +248,7 @@ class AutonomousRunner {
         return finalized;
       }
     }
+
 
     // (Facts-sufficiency runs AFTER brief composition — the decision-router can
     // change the final action_type, so the gate must key on brief.action_type,
@@ -277,7 +287,13 @@ class AutonomousRunner {
     if (finalProtected?.protected) {
       run.protected_check = finalProtected;
       const finalized = await finalize(run, t0, protectedPagePatch(finalProtected));
-      await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+      // Same exceptions-only rule as the initial check: by-design protection
+      // skips silently; only a protected-check ERROR parks for a human.
+      if (finalProtected.is_error) {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+      } else {
+        await this._skipClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+      }
       return finalized;
     }
     if (finalProtected) run.protected_check = finalProtected;
@@ -329,6 +345,29 @@ class AutonomousRunner {
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
       });
       await this._skipClaimOrThrow(queue, opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken });
+      return finalized;
+    }
+
+    // 2c. Publish-cap pre-check — AFTER brief composition so it keys on the
+    // FINAL (router-decided) action type, not the miner's provisional one
+    // (the router can retarget an opportunity mid-composition). When the
+    // day/week cap for this action is already exhausted, dispatching the
+    // writer is pure waste (the step-7 publish guard would block anyway)
+    // and the old disposition — park the finished draft as pending_review —
+    // turned a rate limit into human review work. Defer the opportunity to
+    // the next cap window instead: no drafting spend, no review item;
+    // claimNext() re-serves it when the window reopens and it publishes
+    // autonomously then. The step-7 guard remains as the race backstop.
+    // Shadow runs are exempt: they exist to exercise drafting and never
+    // publish, so the cap doesn't constrain them.
+    const capDeferral = run.shadow_mode ? null : await this._capDeferralFor(run.action_type);
+    if (capDeferral) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'deferred_publish_cap',
+        skip_reason: capDeferral.reason,
+        reviewer_notes: capDeferral.notes,
+      });
+      await this._deferClaimOrThrow(queue, opp.id, capDeferral.availableAt, { claimToken });
       return finalized;
     }
 
@@ -582,13 +621,9 @@ class AutonomousRunner {
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: 'content_guardrails_failed',
-          reviewer_notes: notes,
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken, skipReason: 'content_guardrails_failed', notes, blocking,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_failed', { claimToken });
-        return finalized;
       }
     }
 
@@ -637,13 +672,29 @@ class AutonomousRunner {
       if (!comparisonResult.pass) {
         const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: 'comparison_table_failed',
-          reviewer_notes: notes,
+        // Two comparison findings are NOT writer mistakes and must stay
+        // reviewable rather than retry/skip: a THROWN evaluator
+        // (COMPARISON_TABLE_GATE_ERROR — engine fault a redraft can't fix)
+        // and COMPARISON_NAMED_COMPETITOR_DISABLED (a clean draft naming an
+        // allowlisted competitor while the namedCompetitorComparison gate is
+        // off — a legal/brand decision the owner approves via the
+        // named-competitor review flow, not a defect).
+        const nonRetryable = blocking.find((f) => f.code === 'COMPARISON_TABLE_GATE_ERROR' || f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED');
+        if (nonRetryable) {
+          const parkNote = nonRetryable.code === 'COMPARISON_TABLE_GATE_ERROR'
+            ? 'evaluator threw (engine fault); parked for review, not retried.'
+            : 'named-competitor comparisons are gated off — review/approve via the named-competitor flow, not a redraft.';
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: 'comparison_table_failed',
+            reviewer_notes: `${notes} — ${parkNote}`,
+          });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
+          return finalized;
+        }
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken, skipReason: 'comparison_table_failed', notes, blocking,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
-        return finalized;
       }
     }
 
@@ -857,19 +908,36 @@ class AutonomousRunner {
     }
 
     if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
-      // Auto-publish lanes skip silently on a pure quality-gate failure rather
-      // than build a review backlog. Router-flagged human-review cases (loop /
-      // cannibalization / .gov SERP) still route to review even under
-      // auto-publish, since those are content-risk signals, not quality misses.
-      if (autoPublish && !gatesPass && !brief.human_review_required) {
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: 'auto_publish_gate_fail',
-          reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+      // Pure quality-gate failure on ANY lane (owner directive 2026-07-18:
+      // exceptions-only review queue): one feedback-informed redraft, then
+      // silent skip — same disposition as the guardrails/comparison gates.
+      // Router-flagged human-review cases (loop / cannibalization / .gov
+      // SERP) still route to review — those are content-risk signals a
+      // redraft can't clear — as do the named-competitor and trust-build
+      // paths below. Gate INFRA failures (module/corpus unavailable, thrown
+      // evaluate — the shapes that carry `.error`) also still park: a
+      // redraft can't fix a broken gate, and silently skipping would hide
+      // an engine fault (same fail-closed posture as the *_unavailable
+      // paths above).
+      // content-quality-gate reports some infrastructure failures INSIDE
+      // hard_failures (evaluator_threw:*, pii_scan_unavailable:*,
+      // no_previous_version_to_compare) rather than as a top-level .error —
+      // those are engine faults too, not writer misses.
+      const qualityInfraFailure = Array.isArray(qualityResult?.hard_failures)
+        && qualityResult.hard_failures.some((f) => /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(String(f?.reason ?? f)));
+      const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
+        || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
+      if (!gatesPass && !brief.human_review_required && !gateInfraError) {
+        const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken,
+          skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
+          notes: summary,
+          blocking: aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }),
         });
-        await this._skipClaimOrThrow(queue, opp.id, 'auto_publish_gate_fail', { claimToken });
-        return finalized;
       }
+      // Remaining combinations are genuine human decisions (gate infra
+      // errors, router-flagged briefs, named-competitor, trust-build ramp).
       const reason = !gatesPass ? 'gate_fail'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
@@ -898,6 +966,24 @@ class AutonomousRunner {
 
     const publishingGuards = await this._evaluatePublishingGuards(run, brief, seoCompletionResult);
     if (!publishingGuards.ok) {
+      // A full day/week cap is a rate limit, not an exception — defer to the
+      // next cap window instead of parking a finished draft for human review
+      // (owner directive 2026-07-18: review queue is exceptions-only). This
+      // path is the race backstop behind the step-1a.3 pre-check (the cap can
+      // fill between claim and publish); the draft is discarded and
+      // regenerates when the window reopens.
+      if (publishingGuards.reason === 'canary_daily_publish_cap' || publishingGuards.reason === 'canary_weekly_publish_cap') {
+        const availableAt = publishingGuards.reason === 'canary_weekly_publish_cap'
+          ? nextEtWeekStart()
+          : nextEtDayStart();
+        const finalized = await finalize(run, t0, {
+          outcome: 'deferred_publish_cap',
+          skip_reason: publishingGuards.reason,
+          reviewer_notes: `${publishingGuards.notes} Deferred — redrafts and publishes autonomously when the cap window reopens.`,
+        });
+        await this._deferClaimOrThrow(queue, opp.id, availableAt, { claimToken });
+        return finalized;
+      }
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: publishingGuards.reason,
@@ -1221,7 +1307,10 @@ class AutonomousRunner {
     const review = real.filter((r) => r.outcome === 'completed_pending_review').length;
     const gated = real.filter((r) => r.outcome === 'skipped_gate_fail').length;
     const failed = real.filter((r) => String(r.outcome || '').startsWith('failed')).length;
-    if (published + review + gated + failed === 0) return; // nothing notable today
+    const deferred = real.filter((r) => String(r.outcome || '').startsWith('deferred')).length;
+    // Deferrals count as notable: an all-deferred batch (caps full, gate
+    // retry pending) did real work the operator should hear about.
+    if (published + review + gated + failed + deferred === 0) return; // nothing notable today
 
     const reasons = {};
     for (const r of real) {
@@ -1235,7 +1324,7 @@ class AutonomousRunner {
       .join(', ');
     const liveUrls = real.map((r) => r.published_url).filter(Boolean);
 
-    const parts = [`Waves content engine: ${published} published, ${review} to review, ${gated} gated, ${failed} failed.`];
+    const parts = [`Waves content engine: ${published} published, ${review} to review, ${gated} gated, ${failed} failed${deferred ? `, ${deferred} deferred` : ''}.`];
     if (topReasons) parts.push(`Why: ${topReasons}.`);
     if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
     const body = parts.join(' ');
@@ -1407,6 +1496,78 @@ class AutonomousRunner {
   async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload) {
     const ok = await queue.pendingReview(opportunityId, reason, payload);
     if (!ok) throw new Error('queue_pending_review_failed_or_stale_claim');
+  }
+
+  async _deferClaimOrThrow(queue, opportunityId, availableAt, payload) {
+    const ok = await queue.defer(opportunityId, availableAt, payload);
+    if (!ok) throw new Error('queue_defer_failed_or_stale_claim');
+  }
+
+  /**
+   * Hard-gate failure disposition (owner directive 2026-07-18: the review
+   * queue is exceptions-only — a writer mistake is not a human decision).
+   * First failure: record the blocking findings on the opportunity's
+   * signal_metadata and defer it back to pending, immediately claimable —
+   * the redraft composes a brief that carries the findings as binding
+   * retry directives (content-brief-builder), so the writer gets one
+   * feedback-informed second attempt, usually within the same batch.
+   * Second failure: skip silently. The gates themselves never loosen —
+   * a repeat offender is discarded, not published and not parked.
+   */
+  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes, blocking }) {
+    const alreadyRetried = !!opp.signal_metadata?.gate_retry;
+    if (!alreadyRetried) {
+      let recorded = false;
+      try {
+        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
+      }
+      if (recorded) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'deferred_gate_retry',
+          skip_reason: skipReason,
+          reviewer_notes: `${notes} — deferred for one autonomous redraft with these findings fed back to the writer.`,
+        });
+        await this._deferClaimOrThrow(queue, opp.id, new Date(), { claimToken });
+        return finalized;
+      }
+      // Couldn't persist the feedback marker: a defer would retry blind and
+      // could loop. Fall through to the terminal skip instead.
+    }
+    const finalized = await finalize(run, t0, {
+      outcome: 'skipped_gate_fail',
+      skip_reason: skipReason,
+      reviewer_notes: alreadyRetried
+        ? `${notes} — redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).`
+        : `${notes} — could not record retry feedback; skipped (exceptions-only review queue).`,
+    });
+    await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+    return finalized;
+  }
+
+  /**
+   * Persist the blocking gate findings onto the opportunity so the redraft's
+   * brief can feed them back to the writer. Returns true only when the row
+   * was actually written. Guarded to the active claim so a stale worker
+   * can't stamp feedback over another attempt.
+   */
+  async _recordGateRetry(opp, skipReason, blocking, claimToken) {
+    const findings = (blocking || []).map((f) => ({
+      severity: f.severity,
+      code: f.code,
+      message: String(f.message || '').slice(0, 300),
+    }));
+    const meta = {
+      ...(opp.signal_metadata || {}),
+      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
+    };
+    const updated = await db('opportunity_queue')
+      .where('id', opp.id)
+      .where('status', 'claimed')
+      .where('claimed_at', claimToken)
+      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
+    return updated > 0;
   }
 
   async _releaseClaimOrThrow(queue, opportunityId, payload) {
@@ -2157,6 +2318,44 @@ class AutonomousRunner {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Pre-draft cap check for step 1a.3. Mirrors ONLY the day/week publish
+   * caps from _evaluatePublishingGuards (the other canary guards need a
+   * draft to evaluate) under the same enable-flag semantics. Returns
+   * { reason, notes, availableAt } when the cap window is already full, so
+   * the runner can defer without spending a generation — null otherwise.
+   * Weekly is checked first: when both caps are hit the longer defer wins.
+   */
+  async _capDeferralFor(actionType) {
+    if (!envBool('AUTONOMOUS_CONTENT_ENABLE_CANARY_GUARDS', actionType === 'new_supporting_blog')) {
+      return null;
+    }
+    const now = new Date();
+    const maxPerWeek = envInt('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', null);
+    if (maxPerWeek != null) {
+      const count = await this._countPublishedSince(actionType, startOfEtWeek(now));
+      if (count >= maxPerWeek) {
+        return {
+          reason: 'canary_weekly_publish_cap',
+          availableAt: nextEtWeekStart(now),
+          notes: `Weekly publish cap already full (${count}/${maxPerWeek} ${actionType} this ET week) — deferred to next ET week without drafting.`,
+        };
+      }
+    }
+    const maxPerDay = envInt('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', null);
+    if (maxPerDay != null) {
+      const count = await this._countPublishedSince(actionType, startOfEtDay(now));
+      if (count >= maxPerDay) {
+        return {
+          reason: 'canary_daily_publish_cap',
+          availableAt: nextEtDayStart(now),
+          notes: `Daily publish cap already full (${count}/${maxPerDay} ${actionType} today ET) — deferred to next ET day without drafting.`,
+        };
+      }
+    }
+    return null;
   }
 
   async _countPublishedSince(actionType, since) {
@@ -2951,6 +3150,23 @@ function actionEditsExistingPage(opp = {}, brief = null) {
   return EDITING_ACTION_TYPES.has(brief?.action_type || opp.action_type);
 }
 
+// Synthesize structured findings from the aggregate quality gates so the
+// gate-retry disposition can feed them back to the writer the same way the
+// guardrails/comparison gates do. The first finding carries the compact
+// reviewer summary — it names the specific failing checks and is the most
+// actionable feedback for the redraft.
+function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }) {
+  const blocking = [];
+  if (!uniquenessResult?.ok) blocking.push({ severity: 'P1', code: 'UNIQUENESS_GATE', message: 'draft failed the uniqueness/dedup gate' });
+  if (!qualityResult?.ok) blocking.push({ severity: 'P1', code: 'QUALITY_GATE', message: 'draft failed the content quality gate' });
+  if (seoCompletionResult?.passed !== true) {
+    blocking.push({ severity: 'P1', code: 'SEO_COMPLETION_GATE', message: `SEO completion failed (${Number(seoCompletionResult?.summary?.p0 || 0)} P0 / ${Number(seoCompletionResult?.summary?.p1 || 0)} P1 findings)` });
+  }
+  if (prePublishVisibilityResult?.passed !== true) blocking.push({ severity: 'P1', code: 'AI_VISIBILITY_GATE', message: 'draft failed the AI-visibility static checks' });
+  if (blocking.length && summary) blocking[0].message = `${blocking[0].message}: ${String(summary)}`;
+  return blocking;
+}
+
 function protectedPagePatch(prot = {}) {
   return {
     outcome: 'skipped_gate_fail',
@@ -3024,6 +3240,20 @@ function startOfEtDay(date = new Date()) {
 
 function startOfEtWeek(date = new Date()) {
   return parseETDateTime(`${etWeekStart(date)}T00:00`);
+}
+
+function nextEtDayStart(date = new Date()) {
+  // Tomorrow's ET midnight via ET-calendar arithmetic (addETDays), not a
+  // +24h jump — during the fall-back transition a 25-hour ET day means
+  // +24h can land on the SAME ET calendar date, which would produce a
+  // midnight already in the past (Codex pre-push P1).
+  return parseETDateTime(`${etDateString(addETDays(date, 1))}T00:00`);
+}
+
+function nextEtWeekStart(date = new Date()) {
+  // Next ET week's Monday 00:00: hop 7 ET calendar days from this week's
+  // start (DST-safe), then re-normalize to that week's start.
+  return startOfEtWeek(addETDays(startOfEtWeek(date), 7));
 }
 
 async function queueInternalLinkTaskForDryRun(task, opportunityId) {
@@ -3105,6 +3335,8 @@ module.exports._internals = {
   extractFrontmatterScalar,
   startOfEtDay,
   startOfEtWeek,
+  nextEtDayStart,
+  nextEtWeekStart,
   gbpLocationIdForCity,
   operatorBriefTextForComparisonGate,
 };

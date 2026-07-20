@@ -36,6 +36,7 @@ const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../s
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { dispatchWithFallback } = require('./llm/call');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -106,15 +107,52 @@ Use punctuation and line breaks where helpful. Do not summarize, translate, or a
 // (rolling 404 brown-outs starting 2026-07-09), so a dead default here means
 // the fallback transcriber fails exactly when OpenAI needs it.
 const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-3.5-flash';
-// v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
-// v1.0.0 schema (better structured-output adherence + fewer hallucinations than
-// Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
-// pins temp 0 for determinism). Env-overridable for instant rollback.
-// NOTE: this var governs the V2 extractor ONLY — the dictation decoder and
-// street recovery have their own vars (GEMINI_CONTACT_DECODER_MODEL /
-// GEMINI_RECOVERY_MODEL) with literal defaults, so an extraction rollback no
-// longer silently degrades the mishear-recovery lanes.
+// Gemini-leg model for the V2 extraction route below (also the legacy env
+// name, kept so an existing GEMINI_EXTRACTION_MODEL override still governs
+// the gemini leg). NOTE: the dictation decoder and street recovery have
+// their own vars (GEMINI_CONTACT_DECODER_MODEL / GEMINI_RECOVERY_MODEL)
+// with literal defaults, so an extraction rollback never silently degrades
+// the mishear-recovery lanes.
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+// V2 extraction route — owner-locked 2026-07-18 off the 25-call bake-off run
+// through the EXACT V2 contract (identical prompt + ajv validate + normalize):
+// gpt-5.6-sol led consensus agreement 97.8% with 25/25 contract-valid vs the
+// gemini-2.5-pro incumbent's 91.7% (last place, dragged by a 24% phone-field
+// agreement). Claude Opus 4.8 is the cross-provider fallback per the house
+// automatic-fallback-to-Claude rule, with schema validation running INSIDE
+// the dispatcher so contract-invalid primary output fails over instead of
+// failing the call. Defaults are PINNED per provider (never tier or
+// report-writer aliases — an ops change to another lane's model env must not
+// silently swap the extractor). Kill switch: CALL_EXTRACTION_PROVIDER=gemini
+// ALONE restores the Gemini leg (via llm/call.js, same greedy temp-0 JSON
+// mode) — model overrides are PER-PROVIDER (CALL_EXTRACTION_MODEL = the
+// OpenAI leg only, MODEL_CALL_EXTRACTION_ANTHROPIC = the Claude leg,
+// GEMINI_EXTRACTION_MODEL = the Gemini leg), so a lingering OpenAI model
+// override can never ride along into another provider during a rollback.
+// A typo'd provider must not brick the route (unknown provider → dispatch
+// rejects every leg → not_run → every call held for triage). Fail OPEN to
+// the bake-off-winning default with a loud error, never fail closed.
+const RAW_EXTRACTION_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+const CALL_EXTRACTION_PROVIDER = ['openai', 'anthropic', 'gemini'].includes(RAW_EXTRACTION_PROVIDER)
+  ? RAW_EXTRACTION_PROVIDER
+  : 'openai';
+if (CALL_EXTRACTION_PROVIDER !== RAW_EXTRACTION_PROVIDER) {
+  logger.error(`[call-proc-v2] CALL_EXTRACTION_PROVIDER "${RAW_EXTRACTION_PROVIDER}" is not openai|anthropic|gemini — using openai`);
+}
+const CALL_EXTRACTION_MODEL_FOR = {
+  openai: process.env.CALL_EXTRACTION_MODEL || 'gpt-5.6-sol',
+  anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC,
+  gemini: GEMINI_EXTRACTION_MODEL,
+};
+const CALL_EXTRACTION_ROUTE = Object.freeze({
+  primary: Object.freeze({
+    provider: CALL_EXTRACTION_PROVIDER,
+    model: CALL_EXTRACTION_MODEL_FOR[CALL_EXTRACTION_PROVIDER] || CALL_EXTRACTION_MODEL_FOR.openai,
+  }),
+  fallback: CALL_EXTRACTION_PROVIDER === 'anthropic'
+    ? Object.freeze({ provider: 'openai', model: CALL_EXTRACTION_MODEL_FOR.openai })
+    : Object.freeze({ provider: 'anthropic', model: MODELS.CALL_EXTRACTION_ANTHROPIC }),
+});
 // V1 (legacy) extractor model — historically hardcoded in the request URL,
 // which made V1 the only lane without a zero-deploy rollback lever.
 // 2026-07-09: the old gemini-2.5-flash default 404'd (model retired by
@@ -3595,7 +3633,12 @@ Return ONLY valid JSON.`;
   try {
     return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
   } catch (e) {
-    logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
+    // Fixed message + length ONLY — the raw model output is a call
+    // extraction carrying the caller's name/phone/address, and JSON.parse
+    // error messages themselves echo a fragment of the rejected input
+    // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
+    // logged either (AGENTS.md PII-in-logs).
+    logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars)`);
     return normalizeCallExtraction({
       first_name: null,
       is_spam: false,
@@ -3632,7 +3675,9 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptV
     const cleaned = String(rawText).replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} (${String(rawText).length} chars)`);
+    // Same PII rule as the v1 site above: JSON.parse error messages echo a
+    // fragment of the rejected model output — fixed message + length only.
+    logger.error(`[call-proc-v2] JSON parse failed (${String(rawText).length} chars)`);
     return { status: 'parse_failed', extraction: null, errors: [{ message: e.message }] };
   }
 
@@ -3673,7 +3718,14 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptV
 }
 
 async function extractCallDataV2(transcription, callerPhone, opts = {}) {
-  if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
+  const keyFor = (provider) => {
+    if (provider === 'openai') return !!process.env.OPENAI_API_KEY;
+    if (provider === 'anthropic') return !!process.env.ANTHROPIC_API_KEY;
+    return !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  };
+  if (![CALL_EXTRACTION_ROUTE.primary, CALL_EXTRACTION_ROUTE.fallback].some((r) => keyFor(r.provider))) {
+    return { status: 'not_run', extraction: null, errors: null };
+  }
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
@@ -3687,43 +3739,49 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     priorCall: opts.priorCall,
   });
 
-  let rawText;
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        signal: providerTimeoutSignal('extraction'),
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            response_mime_type: 'application/json',
-            // Greedy decode — this output feeds the routing gate directly;
-            // 0.2 sampling could flip a borderline scheduling.status between
-            // reprocesses of the same call.
-            temperature: 0,
-          },
-        }),
-      }
-    );
+  // Cross-provider dispatch with the model-output schema validated INSIDE
+  // the dispatcher — contract-invalid primary output (valid JSON, wrong
+  // shape) fails over to the Claude leg instead of failing the call. No
+  // explicit timeoutMs: an explicit budget is a shared deadline whose first
+  // leg gets the full remainder (a stalled primary would starve the
+  // fallback); the dispatcher's default budget splits evenly across legs.
+  // temperature: 0 pins greedy decode on the legs that still accept
+  // sampling controls (the gemini rollback leg). It is deliberately NOT
+  // plumbed to the OpenAI leg — the Responses API 400s ("Unsupported
+  // parameter: 'temperature' is not supported with this model") on the
+  // GPT-5.6 reasoning line, so the primary's repeat-stability rests on the
+  // reasoning model's default decoding; Anthropic strips-and-retries in
+  // callAnthropic for the same reason.
+  const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
+    text: prompt,
+    jsonMode: true,
+    maxTokens: 16384,
+    temperature: 0,
+  }, {
+    validate: (result) => (result.json && validateModelOutput(result.json).valid ? null : 'extraction_schema_invalid'),
+  });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      logger.error(`[call-proc-v2] Gemini HTTP ${res.status}: ${body.slice(0, 240)}`);
-      return { status: 'parse_failed', extraction: null, errors: [{ message: `Gemini HTTP ${res.status}` }] };
-    }
-
-    const data = await res.json();
-    rawText = data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || '{}';
-  } catch (err) {
-    logger.error(`[call-proc-v2] Gemini request failed: ${err.message}`);
-    return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
+  if (!res.ok || !res.text) {
+    const failures = res.failures || [];
+    logger.error(`[call-proc-v2] extraction dispatch failed (${res.reason}): ${JSON.stringify(failures.slice(0, 3))}`);
+    // Every-leg-schema-invalid keeps the schema_failed classification the
+    // finalize tail would have produced; transport/config failures keep the
+    // parse_failed retry path (extraction_attempts + sweeper).
+    // Persist the PER-LEG failure list on both paths — downstream health
+    // accounting (v2-promotion-readiness) derives failed fallback attempts
+    // from these rows, since a both-legs-failed row stamps the primary model.
+    const allSchema = failures.length > 0 && failures.every((f) => f.reason === 'extraction_schema_invalid');
+    return allSchema
+      ? { status: 'schema_failed', extraction: null, errors: failures }
+      : { status: 'parse_failed', extraction: null, errors: failures.length ? failures : [{ message: res.reason || 'dispatch_failed' }] };
   }
 
-  return finalizeV2Extraction(rawText, {
+  // Serialize the object the dispatcher VALIDATED, not the raw text: the
+  // dispatcher's loose parser repairs preambles/trailing commas, so a
+  // repaired schema-valid response must not re-fail finalize's strict parse.
+  return finalizeV2Extraction(JSON.stringify(res.json), {
     callId: opts.callId || null,
-    extractionModel: GEMINI_EXTRACTION_MODEL,
+    extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
     // version must carry its hash or cohorts mix under one version.
     promptVersion: extractionPromptVersion(opts.bookableServiceNames),
@@ -4386,7 +4444,9 @@ const CallRecordingProcessor = {
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
-          ai_extraction_model: GEMINI_EXTRACTION_MODEL,
+          // Provenance = the model that actually produced the output (the
+          // fallback leg stamps its own model), not the configured primary.
+          ai_extraction_model: v2Result.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
           ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         };
@@ -4401,7 +4461,7 @@ const CallRecordingProcessor = {
         await db('call_log').where({ id: call.id }).update({
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
-          ai_extraction_model: GEMINI_EXTRACTION_MODEL,
+          ai_extraction_model: CALL_EXTRACTION_ROUTE.primary.model,
           ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         });
@@ -6271,7 +6331,10 @@ const CallRecordingProcessor = {
     // bell above already rang synchronously (the DURABLE owed-quote record);
     // the engine upgrades that bell in place with the draft when it finishes.
     // Non-blocking by contract — a drafting failure must never break call
-    // processing or eat the promise.
+    // processing or eat the promise. The settled chain is retained so the
+    // assessment pre-draft hook below can sequence AFTER it (never a second
+    // concurrent composer run for the same call).
+    let estimatorEnginePromise = null;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
@@ -6279,7 +6342,7 @@ const CallRecordingProcessor = {
       // a drafting pass. The engine's own dedupe guards make re-entry safe
       // and it degrades to the fallback notification on any failure.
       const { maybeDraftEstimateForCall } = require('./estimator-engine');
-      maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
+      estimatorEnginePromise = maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
         .then((engineOutcome) => {
           logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
         })
@@ -6517,6 +6580,10 @@ const CallRecordingProcessor = {
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      // Declared OUTSIDE the try so the catch can see whether a schedule row
+      // was already inserted when a later confirmation/SMS step threw — the
+      // insert-first contract means the booking can be real even on error.
+      let scheduledServiceId = null;
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
@@ -6619,8 +6686,8 @@ const CallRecordingProcessor = {
           // the SMS first and inserted the schedule row afterward — if the
           // insert threw, the customer received "your appointment is booked"
           // for an appointment that never landed on the schedule. Now: insert
-          // first, send only if it succeeded.
-          let scheduledServiceId = null;
+          // first, send only if it succeeded. (scheduledServiceId itself is
+          // declared above the outer try so the catch keeps the booked id.)
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
@@ -7421,7 +7488,11 @@ const CallRecordingProcessor = {
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+            // Keep scheduledServiceId (same rule as the outbound branch
+            // above): the schedule row EXISTS — dropping the id made the
+            // downstream approved-but-unbooked audit read this as a skipped
+            // booking, and starves the assessment pre-draft hook.
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -7644,7 +7715,11 @@ const CallRecordingProcessor = {
         }
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
-        appointmentResult = { error: err.message };
+        // The schedule row can already exist (insert-first contract): a
+        // confirmation/SMS failure must not erase its id — the
+        // approved-but-unbooked audit would read a real booking as skipped
+        // and the assessment pre-draft hook below would starve.
+        appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
       }
     }
 
@@ -7693,6 +7768,37 @@ const CallRecordingProcessor = {
           });
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
+      }
+    }
+
+    // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
+    // default OFF): a phone-booked Waves Assessment (the fail-open catch-all)
+    // seeds a draft through the FULL engine call context. Self-filtering
+    // (non-assessment bookings return skipped) and fire-and-forget — never
+    // blocks call processing. Sequenced AFTER the quote lane's engine run
+    // settles so the paid composer never runs twice concurrently: for a
+    // call the engine already drafted, the delegation's early
+    // existing-draft path re-notifies with quotePromised=true (an
+    // assessment booking IS an owed quote — the initial launch may have
+    // run quote-requested-only) and the booking linkage merges in;
+    // otherwise this is the first and only engine run for the call.
+    if (appointmentResult?.scheduledServiceId) {
+      try {
+        const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
+        if (bookingPreDraftsEnabled()) {
+          const preDraftBookingId = appointmentResult.scheduledServiceId;
+          void (estimatorEnginePromise || Promise.resolve())
+            .catch(() => {})
+            .then(() => maybePreDraftForBooking(preDraftBookingId))
+            .then((outcome) => {
+              if (outcome?.drafted) {
+                logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
+              }
+            })
+            .catch((err) => logger.warn(`[call-proc] assessment pre-draft failed for ${maskSid(callSid)}: ${err.message}`));
+        }
+      } catch (predraftErr) {
+        logger.warn(`[call-proc] assessment pre-draft hook unavailable: ${predraftErr.message}`);
       }
     }
 
@@ -7862,7 +7968,7 @@ const CallRecordingProcessor = {
 
       await db('call_log').where({ id: call.id }).update({
         ai_validation: JSON.stringify(validationPayload),
-        ai_validation_model: v2ExtractionForAudit?.meta?.extraction_model || GEMINI_EXTRACTION_MODEL,
+        ai_validation_model: v2ExtractionForAudit?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
         ai_validation_prompt_version: v2ExtractionForAudit?.meta?.extraction_prompt_version || PROMPT_HASH,
         ai_validation_schema_version: v2ExtractionForAudit?.meta?.schema_version || null,
         updated_at: new Date(),
@@ -8289,6 +8395,7 @@ CallRecordingProcessor._test = {
   hasWorkableLeadSignal,
   transcribeRecording,
   extractCallDataV2,
+  CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,

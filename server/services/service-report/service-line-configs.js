@@ -189,6 +189,11 @@ function detectServiceLine(serviceType) {
   if (category === 'rodent') return 'rodent';
   if (category === 'tree_shrub') return 'tree_shrub';
 
+  // Tree/shrub tokens outrank fertil/weed here for the same reason as the
+  // normalizer's early branch: "Tree & Shrub Fertilization" is a tree &
+  // shrub visit, not a lawn one. Lawn-surface tokens still win.
+  if (/\b(tree|shrub|ornamental|arborjet)\b/.test(text)
+    && !/\b(lawn|turf|grass|sod|dethatch|aerat)\b/.test(text)) return 'tree_shrub';
   if (/\b(lawn|turf|grass|weed|fertil|dethatch|top\s*dress|aerat|sod)\b/.test(text)) return 'lawn';
   if (text.includes('mosquito')) return 'mosquito';
   if (/\b(termite|wdo|bora|trelona)\b/.test(text)) return 'termite';

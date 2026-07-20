@@ -1,4 +1,11 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { getAdminUser } from "../../lib/adminAuth";
+
+// Pricing writes are admin-only server-side (requireAdmin on every mutating
+// pricing-config route). Mirror that here so a technician sees read-only
+// values instead of optimistic edits that silently 403 — the calculators
+// and read views stay available to both roles.
+const canEditPricing = () => getAdminUser()?.role === "admin";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
@@ -1126,7 +1133,7 @@ function ProposalsTab() {
               >
                 Close
               </button>
-              {selected.status === "pending" && (
+              {selected.status === "pending" && canEditPricing() && (
                 <>
                   {" "}
                   <button
@@ -1225,14 +1232,15 @@ function EditCell({ value, onSave, type = "number", width = 70 }) {
       />
     );
   }
+  const editable = canEditPricing();
   return (
     <span
-      onClick={() => {
+      onClick={editable ? () => {
         setVal(value);
         setEditing(true);
-      }}
+      } : undefined}
       style={{
-        cursor: "pointer",
+        cursor: editable ? "pointer" : "default",
         padding: "4px 6px",
         borderRadius: 4,
         fontSize: 13,
@@ -1242,7 +1250,7 @@ function EditCell({ value, onSave, type = "number", width = 70 }) {
         minWidth: width,
         textAlign: "right",
       }}
-      title="Click to edit"
+      title={editable ? "Click to edit" : "Read-only — pricing edits are admin-only"}
     >
       {typeof value === "number"
         ? value < 1 && value > 0
@@ -1581,7 +1589,7 @@ function ConfigCard({ config, onUpdate }) {
           )}
         </div>{" "}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {expanded && (
+          {expanded && canEditPricing() && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -2023,6 +2031,7 @@ function DiscountRulesTab() {
                   <input
                     type="checkbox"
                     checked={r.tier_qualifier}
+                    disabled={!canEditPricing()}
                     onChange={(e) =>
                       handleUpdate(
                         r.service_key,
@@ -2034,7 +2043,7 @@ function DiscountRulesTab() {
                       accentColor: D.teal,
                       width: 16,
                       height: 16,
-                      cursor: "pointer",
+                      cursor: canEditPricing() ? "pointer" : "default",
                     }}
                   />{" "}
                 </td>{" "}
@@ -2063,6 +2072,7 @@ function DiscountRulesTab() {
                   <input
                     type="checkbox"
                     checked={r.exclude_from_pct_discount}
+                    disabled={!canEditPricing()}
                     onChange={(e) =>
                       handleUpdate(
                         r.service_key,
@@ -2074,7 +2084,7 @@ function DiscountRulesTab() {
                       accentColor: D.red,
                       width: 16,
                       height: 16,
-                      cursor: "pointer",
+                      cursor: canEditPricing() ? "pointer" : "default",
                     }}
                   />{" "}
                 </td>{" "}

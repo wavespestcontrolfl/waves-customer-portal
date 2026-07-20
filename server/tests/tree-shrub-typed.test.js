@@ -292,6 +292,68 @@ describe('ported closeout compliance (typed path)', () => {
   const product = (id, name, extra = {}) => ({ productId: id, totalAmount: 2, amountUnit: 'oz', name, ...extra });
   const row = (id, name) => ({ id, name });
 
+  test('herbicide chips require a matching product (FDACS ledger, audit 2026-07-18 P2)', () => {
+    // A pre-emergent is a pesticide application — completing the chip with
+    // no product left service_products / property_application_history empty
+    // while the typed summary claimed the application.
+    const noProduct = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Pre-emergent bed treatment' },
+      products: [],
+      productRows: [],
+      completionPhotos: photos,
+    });
+    expect(noProduct.ok).toBe(false);
+    expect(noProduct.blocks.map((b) => b.code)).toContain('tree_shrub_products_required');
+
+    // An unrelated product must not satisfy the herbicide chip.
+    const wrongProduct = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Weed spot treatment' },
+      products: [product('p8', 'Palm Fertilizer 8-2-12')],
+      productRows: [row('p8', 'Palm Fertilizer 8-2-12')],
+      completionPhotos: photos,
+    });
+    expect(wrongProduct.blocks.map((b) => b.code)).toContain('tree_shrub_products_required');
+
+    // A SEAWEED biostimulant is not an herbicide (codex P2 r2 class —
+    // 'weed' must match as a word, never inside 'seaweed').
+    const seaweed = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Weed spot treatment' },
+      products: [product('p10', 'Seaweed Extract Biostimulant')],
+      productRows: [row('p10', 'Seaweed Extract Biostimulant')],
+      completionPhotos: photos,
+    });
+    expect(seaweed.blocks.map((b) => b.code)).toContain('tree_shrub_products_required');
+
+    const withHerbicide = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Pre-emergent bed treatment' },
+      products: [product('p9', 'Barricade 4FL Pre-Emergent')],
+      productRows: [row('p9', 'Barricade 4FL Pre-Emergent')],
+      completionPhotos: photos,
+    });
+    expect(withHerbicide.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
+    // Herbicides carry rotation history too (HRAC): the rotation-log
+    // confirmation gates the application like IRAC/FRAC ones (codex P2 r3).
+    expect(withHerbicide.blocks.map((b) => b.code)).toContain('tree_shrub_irac_frac_required');
+    const withHerbicideLogged = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Pre-emergent bed treatment', irac_frac_logged: 'Yes' },
+      products: [product('p9', 'Barricade 4FL Pre-Emergent')],
+      productRows: [row('p9', 'Barricade 4FL Pre-Emergent')],
+      completionPhotos: photos,
+    });
+    expect(withHerbicideLogged.blocks.map((b) => b.code)).not.toContain('tree_shrub_irac_frac_required');
+    expect(withHerbicideLogged.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
+  });
+
   test('N/P fertilizer blocked in summer blackout window, allowed outside it', () => {
     const summer = validateTreeShrubTypedCompliance({
       service: manateeService,

@@ -29,6 +29,9 @@ const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, C
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
+const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
+const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
+const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -258,6 +261,24 @@ function assignAbVariant() {
 // operator-triggered resume would double-send.
 const TERMINAL_SUCCESS_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 const RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
+const DEFAULT_SENDING_LEASE_MINUTES = 30;
+
+function sendingLeaseMinutes() {
+  const configured = Number(process.env.NEWSLETTER_SENDING_LEASE_MINUTES);
+  return Number.isFinite(configured) && configured >= 5 && configured <= 1440
+    ? configured
+    : DEFAULT_SENDING_LEASE_MINUTES;
+}
+
+// updated_at doubles as the claim heartbeat: sendCampaign touches it after
+// every chunk, so "stale" means no chunk progress for a full lease window —
+// not merely a long-running send.
+function sendingClaimIsStale(send, now = new Date()) {
+  if (send?.status !== 'sending') return false;
+  const claimedAt = new Date(send.updated_at || send.created_at || 0).getTime();
+  if (!Number.isFinite(claimedAt) || claimedAt <= 0) return false;
+  return claimedAt <= now.getTime() - sendingLeaseMinutes() * 60 * 1000;
+}
 
 function isRetryableDelivery(delivery) {
   if (!delivery) return false;
@@ -339,6 +360,39 @@ async function sendCampaign(sendId, opts = {}) {
   if (!send) throw new Error('not found');
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
+  // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
+  // A TRUE PARTIAL resume — preclaimed AND constrained to the existing
+  // delivery ledger — re-mails a campaign that already passed these gates:
+  // re-validating the lineup would reject it against itself (a partial
+  // first pass finalizes 'sent' and markEventsFeatured advances
+  // times_featured, so the same locked ids read as "no longer new"), and
+  // the 6:00–6:14 delivery window would block stalled-send recovery at
+  // 6:30. A ZERO-LEDGER resume (failed before any delivery rows were
+  // seeded) reseeds the whole audience — that IS a first send, so it faces
+  // the full gates: no resuming an entire issue outside the Tuesday window
+  // or on a stale lineup.
+  if (!(opts.preclaimed && opts.existingDeliveriesOnly)) {
+    const eventSelection = await validateFlagshipEventSelection(send);
+    if (eventSelection.flagship) {
+      if (!eventSelection.valid) {
+        const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
+        err.code = 'EVENT_SELECTION_INVALID';
+        throw err;
+      }
+      const now = new Date();
+      if (send.status === 'scheduled' && !isCurrentFlagshipTarget(send.scheduled_for, now)) {
+        const err = new Error('scheduled flagship target is not the current issue Tuesday at 6:00 AM ET');
+        err.code = 'FLAGSHIP_SCHEDULE_TARGET';
+        throw err;
+      }
+      if (!isFlagshipDeliveryWindow(now)) {
+        const err = new Error('flagship newsletters can only be delivered Tuesday at 6:00 AM ET');
+        err.code = 'FLAGSHIP_CADENCE_WINDOW';
+        throw err;
+      }
+    }
+  }
+
   // 0-recipient guard — runs BEFORE the atomic claim so a no-op send
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
@@ -350,6 +404,21 @@ async function sendCampaign(sendId, opts = {}) {
       throw err;
     }
   }
+
+  // Owner token for this worker's 'sending' claim. Every claim path (first
+  // send here, resume/stale-reclaim in prepareResumeCampaign) stamps its own
+  // token; the per-chunk heartbeat doubles as an ownership check so a worker
+  // whose stale claim was reclaimed by recovery stops before mailing another
+  // chunk — instead of waking from a slow SendGrid call and racing the new
+  // owner into duplicate emails. A preclaimed caller that didn't thread the
+  // prepared token falls back to the token stored ON the row by its own
+  // claim (the row can't have been reclaimed in between — it was claimed
+  // moments ago, so it is neither stale nor claimable); minting a fresh one
+  // there would fail our own first heartbeat and strand the campaign in
+  // 'sending' until the lease expires.
+  const claimToken = opts.claimToken
+    || (opts.preclaimed ? send.sending_claim_token : null)
+    || crypto.randomUUID();
 
   if (opts.preclaimed) {
     if (send.status !== 'sending') {
@@ -367,7 +436,7 @@ async function sendCampaign(sendId, opts = {}) {
     const claimed = await db('newsletter_sends')
       .where({ id: send.id })
       .whereIn('status', ['draft', 'scheduled'])
-      .update({ status: 'sending', updated_at: new Date() })
+      .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
       const err = new Error('already sent or in progress');
@@ -432,11 +501,24 @@ async function sendCampaign(sendId, opts = {}) {
     logger.info(`[newsletter] send ${send.id} skipping ${skippedAlreadySent} recipient(s) already in non-retryable state (resume)`);
   }
 
+  // Every edition ends with the reaction footer (owner directive
+  // 2026-07-17). Assembled drafts already carry the token; hand-composed
+  // campaigns get it appended so the ask is a system property — same
+  // philosophy as ensureLegalTextFooter. The SAME helper runs in the
+  // composer preview, test send, and owner proof, so review surfaces always
+  // show the footer the broadcast will carry. Local copies only: the
+  // persisted html_body stays the operator's content; deterministic, so
+  // resumes rebuild identically.
+  const { html: bodyHtml, text: bodyText } = ensureFeedbackToken({
+    html: send.html_body || '',
+    text: send.text_body,
+  });
+
   // Wrap the operator-written body in branded chrome (header + footer
   // + Waves logo). The unsubscribe URL is the SendGrid substitution
   // token — sendBatch injects a real per-recipient URL in its place.
   const htmlWithFooter = wrapNewsletter({
-    body: send.html_body || '',
+    body: bodyHtml,
     unsubscribeUrl: '{{unsubscribe_url}}',
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
@@ -444,6 +526,7 @@ async function sendCampaign(sendId, opts = {}) {
   });
 
   let accepted = 0, failed = 0;
+  let claimLost = false;
 
   // O(1) variant lookup per subscriber. The previous .filter().find() was
   // O(n²) — at 5k subscribers that's 25M comparisons before the first
@@ -467,8 +550,13 @@ async function sendCampaign(sendId, opts = {}) {
   // {{quiz-text:id}} — resolve to a block whose answer links carry THAT
   // recipient's engagement_token (newsletter-quiz.js). quizBody is scanned for
   // the tokens; html + text are joined so a token in either part is found.
-  const quizBody = [send.html_body, send.text_body].filter(Boolean).join('\n');
+  const quizBody = [bodyHtml, bodyText].filter(Boolean).join('\n');
   const quizEnabled = hasQuizToken(quizBody);
+  // Reaction footer ({{feedback}} / {{feedback-text}}): same per-recipient
+  // substitution mechanics as the quiz — links carry the recipient's
+  // engagement_token so a tap lands on the right delivery row. Scanned on
+  // the local copies so the send-time append above is always resolved.
+  const feedbackEnabled = hasFeedbackToken(quizBody);
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -517,6 +605,7 @@ async function sendCampaign(sendId, opts = {}) {
             // every quiz token in the body (default or {{quiz:id}}). Missing
             // token (shouldn't happen post-migration) → neutral link-free render.
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
+            ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
@@ -532,6 +621,21 @@ async function sendCampaign(sendId, opts = {}) {
       });
       const subscriberIds = chunkToSend.map((s) => s.id);
 
+      // Ownership check + lease renewal BEFORE the external call: 0 rows
+      // means recovery rotated sending_claim_token while we were stalled —
+      // stop WITHOUT mailing this chunk. A successful renewal also resets
+      // the stale lease, so recovery cannot legally reclaim while the
+      // following SendGrid request is in flight (a reclaim requires a full
+      // lease window of silence).
+      const heartbeat = await db('newsletter_sends')
+        .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
+        .update({ updated_at: new Date() });
+      if (!heartbeat) {
+        claimLost = true;
+        logger.error(`[newsletter] send ${send.id} claim lost (stale reclaim by another worker) — stopping before mailing this chunk; ${accepted} accepted so far; new owner resumes the rest`);
+        break;
+      }
+
       try {
         // sendBroadcast = sendBatch with the SENDGRID_ASM_GROUP_NEWSLETTER
         // group attached by default. Newsletter unsubs land in the
@@ -543,7 +647,7 @@ async function sendCampaign(sendId, opts = {}) {
           fromName: send.from_name,
           subject: subjectForGroup,
           html: htmlWithFooter,
-          text: ensureLegalTextFooter(send.text_body, { unsubscribeUrl: '{{unsubscribe_url}}' }) || undefined,
+          text: ensureLegalTextFooter(bodyText, { unsubscribeUrl: '{{unsubscribe_url}}' }) || undefined,
           replyTo: send.reply_to,
           categories: ['newsletter', `send_${send.id}`, variant ? `variant_${variant}` : 'variant_none'],
         });
@@ -612,7 +716,17 @@ async function sendCampaign(sendId, opts = {}) {
         .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
         failed += updated;
       }
+
     }
+    if (claimLost) break;
+  }
+
+  // A worker that lost its claim must not finalize, advance the calendar,
+  // mark events featured, or fire the social share — the reclaiming owner
+  // runs that lifecycle. Deliveries already updated stay updated (the new
+  // owner's retryable filter skips them).
+  if (claimLost) {
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
   }
 
   // Final state. If every recipient bounced into 'failed', the whole send
@@ -636,7 +750,19 @@ async function sendCampaign(sendId, opts = {}) {
   if (!opts.preserveSentAt || !send.sent_at) {
     finalSendUpdate.sent_at = new Date();
   }
-  await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
+  // Only the worker that still owns the parent 'sending' claim may finalize.
+  // A late completion must not overwrite a newer recovery lifecycle — and a
+  // zero-row result means exactly that: the claim rotated after our last
+  // batch. The loser must also skip ALL first-send side effects (calendar
+  // advance, markEventsFeatured, social share) or both workers would run
+  // them and double-count featured events.
+  const finalized = await db('newsletter_sends')
+    .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
+    .update(finalSendUpdate);
+  if (!finalized) {
+    logger.error(`[newsletter] send ${send.id} claim lost at finalization — skipping lifecycle side effects; the reclaiming owner finalizes`);
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
+  }
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
@@ -698,11 +824,10 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'NOT_RESUMABLE';
     throw err;
   }
-  if (send.status === 'sending') {
-    // An active sendCampaign holds the work — refuse the resume so we
-    // don't race two writers on the same delivery rows. Operator can
-    // wait or, if the send genuinely stalled (worker died, status stuck),
-    // flip the row to 'failed' manually first.
+  const reclaimingStaleSend = send.status === 'sending' && sendingClaimIsStale(send);
+  if (send.status === 'sending' && !reclaimingStaleSend) {
+    // An active sendCampaign owns the work. A crash/deploy claim ages out
+    // after a bounded lease, giving the operator recovery without prod SQL.
     const err = new Error('campaign is actively sending; refusing to resume');
     err.code = 'STILL_SENDING';
     throw err;
@@ -717,7 +842,7 @@ async function prepareResumeCampaign(sendId) {
     .count('* as c')
     .first();
   const totalDeliveries = Number(deliveryTotal?.c || 0);
-  if (totalDeliveries === 0 && send.status !== 'failed') {
+  if (totalDeliveries === 0 && send.status !== 'failed' && !reclaimingStaleSend) {
     const err = new Error('no outstanding deliveries to resume');
     err.code = 'NOTHING_TO_RESUME';
     throw err;
@@ -745,9 +870,17 @@ async function prepareResumeCampaign(sendId) {
   // Claim directly as 'sending' only if the row is still in the state we
   // inspected above. This avoids a generic 'scheduled' window where the normal
   // /send path or scheduler could claim the send without resume constraints.
-  const claimed = await db('newsletter_sends')
-    .where({ id: send.id, status: send.status })
-    .update({ status: 'sending', scheduled_for: null, updated_at: new Date() })
+  const claimQuery = db('newsletter_sends')
+    .where({ id: send.id, status: send.status });
+  if (reclaimingStaleSend) {
+    claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+  }
+  // A fresh owner token every (re)claim: a stale-reclaim rotates the token,
+  // which is exactly what tells the stuck original worker (via its next
+  // heartbeat ownership check) that it no longer owns the campaign.
+  const claimToken = crypto.randomUUID();
+  const claimed = await claimQuery
+    .update({ status: 'sending', scheduled_for: null, sending_claim_token: claimToken, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
     const err = new Error('campaign was claimed by another worker');
@@ -755,7 +888,7 @@ async function prepareResumeCampaign(sendId) {
     throw err;
   }
 
-  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0, preclaimed: true };
+  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0, preclaimed: true, claimToken };
 }
 
 async function resumeCampaign(sendId) {
@@ -765,6 +898,7 @@ async function resumeCampaign(sendId) {
     preserveSentAt: true,
     existingDeliveriesOnly: prepared.existingDeliveriesOnly,
     preclaimed: prepared.preclaimed,
+    claimToken: prepared.claimToken,
   });
 }
 
@@ -774,7 +908,7 @@ async function resumeCampaign(sendId) {
  * can't stampede the others.
  */
 async function processScheduledSends() {
-  const { requiresClaimValidation } = require('../config/newsletter-types');
+  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
   const { validateNewsletterDraft } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
@@ -789,19 +923,69 @@ async function processScheduledSends() {
   let processed = 0;
   for (const row of due) {
     try {
-      // Validate AI-generated sends (flagship + Pest Insider) before dispatching
-      if (requiresClaimValidation(row.newsletter_type)) {
+      // Proof-approved rows remain governed by the proof kill switch even
+      // after approval. A manual future schedule has no proof_approved_at and
+      // is unaffected; an approved autopilot send stays queued until the gate
+      // is deliberately re-enabled.
+      if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
+        continue;
+      }
+      const eventSelection = await validateFlagshipEventSelection(row);
+      if (eventSelection.flagship) {
+        const now = new Date();
+        const currentTarget = isCurrentFlagshipTarget(row.scheduled_for, now);
+        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now)) {
+          const reason = !eventSelection.valid
+            ? eventSelection.errors.join(', ')
+            : !currentTarget
+              ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
+              : 'missed the Tuesday 6:00–6:14 AM ET delivery window';
+          logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
+          // Reverting an approved schedule INVALIDATES the approval: the
+          // state the owner signed off (lineup, target Tuesday) no longer
+          // holds. Clear the proof fields or the now-draft row would carry
+          // stale approval metadata forever — the PATCH invalidation only
+          // covers status='scheduled', so a draft must never hold one.
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+            status: 'draft',
+            scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
+            updated_at: new Date(),
+          });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+          continue;
+        }
+      }
+      // Validate AI-generated sends (flagship + Pest Insider) before
+      // dispatching. Promoted legacy rows (newsletter_type NULL, flagship
+      // via the calendar link) MUST validate too — keying off the raw type
+      // alone let them ship customer-facing AI copy without the
+      // hallucinated-claim hard block.
+      if (requiresClaimValidation(row.newsletter_type) || eventSelection.flagship) {
+        const typedRow = requiresClaimValidation(row.newsletter_type)
+          ? row
+          : { ...row, newsletter_type: FLAGSHIP_TYPE_KEY };
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
-        const { errors } = validateNewsletterDraft(row, { recipientCount });
+        const { errors } = validateNewsletterDraft(typedRow, { recipientCount });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
-          await db('newsletter_sends').where({ id: row.id }).update({
+          // Same approval invalidation as the flagship revert above.
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
             status: 'draft',
             scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
             updated_at: new Date(),
           });
+          if (!reverted) continue;
           // Keep the calendar in lockstep: this send is no longer scheduled, so
           // roll its linked calendar row back to 'drafted'. Without this the
           // row would stay 'scheduled' forever (autopilot then skips the week)
@@ -821,7 +1005,18 @@ async function processScheduledSends() {
         continue;
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
-      try { await db('newsletter_sends').where({ id: row.id }).update({ status: 'failed' }); } catch { /* swallow */ }
+      try {
+        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
+        if (!flipped) {
+          // Pre-claim throw (e.g. SendGrid unconfigured): the row never
+          // reached 'sending' and would otherwise stay 'scheduled' — due
+          // forever, retried every tick, invisible as a failure. Same
+          // status-guarded flip as the route's fire-and-forget catch.
+          await db('newsletter_sends')
+            .where({ id: row.id, status: 'scheduled' })
+            .update({ status: 'failed', updated_at: new Date() });
+        }
+      } catch { /* swallow */ }
     }
   }
   return { processed };
@@ -830,10 +1025,7 @@ async function processScheduledSends() {
 /**
  * Advance events_raw.times_featured + last_featured_at and recompute freshness
  * for every event a sent newsletter shipped (the locked send.event_ids). This
- * is what makes the recurring-series anti-repeat gate actually decay for the
- * automated path — previously only a manual admin "feature" click bumped the
- * counter, so an approved-but-never-featured recurring event stayed
- * fresh_series_launch forever and could headline every week.
+ * preserves the feature-history signal used by editorial novelty scoring.
  */
 async function markEventsFeatured(send) {
   let ids = [];
@@ -853,13 +1045,17 @@ async function markEventsFeatured(send) {
   for (const id of ids) {
     await db.transaction(async (trx) => {
       const row = await trx('events_raw').where({ id }).forUpdate()
-        .first('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+        .first('id', 'title', 'description', 'event_type', 'recurrence_type', 'times_featured', 'start_at', 'end_at');
       if (!row) return;
       const nextFeatured = (row.times_featured || 0) + 1;
       const { freshness_status, freshness_score } = classifyFreshness({ ...row, times_featured: nextFeatured });
       await trx('events_raw').where({ id }).update({
         times_featured: nextFeatured,
         last_featured_at: new Date(),
+        // The editorial star is consumed by shipping: drop featured back to
+        // approved so the eligibility override can't re-admit the same
+        // event in the next issue.
+        admin_status: db.raw(`CASE WHEN admin_status = 'featured' THEN 'approved' ELSE admin_status END`),
         freshness_status,
         freshness_score,
         updated_at: new Date(),
@@ -868,4 +1064,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured, sendingClaimIsStale };

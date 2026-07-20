@@ -115,6 +115,30 @@ function sendPolicyForDraft(draft, recipient) {
       },
     };
   }
+  if (draft.intent === 'estimate_clarify') {
+    // Clarify asks answer the contact's OWN quote request, so they ride the
+    // transactional estimate rails, never the conversational fallthrough.
+    // Consent is only ASSERTED when the phone's recorded provenance
+    // supports SMS contact — they texted us, called us, or self-submitted
+    // the number on our quote form (the basis the form's SMS auto-reply
+    // already sends under). An email-extracted phone asserts nothing:
+    // consentBasis stays undefined and the messaging validator's
+    // fail-closed path owns the verdict. Draft creation is never itself
+    // consent evidence.
+    const flags = parseFlags(draft.flags);
+    const provenance = flags.channel_provenance || null;
+    const smsProvenance = ['sms', 'voice', 'web_form'].includes(provenance);
+    return {
+      audience: recipient.customerId ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      estimateId: flags.estimate_id || undefined,
+      consentBasis: (recipient.customerId || !smsProvenance) ? undefined : {
+        status: 'transactional_allowed',
+        source: `estimate_clarify_${provenance}`,
+        capturedAt: draft.created_at || new Date().toISOString(),
+      },
+    };
+  }
   return draftSendPolicyFields(draft, recipient);
 }
 
@@ -310,6 +334,114 @@ function draftMessageType(draft, legacyValue) {
  *   { blocked: false, customer }         — proceed; customer carries
  *                                          nearest_location_id for the send
  */
+// Clarify-ask drafts (services/estimate-clarify-asks.js): the writer's gate
+// must hold at APPROVAL time too — GATE_ESTIMATE_CLARIFY_ASKS turned off
+// while a draft sits pending means the owner shut the lane; the click must
+// not send. And the QUESTION must still be needed: the answer can arrive,
+// the linked estimate can move past draft, or the lead can close while the
+// draft sits pending — approving then would text a stale question. Stale →
+// draft retired (rejected) + 409; transient lookup failure → fail closed,
+// claim released, 503. Suppression/consent are re-checked by
+// sendCustomerMessage regardless. Narrowly scoped to
+// intent='estimate_clarify'. The staleness rules themselves (closed-lead
+// statuses, answer-arrived detection) live in claimClarifyDispatch.
+// Clarify-only claim release: conditional on the claim still standing, so
+// it can never overwrite a concurrent reject's verdict back to pending
+// (the unlocked reject route can land at any moment; unconditional
+// releaseDraftClaim would resurrect it).
+async function releaseClarifyClaim(draftId, fields = {}) {
+  await db('message_drafts').where({ id: draftId })
+    .whereIn('status', ['approved', 'revised'])
+    .update({
+      status: 'pending',
+      approved_by: null,
+      approved_at: null,
+      ...fields,
+    }).catch(() => {});
+}
+
+async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
+  if (draft.intent !== 'estimate_clarify') return { blocked: false };
+  if (!isEnabled('estimateClarifyAsks')) {
+    await releaseClarifyClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Clarify asks are disabled (GATE_ESTIMATE_CLARIFY_ASKS is off) — draft left pending',
+      code: 'CLARIFY_GATE_OFF',
+    });
+    return { blocked: true };
+  }
+
+  // The staleness re-read, partial-answer rewrite, and claim re-verification
+  // all commit atomically under the per-phone clarify lock (the same lock
+  // every reply/park writer holds) — see claimClarifyDispatch. sent_at
+  // stays provider-confirmed (finalizeDraftSend stamps it after a real
+  // send). From the 'send' outcome on, the decision is committed: failures
+  // downstream MUST reconcile via releaseFailedSendClaim, never plain
+  // releaseDraftClaim.
+  const { claimClarifyDispatch, clarifyPreDispatchCheck } = require('../services/estimate-clarify-asks');
+  const verdict = await claimClarifyDispatch({ draft, isRevision, releaseFields });
+  if (verdict.outcome === 'retired') {
+    res.status(409).json({ error: verdict.message, code: 'CLARIFY_STALE' });
+    return { blocked: true };
+  }
+  if (verdict.outcome === 'rewritten') {
+    // The owner's revision was typed against the stale multi-question copy —
+    // it must not go out as-is. The decision already released the claim in
+    // its locked conditional write (an unconditional release here could
+    // resurrect a concurrent reject); the queue now shows the rewritten
+    // single question.
+    res.status(409).json({
+      error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
+      code: 'CLARIFY_UPDATED',
+    });
+    return { blocked: true };
+  }
+  if (verdict.outcome !== 'send') {
+    await releaseClarifyClaim(draft.id, releaseFields);
+    res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
+    return { blocked: true };
+  }
+  draft.draft_response = verdict.body;
+  draft.flags = JSON.stringify(verdict.flags);
+  const dispatchedMissing = Array.isArray(verdict.flags.missing) ? verdict.flags.missing : [];
+  return {
+    blocked: false,
+    dispatchCommitted: true,
+    dispatchedMissing,
+    // Final abort point, run by sendCustomerMessage as the last await
+    // before the provider handoff — catches answers that land while the
+    // send pipeline's own validators run.
+    preDispatchCheck: clarifyPreDispatchCheck({
+      draftId: draft.id,
+      sourceRef: draft.source_ref,
+      dispatchedMissing,
+    }),
+  };
+}
+
+// Post-guard failure release. A clarify draft past its dispatch decision
+// must reconcile UNDER the clarify lock — plain releaseDraftClaim is
+// unconditional, so it could resurrect a concurrently rejected draft and it
+// can't honor answers a reply recorded during the send window. If the
+// locked reconciliation itself fails, the draft is deliberately LEFT
+// CLAIMED (the same stuck-claim surface every draft lane has on a
+// double-failure) rather than force-released blind.
+async function releaseFailedSendClaim(draft, clarifyGuard, releaseFields = {}) {
+  if (draft.intent === 'estimate_clarify' && clarifyGuard?.dispatchCommitted) {
+    const { reopenClarifyAfterFailedSend } = require('../services/estimate-clarify-asks');
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: draft.id,
+      dispatchedMissing: clarifyGuard.dispatchedMissing,
+      releaseFields,
+    });
+    if (!result.reopened && !result.retired) {
+      logger.warn(`[admin-drafts] clarify failed-send reconciliation unavailable — draft ${draft.id} left claimed for manual recovery`);
+    }
+    return;
+  }
+  await releaseDraftClaim(draft.id, releaseFields);
+}
+
 async function guardCampaignSend(draft, req, res, releaseFields = {}) {
   if (!draft.campaign_type) return { blocked: false, customer: null };
 
@@ -526,16 +658,31 @@ router.put('/:id/approve', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res);
     if (campaignGuard.blocked) return;
 
+    // Recipient + policy resolve BEFORE the clarify decision: both are
+    // decision-invariant (toPhone, provenance, and estimate linkage never
+    // change in the decision), and failures here happen pre-commitment — a
+    // plain claim release suffices, nothing to reconcile.
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id);
+      // Unreachable for clarify drafts by construction (park requires a
+      // usable phone) — but if it ever fires, the release must still be
+      // reject-safe.
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
+      else await releaseDraftClaim(draft.id);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
-
     const sendPolicy = sendPolicyForDraft(draft, recipient);
+
+    // Clarify dispatch decision runs LAST — there is no await between its
+    // commit and the provider call below, so a reply can only land fully
+    // before the decision (honored under the lock: rewrite/retire/abort)
+    // or race the already-in-flight SMS, which no server-side ordering can
+    // remove.
+    const clarifyGuard = await guardClarifySend(draft, res);
+    if (clarifyGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
@@ -549,6 +696,7 @@ router.put('/:id/approve', async (req, res, next) => {
         // stored-preference consentBasis); legacy null-purpose drafts keep
         // the conversational shape exactly.
         ...sendPolicy,
+        preDispatchCheck: clarifyGuard.preDispatchCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -566,11 +714,11 @@ router.put('/:id/approve', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
-      await releaseDraftClaim(draft.id);
+      await releaseFailedSendClaim(draft, clarifyGuard);
       throw sendErr;
     }
     if (!smsResult.sent) {
-      await releaseDraftClaim(draft.id);
+      await releaseFailedSendClaim(draft, clarifyGuard);
       return blockedSendResponse(res, smsResult);
     }
     // Suppression sentinel (campaign drafts): sent:true but nothing actually
@@ -647,16 +795,23 @@ router.put('/:id/revise', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
     if (campaignGuard.blocked) return;
 
+    // Same order contract as the approve route: recipient + policy are
+    // decision-invariant and resolve pre-commitment; the clarify decision
+    // runs LAST with no await between its commit and the provider call.
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      // Same reject-safe release rule as the approve route.
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id, { revised_response: null, final_response: null });
+      else await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
-
     const sendPolicy = sendPolicyForDraft(draft, recipient);
+
+    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
+    if (clarifyGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
@@ -670,6 +825,7 @@ router.put('/:id/revise', async (req, res, next) => {
         // stored-preference consentBasis); legacy null-purpose drafts keep
         // the conversational shape exactly.
         ...sendPolicy,
+        preDispatchCheck: clarifyGuard.preDispatchCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
@@ -687,11 +843,11 @@ router.put('/:id/revise', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       throw sendErr;
     }
     if (!smsResult.sent) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       return blockedSendResponse(res, smsResult);
     }
     // Suppression sentinel (campaign drafts) — same contract as approve: a

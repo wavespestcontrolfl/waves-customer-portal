@@ -658,9 +658,52 @@ async function pullNewsRssItems(source, items) {
 //   - .description is the body (may contain HTML or plain text)
 //   - .location is a free-form venue/address string
 //   - .url is the event URL (when present)
-//   - Recurring events expose .rrule with an .options.rrule string;
-//     we don't expand recurrences in this PR — only the base event
-//     is ingested. P3b can layer on rrule expansion if needed.
+//   - Recurring events expose .rrule. We do not expand every occurrence, but
+//     we persist the authoritative RRULE frequency so a title such as
+//     "Sunset Yoga" cannot be mistaken for a one-time event merely because
+//     its prose omits "weekly".
+function recurrenceMetadataFromIcalEvent(event = {}) {
+  const rrule = event.rrule;
+  if (!rrule) return null;
+
+  const rawFreq = rrule?.origOptions?.freq ?? rrule?.options?.freq;
+  const numericFrequency = {
+    0: 'annual', // rrule package: YEARLY
+    1: 'monthly',
+    2: 'weekly',
+    3: 'daily',
+  }[rawFreq];
+  let recurrenceType = numericFrequency;
+  if (!recurrenceType) {
+    const ruleText = [
+      rrule?.options?.rrule,
+      typeof rrule?.toString === 'function' ? rrule.toString() : rrule,
+    ].filter(Boolean).join(';').toUpperCase();
+    if (/FREQ=YEARLY/.test(ruleText)) recurrenceType = 'annual';
+    else if (/FREQ=MONTHLY/.test(ruleText)) recurrenceType = 'monthly';
+    else if (/FREQ=WEEKLY/.test(ruleText)) recurrenceType = 'weekly';
+    else if (/FREQ=DAILY/.test(ruleText)) recurrenceType = 'daily';
+    else recurrenceType = 'custom';
+  }
+
+  if (recurrenceType === 'annual') {
+    return {
+      event_type: 'annual',
+      recurrence_type: 'annual',
+      freshness_status: 'fresh_annual',
+      freshness_score: 95,
+      routine: false,
+    };
+  }
+  return {
+    event_type: 'recurring_series',
+    recurrence_type: recurrenceType,
+    freshness_status: 'stale_recurring',
+    freshness_score: 10,
+    routine: true,
+  };
+}
+
 async function pullIcalSource(source) {
   if (!ical) {
     throw new Error('node-ical not installed');
@@ -717,6 +760,7 @@ async function pullIcalSource(source) {
     const description = ev.description ? String(ev.description) : null;
     const eventUrl = safeHttpUrl(ev.url);
     const venueName = ev.location ? String(ev.location).slice(0, 256) : null;
+    const recurrence = recurrenceMetadataFromIcalEvent(ev);
 
     // Best-effort city from title/description/location; falls back to
     // source.coverage_geo[0] just like the RSS handler.
@@ -724,7 +768,7 @@ async function pullIcalSource(source) {
       || extractCity(description)
       || extractCity(venueName)
       || (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1;
+    const autoApprove = source.priority_tier === 1 && !recurrence?.routine;
 
     await db('events_raw')
       .insert({
@@ -740,6 +784,12 @@ async function pullIcalSource(source) {
         event_url: eventUrl,
         image_url: null, // iCal spec doesn't carry images
         categories: null,
+        ...(recurrence && {
+          event_type: recurrence.event_type,
+          recurrence_type: recurrence.recurrence_type,
+          freshness_status: recurrence.freshness_status,
+          freshness_score: recurrence.freshness_score,
+        }),
         ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
@@ -751,6 +801,12 @@ async function pullIcalSource(source) {
         venue_name: venueName,
         city,
         event_url: eventUrl,
+        ...(recurrence && {
+          event_type: recurrence.event_type,
+          recurrence_type: recurrence.recurrence_type,
+          freshness_status: recurrence.freshness_status,
+          freshness_score: recurrence.freshness_score,
+        }),
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
         ...revivalResetFields(),
@@ -835,6 +891,7 @@ async function pullScrapeSource(source) {
     // selector itself is invalid CSS (operator typo in scrape_config
     // would otherwise throw a SyntaxError that fails the whole pull
     // every run until edited).
+    /* global document -- the evaluate callback runs in the page's browser context */
     html = await page.evaluate((sel) => {
       let root = document.body;
       if (sel && sel !== 'body') {
@@ -964,6 +1021,7 @@ module.exports = {
   buildArticleBundle,
   buildExtractionSystemPrompt,
   normalizeExtractedEvent,
+  recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,
   decodeXmlBody,

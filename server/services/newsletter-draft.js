@@ -18,7 +18,17 @@ const config = require('../config');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { getNewsletterType } = require('../config/newsletter-types');
 const { etDateString } = require('../utils/datetime-et');
+const { FEEDBACK_HTML_TOKEN, FEEDBACK_TEXT_TOKEN } = require('./newsletter-feedback');
 const logger = require('./logger');
+const {
+  isEligibleForFreshDigest,
+  excludeRoutineRecurringFromQuery,
+  dedupeDigestEvents,
+} = require('./event-freshness');
+const {
+  filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
+} = require('./newsletter-event-selection');
 const { dispatchWithFallback } = require('./llm/call');
 
 function generateSlug(subject) {
@@ -32,6 +42,12 @@ function generateSlug(subject) {
   const date = etDateString();
   const suffix = crypto.randomUUID().slice(0, 6);
   return `${base}-${date}-${suffix}`;
+}
+
+function resolveIssueReference(issueReference, fallback = new Date()) {
+  const reference = issueReference ? new Date(issueReference) : new Date(fallback);
+  if (Number.isNaN(reference.getTime())) throw new Error('issueReference must be a valid date');
+  return reference;
 }
 
 /**
@@ -65,7 +81,7 @@ function formatEventBlock(events) {
  * styled metadata blocks, and per-event sections server-side.
  */
 function buildFlagshipSystemPrompt(voice, month) {
-  return `You write the Waves weekly local events newsletter — "Fresh This Week from North Port to Tampa."
+  return `You write Fresh This Week — Waves Pest Control's weekly local weekend guide ("A local weekend guide from the Waves crew") — for readers from North Port to Tampa.
 
 This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide written like a friend texting "yo, here's what's actually worth doing."
 
@@ -99,7 +115,7 @@ VOICE:
   * Mock warnings and dares: "Don't say we didn't warn you."
   * Florida in-jokes: foldable chair in the trunk, sunscreen, afternoon thunderstorms
 
-SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, specific to this week, two proven shapes — (1) noun-triple + kicker, (2) full declarative sentence with a curiosity gap. Examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
+SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, LEAD with exactly ONE thematic emoji then a space (reference-edition convention — never two, never zero), then the hook: specific to this week, two proven shapes — (1) noun-triple + kicker, (2) full declarative sentence with a curiosity gap. Examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
 
 PREVIEW TEXT: the second punchline, never a summary. Direct-address roast or three-fragment cadence. Examples: ${(voice.previewTextRules?.examples || []).map(e => `"${e}"`).join(', ')}
 
@@ -375,6 +391,16 @@ async function assemblePestInsiderNewsletter(draft) {
   const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds, gifRetryBudget);
   const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds, gifRetryBudget);
 
+  // The generator already paid for and uploaded this issue-specific artwork.
+  // Render it as the lead image just like the flagship assembler does; keeping
+  // it out of the body silently burned an image-generation call every month.
+  const heroUrl = safeUrl(draft.heroImageUrl);
+  if (heroUrl) {
+    parts.push(`<div style="text-align:center;margin:0 0 24px 0;">
+<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || draft.subject || 'Pest Insider')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+</div>`);
+  }
+
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
     draft.crawlHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-crawl" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.crawlHeading)}</a></li>`,
@@ -385,7 +411,7 @@ async function assemblePestInsiderNewsletter(draft) {
   ].filter(Boolean);
   if (tocItems.length) {
     parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
-<p style="margin:0 0 10px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
+<p style="margin:0 0 10px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
 <ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
 </div>`);
   }
@@ -404,7 +430,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.crawlHeading || draft.crawlText) {
     parts.push(dividerHtml());
     if (draft.crawlHeading) {
-      parts.push(`<h2 id="pi-crawl" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-crawl" style="${sectionHeadingStyle(0, 8)}"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
     }
     if (crawlGif) parts.push(gifBlock(crawlGif, draft.crawlGifCaption));
     if (draft.crawlText) {
@@ -416,7 +442,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.pestOfMonth?.name) {
     const card = draft.pestOfMonth;
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pest" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pest" style="${sectionHeadingStyle(1, 8)}">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
     const rows = [
       card.whereYoullSeeIt && `📍 <strong>Where you'll see it:</strong> ${markdownToHtml(card.whereYoullSeeIt)}`,
       card.threatLevel && `⚠️ <strong>How worried to be:</strong> ${markdownToHtml(card.threatLevel)}`,
@@ -430,7 +456,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.lawnHeading || draft.lawnText) {
     parts.push(dividerHtml());
     if (draft.lawnHeading) {
-      parts.push(`<h2 id="pi-lawn" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-lawn" style="${sectionHeadingStyle(2, 8)}"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
     }
     if (draft.lawnText) {
       parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
@@ -442,14 +468,14 @@ async function assemblePestInsiderNewsletter(draft) {
   // 4. Myth-Buster
   if (draft.mythQuestion && draft.mythVerdict) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-myth" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-myth" style="${sectionHeadingStyle(3, 8)}">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
     parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.mythVerdict)}</p>`);
   }
 
   // 5. The pitch (sincere middle of the sandwich)
   if (draft.pitchHeading) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pitch" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pitch" style="${sectionHeadingStyle(4, 8)}"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
     if (pitchGif) parts.push(gifBlock(pitchGif, draft.pitchGifCaption));
     if (draft.pitchIntro) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.pitchIntro)}</p>`);
@@ -464,7 +490,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.closingHeading || draft.closingText || draft.ctaLine) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 id="pi-close" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-close" style="${sectionHeadingStyle(5)}"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText).replace(/\n+/g, '<br/><br/>')}</p>`);
@@ -487,13 +513,18 @@ async function assemblePestInsiderNewsletter(draft) {
     }
   }
 
+  // ── Reaction footer ── every edition ends with the feedback ask (owner
+  // directive 2026-07-17). Per-recipient links substitute at send time;
+  // archive/preview surfaces neutralize to inert chips.
+  parts.push(FEEDBACK_HTML_TOKEN);
+
   return parts.join('\n\n');
 }
 
 // ── Beehiiv-Quality Newsletter Assembly ──────────────────────────────
 //
 // Renders structured event JSON into styled email HTML matching the
-// visual quality of the Beehiiv "Fresh This Week" newsletters: per-event
+// visual quality of the former Beehiiv-hosted newsletters: per-event
 // GIFs, branded dividers, emoji metadata blocks, TOC with jump links.
 
 // Palette lives in email-template.js (one theme layer for every email
@@ -501,7 +532,7 @@ async function assemblePestInsiderNewsletter(draft) {
 // active GATE_EMAIL_GLASS chrome). Getter shape keeps the 30+
 // `COLORS.x` call sites unchanged; classic values are verbatim the
 // original set, so gate-off output is byte-identical.
-const { newsletterPalette } = require('./email-template');
+const { newsletterPalette, newsletterSectionTheme } = require('./email-template');
 const COLORS = {
   get font() { return newsletterPalette().font; },
   get navy() { return newsletterPalette().navy; },
@@ -513,12 +544,19 @@ const COLORS = {
   get rule() { return newsletterPalette().rule; },
 };
 
+// Inline-only section bands are deliberate: many inboxes strip embedded CSS,
+// so each heading carries its own accessible text/background/accent pairing.
+function sectionHeadingStyle(index, marginBottom = 12) {
+  const theme = newsletterSectionTheme(index);
+  return `font-family:${COLORS.font};font-size:20px;line-height:1.35;font-weight:800;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 ${marginBottom}px 0;`;
+}
+
 // Animated circular mascot badge built from the CURRENT brand mascot
 // (client/public/waves-logo-2026.png art, wordmark cropped out — illegible
 // at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
 // mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
 // a platform we left — that asset can vanish without notice.
-const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
+const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 // The exact words the hero poster letters into the artwork: the issue's
 // subject line, emoji stripped (image models render emoji glyphs as mush;
@@ -722,11 +760,12 @@ function stripPersonalizationTokens(content) {
   // require here (not at top) so newsletter-quiz — which requires db — stays a
   // leaf of newsletter-draft's dependency graph regardless of load order.
   const { neutralizeQuizTokens } = require('./newsletter-quiz');
-  return neutralizeQuizTokens(
+  const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
+  return neutralizeFeedbackTokens(neutralizeQuizTokens(
     stripGreetingNameToken(content)
       .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
       .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL),
-  );
+  ));
 }
 
 // Highlights bullets are plain text with a renderer-added "•" marker
@@ -982,9 +1021,10 @@ function linkifyFirst(html, text, url) {
 }
 
 function gifBlock(url, caption) {
-  if (!url) return '';
+  const safeGifUrl = safeUrl(url);
+  if (!safeGifUrl) return '';
   let html = `<div style="text-align:center;margin:12px 0 8px 0;">
-<img src="${url}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+<img src="${safeGifUrl}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
   if (caption) {
     html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
@@ -1032,7 +1072,7 @@ async function assembleBeehiivNewsletter(draft) {
   const heroUrl = safeUrl(draft.heroImageUrl);
   if (heroUrl) {
     parts.push(`<div style="margin:0 0 20px 0;text-align:center;">
-<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || 'Fresh This Week')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || 'Waves Newsletter')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
 </div>`);
   }
 
@@ -1044,7 +1084,7 @@ async function assembleBeehiivNewsletter(draft) {
     tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
   }
   parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
-<p style="margin:0 0 10px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
+<p style="margin:0 0 10px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
 <ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
 </div>`);
 
@@ -1071,7 +1111,7 @@ async function assembleBeehiivNewsletter(draft) {
 
     // Heading
     const anchorId = `evt-${slugify(ev.title)}`;
-    parts.push(`<h2 id="${anchorId}" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
+    parts.push(`<h2 id="${anchorId}" style="${sectionHeadingStyle(i, 8)}">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     // Reaction GIF first — in the shipped Beehiiv formula the GIF + caption
     // IS the joke; the event photo is only a fallback when Giphy yields
@@ -1164,7 +1204,7 @@ async function assembleBeehiivNewsletter(draft) {
   // ── Homeowner Minute ──
   if (draft.homeownerMinute) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="homeowner-minute" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
+    parts.push(`<h2 id="homeowner-minute" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
     parts.push(`<div style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
 <p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
 </div>`);
@@ -1174,7 +1214,7 @@ async function assembleBeehiivNewsletter(draft) {
   if (draft.closingHeading || draft.closingText) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 style="${sectionHeadingStyle(events.length + 1)}">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);
@@ -1190,7 +1230,7 @@ async function assembleBeehiivNewsletter(draft) {
 
   // ── Sign-off ──
   parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
-  const signoffText = draft.signoff || '— The Waves Pest Control Team';
+  const signoffText = draft.signoff || '— The Waves Team';
   parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
 
   // ── P.S. ──
@@ -1203,13 +1243,18 @@ async function assembleBeehiivNewsletter(draft) {
 
   // ── Share Banner ──
   parts.push(`<div style="margin:28px 0 0 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;text-align:center;">
-<p style="margin:0 0 8px 0;font-size:13px;color:${COLORS.muted};">Know someone who'd dig this? Forward it or share the link 👇</p>
+<p style="margin:0 0 8px 0;font-size:14px;color:${COLORS.muted};">Know someone who'd dig this? Forward it or share the link 👇</p>
 <p style="margin:0;">
 <a href="https://www.facebook.com/wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">📘</a>
 <a href="https://www.instagram.com/wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">📸</a>
 <a href="https://www.youtube.com/@wavespestcontrol" style="text-decoration:none;margin:0 8px;font-size:20px;">▶️</a>
 </p>
 </div>`);
+
+  // ── Reaction footer ── every edition ends with the feedback ask (owner
+  // directive 2026-07-17). Per-recipient links substitute at send time;
+  // archive/preview surfaces neutralize to inert chips.
+  parts.push(FEEDBACK_HTML_TOKEN);
 
   return parts.join('\n\n');
 }
@@ -1226,6 +1271,7 @@ async function assembleBeehiivNewsletter(draft) {
  * @param {string} [opts.audience] - Audience description
  * @param {string} [opts.tone] - Tone description
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
+ * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
  * @returns {Promise<{send: Object, draft: Object}>}
  */
@@ -1238,11 +1284,15 @@ async function createNewsletterDraft({
   audience,
   tone,
   includeCTA,
+  issueReference,
   trx,
   persist = true,
 }) {
   const knex = trx || db;
-  const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
+  // The issue's Tuesday (not "now") anchors both the seasonal-month framing
+  // and every event-policy window — cross-provider dispatch happens below.
+  const editorialReference = resolveIssueReference(issueReference);
+  const month = editorialReference.toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
   const typeConfig = getNewsletterType(newsletterType);
   const voice = getVoiceProfile(typeConfig.voiceProfile);
 
@@ -1265,18 +1315,34 @@ async function createNewsletterDraft({
       // merged-away, or expired event could be re-pulled with DB-accurate
       // facts and shipped as "fresh". Ineligible ids simply don't resolve and
       // get dropped by lockEventFactsFromDb.
-      approvedEvents = await knex('events_raw as e')
+      const approvedQuery = knex('events_raw as e')
         .leftJoin('event_sources as s', 's.id', 'e.source_id')
         .select(
           'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
-          'e.image_url', 'e.categories', 'e.is_free', 's.name as source_name',
+          'e.image_url', 'e.categories', 'e.is_free', 'e.admin_status',
+          'e.event_type', 'e.recurrence_type', 'e.freshness_status',
+          'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+          's.name as source_name',
         )
         .whereIn('e.id', safeIds)
         .whereIn('e.admin_status', ['approved', 'featured'])
         .whereNull('e.merged_into')
         .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
         .orderByRaw('e.freshness_score DESC NULLS LAST');
+
+      const approvedRows = await excludeRoutineRecurringFromQuery(approvedQuery);
+      const nonRepeatedRows = await filterRepeatedDateIdentities(approvedRows, {
+        knex,
+        reference: editorialReference,
+      });
+      const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, {
+        knex,
+        reference: editorialReference,
+      });
+      approvedEvents = dedupeDigestEvents(
+        historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
+      );
 
       eventBlock = formatEventBlock(approvedEvents);
     }
@@ -1352,7 +1418,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
   // 4b. Generate hero image (runs in parallel with nothing — fire and await)
   if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl) {
-    draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Fresh This Week');
+    draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Waves Newsletter');
   }
 
   // 4c. Assemble Beehiiv-quality HTML from structured data + Giphy GIFs
@@ -1384,7 +1450,11 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   if (!draft.textBody && draft.htmlBody) {
     draft.textBody = decodeEscapedEntities(draft.htmlBody.replace(/<[^>]+>/g, ''))
       .replace(/\s+/g, ' ')
-      .trim();
+      .trim()
+      // The HTML reaction token survives tag-stripping as a literal string;
+      // the text part carries its own token so the sender substitutes the
+      // plain-text render (links list) instead of an HTML block.
+      .split(FEEDBACK_HTML_TOKEN).join(FEEDBACK_TEXT_TOKEN);
   }
 
   // 5. Run voice validation
@@ -1423,10 +1493,18 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     return { send: null, draft };
   }
 
-  // 6. Generate slug
+  const send = await persistNewsletterDraft({ draft, prompt, newsletterType, knex });
+
+  // 8. Return { send, draft }
+  return { send, draft };
+}
+
+async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
+  // Generate slug only at persistence time. This lets callers do paid/network
+  // generation before opening a short advisory-locked DB transaction.
   const slug = generateSlug(draft.subject);
 
-  // 7. Insert newsletter_sends row
+  // Insert newsletter_sends row
   const [send] = await knex('newsletter_sends').insert({
     subject: draft.subject,
     subject_b: null,
@@ -1448,13 +1526,13 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     // actually shipped, on the first 'sent' transition.
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
   }).returning('*');
-
-  // 8. Return { send, draft }
-  return { send, draft };
+  return send;
 }
 
 module.exports = {
+  resolveIssueReference,
   createNewsletterDraft,
+  persistNewsletterDraft,
   lockEventFactsFromDb,
   // Exported for unit testing the injection/prose defenses
   escapeHtml,

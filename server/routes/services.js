@@ -8,6 +8,7 @@ const { authenticate } = require('../middleware/auth');
 // customer-facing render of technician_notes applies the same legacy
 // inspection-fee scrub (codex #2817).
 const { customerSafeServiceNotes } = require('../services/project-types');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
 
@@ -225,9 +226,12 @@ router.get('/:id', async (req, res, next) => {
 // =========================================================================
 router.get('/stats/summary', async (req, res, next) => {
   try {
+    // ET calendar year — service_date is a DATE in ET terms; UTC's year
+    // flips 5 hours early on New Year's Eve.
+    const etYearStart = `${etDateString().slice(0, 4)}-01-01`;
     const servicesYTD = await db('service_records')
       .where({ customer_id: req.customerId })
-      .where('service_date', '>=', `${new Date().getFullYear()}-01-01`)
+      .where('service_date', '>=', etYearStart)
       .count('id as count')
       .first();
 
@@ -249,7 +253,7 @@ router.get('/stats/summary', async (req, res, next) => {
     const celsiusApps = await db('service_products')
       .join('service_records', 'service_products.service_record_id', 'service_records.id')
       .where({ 'service_records.customer_id': req.customerId })
-      .where('service_records.service_date', '>=', `${new Date().getFullYear()}-01-01`)
+      .where('service_records.service_date', '>=', etYearStart)
       .where('service_products.product_name', 'ilike', '%celsius%')
       .count('service_products.id as count')
       .first();

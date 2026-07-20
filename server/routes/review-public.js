@@ -23,6 +23,7 @@ router.post('/:token', async (req, res, next) => {
   } catch (err) {
     if (err.message === 'Already rated') return res.status(409).json({ error: err.message });
     if (err.message === 'Review request not found') return res.status(404).json({ error: err.message });
+    if (err.message === 'Review link expired') return res.status(410).json({ error: 'This review link has expired' });
     next(err);
   }
 });

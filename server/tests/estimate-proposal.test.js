@@ -142,3 +142,18 @@ describe('estimate-proposal', () => {
     });
   });
 });
+
+describe('isCommercialProposalData', () => {
+  const { isCommercialProposalData } = require('../services/estimate-proposal');
+
+  test('authored proposals and machine scaffolds both route to the proposal editor', () => {
+    expect(isCommercialProposalData({ proposal: { enabled: true } })).toBe(true);
+    // enabled:false scaffold — the normal edit flow would accept it and
+    // then lose the operator's edits when revise rejects COMMERCIAL rows.
+    expect(isCommercialProposalData({ proposal: { enabled: false, scaffold: true } })).toBe(true);
+    expect(isCommercialProposalData({ proposal: { enabled: false } })).toBe(false);
+    expect(isCommercialProposalData({})).toBe(false);
+    expect(isCommercialProposalData(null)).toBe(false);
+    expect(isCommercialProposalData(JSON.stringify({ proposal: { scaffold: true } }))).toBe(true);
+  });
+});

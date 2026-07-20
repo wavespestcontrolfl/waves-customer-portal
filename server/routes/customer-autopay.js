@@ -327,6 +327,41 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       return res.json({ success: true, updated: false });
     }
 
+    // Consent scope (same gate enrollConsentedMethod enforces): a method may
+    // only ENTER the in-charge Auto Pay role with an enrollment-qualifying
+    // (v8+) consent row on file. A card saved through the estimate card-hold
+    // capture only authorized that visit's charges — without this check
+    // "use this card" promotes it to recurring billing with no authorization
+    // of record (and the enrollment-email backstop below skips exactly these
+    // customers, so no disclosure would go out either). The client shows the
+    // full authorization copy and re-submits with consent_accepted; that
+    // acceptance is recorded as the audit row BEFORE any flag moves.
+    if (shouldMirrorAutopayMethod) {
+      const ConsentService = require('../services/payment-method-consents');
+      const hasConsent = await ConsentService.hasEnrollmentScopedConsent(
+        req.customerId,
+        selectedPaymentMethod.stripe_payment_method_id
+      );
+      if (!hasConsent) {
+        if (req.body?.consent_accepted !== true) {
+          return res.status(409).json({
+            error: 'This payment method has not been authorized for Auto Pay yet. Review and accept the authorization to continue.',
+            code: 'consent_required',
+            method_type: selectedPaymentMethod.method_type || 'card',
+          });
+        }
+        await ConsentService.recordConsent({
+          customerId: req.customerId,
+          paymentMethodId: selectedPaymentMethod.id,
+          stripePaymentMethodId: selectedPaymentMethod.stripe_payment_method_id,
+          source: 'portal_autopay_enable',
+          methodType: selectedPaymentMethod.method_type || 'card',
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+        });
+      }
+    }
+
     await db.transaction(async (trx) => {
       if (Object.keys(updates).length > 0) {
         await trx('customers').where({ id: req.customerId }).update(updates);
@@ -334,6 +369,16 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
       if (updates.autopay_enabled === false) {
         await trx('payment_methods').where({ customer_id: req.customerId }).update({ autopay_enabled: false });
+        // The opt-out EVENT commits with the opt-out STATE: this row is what
+        // enrollConsentedMethod's opted_out_after_authorization guard reads,
+        // so a post-commit best-effort write left a gap where a delayed
+        // webhook enrollment could land after the disable committed but
+        // before (or without) the event row — overwriting a real opt-out.
+        await logAutopay(req.customerId, 'autopay_disabled', {
+          details: {},
+          db: trx,
+          required: true,
+        });
         return;
       }
 
@@ -348,6 +393,9 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     });
 
     for (const evt of events) {
+      // autopay_disabled already committed INSIDE the transaction above
+      // (guard input, not just audit) — don't write it twice.
+      if (evt.type === 'autopay_disabled') continue;
       await logAutopay(req.customerId, evt.type, {
         paymentMethodId: evt.paymentMethodId || null,
         details: evt.details || {},
