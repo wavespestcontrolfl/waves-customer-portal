@@ -20,6 +20,18 @@
  * same/next-day appointment leaves a dead armed flag the 15-minute scan
  * re-selects forever, so those guards re-arm ONLY the 24h window (which
  * carries the fallback notice). This pins both helpers' contract.
+ *
+ * The snapshot read itself is BEST-EFFORT with a DISTINCT failure result:
+ * captureReminderGuards returned [] both for "no reminder rows" and for a
+ * failed read, so a blocked send after a failed read silently skipped the
+ * re-arm — the willNotify:true sync had already covered both windows, and the
+ * customer heard nothing. It now returns { failed: true, guards: [] } on
+ * failure, and rearmRescheduleReminderWindows degrades to the unguarded
+ * re-arm scoped by the caller-supplied service ids + the static
+ * suppressed_by_sibling/cancelled carve-outs, judging the 72h band from each
+ * entry's caller-known NEW appointment time (mirrors reschedule-sms.js's
+ * reminderGuardReadFailed fallback — "silence is worse"). Genuine-empty []
+ * stays a no-op, and a nullish guards input can never trigger the fallback.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -191,9 +203,94 @@ describe('captureReminderGuards', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('a snapshot read failure degrades to [] (best-effort), logged', async () => {
+  test('a snapshot read failure returns the DISTINCT failure marker (never the genuine-empty []), logged', async () => {
+    // [] must keep meaning "read succeeded, no reminder rows" — a failed read
+    // masquerading as that no-ops the blocked-send re-arm while the
+    // willNotify:true sync has already covered both windows: total silence.
     db.mockImplementation(() => chain({ select: jest.fn().mockRejectedValue(new Error('db down')) }));
-    await expect(captureReminderGuards('svc-1')).resolves.toEqual([]);
+    await expect(captureReminderGuards('svc-1')).resolves.toEqual({ failed: true, guards: [] });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reminder guard snapshot failed'));
+  });
+});
+
+describe('snapshot-read-failure fallback (unguarded re-arm)', () => {
+  const FAILED = { failed: true, guards: [] };
+  const entry = (id, appointmentTime = FUTURE_APPT) => ({ scheduledServiceId: id, appointmentTime });
+
+  test('failure marker + fallback scope → unguarded re-arm: service id + carve-outs only, NO snapshot predicates, logged loudly', async () => {
+    const q = chain();
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return q;
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+
+    await rearmRescheduleReminderWindows(FAILED, [entry('svc-1')]);
+
+    expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
+    // The static carve-outs survive the lost snapshot…
+    expect(q.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
+    expect(q.where).toHaveBeenCalledWith('cancelled', false);
+    // …but the snapshot predicates are exactly what failed to capture — they
+    // must NOT appear, or the update could never match a row.
+    expect(q.where).not.toHaveBeenCalledWith('appointment_time', expect.anything());
+    expect(q.where).not.toHaveBeenCalledWith('updated_at', expect.anything());
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('WITHOUT the pre-send snapshot guard'));
+  });
+
+  test('fallback respects the 72h band per entry, judged on the caller-supplied NEW appointment time', async () => {
+    const q = chain();
+    db.mockImplementation(() => q);
+
+    await rearmRescheduleReminderWindows(FAILED, [
+      entry('svc-1', FUTURE_APPT), entry('svc-2', NEAR_APPT),
+    ]);
+
+    expect(q.update).toHaveBeenCalledTimes(2);
+    expect(q.update.mock.calls[0][0]).toHaveProperty('reminder_72h_sent', false);
+    expect(q.update.mock.calls[1][0]).not.toHaveProperty('reminder_72h_sent');
+    expect(q.update.mock.calls[1][0]).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+  });
+
+  test('capture failure piped straight into the re-arm (the call-site shape) fires the fallback', async () => {
+    // The read fails…
+    db.mockImplementation(() => chain({ select: jest.fn().mockRejectedValue(new Error('db down')) }));
+    const guards = await captureReminderGuards(['svc-1']);
+
+    // …and the re-arm still reaches the row via the caller-known scope.
+    const q = chain();
+    db.mockImplementation(() => q);
+    await rearmRescheduleReminderWindows(guards, [entry('svc-1')]);
+
+    expect(q.update).toHaveBeenCalledTimes(1);
+    expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
+  });
+
+  test('failure marker WITHOUT a usable fallback scope re-arms nothing (logged) — never an unscoped update', async () => {
+    db.mockImplementation(() => { throw new Error('should not query'); });
+    await rearmRescheduleReminderWindows(FAILED);
+    await rearmRescheduleReminderWindows(FAILED, []);
+    // A malformed entry with no id is filtered out too.
+    await rearmRescheduleReminderWindows(FAILED, [{ appointmentTime: APPT }]);
+    expect(db).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('no fallback scope supplied'));
+  });
+
+  test('genuine-empty snapshot ([] — read succeeded, no rows) still no-ops even with a fallback scope supplied', async () => {
+    db.mockImplementation(() => { throw new Error('should not query'); });
+    await rearmRescheduleReminderWindows([], [entry('svc-1')]);
+    expect(db).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a fallback re-arm failure is logged per entry, never thrown (best-effort compensation)', async () => {
+    db.mockImplementation(() => chain({ update: jest.fn().mockRejectedValue(new Error('db down')) }));
+    await expect(rearmRescheduleReminderWindows(FAILED, [entry('svc-1')])).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-arm after failed notice failed'));
   });
 });
