@@ -4,6 +4,7 @@ const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove } = require('./call-booking-catalog');
+const { findConflictingVisits } = require('./scheduling/occupancy');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -285,11 +286,16 @@ class SmartRebooker {
       const keptTechId = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         ? options.technicianId
         : service.technician_id;
-      if (keptTechId && updates.window_start && windowEnd) {
+      if (updates.window_start && windowEnd) {
+        // Same slot-reserve namespace + `${techId || 'unassigned'}` key shape
+        // slot-reservation.js uses — techless moves now serialize too instead
+        // of skipping the lock along with the (formerly tech-only) check.
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${keptTechId}:${newDateStr}`],
+          ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
+      }
+      if (keptTechId && updates.window_start && windowEnd) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
@@ -312,6 +318,36 @@ class SmartRebooker {
           )
           .first('id');
         if (overlap) {
+          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
+
+      // Tech-blind occupancy (shared module): the kept-tech WHERE above can
+      // never match technician-NULL rows, and the whole check was skipped
+      // when keptTechId was null (reachable via rain-out and reschedule-sms
+      // on techless rows) — a public reschedule landed the clash silently.
+      // One active tech means ANY overlap is a real double-booking. Status
+      // set matches the tech check above (completed excluded — a done
+      // morning visit must not block an afternoon move). Batch movers
+      // (rain-out route pushes) pass options.excludeServiceIds so the
+      // visits moving in the same sweep don't collide with their own
+      // pre-move positions.
+      if (updates.window_start && windowEnd) {
+        const occupancyClash = await findConflictingVisits({
+          db: trx,
+          date: newDateStr,
+          windowStart: updates.window_start,
+          windowEnd,
+          excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
+          excludeStatuses: ['cancelled', 'completed'],
+        });
+        if (occupancyClash.length) {
+          // Same failure mode as the kept-tech check so every caller's
+          // 409/SLOT_TAKEN handling works unchanged.
           throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
             statusCode: 409,
             isOperational: true,
@@ -716,6 +752,32 @@ class SmartRebooker {
             }
           }
         }
+        // Anchor tech-blind occupancy (shared module) — the tech-scoped
+        // check above can't see technician-NULL rows and never ran at all
+        // for techless anchors. Same throw/handling as the single-visit
+        // path; sweptIds excludes every row this sweep is moving.
+        if (isAnchor && updateData.window_start) {
+          const anchorOccEnd = updateData.window_end || (() => {
+            const [h, m] = String(updateData.window_start).split(':').map(Number);
+            const total = h * 60 + (m || 0) + 60;
+            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+          })();
+          const anchorOccClash = await findConflictingVisits({
+            db: trx,
+            date: String(date).split('T')[0],
+            windowStart: updateData.window_start,
+            windowEnd: anchorOccEnd,
+            excludeServiceIds: sweptIds,
+            excludeStatuses: TERMINAL,
+          });
+          if (anchorOccClash.length) {
+            throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+        }
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
           trx,
           date,
@@ -771,6 +833,31 @@ class SmartRebooker {
             )
             .first('id');
           if (clash) {
+            conflicted = true;
+            updateData.technician_id = null;
+          }
+        }
+        // Sibling tech-blind occupancy (shared module) — the tech-scoped
+        // probe above misses technician-NULL rows entirely and never ran
+        // for techless siblings. Same failure mode as the tech clash:
+        // flag + unassign (the visit still shifts — cadence preserved,
+        // dispatch parks the occurrence), never a throw that aborts the
+        // whole series over one crowded day.
+        if (!isAnchor && !conflicted && updateData.window_start) {
+          const occEnd = updateData.window_end || (() => {
+            const [h, m] = String(updateData.window_start).split(':').map(Number);
+            const total = h * 60 + (m || 0) + 60;
+            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+          })();
+          const occClash = await findConflictingVisits({
+            db: trx,
+            date: String(date).split('T')[0],
+            windowStart: updateData.window_start,
+            windowEnd: occEnd,
+            excludeServiceIds: sweptIds,
+            excludeStatuses: TERMINAL,
+          });
+          if (occClash.length) {
             conflicted = true;
             updateData.technician_id = null;
           }

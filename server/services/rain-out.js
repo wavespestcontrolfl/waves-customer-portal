@@ -594,7 +594,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     try {
-      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, { allowLive: true });
+      // excludeServiceIds = the whole batch this rain-out is moving: the
+      // rebooker's tech-blind occupancy check would otherwise clash each
+      // move against siblings still sitting in (or already shifted to)
+      // their same-relative-order windows. Relative order within the batch
+      // is preserved by the delta/own-window math above, so intra-batch
+      // overlap can't be introduced; conflicts against rows OUTSIDE the
+      // batch still block. (The tech-scoped check keeps relying on the
+      // tail-first/head-first ordering, unchanged.)
+      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+        allowLive: true,
+        excludeServiceIds: orderedJobs.map((j) => j.id),
+      });
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
       // of a bulk rain-out — record and continue.

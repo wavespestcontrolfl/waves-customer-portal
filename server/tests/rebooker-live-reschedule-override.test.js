@@ -12,6 +12,13 @@ const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: mockIoTo })),
 }));
+// The shared tech-blind occupancy gate has its own suites
+// (scheduling-occupancy.test.js, rebooker-occupancy-conflict.test.js); this
+// file exercises the allowLive/tech-scoped semantics, so the module is
+// stubbed clean here to keep the table-queue mocks focused.
+jest.mock('../services/scheduling/occupancy', () => ({
+  findConflictingVisits: jest.fn().mockResolvedValue([]),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');

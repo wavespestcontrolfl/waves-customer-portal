@@ -91,6 +91,34 @@ const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TE
 // Owner directive 2026-07-08: call-booked visits default to a 60-minute
 // duration when the catalog doesn't specify one.
 const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
+
+// Time-sanity screen for transcript-parsed booking times (advisory only —
+// NEVER a block: owner's call is to book exactly as before and flag for
+// review). The transcript parse has no clamp, so "Sunday 7pm" books 19:00
+// verbatim; these flags put that on a triage card instead of leaving it to
+// be discovered on the dispatch board. Bounds mirror the self-booking
+// surfaces' working day (booking_config defaults 08:00–17:00 ET).
+const CALL_BOOKING_DAY_START_MIN = 8 * 60;
+const CALL_BOOKING_DAY_END_MIN = 17 * 60;
+function callBookingTimeSanityFlags({ scheduledDate, windowStart }) {
+  const flags = [];
+  if (scheduledDate) {
+    try {
+      const dow = etParts(parseETDateTime(`${String(scheduledDate).split('T')[0]}T12:00`)).dayOfWeek;
+      if (dow === 0 || dow === 6) flags.push('weekend');
+    } catch { /* unparseable date — the booking guards upstream own that */ }
+  }
+  if (windowStart) {
+    const [h, m] = String(windowStart).split(':').map(Number);
+    if (Number.isFinite(h)) {
+      const startMin = h * 60 + (Number.isFinite(m) ? m : 0);
+      if (startMin < CALL_BOOKING_DAY_START_MIN || startMin >= CALL_BOOKING_DAY_END_MIN) {
+        flags.push('outside_business_hours');
+      }
+    }
+  }
+  return flags;
+}
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
@@ -6692,6 +6720,10 @@ const CallRecordingProcessor = {
           let windowStartForLog = null;
           let scheduleWasReused = false;
           let followUpCreated = null;
+          // Cross-customer overlap findings from inside the booking txn —
+          // advisory only (owner's chosen behavior: the booking proceeds
+          // exactly as before; a triage card + admin bell surface the clash).
+          let bookingTimeConflicts = [];
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -7148,6 +7180,30 @@ const CallRecordingProcessor = {
                     },
                   };
                 }
+                // Cross-customer occupancy check (shared scheduling/occupancy
+                // module) — the only date-collision guard above is
+                // customer-scoped, so a booking overlapping ANOTHER
+                // customer's visit sailed through silently. One active tech
+                // means any overlap is a real clash. ADVISORY ONLY by owner
+                // decision: never hold or block — record the clashing rows
+                // and book exactly as before; the post-commit triage card +
+                // admin notification below surface them. excludeCustomerId
+                // keeps the existing same-customer semantics (the same-day
+                // guard above already owns those). Best-effort: a query
+                // failure must never fail the booking txn.
+                try {
+                  const { findConflictingVisits } = require('./scheduling/occupancy');
+                  bookingTimeConflicts = await findConflictingVisits({
+                    db: trx,
+                    date: scheduledDate,
+                    windowStart: windowStart || '09:00',
+                    windowEnd: windowEnd || '10:00',
+                    excludeCustomerId: customerId,
+                  });
+                } catch (occErr) {
+                  logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
+                  bookingTimeConflicts = [];
+                }
                 // Bill-To linkage (callBookingPayerId resolved above, before the
                 // transaction): stamp payer_id (per-job) so the completion
                 // invoice routes to the payer. (propertyLinkage resolved above,
@@ -7411,6 +7467,74 @@ const CallRecordingProcessor = {
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
                   .catch((triageErr) => logger.warn(`[call-proc] unassigned-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+              }
+              // Schedule-conflict / time-sanity review card (advisory —
+              // owner's chosen behavior: the booking above already landed
+              // exactly as before; this only surfaces it). Fresh inserts
+              // only: reused/attached rows were validated when first
+              // created, and bookingTimeConflicts was computed inside THIS
+              // run's insert txn. Mirrors the unassigned_auto_booking
+              // pattern above; the admin bell rides the same channel other
+              // schedule anomalies use (notification-service.notifyAdmin).
+              if (!scheduleWasReused) {
+                const timeSanityFlags = callBookingTimeSanityFlags({
+                  scheduledDate,
+                  windowStart: windowStart || '09:00',
+                });
+                if (bookingTimeConflicts.length || timeSanityFlags.length) {
+                  const conflictFlag = bookingTimeConflicts.length
+                    ? 'booking_time_conflict'
+                    : 'booking_out_of_hours';
+                  await db('triage_items')
+                    .insert(buildTriageItem({
+                      callLogId: call.id,
+                      flag: conflictFlag,
+                      extraction: v2ApprovedExtraction || undefined,
+                      severity: 'advisory',
+                      extraPayload: {
+                        scheduled_service_id: svc.id,
+                        scheduled_date: scheduledDate,
+                        window_start: windowStart || '09:00',
+                        service: svc.service_type,
+                        conflicting_visits: bookingTimeConflicts.map((r) => ({
+                          id: r.id,
+                          customer_id: r.customer_id,
+                          window_start: r.window_start,
+                          window_end: r.window_end,
+                          service_type: r.service_type,
+                          status: r.status,
+                        })),
+                        time_sanity_flags: timeSanityFlags,
+                      },
+                    }))
+                    .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                    .ignore()
+                    .catch((triageErr) => logger.warn(`[call-proc] booking-conflict triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                  try {
+                    const conflictBits = [];
+                    if (bookingTimeConflicts.length) {
+                      conflictBits.push(`overlaps ${bookingTimeConflicts.length} existing visit${bookingTimeConflicts.length === 1 ? '' : 's'}`);
+                    }
+                    if (timeSanityFlags.includes('outside_business_hours')) conflictBits.push('outside 8am–5pm');
+                    if (timeSanityFlags.includes('weekend')) conflictBits.push('on a weekend');
+                    await require('./notification-service').notifyAdmin(
+                      'schedule',
+                      bookingTimeConflicts.length ? 'Call booking overlaps the schedule' : 'Call booking outside normal hours',
+                      `Phone-booked ${svc.service_type || 'visit'} on ${scheduledDate} at ${windowStart || '09:00'} ${conflictBits.join(' and ')} — review it on the dispatch board.`,
+                      {
+                        link: '/admin/dispatch',
+                        metadata: {
+                          scheduledServiceId: svc.id,
+                          callSid,
+                          conflicting_visit_ids: bookingTimeConflicts.map((r) => r.id),
+                          time_sanity_flags: timeSanityFlags,
+                        },
+                      },
+                    );
+                  } catch (notifyErr) {
+                    logger.warn(`[call-proc] booking-conflict admin notify failed for ${maskSid(callSid)}: ${notifyErr.message}`);
+                  }
+                }
               }
               if (attachedManualBookingId && attachSkippedFollowUpPlan) {
                 // The call promised a follow-up treatment, but the primary is
@@ -8414,6 +8538,7 @@ CallRecordingProcessor._test = {
   isUsableContactPhone,
   labeledTranscriptPreservesWords,
   applyRecurringIntentDefault,
+  callBookingTimeSanityFlags,
 };
 
 // Production contract for the re-transcription backfill (NOT test-only):

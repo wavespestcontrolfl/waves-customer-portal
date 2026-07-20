@@ -9,6 +9,7 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
+const { findConflictingVisits } = require('./scheduling/occupancy');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -348,6 +349,34 @@ class AvailabilityEngine {
           });
         }
         if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
+          throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
+        }
+      } else {
+        // City resolved to no zone → the whole occupied-set check above was
+        // skipped and NOTHING validated the window (AI-assistant book tool,
+        // onboarding reschedule). Fall back to the shared tech-blind
+        // occupancy check — one active tech, so any overlapping
+        // scheduled_services row is a real clash. Status set matches the
+        // zone path (non-cancelled occupies); live holds count, expired
+        // ones don't. Zone-resolved behavior above is unchanged.
+        const zoneNullExcludes = [];
+        if (options.excludeServiceId) zoneNullExcludes.push(options.excludeServiceId);
+        if (options.excludeSelfBookingId) {
+          // The onboarding reschedule identifies the row it is replacing by
+          // its self-booking id — exclude that booking's dispatch row too.
+          const replacedRow = await trx('scheduled_services')
+            .where({ self_booking_id: options.excludeSelfBookingId })
+            .first('id');
+          if (replacedRow?.id) zoneNullExcludes.push(replacedRow.id);
+        }
+        const zoneNullClash = await findConflictingVisits({
+          db: trx,
+          date: dateStr,
+          windowStart: startTime,
+          windowEnd: endTime,
+          excludeServiceIds: zoneNullExcludes,
+        });
+        if (zoneNullClash.length) {
           throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
         }
       }

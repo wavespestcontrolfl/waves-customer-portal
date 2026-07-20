@@ -4,6 +4,12 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The shared tech-blind occupancy gate is covered by its own suites
+// (scheduling-occupancy.test.js, rebooker-occupancy-conflict.test.js); this
+// file exercises track-token expiry, so stub the gate clean.
+jest.mock('../services/scheduling/occupancy', () => ({
+  findConflictingVisits: jest.fn().mockResolvedValue([]),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');

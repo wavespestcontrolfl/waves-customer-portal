@@ -294,7 +294,10 @@ describe('rain-out service', () => {
       // The appointment is BOOKED as the tight 1-hour slot the dispatcher saw.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
-        { allowLive: true },
+        // excludeServiceIds = the batch being moved (here just the anchor) so
+        // the rebooker's tech-blind occupancy check never clashes a rain-out
+        // move against the batch's own pre-move positions.
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
       );
 
       // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
@@ -449,9 +452,11 @@ describe('rain-out service', () => {
       // Tail-first: the later sibling moves BEFORE the anchor so the anchor's
       // new 13:00-15:00 slot isn't blocked by the not-yet-moved sibling.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
-        'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
-        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-2', 'svc-1'] });
     });
 
     test('same-day BACKWARD pull (custom time earlier than anchor) moves head-first', async () => {
@@ -484,9 +489,11 @@ describe('rain-out service', () => {
       });
 
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
-        'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
-        'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -527,7 +534,8 @@ describe('rain-out service', () => {
 
       // The dispatch path must log moves as admin-initiated, not 'tech'.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
-        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin', { allowLive: true });
+        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+        { allowLive: true, excludeServiceIds: ['svc-1'] });
     });
 
     test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {
@@ -616,12 +624,15 @@ describe('rain-out service', () => {
       expect(result.movedCount).toBe(3);
 
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
-        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
       // Route siblings keep their own windows on the new date.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
-        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
-        'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
 
       // Anchor and sibling both get the self-serve link — no reply ask;
       // no-phone sibling skipped.
@@ -704,7 +715,8 @@ describe('rain-out service', () => {
       // DB TIME comes back 'HH:MM:SS'; it must be trimmed so the strict
       // reminder helper re-arms the sibling onto its real window, not 08:00.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
-        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech', { allowLive: true });
+        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2'] });
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {

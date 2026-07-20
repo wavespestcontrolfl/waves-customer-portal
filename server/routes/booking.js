@@ -838,6 +838,38 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
   );
 
+  // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
+  // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
+  // blocks on unassigned zone rows and live customer-NULL estimate holds,
+  // but find-time's occupied set is per-tech — technician_id-NULL rows and
+  // techless holds never occupied anything, so /book kept re-offering a
+  // slot every tap on which 409'd. Post-filter candidates against the
+  // shared tech-blind occupancy set (one active tech: ANY overlap is the
+  // commit gate's superset — tech-backed rows are already excluded by
+  // find-time, so re-dropping them is idempotent; over-filtering is
+  // acceptable, a new 409 source is not). Degrades soft: on query failure
+  // serve unfiltered rather than serving nothing — the commit gate still
+  // owns correctness.
+  let occupiedByDate = null;
+  try {
+    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+    const occupiedRows = await listOccupiedWindows({
+      dateFrom: rangeFrom,
+      dateTo: rangeTo,
+      // Public self-reschedule: the moving row must not block the slot it
+      // is vacating — same exclusion findAvailableSlots already applies.
+      excludeServiceIds,
+    });
+    occupiedByDate = new Map();
+    for (const row of occupiedRows) {
+      if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
+      occupiedByDate.get(row.date).push(row);
+    }
+  } catch (occErr) {
+    logger.warn(`[booking] availability occupancy filter unavailable — serving unfiltered slots: ${occErr.message}`);
+    occupiedByDate = null;
+  }
+
   const fmt = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
   // Location scope for every offer this build signs — the exact coords the
   // slot computation ran on, on the public rounding grid. Callers that mint
@@ -853,6 +885,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     if (startMin < dayStartMin || endMin > dayEndMin) return;
     // Lunch windows are reserved for route health and should never be self-booked.
     if (startMin < lunchEnd && endMin > lunchStart) return;
+    // Commit-gate occupancy mirror (see the fetch above). Overlap semantics
+    // match the gate's SQL predicate (half-open: back-to-back windows touch
+    // without clashing). Also covers cleanBookingStart snaps that would land
+    // a candidate on a window find-time validated around.
+    if (occupiedByDate) {
+      const dayOccupied = occupiedByDate.get(slot.date);
+      if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
+    }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
     const key = `${slot.date}|${startTime}`;
