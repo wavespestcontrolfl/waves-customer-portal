@@ -308,16 +308,36 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(lockIdx).toBeLessThan(capCountIdx); // taken before the count it serializes
   });
 
-  test('lock acquisition order stays fixed — customer → tech → zone → day — so writers can never deadlock', () => {
+  // ORDERING CONTRACT (services/scheduling/occupancy.js): the ONE global
+  // order is date-occupancy → self-booking-confirm → tech → zone → day-cap.
+  // createSelfBooking uses every rung, so it is the writer that pins the
+  // whole order down.
+  test('lock acquisition order stays fixed — date → customer → tech → zone → day-cap — so writers can never deadlock', () => {
     const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
     const customerLockIdx = src.indexOf("['self-booking-confirm', `${custId}:${slotDateStr}`],", txIdx);
     const techLockIdx = src.indexOf("['slot-reserve', `${technician_id}:${slotDateStr}`],", txIdx);
     const zoneLockIdx = src.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],", txIdx);
     const dayLockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);', txIdx);
-    expect(customerLockIdx).toBeGreaterThan(txIdx);
+    expect(dateLockIdx).toBeGreaterThan(txIdx);
+    expect(customerLockIdx).toBeGreaterThan(dateLockIdx);
     expect(techLockIdx).toBeGreaterThan(customerLockIdx);
     expect(zoneLockIdx).toBeGreaterThan(techLockIdx);
     expect(dayLockIdx).toBeGreaterThan(zoneLockIdx);
+  });
+
+  test('the date-occupancy lock comes from the SHARED module (a private copy would key a different lock)', () => {
+    // A hand-rolled advisory-lock statement here would have to reproduce the
+    // namespace AND the `occupancy:<date>` key shape exactly; one typo and
+    // this writer silently stops serializing against the rebooker.
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
+    expect(dateLockIdx).toBeGreaterThan(-1);
+    expect(src.slice(txIdx, dateLockIdx))
+      .toContain("require('../services/scheduling/occupancy')");
+    // ...and it is the FIRST advisory lock the transaction takes.
+    const firstRawLockIdx = src.indexOf('pg_advisory_xact_lock', txIdx);
+    expect(dateLockIdx).toBeLessThan(firstRawLockIdx);
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
@@ -401,12 +421,17 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
     expect(availSrc).toMatch(/module\.exports\.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;/);
   });
 
-  test('confirmBooking takes the day lock AFTER its zone lock (fixed order) and counts globally before inserting', () => {
+  test('confirmBooking takes date → zone → day-cap (the global order) and counts globally before inserting', () => {
+    const dateLockIdx = availSrc.indexOf('await acquireOccupancyLock(trx, dateStr);');
     const zoneLockIdx = availSrc.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],");
     const dayLockIdx = availSrc.indexOf('await acquireSelfBookingDayCapLock(trx, dateStr);');
     const dayCountIdx = availSrc.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {');
     const insertIdx = availSrc.indexOf("await trx('self_booked_appointments').insert({");
-    expect(zoneLockIdx).toBeGreaterThan(-1);
+    expect(dateLockIdx).toBeGreaterThan(-1);
+    expect(zoneLockIdx).toBeGreaterThan(dateLockIdx); // rung 1 before rung 4
+    // Exactly ONE acquisition — hoisted out of the zone-null branch, so the
+    // zone-resolved branch can't skip it.
+    expect(availSrc.split('await acquireOccupancyLock(trx, dateStr);')).toHaveLength(2);
     expect(dayLockIdx).toBeGreaterThan(zoneLockIdx); // zone → day, same relative order as createSelfBooking
     expect(dayCountIdx).toBeGreaterThan(dayLockIdx); // count under the lock
     expect(insertIdx).toBeGreaterThan(dayCountIdx); // checked before the write

@@ -181,6 +181,19 @@ describe('slot reservation helpers', () => {
       });
 
       expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-1', active: true });
+      // ORDERING CONTRACT (services/scheduling/occupancy.js): rung 1
+      // (date-occupancy) → rung 3 (tech) → rung 4 (zone). The hold row this
+      // inserts is COUNTED by findConflictingVisits, so the estimate path is
+      // a real occupancy writer; the tech + zone locks below it are not
+      // enough on their own — the rebooker takes rungs 1+3 and NO zone lock,
+      // so a hold for a different tech shared nothing with a concurrent move.
+      expect(trx.raw.mock.calls
+        .filter((c) => String(c[0]).includes('pg_advisory_xact_lock'))
+        .map((c) => c[1])).toEqual([
+        ['slot-reserve', 'occupancy:2027-05-20'],
+        ['slot-reserve', 'tech-1:2027-05-20'],
+        ['slot-reserve', 'zone:unknown:2027-05-20'],
+      ]);
       expect(liveHoldsBuilder.where).toHaveBeenCalledWith({ source_estimate_id: 'estimate-456' });
       expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
       expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
@@ -243,6 +256,13 @@ describe('slot reservation helpers', () => {
   });
 
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
+    // Unlocked pre-read that keys the date-occupancy lock (rung 1) — taken
+    // before the FOR UPDATE so a writer already holding the date lock and
+    // waiting on this row can't deadlock us.
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }),
+    };
     const reservationBuilder = {
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
@@ -280,7 +300,7 @@ describe('slot reservation helpers', () => {
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1' }]),
     };
-    const scheduledBuilders = [reservationBuilder, conflictBuilder, updateBuilder];
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
       throw new Error(`unexpected table ${table}`);
@@ -302,6 +322,14 @@ describe('slot reservation helpers', () => {
       expect.objectContaining({ id: 'estimate-456' }),
       expect.objectContaining({ serviceMode: 'recurring', selectedFrequency: 'quarterly' }),
     );
+    // Rung 1 is the FIRST advisory lock this path takes, keyed by the held
+    // row's calendar date — commitReservation takes no tech or zone lock, so
+    // it is the only thing serializing the commit against the rebooker and
+    // the self-booking confirms (and the commit can WIDEN window_end).
+    expect(trx.raw.mock.calls[0]).toEqual([
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'occupancy:2027-05-20'],
+    ]);
     expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
     expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
     expect(conflictBuilder.whereNot).toHaveBeenCalledWith('id', 'scheduled-123');

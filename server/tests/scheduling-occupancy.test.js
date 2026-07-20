@@ -237,3 +237,116 @@ describe('date-wide occupancy advisory lock', () => {
     expect(trx.raw).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE ORDERING CONTRACT, asserted at every writer.
+ *
+ * Global order (occupancy.js header):
+ *   1 date-occupancy → 2 self-booking-confirm → 3 tech → 4 zone → 5 day-cap
+ *
+ * Round-2 P1: the order used to differ per writer (rebooker occupancy→tech,
+ * zone-null confirm zone→day-cap→occupancy, createSelfBooking customer→tech→
+ * zone→day-cap with NO date lock at all). That permitted a three-way deadlock
+ * AND left writers whose uncommitted inserts the tech-blind checkers could not
+ * see. Each writer's runtime lock sequence is asserted in its own suite; this
+ * one is the cross-writer invariant — every blocking writer's FIRST scheduling
+ * lock is rung 1, from the shared helper, so no two of them can invert.
+ */
+describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  // [label, source, slice-start marker, the rung-1 call expected inside it]
+  const WRITERS = [
+    ['createSelfBooking (routes/booking.js)',
+      read('routes/booking.js'), 'txResult = await db.transaction',
+      'await acquireOccupancyLock(trx, slotDateStr);'],
+    ['confirmBooking (services/availability.js)',
+      read('services/availability.js'), 'const { booking, scheduled } = await runBookingWork(',
+      'await acquireOccupancyLock(trx, dateStr);'],
+    ['reserveSlot (services/slot-reservation.js)',
+      read('services/slot-reservation.js'), 'async function reserveSlot(',
+      'await acquireOccupancyLock(trx, date);'],
+    ['commitReservation (services/slot-reservation.js)',
+      read('services/slot-reservation.js'), 'async function commitReservation(',
+      'await acquireOccupancyLock(client, lockedDate);'],
+  ];
+
+  test.each(WRITERS)('%s takes the shared date lock before any other advisory lock', (_label, src, startMarker, rungOneCall) => {
+    const startIdx = src.indexOf(startMarker);
+    expect(startIdx).toBeGreaterThan(-1);
+    const rungOneIdx = src.indexOf(rungOneCall, startIdx);
+    expect(rungOneIdx).toBeGreaterThan(startIdx);
+    // No hand-rolled pg_advisory_xact_lock beats it to the punch. (Rung 1 is
+    // taken via the shared helper, so it never appears in this scan itself.)
+    const firstRawLockIdx = src.indexOf('pg_advisory_xact_lock', startIdx);
+    if (firstRawLockIdx > -1) expect(rungOneIdx).toBeLessThan(firstRawLockIdx);
+  });
+
+  test('the rebooker takes rung 1 first on BOTH its paths — single, and series (all dates up front)', () => {
+    const src = read('services/rebooker.js');
+    // Single move: date lock, then the tech-scoped lock.
+    const singleIdx = src.indexOf('await acquireOccupancyLock(trx, newDateStr);');
+    const singleTechIdx = src.indexOf("['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],");
+    expect(singleIdx).toBeGreaterThan(-1);
+    expect(singleTechIdx).toBeGreaterThan(singleIdx);
+    // Series: the multi-date acquisition is sorted-ascending (acquireOccupancyLocks)
+    // and precedes every per-sibling tech lock in the loop below it.
+    const seriesIdx = src.indexOf('await acquireOccupancyLocks(trx, projectedDates);');
+    expect(seriesIdx).toBeGreaterThan(-1);
+    for (const techLock of [
+      "['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],",
+      "['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],",
+    ]) {
+      const idx = src.indexOf(techLock);
+      expect(idx).toBeGreaterThan(seriesIdx);
+    }
+  });
+
+  test('every writer imports rung 1 from the shared module — no private key shapes', () => {
+    // A local copy of the lock statement would have to reproduce the
+    // namespace AND the `occupancy:<date>` key exactly; one drift and the
+    // writer silently stops serializing against the others.
+    for (const rel of [
+      'routes/booking.js',
+      'services/availability.js',
+      'services/slot-reservation.js',
+      'services/rebooker.js',
+    ]) {
+      const src = read(rel);
+      expect(src).toContain('scheduling/occupancy');
+      expect(src).toContain('acquireOccupancyLock');
+      // The key shape lives in exactly one place.
+      expect(src).not.toContain('occupancy:${');
+    }
+  });
+
+  test('the header documents the order AND the exemptions (the contract is the doc)', () => {
+    const header = read('services/scheduling/occupancy.js').split('const OCCUPANCY_LOCK_NS')[0];
+    expect(header).toContain('ORDERING CONTRACT');
+    // The five rungs, in order.
+    const rungs = ['date-occupancy', 'self-booking', 'technician', 'zone', 'global day cap'];
+    let cursor = -1;
+    for (const rung of rungs) {
+      const idx = header.indexOf(rung, cursor + 1);
+      expect(idx).toBeGreaterThan(cursor);
+      cursor = idx;
+    }
+    // Every writer named, so a new one can't be added without meeting the doc.
+    for (const writer of [
+      'createSelfBooking', 'confirmBooking', 'rescheduleVisit', 'series sweep',
+      'reserveSlot', 'commitReservation',
+    ]) {
+      expect(header).toContain(writer);
+    }
+    // ...and every exemption justified rather than merely omitted.
+    expect(header).toContain('EXEMPT');
+    for (const exempt of [
+      'buildBookingAvailability', 'rain-out.js', 'call-recording-processor.js',
+      'releaseReservation',
+    ]) {
+      expect(header).toContain(exempt);
+    }
+  });
+});

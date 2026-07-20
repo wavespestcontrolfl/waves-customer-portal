@@ -35,6 +35,9 @@ const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+// Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
+// scheduling/occupancy.js for why both write paths here take it first.
+const { acquireOccupancyLock } = require('./scheduling/occupancy');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -413,6 +416,15 @@ async function reserveSlot({
         }
       }
 
+      // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
+      // in scheduling/occupancy.js). The hold row inserted below is
+      // customer-NULL but findConflictingVisits COUNTS live holds, so this is
+      // a real occupancy writer. The tech + zone locks taken next do NOT
+      // cover it: the rebooker takes the date + tech rungs and NO zone lock,
+      // so an estimate hold whose slot named a different tech (or none)
+      // shared nothing with a concurrent rebooker move on the same date and
+      // the two could interleave past each other's checks.
+      await acquireOccupancyLock(trx, date);
       // The FOR UPDATE above only serializes THIS estimate — two different
       // customers' estimates reserving the same tech/date can both pass the
       // conflict check below concurrently and both insert. Serialize all
@@ -426,7 +438,7 @@ async function reserveSlot({
       // (availability.confirmBooking, /api/booking/confirm) use — without
       // it, a self-book confirm and an estimate hold for the same window
       // each miss the other's uncommitted row. Fixed order everywhere:
-      // tech lock first, zone lock second.
+      // date lock first, then tech, then zone.
       let reserveZone = null;
       try {
         // Shared with the slot generator's colliding-slot filter (slot-zone.js)
@@ -620,6 +632,35 @@ async function commitReservation({
   // with us, and the expiry comparison runs in Postgres (NOW()) so server
   // clock skew can't let an expired reservation slip through.
   const run = async (client) => {
+    // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT in
+    // scheduling/occupancy.js). Committing a hold is a real occupancy write:
+    // it graduates the row to a live booking and can WIDEN window_end, since
+    // the commit-time duration is resolved from the accepted service profile
+    // and may exceed the held one. The conflict check below is tech-scoped
+    // ONLY when the row carries a technician — an unassigned hold makes it
+    // date-wide/tech-blind outright — and this path takes no tech or zone
+    // lock at all, so rung 1 is the only thing serializing it against the
+    // rebooker and the self-booking confirms.
+    //
+    // Taken BEFORE the FOR UPDATE row lock on purpose: a writer already
+    // holding the date lock may need this row, so grabbing the row first and
+    // then waiting on the date lock would invert the order. scheduled_date is
+    // read without a lock to key it; if the row moved dates in between, the
+    // date lock we hold is the wrong one — fail into the same
+    // RESERVATION_EXPIRED recovery the accept flow already handles (the
+    // customer re-picks a time) rather than taking a second date lock and
+    // opening a two-key inversion.
+    const preRow = await client('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('scheduled_date');
+    if (!preRow) {
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    const lockedDate = dateOnly(preRow.scheduled_date);
+    if (lockedDate) await acquireOccupancyLock(client, lockedDate);
+
     const row = await client('scheduled_services')
       .where({ id: scheduledServiceId })
       .select('*', client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW()) AS _expired'))
@@ -628,6 +669,11 @@ async function commitReservation({
     if (!row) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    if (dateOnly(row.scheduled_date) !== lockedDate) {
+      const err = new Error('reservation moved to another date');
+      err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
     if (!row.reservation_expires_at) {

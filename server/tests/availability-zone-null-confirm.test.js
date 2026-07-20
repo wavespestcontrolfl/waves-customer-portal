@@ -41,6 +41,14 @@ const futureWeekday = () => {
 };
 const DATE = futureWeekday();
 
+// Every advisory lock a transaction took, as [namespace, key], in acquisition
+// order — the ORDERING CONTRACT is about order, so the assertions below read
+// this list positionally.
+const advisoryLocks = (trx) => trx.raw.mock.calls
+  .filter((c) => String(c[0]).includes('pg_advisory_xact_lock') && Array.isArray(c[1]))
+  .map((c) => c[1]);
+const lockKeys = (trx) => advisoryLocks(trx).map(([, key]) => key);
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -172,19 +180,60 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     }));
   });
 
-  test('zone resolved → zone path unchanged, fallback never runs', async () => {
+  test('zone resolved → zone probe path unchanged, but the date lock is STILL taken first', async () => {
     const { trx } = wireConfirm({
       zones: [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }],
     });
 
     const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(result.confirmationCode).toBeTruthy();
+    // The zone-scoped occupied-set probe still owns this branch — the shared
+    // tech-blind module is NOT consulted here.
     expect(findConflictingVisits).not.toHaveBeenCalled();
-    // The date-wide occupancy lock belongs to the tech-blind gate; the
-    // zone-resolved path keeps its own zone+day-cap serialization only.
-    const lockKeys = trx.raw.mock.calls
-      .filter((c) => Array.isArray(c[1]))
-      .map((c) => c[1][1]);
-    expect(lockKeys).not.toContain(`occupancy:${DATE}`);
+    // ...but the date-wide lock is unconditional (ORDERING CONTRACT rung 1).
+    // This branch validates against a ZONE-scoped occupied set, so its
+    // uncommitted insert is exactly what a rebooker's global tech-blind check
+    // would miss — the rebooker takes no zone lock, so rung 1 is the only
+    // thing that serializes the two.
+    expect(lockKeys(trx)).toContain(`occupancy:${DATE}`);
+  });
+
+  // ---- ORDERING CONTRACT (services/scheduling/occupancy.js) ---------------
+  // Global order: date-occupancy -> self-booking-confirm -> tech -> zone ->
+  // day-cap. confirmBooking uses rungs 1, 4 and 5. A writer that took them in
+  // any other order could deadlock against createSelfBooking, which shares
+  // all three.
+  describe('lock ordering', () => {
+    test.each([
+      ['zone-null', []],
+      ['zone-resolved', [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }]],
+    ])('%s confirm takes date-occupancy -> zone -> day-cap', async (_label, zones) => {
+      const { trx } = wireConfirm({ zones });
+
+      await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+
+      const keys = lockKeys(trx);
+      const occupancyIdx = keys.indexOf(`occupancy:${DATE}`);
+      const zoneIdx = keys.indexOf(`zone:${zones[0]?.id || 'unknown'}:${DATE}`);
+      const dayCapIdx = keys.indexOf(DATE);
+      expect(occupancyIdx).toBeGreaterThanOrEqual(0);
+      expect(zoneIdx).toBeGreaterThanOrEqual(0);
+      expect(dayCapIdx).toBeGreaterThanOrEqual(0);
+      // Rung 1 is FIRST — of every advisory lock this transaction takes, not
+      // merely before the zone one.
+      expect(occupancyIdx).toBe(0);
+      expect(occupancyIdx).toBeLessThan(zoneIdx);
+      expect(zoneIdx).toBeLessThan(dayCapIdx);
+    });
+
+    test('the day-cap lock rides the self-booking-day-cap namespace, the other two ride slot-reserve', async () => {
+      const { trx } = wireConfirm({ zones: [] });
+      await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+
+      const locks = advisoryLocks(trx);
+      expect(locks[0]).toEqual(['slot-reserve', `occupancy:${DATE}`]);
+      expect(locks[1]).toEqual(['slot-reserve', `zone:unknown:${DATE}`]);
+      expect(locks[2]).toEqual(['self-booking-day-cap', DATE]);
+    });
   });
 });

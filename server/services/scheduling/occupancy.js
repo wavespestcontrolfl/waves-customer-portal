@@ -56,17 +56,74 @@ const DEFAULT_DURATION_MINUTES = 60;
 // from `<tech>:<date>` or `zone:<id>:<date>`; sharing the namespace string
 // just keeps the family together, it does not make them collide.
 //
-// ORDERING CONTRACT: this is the COARSEST scheduling lock (a whole calendar
-// day), so a writer that ALSO takes a tech/zone slot-reserve lock acquires
-// THIS ONE FIRST (rebooker: date-occupancy -> tech). That gives one global
-// order — date-occupancy before tech/zone/day-cap — so the rebooker single
-// path, the series path, and the zone-null confirm can never invert against
-// each other. It composes with createSelfBooking's customer -> tech -> zone ->
-// day-cap sequence because those callers don't take THIS lock, and the only
-// lock they share with a date-occupancy writer is a single tech/zone key (one
-// shared lock can't deadlock). Multi-date callers (series) must take their
-// date locks in ascending date order — use acquireOccupancyLocks().
-// pg_advisory_xact_lock auto-releases at commit/rollback.
+// ============================ ORDERING CONTRACT ============================
+//
+// THE global scheduling lock order. Every writer that BLOCKS on a schedule
+// check and then COMMITS a scheduled_services row acquires locks in exactly
+// this sequence, skipping the rungs it doesn't need — never reordering them:
+//
+//   1. date-occupancy   'slot-reserve' / `occupancy:<YYYY-MM-DD>`  (THIS module)
+//   2. self-booking     'self-booking-confirm' / `<customerId>:<date>`
+//   3. technician       'slot-reserve' / `<techId|'unassigned'>:<date>`
+//   4. zone             'slot-reserve' / `zone:<zoneId|'unknown'>:<date>`
+//   5. global day cap   'self-booking-day-cap' / `<date>`
+//                       (availability.acquireSelfBookingDayCapLock)
+//
+// Coarsest first. Rung 1 is a whole calendar day and is therefore ALWAYS
+// taken first; a consistent global order is what makes the set deadlock-free
+// (two writers can share any subset of rungs and still acquire them in the
+// same relative order). Multi-date callers take their rung-1 keys in ascending
+// date order — use acquireOccupancyLocks(). pg_advisory_xact_lock auto-releases
+// at commit/rollback.
+//
+// WHY EVERY BLOCKING WRITER MUST TAKE RUNG 1 — not just the tech-blind ones:
+// findConflictingVisits is GLOBAL but reads COMMITTED rows only. A writer that
+// skips the date lock can hold an UNCOMMITTED overlapping insert while a
+// date-lock holder runs its tech-blind check, sees nothing, and commits on top
+// of it. So the date lock is not "the lock the tech-blind check needs" — it is
+// the lock every writer owes the tech-blind checkers. A narrower rung cannot
+// substitute: the rebooker takes rungs 1+3 only, so a zone lock (rung 4) is
+// never shared with it and never serializes against it.
+//
+// WRITERS (each verified against this order):
+//   routes/booking.js createSelfBooking ......... 1 -> 2 -> 3(if tech) -> 4 -> 5
+//   services/availability.js confirmBooking ..... 1 -> 4 -> 5
+//     Rung 1 is unconditional here — the ZONE-RESOLVED branch checks only a
+//     zone-scoped occupied set, so it is exactly the "uncommitted insert the
+//     rebooker's global check can't see" case above. The zone-null branch also
+//     needs it for its own findConflictingVisits call.
+//   services/rebooker.js rescheduleVisit (single)  1 -> 3
+//   services/rebooker.js series sweep ........... 1 (all target dates, sorted,
+//     up front, BEFORE the loop's per-sibling rung-3 locks) -> 3 per sibling
+//   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
+//   services/slot-reservation.js commitReservation  1
+//
+// ESTIMATE-HOLD PATH — why rungs 3+4 do NOT cover it, and rung 1 was added:
+// reserveSlot inserts a customer-NULL hold row that findConflictingVisits
+// COUNTS (includeHolds), and commitReservation graduates that hold to a real
+// booking while possibly WIDENING window_end (the commit-time duration can
+// exceed the held one). Both are therefore real occupancy writers. Their zone
+// leg (rung 4) serializes them against the self-booking writers only —
+// the rebooker takes rungs 1+3 and NO zone lock, so an estimate hold and a
+// rebooker move on the same date shared nothing and could interleave. The
+// unassigned case is worse: commitReservation's own conflict query drops its
+// technician predicate when the row has no tech, making it a tech-blind
+// writer outright. Both now take rung 1 first. commitReservation is often
+// handed the estimate-accept transaction (routes/estimate-public.js), which
+// takes no scheduling locks of its own, so rung 1 is still that txn's first.
+//
+// EXEMPT — read-only or occupancy-shrinking, no lock required:
+//   routes/booking.js buildBookingAvailability, availability.getAvailableSlots,
+//   auto-dispatch/candidate-slots, estimate-slot-availability.js + find-time
+//     — OFFER surfaces. They read (listOccupiedWindows) and commit nothing;
+//       every offer is re-validated under lock at its own commit gate.
+//   services/rain-out.js — computes the batch and delegates EVERY write to
+//     rebooker.rescheduleVisit, so its moves take rungs 1+3 there.
+//   services/call-recording-processor.js triage cards — advisory-only reads
+//     (conflict + out-of-hours flags); never block, never write a visit.
+//   slot-reservation releaseReservation / releaseExpiredReservations — delete
+//     only. Removing occupancy can never create an overlap.
+// ===========================================================================
 const OCCUPANCY_LOCK_NS = 'slot-reserve';
 
 function occupancyLockKey(dateStr) {

@@ -100,7 +100,27 @@ const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
 // surfaces' working day (booking_config defaults 08:00–17:00 ET).
 const CALL_BOOKING_DAY_START_MIN = 8 * 60;
 const CALL_BOOKING_DAY_END_MIN = 17 * 60;
-function callBookingTimeSanityFlags({ scheduledDate, windowStart }) {
+function callBookingTimeMinutes(value) {
+  if (!value) return null;
+  const [h, m] = String(value).split(':').map(Number);
+  if (!Number.isFinite(h)) return null;
+  return h * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+/**
+ * @param {object}  args
+ * @param {string} [args.scheduledDate]     'YYYY-MM-DD'
+ * @param {string} [args.windowStart]       'HH:MM'
+ * @param {string} [args.windowEnd]         'HH:MM' — preferred end source.
+ * @param {number} [args.durationMinutes]   fallback when windowEnd is absent
+ *                                          (defaults to the catalog default).
+ */
+function callBookingTimeSanityFlags({
+  scheduledDate,
+  windowStart,
+  windowEnd,
+  durationMinutes,
+} = {}) {
   const flags = [];
   if (scheduledDate) {
     try {
@@ -108,13 +128,27 @@ function callBookingTimeSanityFlags({ scheduledDate, windowStart }) {
       if (dow === 0 || dow === 6) flags.push('weekend');
     } catch { /* unparseable date — the booking guards upstream own that */ }
   }
-  if (windowStart) {
-    const [h, m] = String(windowStart).split(':').map(Number);
-    if (Number.isFinite(h)) {
-      const startMin = h * 60 + (Number.isFinite(m) ? m : 0);
-      if (startMin < CALL_BOOKING_DAY_START_MIN || startMin >= CALL_BOOKING_DAY_END_MIN) {
-        flags.push('outside_business_hours');
-      }
+  const startMin = callBookingTimeMinutes(windowStart);
+  if (startMin != null) {
+    const startOutside = startMin < CALL_BOOKING_DAY_START_MIN
+      || startMin >= CALL_BOOKING_DAY_END_MIN;
+    if (startOutside) flags.push('outside_business_hours');
+    // A start INSIDE the working day still runs past close when the visit is
+    // long enough: a 60-minute booking at 16:30 ends at 17:30. Checking only
+    // the start let every one of those through clean. Only raised when the
+    // start itself passed — a 19:00 start is already flagged above and a
+    // second flag for its equally-late end is noise on the same card.
+    if (!startOutside) {
+      const explicitEnd = callBookingTimeMinutes(windowEnd);
+      const duration = Number(durationMinutes) > 0
+        ? Number(durationMinutes)
+        : DEFAULT_CALL_BOOKING_DURATION_MINUTES;
+      // An end at or before start (parse noise, or a window crossing
+      // midnight) is not evidence of an overrun — fall back to the duration.
+      const endMin = explicitEnd != null && explicitEnd > startMin
+        ? explicitEnd
+        : startMin + duration;
+      if (endMin > CALL_BOOKING_DAY_END_MIN) flags.push('ends_after_business_hours');
     }
   }
   return flags;
@@ -7488,6 +7522,12 @@ const CallRecordingProcessor = {
                 const timeSanityFlags = callBookingTimeSanityFlags({
                   scheduledDate,
                   windowStart: windowStart || '09:00',
+                  // Same end/duration the visit row above was written with,
+                  // so the card flags a visit that RUNS past close, not just
+                  // one that starts after it.
+                  windowEnd: windowEnd || '10:00',
+                  durationMinutes: callBookingCatalogRow?.default_duration_minutes
+                    || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                 });
                 if (bookingTimeConflicts.length || timeSanityFlags.length) {
                   const conflictFlag = bookingTimeConflicts.length
@@ -7503,6 +7543,9 @@ const CallRecordingProcessor = {
                         scheduled_service_id: svc.id,
                         scheduled_date: scheduledDate,
                         window_start: windowStart || '09:00',
+                        // The end is what the ends_after_business_hours flag
+                        // is about — the card is unreadable without it.
+                        window_end: windowEnd || '10:00',
                         service: svc.service_type,
                         conflicting_visits: bookingTimeConflicts.map((r) => ({
                           id: r.id,

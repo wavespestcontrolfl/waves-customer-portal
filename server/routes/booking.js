@@ -1738,6 +1738,16 @@ async function createSelfBooking(payload = {}) {
     let txResult;
     try {
       txResult = await db.transaction(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
+      // in services/scheduling/occupancy.js). This path's own conflict gate
+      // below is zone/tech-scoped, but the row it inserts is counted by the
+      // GLOBAL tech-blind check the rebooker and the zone-null confirm run.
+      // Without this lock our uncommitted insert is invisible to them: they
+      // pass their check and commit an overlapping visit on top of it. Taken
+      // before the customer/tech/zone/day-cap locks below so every writer in
+      // the family acquires the same rungs in the same order.
+      const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
+      await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${custId}:${slotDateStr}`],
@@ -1748,8 +1758,8 @@ async function createSelfBooking(payload = {}) {
       // BOTH locks: tech:date serializes against slot-reservation and
       // rebooker, zone:date serializes against the zone-capacity writers
       // (availability.confirmBooking and no-tech confirms here). Lock
-      // order is fixed (tech first) so concurrent confirms can't
-      // deadlock.
+      // order is fixed (date → customer → tech → zone → day-cap, the
+      // global order) so concurrent confirms can't deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       if (technician_id) {
         await trx.raw(
@@ -1768,7 +1778,8 @@ async function createSelfBooking(payload = {}) {
       // (the SHARED helper — availability.js's confirmBooking takes the same
       // one) serializes the count+insert across zones AND across writers.
       // Taken last, keeping the acquisition order fixed
-      // (customer → tech → zone → day) so concurrent confirms can't deadlock.
+      // (date → customer → tech → zone → day-cap — the global order in
+      // scheduling/occupancy.js) so concurrent confirms can't deadlock.
       await acquireSelfBookingDayCapLock(trx, slotDateStr);
 
       // Idempotent replay: same customer, same day, same start time →

@@ -277,6 +277,18 @@ class AvailabilityEngine {
     // customer-visible fires before the outer transaction commits.
     const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
     const { booking, scheduled } = await runBookingWork(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST and UNCONDITIONAL (see the
+      // ORDERING CONTRACT in scheduling/occupancy.js). This confirm inserts a
+      // scheduled_services row that the GLOBAL tech-blind checks (rebooker
+      // single + series) count, and those checks read committed rows only:
+      // without this lock our uncommitted insert is invisible to them and
+      // both sides commit an overlap. It is taken on the ZONE-RESOLVED branch
+      // too — that branch validates against a zone-scoped occupied set, so it
+      // is precisely the writer whose insert a global checker would miss. The
+      // zone-null branch below additionally relies on it to guard its own
+      // findConflictingVisits call. Hoisted above the zone + day-cap locks so
+      // every writer in the family acquires the shared rungs in one order.
+      await acquireOccupancyLock(trx, dateStr);
       // slot-reserve namespace + zone-key shape match routes/booking.js
       // exactly, so confirms through onboarding/AI and the public
       // /api/booking/confirm serialize against each other for the same
@@ -292,9 +304,9 @@ class AvailabilityEngine {
       // zone lock only serializes same-zone writers; the cap is global by
       // date, so a per-zone count here let cross-zone confirms (this engine
       // vs the public /book confirm) exceed max_self_books_per_day. Lock
-      // order stays fixed — zone THEN day, the same relative order as
-      // createSelfBooking's customer → tech → zone → day — so concurrent
-      // confirms across both writers can never deadlock.
+      // order stays fixed — date → zone → day-cap, the same relative order
+      // as createSelfBooking's date → customer → tech → zone → day-cap — so
+      // concurrent confirms across both writers can never deadlock.
       await acquireSelfBookingDayCapLock(trx, dateStr);
       const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
         excludeSelfBookingId: options.excludeSelfBookingId || null,
@@ -358,18 +370,11 @@ class AvailabilityEngine {
         // occupancy check — one active tech, so any overlapping
         // scheduled_services row is a real clash. Status set matches the
         // zone path (non-cancelled occupies); live holds count, expired
-        // ones don't. Zone-resolved behavior above is unchanged.
-        // Date-wide occupancy lock (shared module) — this CONFIRM inserts a
-        // scheduled_services row behind the tech-blind gate, so it must
-        // serialize with the other date-wide writers (rebooker single/series).
-        // Without it, a zone-null confirm and a rebooker move on the same date
-        // both pass their tech-blind checks under READ COMMITTED and
-        // double-book. A zone-null confirm shares only THIS lock with the
-        // rebooker (the rebooker takes neither the zone lock nor the day-cap
-        // lock already held above), so taking it here — after zone + day-cap —
-        // can't invert against anyone: one shared lock never deadlocks. See
-        // the ORDERING CONTRACT in scheduling/occupancy.js.
-        await acquireOccupancyLock(trx, dateStr);
+        // ones don't. Zone-resolved behavior above is unchanged. The
+        // date-wide occupancy lock this check runs under was already taken
+        // at the TOP of the transaction (rung 1 of the global order) — the
+        // rebooker takes neither the zone nor the day-cap lock, so that
+        // date lock is the only rung shared with it.
         const zoneNullExcludes = [];
         if (options.excludeServiceId) zoneNullExcludes.push(options.excludeServiceId);
         if (options.excludeSelfBookingId) {
