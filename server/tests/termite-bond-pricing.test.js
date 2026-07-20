@@ -16,6 +16,12 @@ const { _private: sweepPrivate } = require('../services/lifecycle-email-sweeps')
 
 const PROFILE = { homeSqFt: 2000, stories: 1, lotSqFt: 8000 };
 
+// The bond option ships dark (GATE_TERMITE_BOND_OPTION, default OFF) — the
+// engine emission is the single choke point, so the suite runs gate-on and
+// one case pins the dark default.
+beforeAll(() => { process.env.GATE_TERMITE_BOND_OPTION = 'true'; });
+afterAll(() => { delete process.env.GATE_TERMITE_BOND_OPTION; });
+
 function termiteInput(options = {}) {
   return translateV2CallToV1Input(PROFILE, ['TERMITE_BAIT'], {
     termiteBaitSystem: 'advance',
@@ -262,5 +268,20 @@ describe('solo termite accept totals carry the bond (money-path)', () => {
     const entry = bundle.services[0].frequencies[0];
     expect(entry.monthly).toBe(35);
     expect(entry.perTreatment).toBe(105);
+  });
+});
+
+describe('GATE_TERMITE_BOND_OPTION (default OFF)', () => {
+  test('gate off: no bond line, no options snapshot, selector never renders', () => {
+    const prev = process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    try {
+      const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteBondTerm: '10yr' })));
+      expect(mapped.recurring.services.some((svc) => String(svc.service).startsWith('termite_bond'))).toBe(false);
+      expect(mapped.results.tmBait.bondOptions).toBeFalsy();
+      expect(mapped.recurring.monthlyTotal).toBe(35);
+    } finally {
+      process.env.GATE_TERMITE_BOND_OPTION = prev;
+    }
   });
 });
