@@ -51,7 +51,7 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -63,11 +63,9 @@ const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
 const SEO_CONFIRMED_ACTION_TOOL_NAMES = new Set(['run_seo_pipeline', 'approve_seo_action']);
-const CONFIRMED_ACTION_TOOL_NAMES = new Set([
-  'request_instant_payout',
-  'request_standard_payout',
-  ...SEO_CONFIRMED_ACTION_TOOL_NAMES,
-]);
+// Membership lives in write-gates.js so the contract-test registry flags the
+// same tools sideEffects — one source, no drift.
+const CONFIRMED_ACTION_TOOL_NAMES = new Set(CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -1098,7 +1096,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeEmailTool(toolName, input);
   }
   if (BANKING_TOOL_NAMES.has(toolName)) {
-    return executeBankingTool(toolName, input);
+    return executeBankingTool(toolName, input, actionContext);
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
     return executeEstimateTool(toolName, input, actionContext);

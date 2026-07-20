@@ -3,6 +3,7 @@ jest.mock('../models/db', () => {
     where: jest.fn(() => ({ first: jest.fn(async () => null) })),
     insert: jest.fn(async () => {}),
     whereNotIn: jest.fn(() => ({ del: jest.fn(async () => 0) })),
+    whereIn: jest.fn(() => ({ orderBy: jest.fn(async () => []) })),
     orderBy: jest.fn(async () => []),
   };
   const db = jest.fn(() => query);
@@ -424,12 +425,21 @@ describe('token health meta checks', () => {
     expect(result.lastError).toMatch(/custom audiences access probe failed/);
   });
 
-  test('getAll RETAINS the three Meta ad lane rows (not purged as unknown platforms)', async () => {
+  test('prune RETAINS the three Meta ad lane rows (not purged as unknown platforms)', async () => {
+    const db = require('../models/db');
+    const tokenHealth = require('../services/token-health');
+    await tokenHealth.pruneStaleCredentials();
+    const kept = db._query.whereNotIn.mock.calls[0][1];
+    expect(kept).toEqual(expect.arrayContaining(['meta_ads', 'meta_capi', 'meta_audiences']));
+  });
+
+  test('getAll never deletes — it read-filters to known platforms (incl. the Meta ad lanes)', async () => {
     const db = require('../models/db');
     const tokenHealth = require('../services/token-health');
     await tokenHealth.getAll();
-    const kept = db._query.whereNotIn.mock.calls[0][1];
-    expect(kept).toEqual(expect.arrayContaining(['meta_ads', 'meta_capi', 'meta_audiences']));
+    expect(db._query.whereNotIn).not.toHaveBeenCalled();
+    const readFilter = db._query.whereIn.mock.calls[0][1];
+    expect(readFilter).toEqual(expect.arrayContaining(['meta_ads', 'meta_capi', 'meta_audiences']));
   });
 
   test('meta lane probes use the lane API version (default v23.0), not the social default', async () => {
