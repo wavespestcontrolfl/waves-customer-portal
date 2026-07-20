@@ -323,6 +323,69 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     expect(src.lastIndexOf('.where({ id: parentId }).update({', locksIdx)).toBe(-1);
   });
 
+  // Round-3 P1: rung 1 SERIALIZES writers but cannot WIDEN a narrow check.
+  // The zone-resolved confirm, createSelfBooking, and both slot-reservation
+  // paths each waited their turn on the date lock and then re-validated a
+  // zone/tech-scoped predicate that never selects a different-tech /
+  // different-zone / unassigned row — and committed over it anyway.
+  // Serialized double-booking is still double-booking: every rung-1 holder
+  // must ALSO run the GLOBAL predicate between lock acquisition and its
+  // insert/commit. The narrow checks stay (they answer with each writer's
+  // specific error shapes); the shared probe is the backstop behind them.
+  // [label, source, slice-start marker, rung-1 call, global-probe call,
+  //  the write it must precede]
+  const PROBED_WRITERS = [
+    ['createSelfBooking (routes/booking.js)',
+      read('routes/booking.js'), 'txResult = await db.transaction',
+      'await acquireOccupancyLock(trx, slotDateStr);',
+      'const globalClash = await findConflictingVisits({',
+      "await trx('self_booked_appointments').insert({"],
+    ['confirmBooking (services/availability.js) — BOTH branches share the one probe',
+      read('services/availability.js'), 'const { booking, scheduled } = await runBookingWork(',
+      'await acquireOccupancyLock(trx, dateStr);',
+      'const occupancyClash = await findConflictingVisits({',
+      "await trx('self_booked_appointments').insert({"],
+    ['reserveSlot (services/slot-reservation.js)',
+      read('services/slot-reservation.js'), 'async function reserveSlot(',
+      'await acquireOccupancyLock(trx, date);',
+      'const committedClash = await findConflictingVisits({',
+      "await trx('scheduled_services').insert({"],
+    ['commitReservation (services/slot-reservation.js)',
+      read('services/slot-reservation.js'), 'async function commitReservation(',
+      'await acquireOccupancyLock(client, lockedDate);',
+      'const committedClash = await findConflictingVisits({',
+      '.update(updates)'],
+  ];
+
+  test.each(PROBED_WRITERS)('%s runs the GLOBAL predicate under rung 1, before its write', (_label, src, startMarker, rungOneCall, probeCall, writeMarker) => {
+    const startIdx = src.indexOf(startMarker);
+    expect(startIdx).toBeGreaterThan(-1);
+    const rungOneIdx = src.indexOf(rungOneCall, startIdx);
+    expect(rungOneIdx).toBeGreaterThan(startIdx);
+    const probeIdx = src.indexOf(probeCall, rungOneIdx);
+    // Probe AFTER the lock (an unlocked global read is the round-1 bug all
+    // over again) and BEFORE the write it gates.
+    expect(probeIdx).toBeGreaterThan(rungOneIdx);
+    const writeIdx = src.indexOf(writeMarker, rungOneIdx);
+    expect(writeIdx).toBeGreaterThan(probeIdx);
+  });
+
+  test('the estimate-hold probes check COMMITTED visits only — hold-vs-hold semantics stay with the narrow checks', () => {
+    const src = read('services/slot-reservation.js');
+    for (const fn of ['async function reserveSlot(', 'async function commitReservation(']) {
+      const startIdx = src.indexOf(fn);
+      const probeIdx = src.indexOf('const committedClash = await findConflictingVisits({', startIdx);
+      expect(probeIdx).toBeGreaterThan(startIdx);
+      expect(src.slice(probeIdx, probeIdx + 400)).toContain('includeHolds: false');
+    }
+    // commitReservation additionally excludes the hold row it is graduating.
+    const commitProbeIdx = src.indexOf(
+      'const committedClash = await findConflictingVisits({',
+      src.indexOf('async function commitReservation('),
+    );
+    expect(src.slice(commitProbeIdx, commitProbeIdx + 400)).toContain('excludeServiceIds: [scheduledServiceId]');
+  });
+
   test('every writer imports rung 1 from the shared module — no private key shapes', () => {
     // A local copy of the lock statement would have to reproduce the
     // namespace AND the `occupancy:<date>` key exactly; one drift and the
@@ -367,5 +430,15 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     ]) {
       expect(header).toContain(exempt);
     }
+    // The second half of the contract: serialization alone cannot widen a
+    // narrow check — the doc must demand the global predicate under the lock.
+    expect(header).toContain('every rung-1 holder MUST run the global');
+    expect(header).toContain('includeHolds:false');
+    // The call-booking exemption now covers DETECTION: its booking commit
+    // stays lock-free (book+flag, and the lead-conversion row locks would
+    // invert against the estimate-accept txn), while the post-commit recheck
+    // takes rung 1 in a dedicated short transaction.
+    expect(header).toContain('post-commit');
+    expect(header).toContain('findConflictingVisits read');
   });
 });

@@ -1,10 +1,15 @@
 /**
- * confirmBooking zone-null occupancy fallback (schedule-conflict lane): the
+ * confirmBooking shared occupancy probe (schedule-conflict lane): the
  * whole occupied-set re-check was wrapped in `if (zone)` — when the
  * customer's city resolved to NO service zone (AI-assistant book tool,
  * onboarding reschedule), NOTHING validated the window and the booking
- * landed blind. The zone-null branch now runs the shared tech-blind
- * occupancy check; zone-resolved behavior is unchanged.
+ * landed blind. The zone-null branch runs the shared tech-blind occupancy
+ * check as its ONLY gate; round 3 extended the SAME probe to the
+ * zone-RESOLVED branch as a backstop behind its zone-scoped fast path —
+ * that fast path never selects an overlapping visit whose customer city is
+ * outside the zone list (or a tech-assigned estimate-lane row), and the
+ * date lock alone only serializes writers, it cannot widen what the check
+ * sees. Zone fast-path behavior and error shapes are unchanged.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -180,22 +185,66 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     }));
   });
 
-  test('zone resolved → zone probe path unchanged, but the date lock is STILL taken first', async () => {
-    const { trx } = wireConfirm({
+  test('zone resolved → zone fast path still runs, AND the shared probe backstops it under the date lock', async () => {
+    const { trx, scheduledQueries } = wireConfirm({
       zones: [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }],
     });
 
     const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(result.confirmationCode).toBeTruthy();
-    // The zone-scoped occupied-set probe still owns this branch — the shared
-    // tech-blind module is NOT consulted here.
-    expect(findConflictingVisits).not.toHaveBeenCalled();
-    // ...but the date-wide lock is unconditional (ORDERING CONTRACT rung 1).
-    // This branch validates against a ZONE-scoped occupied set, so its
-    // uncommitted insert is exactly what a rebooker's global tech-blind check
-    // would miss — the rebooker takes no zone lock, so rung 1 is the only
-    // thing that serializes the two.
+    // The zone-scoped occupied-set fast path still owns this branch's error
+    // shapes — its scheduled_services zone query ran (city-scoped join)...
+    expect(scheduledQueries.some((q) => q.whereIn.mock.calls
+      .some((c) => c[0] === 'customers.city'))).toBe(true);
+    // ...but the branch no longer commits on it ALONE: the shared tech-blind
+    // probe runs as the backstop. The zone set never selects an overlapping
+    // visit whose customer city is outside the zone list, and rung 1 only
+    // serializes writers — it cannot widen what the check sees.
+    expect(findConflictingVisits).toHaveBeenCalledWith({
+      db: trx,
+      date: DATE,
+      windowStart: '09:00',
+      windowEnd: '10:00',
+      excludeServiceIds: [],
+    });
+    // The date-wide lock is unconditional (ORDERING CONTRACT rung 1) and is
+    // granted BEFORE the probe reads.
     expect(lockKeys(trx)).toContain(`occupancy:${DATE}`);
+    const occupancyLockIdx = trx.raw.mock.calls.findIndex(
+      (c) => Array.isArray(c[1]) && c[1][1] === `occupancy:${DATE}`,
+    );
+    expect(trx.raw.mock.invocationCallOrder[occupancyLockIdx])
+      .toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
+  });
+
+  test('zone resolved + clean zone set + GLOBAL overlap → SLOT_TAKEN, nothing inserted (the round-3 P1)', async () => {
+    // A committed visit for a different tech / outside the zone's city list:
+    // invisible to the zone fast path, real for the one field tech.
+    const { scheduledQueries } = wireConfirm({
+      zones: [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }],
+    });
+    findConflictingVisits.mockResolvedValue([{ id: 'svc-other-zone' }]);
+
+    await expect(
+      Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null),
+    ).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409 });
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+  });
+
+  test('zone resolved → the probe threads the onboarding-reschedule exclusions too', async () => {
+    const { trx } = wireConfirm({
+      zones: [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }],
+      replacedRow: { id: 'sched-old' },
+    });
+
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null, {
+      excludeServiceId: 'svc-moving',
+      excludeSelfBookingId: 'booking-old',
+    });
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx,
+      excludeServiceIds: ['svc-moving', 'sched-old'],
+    }));
   });
 
   // ---- ORDERING CONTRACT (services/scheduling/occupancy.js) ---------------

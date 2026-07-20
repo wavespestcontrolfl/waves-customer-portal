@@ -153,6 +153,41 @@ function callBookingTimeSanityFlags({
   }
   return flags;
 }
+
+// AUTHORITATIVE post-commit conflict recheck for a fresh call booking — a
+// short rung-1 transaction of its own: date lock + one shared-module read,
+// no row locks, nothing written. The in-txn advisory read races unlocked:
+// two concurrent call bookings — or a call booking interleaving a rung-1
+// writer whose global predicate ran before this insert committed — can EACH
+// see no committed conflict and land overlapping rows with no card fired.
+// Serializing just the CHECK closes that. Every committing scheduling writer
+// runs the global predicate under the date lock before committing (ORDERING
+// CONTRACT, scheduling/occupancy.js), so by the time this lock is granted a
+// concurrent writer either already saw this booking's committed row (and
+// aborted its own commit — no overlap exists) or committed first and is
+// visible to this read (card fires). Of two concurrent call bookings, the
+// later recheck always sees the earlier insert. Detection-only: the booking
+// already committed and is never unwound here (owner's book+flag rule).
+async function recheckCallBookingConflicts({
+  scheduledDate,
+  windowStart,
+  windowEnd,
+  excludeCustomerId,
+  excludeServiceIds,
+}) {
+  const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+  return db.transaction(async (trx) => {
+    await acquireOccupancyLock(trx, scheduledDate);
+    return findConflictingVisits({
+      db: trx,
+      date: scheduledDate,
+      windowStart,
+      windowEnd,
+      excludeCustomerId,
+      excludeServiceIds,
+    });
+  });
+}
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
@@ -7226,13 +7261,21 @@ const CallRecordingProcessor = {
                 // guard above already owns those). Best-effort: a query
                 // failure must never fail the booking txn.
                 //
-                // NO date-wide occupancy lock here (unlike the rebooker /
-                // zone-null confirm writers): this check is purely advisory —
-                // the call booking commits regardless of what it finds, so
-                // serializing it against other writers would buy nothing. A
-                // lock only matters when the check can BLOCK a write; this one
-                // can't. (occupancy.js acquireOccupancyLock guards the writers
-                // whose commit the gate actually gates.)
+                // NO date-wide occupancy lock in THIS txn, and this read is
+                // therefore only the fast-path signal, not the verdict: it
+                // sees committed truth as of now, so a concurrent rung-1
+                // writer mid-commit — or a second concurrent call booking —
+                // is invisible to it. The AUTHORITATIVE detection is the
+                // post-commit recheck below (recheckCallBookingConflicts),
+                // which takes the date lock in a short transaction of its
+                // own. The lock stays out of this txn on purpose: the
+                // booking must never wait on (or lose to) a scheduling
+                // lock, and the post-insert work here row-locks leads/
+                // customers/estimates — tables the estimate-accept txn
+                // locks BEFORE taking rung 1 inside commitReservation, so
+                // holding rung 1 across them would invert the lock order
+                // (deadlock-abort risk to a booking the owner says always
+                // proceeds).
                 try {
                   const { findConflictingVisits } = require('./scheduling/occupancy');
                   bookingTimeConflicts = await findConflictingVisits({
@@ -7519,6 +7562,27 @@ const CallRecordingProcessor = {
               // pattern above; the admin bell rides the same channel other
               // schedule anomalies use (notification-service.notifyAdmin).
               if (!scheduleWasReused) {
+                // Re-run the occupancy read now that the insert is COMMITTED,
+                // under the date lock (see recheckCallBookingConflicts for
+                // why this one is authoritative where the in-txn read is
+                // only a fast path). Same exclusion semantics as the in-txn
+                // read (excludeCustomerId — the same-day guard owns
+                // same-customer clashes) plus this run's own fresh rows,
+                // belt-and-braces: both carry customerId anyway. Best-effort
+                // in the same spirit as the in-txn read — a recheck failure
+                // falls back to the in-txn findings rather than dropping an
+                // already-detected card.
+                try {
+                  bookingTimeConflicts = await recheckCallBookingConflicts({
+                    scheduledDate,
+                    windowStart: windowStart || '09:00',
+                    windowEnd: windowEnd || '10:00',
+                    excludeCustomerId: customerId,
+                    excludeServiceIds: [svc.id, followUpCreated?.id],
+                  });
+                } catch (recheckErr) {
+                  logger.warn(`[call-proc] post-commit occupancy recheck failed for ${maskSid(callSid)} (falling back to in-txn advisory findings): ${recheckErr.message}`);
+                }
                 const timeSanityFlags = callBookingTimeSanityFlags({
                   scheduledDate,
                   windowStart: windowStart || '09:00',
@@ -8539,6 +8603,7 @@ const CallRecordingProcessor = {
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  recheckCallBookingConflicts,
   scrubTranscriptArtifacts,
   scrubStructuredTranscript,
   canonicalWavesService,

@@ -134,6 +134,28 @@ describe('slot reservation helpers', () => {
       returning: jest.fn().mockResolvedValue([returned]),
     };
   }
+  // The GLOBAL tech-blind probe (shared scheduling/occupancy module) both
+  // write paths now run under the date lock before committing. Chain shape
+  // follows findConflictingVisits; rows resolve at orderBy (the chain tail).
+  function makeGlobalProbeBuilder(rows = []) {
+    const builder = {};
+    Object.assign(builder, {
+      where: jest.fn(function where(arg) {
+        if (typeof arg === 'function') arg.call(builder, builder);
+        return builder;
+      }),
+      whereNotIn: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+      orWhereNull: jest.fn().mockReturnThis(),
+      orWhereNot: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn(() => Promise.resolve(rows)),
+    });
+    return builder;
+  }
   function makeDeleteBuilder() {
     return {
       whereIn: jest.fn().mockReturnThis(),
@@ -163,11 +185,12 @@ describe('slot reservation helpers', () => {
       const technicianBuilder = makeTechnicianBuilder();
       const liveHoldsBuilder = makeLiveHoldsBuilder([]);
       const conflictBuilder = makeConflictBuilder(null);
+      const globalProbeBuilder = makeGlobalProbeBuilder([]);
       const insertBuilder = makeInsertBuilder({
         id: 'scheduled-123',
         reservation_expires_at: '2027-05-20T13:15:00.000Z',
       });
-      const scheduledBuilders = [liveHoldsBuilder, conflictBuilder, insertBuilder];
+      const scheduledBuilders = [liveHoldsBuilder, conflictBuilder, globalProbeBuilder, insertBuilder];
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -201,6 +224,26 @@ describe('slot reservation helpers', () => {
         expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
         ['10:30:00', 60, '09:00:00'],
       );
+      // GLOBAL probe under the date lock, after the narrow tech/zone fast
+      // paths, before the hold insert: tech-blind (no technician predicate —
+      // the builder's plain-string wheres carry only the date)...
+      expect(globalProbeBuilder.where).toHaveBeenCalledWith('scheduled_date', '2027-05-20');
+      expect(globalProbeBuilder.where).not.toHaveBeenCalledWith('technician_id', expect.anything());
+      expect(globalProbeBuilder.whereRaw).toHaveBeenCalledWith(
+        expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
+        ['10:30:00', 60, '09:00:00'],
+      );
+      // ...and against COMMITTED visits only (includeHolds:false) — a hold
+      // over a committed visit is the offer→409 dead-end; hold-vs-hold stays
+      // governed by the narrow checks above.
+      expect(globalProbeBuilder.whereNotNull).toHaveBeenCalledWith('customer_id');
+      expect(globalProbeBuilder.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
+      // Rung 1 was granted before the probe read.
+      const occupancyRawIdx = trx.raw.mock.calls.findIndex(
+        (c) => Array.isArray(c[1]) && c[1][1] === 'occupancy:2027-05-20',
+      );
+      expect(trx.raw.mock.invocationCallOrder[occupancyRawIdx])
+        .toBeLessThan(globalProbeBuilder.where.mock.invocationCallOrder[0]);
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
         service_type: 'Quarterly Pest Control',
         notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
@@ -236,7 +279,7 @@ describe('slot reservation helpers', () => {
         id: 'scheduled-789',
         reservation_expires_at: '2027-05-20T13:15:00.000Z',
       });
-      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), insertBuilder];
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -300,7 +343,8 @@ describe('slot reservation helpers', () => {
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1' }]),
     };
-    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, updateBuilder];
+    const globalProbeBuilder = makeGlobalProbeBuilder([]);
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, globalProbeBuilder, updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
       throw new Error(`unexpected table ${table}`);
@@ -337,6 +381,21 @@ describe('slot reservation helpers', () => {
       expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
       ['10:30:00', 60, '09:00:00'],
     );
+    // GLOBAL probe before graduation: tech-blind, over the ACCEPT-time
+    // window (the commit can widen window_end), excluding this hold's own
+    // row, committed visits only (includeHolds:false).
+    expect(globalProbeBuilder.where).toHaveBeenCalledWith('scheduled_date', '2027-05-20');
+    expect(globalProbeBuilder.where).not.toHaveBeenCalledWith('technician_id', expect.anything());
+    expect(globalProbeBuilder.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
+      ['10:30:00', 60, '09:00:00'],
+    );
+    expect(globalProbeBuilder.whereNotIn).toHaveBeenCalledWith('id', ['scheduled-123']);
+    expect(globalProbeBuilder.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(globalProbeBuilder.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
+    // Rung 1 (the FIRST trx.raw above) was granted before the probe read.
+    expect(trx.raw.mock.invocationCallOrder[0])
+      .toBeLessThan(globalProbeBuilder.where.mock.invocationCallOrder[0]);
     expect(updateBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
       customer_id: 'customer-1',
       payment_method_preference: 'card_on_file',
@@ -650,7 +709,7 @@ describe('slot reservation helpers', () => {
         id: 'scheduled-new',
         reservation_expires_at: '2027-05-20T13:15:00.000Z',
       });
-      const scheduledBuilders = [liveHoldsBuilder, deleteBuilder, conflictBuilder, insertBuilder];
+      const scheduledBuilders = [liveHoldsBuilder, deleteBuilder, conflictBuilder, makeGlobalProbeBuilder([]), insertBuilder];
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -673,6 +732,162 @@ describe('slot reservation helpers', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('reserveSlot: a COMMITTED visit the tech/zone checks never see blocks the hold (global probe, round-3 P1)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      // Narrow checks pass (no same-tech row, zone unresolved in this
+      // harness) — but a committed DIFFERENT-tech visit overlaps. A hold
+      // stacked over it would be the offer→409 dead-end at accept time.
+      const globalProbeBuilder = makeGlobalProbeBuilder([{
+        id: 'svc-other-tech', technician_id: 'tech-2', window_start: '09:30:00',
+      }]);
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), globalProbeBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+
+      // No hold row was inserted — every queued builder was consumed and
+      // none beyond the probe was requested.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('commitReservation probes even when no accept-time duration resolves (the narrow check is skipped then)', async () => {
+    // Null profile → windowEnd null → the tech-scoped conflict check does
+    // not run at all — but graduation still commits real occupancy, so the
+    // global probe must still gate it, over the HELD window.
+    estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce(null);
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }),
+    };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'scheduled-123',
+        source_estimate_id: 'estimate-456',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        window_end: '10:00:00',
+        technician_id: 'tech-1',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      }),
+    };
+    const globalProbeBuilder = makeGlobalProbeBuilder([]);
+    const updateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1' }]),
+    };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, globalProbeBuilder, updateBuilder];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx,
+    })).resolves.toEqual({ id: 'scheduled-123', customer_id: 'customer-1' });
+
+    // Probe ran over the held window (row.window_end fallback), tech-blind,
+    // excluding the graduating row itself.
+    expect(globalProbeBuilder.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
+      ['10:00:00', 60, '09:00:00'],
+    );
+    expect(globalProbeBuilder.whereNotIn).toHaveBeenCalledWith('id', ['scheduled-123']);
+    expect(globalProbeBuilder.whereNotNull).toHaveBeenCalledWith('customer_id');
+  });
+
+  test('commitReservation refuses to graduate over a COMMITTED overlapping visit (tech-blind, round-3 P1)', async () => {
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }),
+    };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'scheduled-123',
+        source_estimate_id: 'estimate-456',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        window_end: '10:00:00',
+        technician_id: 'tech-1',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      }),
+    };
+    const conflictBuilder = {
+      where: jest.fn().mockReturnThis(),
+      modify: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNot: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
+      andWhereRaw: jest.fn().mockReturnThis(),
+      andWhere: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNull: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    // The rebooker parked an unassigned visit over this window while the
+    // customer sat on the accept screen: the tech-scoped narrow check
+    // (technician_id = tech-1) never sees the technician-NULL row.
+    const globalProbeBuilder = makeGlobalProbeBuilder([{
+      id: 'svc-unassigned', technician_id: null, window_start: '09:00:00',
+    }]);
+    const updateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123' }]),
+    };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, globalProbeBuilder, updateBuilder];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control + Lawn Care' },
+      serviceMode: 'recurring',
+      selectedFrequency: 'quarterly',
+      trx,
+    })).rejects.toMatchObject({
+      code: 'SLOT_UNAVAILABLE',
+      slotId: '2027-05-20_09-00_tech-1',
+    });
+    // The graduation was refused — the row was never updated.
+    expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 });
 

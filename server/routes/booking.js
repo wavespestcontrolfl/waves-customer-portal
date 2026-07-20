@@ -1746,7 +1746,7 @@ async function createSelfBooking(payload = {}) {
       // pass their check and commit an overlapping visit on top of it. Taken
       // before the customer/tech/zone/day-cap locks below so every writer in
       // the family acquires the same rungs in the same order.
-      const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
+      const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
       await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -1843,6 +1843,32 @@ async function createSelfBooking(payload = {}) {
       });
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
+      // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1
+      // holder runs the global predicate under the date lock before
+      // committing). The conflictQuery above stays as this path's fast
+      // path — tech route + zone pool + live holds, answering with this
+      // route's SLOT_TAKEN shape — but its capacity legs are NARROW: an
+      // overlapping visit assigned to a different tech outside this zone,
+      // or an unassigned row whose customer city isn't in the zone list,
+      // matches none of them, and with ONE field tech any time overlap is
+      // a real clash. The date lock alone can't close that — it only
+      // serializes writers; a narrow predicate stays narrow under any
+      // lock. No exclusions: this path moves no existing row (the
+      // double-submit replay returned above before any conflict check).
+      const globalClash = await findConflictingVisits({
+        db: trx,
+        date: slotDateStr,
+        windowStart: slot_start,
+        windowEnd: endTime,
+      });
+      if (globalClash.length) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,

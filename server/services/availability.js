@@ -315,6 +315,22 @@ class AvailabilityEngine {
         throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
       }
 
+      // Rows the tech-blind probe below must ignore — the onboarding
+      // reschedule books the replacement BEFORE cancelling the original, so
+      // it must not collide with the row(s) it is about to cancel. Resolved
+      // for BOTH branches: the zone-resolved fast path excludes the same
+      // rows via its own options.exclude* modifiers.
+      const occupancyExcludes = [];
+      if (options.excludeServiceId) occupancyExcludes.push(options.excludeServiceId);
+      if (options.excludeSelfBookingId) {
+        // The onboarding reschedule identifies the row it is replacing by
+        // its self-booking id — exclude that booking's dispatch row too.
+        const replacedRow = await trx('scheduled_services')
+          .where({ self_booking_id: options.excludeSelfBookingId })
+          .first('id');
+        if (replacedRow?.id) occupancyExcludes.push(replacedRow.id);
+      }
+
       if (zone) {
         // Mirror getAvailableSlots' occupied set: zone services + live
         // self-bookings. Any overlap means the slot was taken since the
@@ -363,38 +379,32 @@ class AvailabilityEngine {
         if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
           throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
         }
-      } else {
-        // City resolved to no zone → the whole occupied-set check above was
-        // skipped and NOTHING validated the window (AI-assistant book tool,
-        // onboarding reschedule). Fall back to the shared tech-blind
-        // occupancy check — one active tech, so any overlapping
-        // scheduled_services row is a real clash. Status set matches the
-        // zone path (non-cancelled occupies); live holds count, expired
-        // ones don't. Zone-resolved behavior above is unchanged. The
-        // date-wide occupancy lock this check runs under was already taken
-        // at the TOP of the transaction (rung 1 of the global order) — the
-        // rebooker takes neither the zone nor the day-cap lock, so that
-        // date lock is the only rung shared with it.
-        const zoneNullExcludes = [];
-        if (options.excludeServiceId) zoneNullExcludes.push(options.excludeServiceId);
-        if (options.excludeSelfBookingId) {
-          // The onboarding reschedule identifies the row it is replacing by
-          // its self-booking id — exclude that booking's dispatch row too.
-          const replacedRow = await trx('scheduled_services')
-            .where({ self_booking_id: options.excludeSelfBookingId })
-            .first('id');
-          if (replacedRow?.id) zoneNullExcludes.push(replacedRow.id);
-        }
-        const zoneNullClash = await findConflictingVisits({
-          db: trx,
-          date: dateStr,
-          windowStart: startTime,
-          windowEnd: endTime,
-          excludeServiceIds: zoneNullExcludes,
-        });
-        if (zoneNullClash.length) {
-          throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
-        }
+      }
+
+      // Shared tech-blind occupancy probe, BOTH branches (ORDERING CONTRACT:
+      // every rung-1 holder runs the global predicate under the date lock
+      // before committing — the lock only serializes writers; it cannot
+      // widen what a check sees). For the zone-NULL branch this is the only
+      // window validation there is (AI-assistant book tool, onboarding
+      // reschedule). For the zone-RESOLVED branch the occupied-set check
+      // above remains the fast path, but it is zone-scoped: an overlapping
+      // visit whose customer city is outside this zone's list — or a
+      // tech-assigned row from the estimate lane — never enters `occupied`,
+      // and with one active tech any overlap is a real clash. Status set
+      // matches the zone path (non-cancelled occupies); live holds count,
+      // expired ones don't. The date-wide occupancy lock this runs under
+      // was taken at the TOP of the transaction (rung 1 of the global
+      // order) — the rebooker takes neither the zone nor the day-cap lock,
+      // so that date lock is the only rung shared with it.
+      const occupancyClash = await findConflictingVisits({
+        db: trx,
+        date: dateStr,
+        windowStart: startTime,
+        windowEnd: endTime,
+        excludeServiceIds: occupancyExcludes,
+      });
+      if (occupancyClash.length) {
+        throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
       }
 
       // Create self_booked_appointment

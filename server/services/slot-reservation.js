@@ -36,8 +36,10 @@ const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
-// scheduling/occupancy.js for why both write paths here take it first.
-const { acquireOccupancyLock } = require('./scheduling/occupancy');
+// scheduling/occupancy.js for why both write paths here take it first, and
+// why each also runs the tech-blind global probe (findConflictingVisits)
+// under it before committing.
+const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -557,6 +559,34 @@ async function reserveSlot({
         }
       }
 
+      // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1
+      // holder runs the global predicate under the date lock before
+      // committing). The two checks above stay as fast paths but are
+      // NARROW: the first sees only THIS slot's tech, the second only
+      // technician-NULL rows in a RESOLVED zone — a committed visit for a
+      // different tech, or any visit at all when zone resolution failed,
+      // matches neither, and a hold created over a committed visit is a
+      // guaranteed dead end (the graduation 409s and the customer loops on
+      // offer->reserve->409). includeHolds:false on purpose: COMMITTED
+      // visits only. Hold-vs-hold coexistence stays governed by the
+      // tech/zone checks above — of two live holds those checks permit,
+      // whichever GRADUATES second is stopped by commitReservation's own
+      // probe. This estimate's stale holds were refreshed or deleted
+      // above, inside this txn, so no self-exclusion is needed.
+      const committedClash = await findConflictingVisits({
+        db: trx,
+        date,
+        windowStart,
+        windowEnd,
+        includeHolds: false,
+      });
+      if (committedClash.length) {
+        const err = new Error('slot no longer available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+
       // service_type stays canonical for protocol/default lookups; notes
       // carry the full accepted service mix for dispatch and tech execution.
       const [row] = await trx('scheduled_services').insert({
@@ -729,6 +759,42 @@ async function commitReservation({
         .first('id');
 
       if (conflict) {
+        const err = new Error('slot no longer available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
+        throw err;
+      }
+    }
+
+    // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1 holder
+    // runs the global predicate under the date lock before committing).
+    // Graduating the hold commits real occupancy, and the narrow check
+    // above is tech-scoped when the row carries a technician — and SKIPPED
+    // ENTIRELY when no accept-time duration resolved, though the row
+    // occupies its held window either way (probe end falls back to the
+    // held window_end, then to the module's duration-or-60 convention).
+    // includeHolds:false + excluding this hold's own row: the probe
+    // arbitrates against COMMITTED visits — of two overlapping live holds
+    // the reserve-time checks permitted, first-to-graduate wins and this
+    // stops the second. Same RESERVATION_EXPIRED-style recovery as every
+    // other commit failure: the customer re-picks a time.
+    const probeWindowEnd = windowEnd
+      || row.window_end
+      || (windowStart
+        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
+          ? Number(row.estimated_duration_minutes)
+          : DEFAULT_DURATION_MINUTES)
+        : null);
+    if (scheduledDate && windowStart && probeWindowEnd) {
+      const committedClash = await findConflictingVisits({
+        db: client,
+        date: scheduledDate,
+        windowStart,
+        windowEnd: probeWindowEnd,
+        excludeServiceIds: [scheduledServiceId],
+        includeHolds: false,
+      });
+      if (committedClash.length) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;

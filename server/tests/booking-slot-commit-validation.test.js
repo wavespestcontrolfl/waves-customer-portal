@@ -340,6 +340,35 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(dateLockIdx).toBeLessThan(firstRawLockIdx);
   });
 
+  test('the GLOBAL tech-blind probe runs under the date lock — after the narrow fast path, before any insert', () => {
+    // Round-3 P1: the conflictQuery's capacity legs are NARROW (tech route +
+    // zone pool + live holds) — an overlapping visit for a different tech
+    // outside this zone, or an unassigned row whose customer city isn't in
+    // the zone list, matches none of them. Rung 1 only serializes writers;
+    // it cannot widen what this check sees — the shared global predicate
+    // must ALSO run under it before the inserts (ORDERING CONTRACT,
+    // services/scheduling/occupancy.js).
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
+    const narrowIdx = src.indexOf("const conflict = await conflictQuery.first('scheduled_services.id');", txIdx);
+    const probeIdx = src.indexOf('const globalClash = await findConflictingVisits({', txIdx);
+    const insertIdx = src.indexOf("await trx('self_booked_appointments').insert({", txIdx);
+    expect(dateLockIdx).toBeGreaterThan(txIdx);
+    expect(narrowIdx).toBeGreaterThan(dateLockIdx);
+    // Fast path answers first (it owns this route's specific 409 copy)...
+    expect(probeIdx).toBeGreaterThan(narrowIdx);
+    // ...and nothing is inserted before the global predicate has passed.
+    expect(insertIdx).toBeGreaterThan(probeIdx);
+    // The probe throws the same operational SLOT_TAKEN shape the fast path
+    // uses, so the route's 409 handling (created-profile rollback included)
+    // is identical for both.
+    const probeBlock = src.slice(probeIdx, probeIdx + 700);
+    expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
+    expect(probeBlock).toMatch(/statusCode: 409/);
+    // Shared module import rides the same lazy require as the lock helper.
+    expect(src.slice(txIdx, dateLockIdx)).toContain('findConflictingVisits');
+  });
+
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
     const replayIdx = src.indexOf("if (existing) return { existing };");
     const capIdx = src.indexOf("code: 'DAY_FULL',");

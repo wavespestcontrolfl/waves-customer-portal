@@ -85,18 +85,45 @@ const DEFAULT_DURATION_MINUTES = 60;
 // substitute: the rebooker takes rungs 1+3 only, so a zone lock (rung 4) is
 // never shared with it and never serializes against it.
 //
-// WRITERS (each verified against this order):
+// THE SECOND HALF OF THE CONTRACT — every rung-1 holder MUST run the global
+// predicate (findConflictingVisits, same trx, AFTER the lock, BEFORE its
+// insert/commit) and abort on a hit. The lock only SERIALIZES writers; it
+// cannot WIDEN what a writer's own check sees. A writer that waits its turn
+// on rung 1 and then re-validates a zone-scoped or tech-scoped predicate
+// still sails past a committed different-tech / different-zone / unassigned
+// row that predicate never selects — serialized double-booking is still
+// double-booking. Writers KEEP their narrow checks (they are correct fast
+// paths and produce the writer's specific error shapes: zone capacity,
+// SLOT_TAKEN variants); the global probe is the backstop behind them, thrown
+// as the same conflict error the writer already uses. The one deliberate
+// narrowing: the estimate-hold path probes with includeHolds:false — a hold
+// must never stack over a COMMITTED visit (the offer->409 dead-end class),
+// but hold-vs-hold coexistence stays governed by its narrow tech/zone
+// checks, and whichever overlapping hold GRADUATES second is stopped by
+// commitReservation's own probe.
+//
+// WRITERS (each verified against this order; "+ probe" = the global
+// predicate runs under rung 1 before that writer's insert/commit):
 //   routes/booking.js createSelfBooking ......... 1 -> 2 -> 3(if tech) -> 4 -> 5
+//     + probe (no exclusions) after its tech/zone/hold fast-path check.
 //   services/availability.js confirmBooking ..... 1 -> 4 -> 5
-//     Rung 1 is unconditional here — the ZONE-RESOLVED branch checks only a
+//     Rung 1 is unconditional here — the ZONE-RESOLVED branch fast-paths a
 //     zone-scoped occupied set, so it is exactly the "uncommitted insert the
-//     rebooker's global check can't see" case above. The zone-null branch also
-//     needs it for its own findConflictingVisits call.
+//     rebooker's global check can't see" case above. + probe on BOTH branches
+//     (shared call after the zone fast-path; excludes the onboarding
+//     reschedule's replaced service + dispatch rows).
 //   services/rebooker.js rescheduleVisit (single)  1 -> 3
+//     + probe (IS its primary check — excludes the moving row).
 //   services/rebooker.js series sweep ........... 1 (all target dates, sorted,
 //     up front, BEFORE the loop's per-sibling rung-3 locks) -> 3 per sibling
+//     + probe per occurrence (excludes every sibling moving in the sweep).
 //   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
+//     + probe with includeHolds:false (committed visits only — see above;
+//     its own estimate's stale holds were already deleted in-txn).
 //   services/slot-reservation.js commitReservation  1
+//     + probe with includeHolds:false excluding its own hold row — runs even
+//     when no accept-time duration resolved (the narrow tech-scoped check is
+//     skipped then, but graduation still commits real occupancy).
 //
 // ESTIMATE-HOLD PATH — why rungs 3+4 do NOT cover it, and rung 1 was added:
 // reserveSlot inserts a customer-NULL hold row that findConflictingVisits
@@ -119,8 +146,21 @@ const DEFAULT_DURATION_MINUTES = 60;
 //       every offer is re-validated under lock at its own commit gate.
 //   services/rain-out.js — computes the batch and delegates EVERY write to
 //     rebooker.rescheduleVisit, so its moves take rungs 1+3 there.
-//   services/call-recording-processor.js triage cards — advisory-only reads
-//     (conflict + out-of-hours flags); never block, never write a visit.
+//   services/call-recording-processor.js booking txn — the ONE writer whose
+//     COMMIT is exempt by owner rule (book + flag, never block), so its
+//     in-txn conflict read stays advisory and lock-free. Deliberately so:
+//     that txn's post-insert work row-locks leads/customers/estimates, and
+//     the estimate-accept txn locks those same tables BEFORE taking rung 1
+//     inside commitReservation — holding rung 1 across the call txn would
+//     invert that order (deadlock-abort risk to a booking that must never
+//     fail on a lock). Reliable DETECTION is restored post-commit: a
+//     dedicated short rung-1 transaction (date lock + one
+//     findConflictingVisits read, no row locks) re-checks and feeds the
+//     triage card. Serializing just the CHECK suffices because every
+//     committing writer runs the global predicate under rung 1: by the time
+//     the recheck's lock is granted, a concurrent writer either already saw
+//     the call booking's committed row (and aborted itself) or committed
+//     first and is visible to the recheck.
 //   slot-reservation releaseReservation / releaseExpiredReservations — delete
 //     only. Removing occupancy can never create an overlap.
 // ===========================================================================
