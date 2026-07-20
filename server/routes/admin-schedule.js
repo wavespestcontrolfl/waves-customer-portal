@@ -649,6 +649,45 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
 }
 
+// Third-party Bill-To stamp (payer / PO / self-pay override): a spawned
+// series row must resolve billing exactly like the rest of the series at
+// completion. The PARENT is the canonical source — Bill-To edits propagate
+// parent → children (the PUT payer-propagation and update-details child
+// spawn both treat it that way), so the parent is never staler than a
+// sibling. Without this, a payer-billed series (or an explicit self-pay
+// override on a customer with a default payer) refills a visit whose
+// completion-time COALESCE(visit payer, customer payer) resolves to the
+// WRONG party — invoicing the homeowner instead of the payer, or vice versa.
+function copyBillToFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  if (cols.payer_id) target.payer_id = source.payer_id ?? null;
+  if (cols.po_number) target.po_number = source.po_number ?? null;
+  if (cols.self_pay_override) target.self_pay_override = source.self_pay_override === true;
+}
+
+// Stamped service address (property linkage): a series booked for a
+// secondary/rental property carries a visit-level service_address_* stamp
+// plus property_id and stamped coords. A spawned row must inherit the stamp
+// or every reader's COALESCE(scheduled_services.service_address_*,
+// customers.address_*) falls back to the customer's PRIMARY address and the
+// visit is scheduled/dispatched to the wrong property. Parent-sourced, same
+// as the recurring seeder's follow-up rows. (scheduled_services has no
+// plain address/city/state/zip columns — the seeder's legacy names there
+// are inert; these are the live stamp columns from the property-linkage
+// migration, plus lat/lng.)
+function copyStampedServiceAddressFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  const stampFields = [
+    'property_id',
+    'service_address_line1', 'service_address_line2',
+    'service_address_city', 'service_address_state', 'service_address_zip',
+    'lat', 'lng',
+  ];
+  for (const f of stampFields) {
+    if (cols[f] && source[f] !== undefined) target[f] = source[f];
+  }
+}
+
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
   if (cols.discount_id) target.discount_id = null;
@@ -5914,6 +5953,40 @@ async function runRecurringSeriesMaintenance(conn, svc) {
       serviceType: spawnedVisit.serviceType,
       source: 'recurring_auto_extend',
     });
+    // Post-registration cancellation re-check — the reminder leg of the
+    // cancellation race. Registration runs POST-COMMIT (above, deliberately:
+    // the reminder writer works on its own connection and the label must
+    // include the add-on mirror), so a series cancel can take the per-parent
+    // advisory lock right after our commit and land BETWEEN it and the
+    // registration that just finished. Nothing else covers that window:
+    // handleSeriesCancellation marks only reminder rows that exist when it
+    // runs, and the scheduled_services sync trigger cancels reminders on the
+    // visit's status UPDATE — an update that fired BEFORE this registration
+    // inserted the row, so it matched nothing and never re-fires. In-trx
+    // registration (registerVisitReminderInTx) would close the window
+    // structurally but records the reminder label before the post-commit
+    // add-on mirror exists, permanently degrading multi-service labels — so:
+    // re-read the visit now that registration is done. Losing the race has
+    // exactly one signature — the cancel's status flip commits before its
+    // reminder sweep runs, so a terminal status here means our fresh
+    // reminder escaped that sweep; cancel it. Every interleaving is covered:
+    // reminder inserted before the sweep → the sweep marks it; inserted
+    // after → the terminal status is already committed and visible here.
+    // Terminal set mirrors the reminder cron's SELF_HEAL_TERMINAL_STATUSES
+    // (keep in sync); 'rescheduled' stays armed for the rebook, same as the
+    // cron's live-status guard.
+    try {
+      const visitNow = await conn('scheduled_services')
+        .where({ id: spawnedVisit.scheduledServiceId })
+        .first('status');
+      const statusNow = String(visitNow?.status || '').toLowerCase();
+      if (!visitNow || ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'].includes(statusNow)) {
+        await conn('appointment_reminders')
+          .where({ scheduled_service_id: spawnedVisit.scheduledServiceId, cancelled: false })
+          .update({ cancelled: true, updated_at: new Date() });
+        logger.info(`[recurring] Auto-extend reminder cancelled — visit ${spawnedVisit.scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
+      }
+    } catch (e) { logger.warn(`[recurring] Auto-extend post-registration cancel re-check failed (non-blocking): ${e.message}`); }
     logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
   }
 }
@@ -6023,6 +6096,8 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
           copyLineDiscountFields(nextData, parent, cols);
           copyAppointmentDiscountFields(nextData, parent, cols);
+          copyBillToFields(nextData, parent, cols);
+          copyStampedServiceAddressFields(nextData, parent, cols);
           let parentAddons = [];
           try {
             // Nested transaction = savepoint: a missing
@@ -8097,6 +8172,8 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
+        copyBillToFields(data, parent, cols);
+        copyStampedServiceAddressFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -8157,6 +8234,8 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
+        copyBillToFields(data, parent, cols);
+        copyStampedServiceAddressFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;

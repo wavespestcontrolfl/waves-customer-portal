@@ -29,6 +29,11 @@ const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'),
 const COLS = {
   recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
   create_invoice_on_complete: {}, estimated_price: {}, is_callback: {}, discount_dollars: {},
+  // Bill-To + stamped-service-address columns the refill must propagate.
+  payer_id: {}, po_number: {}, self_pay_override: {},
+  property_id: {}, service_address_line1: {}, service_address_line2: {},
+  service_address_city: {}, service_address_state: {}, service_address_zip: {},
+  lat: {}, lng: {},
 };
 
 // Scriptable fake knex connection: records the chained calls and resolves
@@ -103,7 +108,7 @@ function makeConn(handler, opts = {}) {
   return build(false);
 }
 
-function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOngoing = true }) {
+function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOngoing = true, statusAfterRegistration = 'pending' }) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
     recurring_ongoing: true, scheduled_date: '2026-01-15',
@@ -115,6 +120,7 @@ function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOn
   };
   const inserted = [];
   const alertInserts = [];
+  const reminderWrites = [];
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
       if (op === 'columnInfo') return COLS;
@@ -123,6 +129,11 @@ function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOn
         if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount) };
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: stillOngoing };
         if (firstCall[1] === 'create_invoice_on_complete') return sibling;
+        // Post-registration cancellation re-check reads the fresh row's
+        // status — script what a concurrent series cancel left behind.
+        if (firstCall[1] === 'status') {
+          return statusAfterRegistration == null ? undefined : { status: statusAfterRegistration };
+        }
         if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: '2026-07-15' }; // latest
         return parent;
       }
@@ -143,20 +154,25 @@ function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOn
       if (op === 'columnInfo') return {};
       return [];
     }
+    if (table === 'appointment_reminders') {
+      // Only the race re-check writes here (update chains resolve via 'await').
+      if (op === 'await') { reminderWrites.push(calls); return 1; }
+      return null;
+    }
     if (table === 'recurring_plan_alerts') {
       if (op === 'first') return null;
       if (op === 'insert' || op === 'insertReturning') { alertInserts.push(data); return [1]; }
     }
     return null;
   };
-  return { conn: makeConn(handler), inserted, alertInserts, parent };
+  return { conn: makeConn(handler), inserted, alertInserts, reminderWrites, parent };
 }
 
 describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('extends an ongoing series below the 2-ahead window and propagates create_invoice_on_complete from the latest sibling', async () => {
-    const { conn, inserted } = ongoingScenario({
+    const { conn, inserted, reminderWrites } = ongoingScenario({
       upcomingCount: 1,
       sibling: { create_invoice_on_complete: true },
     });
@@ -178,6 +194,81 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
       901, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
       'recurring_auto_extend', { sendConfirmation: false },
     );
+    // Visit still live after registration → the re-check leaves the fresh
+    // reminder armed.
+    expect(reminderWrites).toHaveLength(0);
+  });
+
+  test('P1: the refill inherits the parent Bill-To stamp (payer/PO) and the stamped service address', async () => {
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      parentOverrides: {
+        payer_id: 'payer-77', po_number: 'PO-4411', self_pay_override: false,
+        property_id: 'prop-9',
+        service_address_line1: '77 Dock St', service_address_line2: 'Unit B',
+        service_address_city: 'Venice', service_address_state: 'FL',
+        service_address_zip: '34285', lat: 27.0998, lng: -82.4543,
+      },
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    expect(inserted).toHaveLength(1);
+    // Billing must resolve identically to the rest of the series at
+    // completion (payer invoice, not the homeowner), and dispatch must roll
+    // to the stamped property, not the customer's primary address.
+    expect(inserted[0]).toMatchObject({
+      payer_id: 'payer-77', po_number: 'PO-4411', self_pay_override: false,
+      property_id: 'prop-9',
+      service_address_line1: '77 Dock St', service_address_line2: 'Unit B',
+      service_address_city: 'Venice', service_address_state: 'FL',
+      service_address_zip: '34285', lat: 27.0998, lng: -82.4543,
+    });
+  });
+
+  test('P1: an explicit self-pay override survives the refill — a customer with a default payer stays self-pay', async () => {
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      parentOverrides: { payer_id: null, po_number: null, self_pay_override: true },
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].self_pay_override).toBe(true);
+    expect(inserted[0].payer_id).toBe(null);
+  });
+
+  test('alert-route extend/convert_ongoing inserts inherit Bill-To + stamped address too (source guard)', () => {
+    // The recurring-alert action route builds its extension rows through the
+    // same applyStoredVisitFinancials pipeline — both spawn loops must carry
+    // the Bill-To and address stamps or a payer-billed / secondary-property
+    // series degrades when the operator extends it from an alert.
+    const alertLegs = src.match(/copyBillToFields\(data, parent, cols\);\n\s*copyStampedServiceAddressFields\(data, parent, cols\);/g) || [];
+    expect(alertLegs.length).toBe(2);
+    expect(src).toContain('copyBillToFields(nextData, parent, cols);');
+    expect(src).toContain('copyStampedServiceAddressFields(nextData, parent, cols);');
+  });
+
+  test('P1: a series cancel landing between the refill commit and the reminder registration cannot leave an armed reminder', async () => {
+    // The cancel took the per-parent lock right after the maintenance trx
+    // committed: it cancelled the fresh visit, but its reminder sweep ran
+    // before the post-commit registration inserted the reminder row (and the
+    // DB sync trigger fired on the visit UPDATE, also before the row
+    // existed). The post-registration re-check must cancel the fresh row.
+    const { conn, inserted, reminderWrites } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      statusAfterRegistration: 'cancelled',
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    expect(inserted).toHaveLength(1);
+    // The reminder WAS registered (registration won no ordering guarantees)…
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    // …and the re-check then cancelled it for the terminal visit.
+    expect(reminderWrites).toHaveLength(1);
+    expect(reminderWrites[0]).toEqual(expect.arrayContaining([
+      ['where', { scheduled_service_id: 901, cancelled: false }],
+      ['update', expect.objectContaining({ cancelled: true })],
+    ]));
   });
 
   test('falls back to the parent template when no sibling carries the flag', async () => {
