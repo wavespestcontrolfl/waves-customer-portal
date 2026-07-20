@@ -13,6 +13,24 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', 'services');
+
+// Write-gate sets are the single source of truth for which IB tools mutate
+// on call: legacy bare writes execute their mutation immediately, and
+// confirmed-endpoint writes (payouts, SEO pipeline) move real state.
+// Execute-smoke must never fire either kind — deriving the flag here means a
+// tool registered in write-gates.js can never be smoke-executed by omission.
+// (Two-step writes stay smokable on purpose: unconfirmed they are
+// contract-tested pure previews, so smoke exercises real coverage.)
+const WRITE_GATES = (() => {
+  try { return require(path.join(ROOT, 'intelligence-bar', 'write-gates.js')); }
+  catch { return null; }
+})();
+
+function isGatedBareWrite(name) {
+  return !!(WRITE_GATES
+    && (WRITE_GATES.LEGACY_BARE_WRITE_TOOL_NAMES?.has(name)
+      || WRITE_GATES.CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES?.has(name)));
+}
 const OVERRIDES = (() => {
   try { return require('./overrides/manual-contracts'); }
   catch { return {}; }
@@ -119,7 +137,7 @@ function buildRecord(tool, ctx) {
     schema: tool.input_schema || { type: 'object' },
     execute: ctx.execute,
     manualContract: override || inlineContract,
-    sideEffects: !!(override?.sideEffects || tool._sideEffects),
+    sideEffects: !!(override?.sideEffects || tool._sideEffects || isGatedBareWrite(tool.name)),
     sonnetBacked: !!(override?.sonnetBacked || tool._sonnetBacked || SONNET_BACKED.has(tool.name)),
   };
 }
