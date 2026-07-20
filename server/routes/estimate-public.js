@@ -9227,10 +9227,27 @@ router.put('/:token/accept', async (req, res, next) => {
     // time — so these visits are invisible as route anchors to every later
     // offer. Geocode the customer once, post-commit, fail-soft; find-time's
     // customers.latitude fallback then covers all their visits.
+    //
+    // Guard: only when the accepted property IS the customer's own address.
+    // A phone-matched accept can reuse an existing customer for a DIFFERENT
+    // property; filling their primary latitude/longitude then makes
+    // find-time anchor the accepted visits at the primary home instead of
+    // the estimate property (Codex 2026-07-20). ensureCustomerGeocoded
+    // geocodes the customer's stored address fields, so it must only run
+    // when those fields describe the accepted property.
     if (customerId) {
-      const { ensureCustomerGeocoded } = require('../services/geocoder');
-      void ensureCustomerGeocoded(customerId)
-        .catch((e) => logger.warn(`[estimate-accept] customer geocode failed (non-blocking) for ${customerId}: ${e.message}`));
+      void (async () => {
+        const cust = await db('customers')
+          .where({ id: customerId })
+          .first('address_line1', 'latitude', 'longitude');
+        if (!cust || (cust.latitude != null && cust.longitude != null)) return;
+        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const estAddr = norm(estimate.address);
+        const custLine1 = norm(cust.address_line1);
+        if (!custLine1 || (estAddr && !estAddr.includes(custLine1))) return;
+        const { ensureCustomerGeocoded } = require('../services/geocoder');
+        await ensureCustomerGeocoded(customerId);
+      })().catch((e) => logger.warn(`[estimate-accept] customer geocode failed (non-blocking) for ${customerId}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows

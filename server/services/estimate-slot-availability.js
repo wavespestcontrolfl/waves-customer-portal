@@ -1026,9 +1026,17 @@ const SCARCE_FIRST_DAY_MAX = 2;
 // (same contract as diversifyByDay).
 function routeFirstOrder(sorted) {
   if (!Array.isArray(sorted) || sorted.length <= 1) return sorted;
-  const [soonest, ...remaining] = sorted;
-  const routeFit = diversifyByDay(remaining.filter((s) => s?.routeOptimal));
-  const rest = diversifyByDay(remaining.filter((s) => !s?.routeOptimal));
+  const soonest = sorted[0];
+  // Partition FIRST, diversify each partition WITH the soonest card still in
+  // place, then drop it from whichever spread it leads. Removing it before
+  // diversifying would hand its day's second window the day-0 lead of the
+  // remainder spread — so a pool with no route-fit slots would order
+  // differently from the ungated spread instead of degrading to it
+  // (Codex 2026-07-20).
+  const routeFit = diversifyByDay(sorted.filter((s) => s?.routeOptimal))
+    .filter((s) => s !== soonest);
+  const rest = diversifyByDay(sorted.filter((s) => !s?.routeOptimal))
+    .filter((s) => s !== soonest);
   return [soonest, ...routeFit, ...rest];
 }
 
@@ -1050,6 +1058,13 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
   // the day's second window ranks behind every other day's first and the
   // display slice cuts it, leaving the badge claiming "2 openings today"
   // over a single bookable card (owner bug report 2026-07-07).
+  //
+  // This pin deliberately outranks route-first mode for the (at most two)
+  // pinned cards: the badge↔display invariant is customer-visible copy and
+  // must hold at every gate setting. Route-fit days still lead the list
+  // immediately after the pinned pair — `diversified` is already
+  // route-first-ordered here, so filtering out the first day leaves
+  // [route-fit days..., capacity days...] intact.
   const firstDay = sorted[0].date;
   const firstDaySlots = sorted.filter((s) => s?.date === firstDay);
   if (firstDaySlots.length > 1 && firstDaySlots.length <= SCARCE_FIRST_DAY_MAX) {
