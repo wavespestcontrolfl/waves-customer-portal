@@ -13,6 +13,10 @@
  *     (applyLiveMoveSideEffects, same trx for the history append):
  *     job_status_history row attributed to the acting staff, tech_status
  *     release, customer tracker refresh
+ *   - window times are range-validated (25:00 / 18:75 fail per-row) and an
+ *     explicit end needs a positive same-day span over the effective start
+ *   - the write is a field-level CAS on the OBSERVED status + scheduled_date
+ *     + window_start, so a concurrent ordinary move is refused, not clobbered
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -330,7 +334,7 @@ test('a row that changes status between the read and the write is skipped, not r
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([{
     id: 'svc-1',
-    reason: 'status changed while the reschedule was pending (it may have been completed, cancelled, or started)',
+    reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
   }]);
 
   // The UPDATE was scoped to the OBSERVED status, so a row that moved on
@@ -518,6 +522,158 @@ test('an explicit windowStart+windowEnd pair is persisted as given (no derivatio
     window_start: '16:00',
     window_end: '18:30',
   });
+});
+
+test('a row moved concurrently (stale date/window snapshot) is refused by the field CAS, not clobbered', async () => {
+  // Two ORDINARY bulk moves of the same confirmed row both satisfied the
+  // status-only predicate — the later write silently overwrote the newer
+  // date/window and logged from a stale snapshot. The CAS now carries the
+  // observed scheduled_date + window_start, so the stale writer matches zero
+  // rows and lands in failed[] instead.
+  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  const trx = wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'confirmed' }) }),
+      updateChain,
+    ],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
+  }]);
+
+  // The CAS carried the full observed snapshot — status AND schedule fields.
+  expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
+  expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00' });
+  // No audit row for a move that did not happen.
+  expect(trx).not.toHaveBeenCalledWith('reschedule_log');
+});
+
+// --- Window range + span validation (explicit ends) ---
+
+test('an out-of-range windowStart (25:00) lands in failed[] instead of a raw PG time-cast error', async () => {
+  // 25:00 matched the old shape-only normalizeHHMM and died downstream at the
+  // TIME cast. Range validation turns it into the same clear per-row failure
+  // as any other malformed time.
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '25:00' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'windowStart must be HH:MM' }]);
+});
+
+test('an out-of-range windowEnd (18:75) lands in failed[] per-row', async () => {
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '16:00', windowEnd: '18:75' },
+  });
+
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'windowEnd must be HH:MM' }]);
+});
+
+test('an explicit inverted windowStart+windowEnd pair (18:00–09:00) lands in failed[] — never persisted', async () => {
+  // Both bounds pass shape+range individually; persisted as-is the pair
+  // stored an inverted block invisible to every overlap predicate (they all
+  // assume start < end). No update chain is queued: an attempted write would
+  // throw Unexpected trx().
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '18:00', windowEnd: '09:00' },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'windowEnd must be after the window start (same-day window)',
+  }]);
+});
+
+test('a zero-length explicit pair (10:00–10:00) is rejected — a positive same-day span is required', async () => {
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowStart: '10:00', windowEnd: '10:00' },
+  });
+
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'windowEnd must be after the window start (same-day window)',
+  }]);
+});
+
+test('an end-only edit at or before the STORED start is rejected against the effective start', async () => {
+  // SVC stores 09:00:00–10:00:00. windowEnd 08:30 alone would persist a
+  // 09:00–08:30 inverted window beside the untouched stored start — the same
+  // invisible-to-overlap block as the explicit pair.
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowEnd: '08:30' },
+  });
+
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'windowEnd must be after the window start (same-day window)',
+  }]);
+});
+
+test('an end-only edit after the stored start still persists (the span guard passes)', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: '2099-01-15', windowEnd: '11:30' },
+  });
+
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_end: '11:30' });
 });
 
 test('a start-only move whose derived end would cross midnight lands in failed[] — never persisted', async () => {

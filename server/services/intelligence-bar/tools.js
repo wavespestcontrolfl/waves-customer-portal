@@ -1437,15 +1437,30 @@ async function rescheduleAppointment(input) {
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
 
-  // Conditional on the OBSERVED status: the terminal guard and the wasLive
-  // classification above came from the initial read — if the visit completed
-  // (or got cancelled / went live) between that read and this write, an
-  // update by id alone would apply the stale branch and rewrite a terminal
-  // row back onto the schedule. Zero rows matched = the row changed under
-  // us; refuse instead of writing.
+  // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
+  // guard and the wasLive classification above came from the initial read —
+  // if the visit completed (or got cancelled / went live) between that read
+  // and this write, an update by id alone would apply the stale branch and
+  // rewrite a terminal row back onto the schedule. Status alone also let two
+  // ORDINARY moves of the same confirmed row both match — the later write
+  // silently clobbered the newer date/window and logged from a stale
+  // snapshot. Matching the observed scheduled_date + window_start makes the
+  // later writer miss instead (knex renders a null value in the object form
+  // as IS NULL — the same contract auto-dispatch's rebooker `expect` relies
+  // on). Field-level CAS is the repo's established pattern for exactly this
+  // (rebooker options.expect); deliberately NOT SELECT..FOR UPDATE, which
+  // would put a row lock + transaction around a quick single-row mover for
+  // no added safety. updated_at stays out of the predicate: knex never
+  // auto-touches it and not every mover stamps it (the bulk route's UPDATE
+  // doesn't), so it isn't a reliable change marker. Zero rows matched = the
+  // row changed under us; refuse instead of writing.
+  const observedDate = appt.scheduled_date instanceof Date
+    ? appt.scheduled_date.toISOString().slice(0, 10)
+    : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
   const updatedRows = await db('scheduled_services')
     .where('id', appointment_id)
     .where('status', String(appt.status))
+    .where({ scheduled_date: observedDate, window_start: appt.window_start ?? null })
     .update({
       scheduled_date: dateStr,
       window_start: newStart,
@@ -1462,7 +1477,7 @@ async function rescheduleAppointment(input) {
       updated_at: new Date(),
     });
   if (updatedRows === 0) {
-    return { error: 'Appointment changed status while the reschedule was pending (it may have been completed, cancelled, or started) — nothing was moved. Re-check the appointment and retry if still applicable.' };
+    return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
 
   // Rebooker-parity side effects of the live → confirmed flip above:

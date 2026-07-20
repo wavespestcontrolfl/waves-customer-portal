@@ -567,6 +567,36 @@ describe('reschedule_appointment', () => {
     expect(updateChain.update).not.toHaveBeenCalled();
   });
 
+  test('a concurrent ordinary move (stale date/window snapshot) is refused by the field CAS — the newer move is not clobbered', async () => {
+    // Two ordinary moves of the same confirmed row: the second one's snapshot
+    // is stale. Status alone matched both, so the later write silently
+    // overwrote the newer date/window and logged from the stale snapshot. The
+    // CAS now carries the observed scheduled_date + window_start: the stale
+    // writer matches zero rows and must not write, log, or fire side effects.
+    const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      // No reschedule_log queue — an audit insert for a move that did not
+      // happen would throw Unexpected db().
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15',
+    });
+
+    expect(result.error).toMatch(/changed concurrently/);
+    // The CAS carried the full observed snapshot — status AND schedule fields.
+    expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
+    expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00' });
+    // No side effects for a refused move.
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
   test('a failed reschedule_log insert never fails the already-committed move', async () => {
     const updateChain = chain();
     wireDb({

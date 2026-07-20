@@ -502,7 +502,15 @@ function normalizeBoosterMonths(value) {
 function normalizeHHMM(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/);
   if (!m) return null;
-  return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
+  const hh = parseInt(m[1], 10);
+  // Range, not just shape: the shape-only check let 25:00 / 09:75 through to
+  // the TIME cast (a raw PG error on the bulk mover instead of a per-row
+  // validation failure). Every caller already treats null as invalid, and
+  // DB-sourced TIME values are in range by definition, so only raw-payload
+  // call sites change behavior. File-local function — the admin-dispatch and
+  // rain-out copies are separate and unaffected.
+  if (hh > 23 || parseInt(m[2], 10) > 59) return null;
+  return `${String(hh).padStart(2, '0')}:${m[2]}`;
 }
 
 function normalizeDateOnly(value) {
@@ -3457,6 +3465,27 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 if (!we) throw Object.assign(new Error('windowEnd must be HH:MM'), { isValidation: true });
                 updates.window_end = we;
               }
+              // An EXPLICIT end must land after its effective start on the
+              // same day. normalizeHHMM is shape+range only, so an inverted
+              // pair (18:00–09:00) — or an end-only edit at/before the stored
+              // start — persisted a non-positive span invisible to every
+              // overlap predicate (they all assume start < end). Derived ends
+              // (the start-only block below) are start+duration by
+              // construction, so only the explicit-end forms need this. The
+              // start is either the just-normalized payload value or the
+              // stored TIME run through the same normalizer; both sides are
+              // zero-padded HH:MM, so the string compare is a time compare.
+              // This is the lane's only explicit-end intake — the IB movers
+              // (create/reschedule/move_stops) all derive their ends.
+              if (updates.window_end) {
+                const effectiveStart = updates.window_start || normalizeHHMM(svc.window_start);
+                if (effectiveStart && updates.window_end <= effectiveStart) {
+                  throw Object.assign(
+                    new Error('windowEnd must be after the window start (same-day window)'),
+                    { isValidation: true },
+                  );
+                }
+              }
               // A start-only move must not validate or persist against the
               // STALE stored end: moving an 08:00–09:00 visit to 16:00 today
               // was rejected after 09:00 (the old end read as elapsed), and
@@ -3511,20 +3540,34 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
               }
-              // Conditional on the OBSERVED status: the terminal guard and the
-              // wasLive classification above came from the read at the top of
-              // this trx — under READ COMMITTED another writer can complete or
-              // cancel the row before this UPDATE lands, and an update by id
-              // alone would apply the stale branch, rewriting a terminal row
-              // back onto the schedule. Zero rows matched = the row changed
-              // under us; refuse this id (the batch carries the reason).
+              // Compare-and-swap on the OBSERVED status + schedule fields:
+              // the terminal guard and the wasLive classification above came
+              // from the read at the top of this trx — under READ COMMITTED
+              // another writer can complete or cancel the row before this
+              // UPDATE lands, and status alone also let two ORDINARY moves of
+              // the same confirmed row both match, the later one silently
+              // clobbering the newer date/window and logging from a stale
+              // snapshot. Matching the observed scheduled_date + window_start
+              // makes the later writer miss instead (knex renders a null
+              // value in the object form as IS NULL — the same contract
+              // auto-dispatch's rebooker `expect` relies on). Field-level CAS
+              // is the repo's established pattern for exactly this (rebooker
+              // options.expect); deliberately NOT SELECT..FOR UPDATE, which
+              // would widen this quick single-row mover's tx shape for no
+              // added safety. updated_at stays out of the predicate: knex
+              // never auto-touches it and not every mover stamps it (this
+              // UPDATE doesn't), so it isn't a reliable change marker. Zero
+              // rows matched = the row changed under us; refuse this id (the
+              // batch carries the reason).
+              const prevDate = normalizeDateOnly(svc.scheduled_date);
               const updatedRows = await trx('scheduled_services')
                 .where({ id })
                 .where('status', String(svc.status))
+                .where({ scheduled_date: prevDate, window_start: svc.window_start ?? null })
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
-                  new Error('status changed while the reschedule was pending (it may have been completed, cancelled, or started)'),
+                  new Error('the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
               }
@@ -3555,9 +3598,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 })(),
               });
               callFollowUpShiftFrom = svc.scheduled_date;
-              const prevDate = svc.scheduled_date instanceof Date
-                ? svc.scheduled_date.toISOString().split('T')[0]
-                : normalizeDateOnly(svc.scheduled_date);
+              // prevDate (the normalized observed date) is hoisted above the
+              // CAS UPDATE — normalizeDateOnly handles both the pg Date and
+              // string forms, same result as the old inline instanceof split.
               const nextDate = bulkTargetDate;
               const nextStart = updates.window_start || svc.window_start;
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {

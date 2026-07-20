@@ -473,16 +473,32 @@ async function moveStopsToDay(input) {
     // lifecycle exactly like the rebooker's live override does.
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
     const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
-    // Conditional on the OBSERVED status: everything below (the wasLive
-    // classification, the lifecycle rewind, the 'confirmed' restamp) was
-    // derived from the initial read — if the stop completed, got cancelled,
-    // or went live between that read and this write, applying the stale
-    // branch by id alone would rewrite a terminal row back to 'confirmed'
-    // (or leave a now-live row unrewound). Zero rows matched = the stop
-    // changed under us; skip it and report the conflict.
+    // Compare-and-swap on the OBSERVED status + schedule fields: everything
+    // below (the wasLive classification, the lifecycle rewind, the
+    // 'confirmed' restamp) was derived from the initial read — if the stop
+    // completed, got cancelled, or went live between that read and this
+    // write, applying the stale branch by id alone would rewrite a terminal
+    // row back to 'confirmed' (or leave a now-live row unrewound). Status
+    // alone also let two ORDINARY moves of the same confirmed stop both
+    // match — the later write silently clobbered the newer date and logged
+    // from a stale snapshot. Matching the observed scheduled_date +
+    // window_start makes the later writer miss instead (knex renders a null
+    // value in the object form as IS NULL — the same contract auto-dispatch's
+    // rebooker `expect` relies on). Field-level CAS is the repo's established
+    // pattern for exactly this (rebooker options.expect); deliberately NOT
+    // SELECT..FOR UPDATE, which would put row locks + a transaction around a
+    // quick per-stop mover for no added safety. updated_at stays out of the
+    // predicate: knex never auto-touches it and not every mover stamps it
+    // (the bulk route's UPDATE doesn't), so it isn't a reliable change
+    // marker. Zero rows matched = the stop changed under us; skip it and
+    // report the conflict.
+    const observedDate = s.scheduled_date instanceof Date
+      ? s.scheduled_date.toISOString().slice(0, 10)
+      : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
     const updatedRows = await db('scheduled_services')
       .where('id', s.id)
       .where('status', String(s.status))
+      .where({ scheduled_date: observedDate, window_start: s.window_start ?? null })
       .update({
         scheduled_date: dateStr,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
@@ -541,7 +557,7 @@ async function moveStopsToDay(input) {
 
   if (!movedStops.length) {
     return {
-      error: 'No stops were moved — every selected stop changed status (completed/cancelled/started) while the move was pending',
+      error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
       ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),

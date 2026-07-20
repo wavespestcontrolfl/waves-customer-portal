@@ -251,9 +251,22 @@ class RescheduleSMS {
       // NEWER reschedule that lands while this (slow) send is in flight — one
       // that re-stamped appointment_time or bumped updated_at via its own
       // markRescheduleNoticeSent — is not clobbered back into the send set.
-      const reminderGuard = await db('appointment_reminders')
-        .where({ scheduled_service_id: pending.scheduled_service_id })
-        .first('id', 'appointment_time', 'updated_at');
+      // Best-effort: the snapshot only GUARDS the re-arm. The visit has
+      // already moved by this point, so a transient failure on this read must
+      // never abort the confirmation send itself — that would silence the one
+      // customer notice this whole path exists to deliver. Read failed →
+      // null snapshot, log, continue; the catch below degrades to the
+      // unguarded (statically scoped) re-arm.
+      let reminderGuard = null;
+      let reminderGuardReadFailed = false;
+      try {
+        reminderGuard = await db('appointment_reminders')
+          .where({ scheduled_service_id: pending.scheduled_service_id })
+          .first('id', 'appointment_time', 'updated_at');
+      } catch (guardErr) {
+        reminderGuardReadFailed = true;
+        logger.warn(`[reschedule-sms] reminder-guard snapshot read failed for ${pending.scheduled_service_id} (${guardErr.message}) — continuing to the confirmation send; a blocked send will re-arm unguarded`);
+      }
       try {
         await sendAppointmentSms({
           to: customer.phone,
@@ -288,6 +301,30 @@ class RescheduleSMS {
               .where('cancelled', false)
               .where('appointment_time', reminderGuard.appointment_time)
               .where('updated_at', reminderGuard.updated_at)
+              .update({
+                reminder_72h_sent: false,
+                reminder_72h_sent_at: null,
+                reminder_24h_sent: false,
+                reminder_24h_sent_at: null,
+                updated_at: db.fn.now(),
+              });
+          } else if (reminderGuardReadFailed) {
+            // The pre-send snapshot READ failed (this is not the row-missing
+            // case — that skips below), so the re-arm can't be scoped by the
+            // pre-send row state. Fall back to the pre-guard re-arm scoped as
+            // tightly as the static predicates allow: the service id plus the
+            // sibling-suppressed/cancelled carve-outs, which don't depend on
+            // the snapshot. Trade-off, decided per this file's own precedent
+            // ("silence is worse", above): the snapshot guard only prevents a
+            // POSSIBLE duplicate text when a newer reschedule re-stamped the
+            // row mid-send; skipping the re-arm instead risks the customer
+            // never hearing about the new time at all. Prefer the re-arm and
+            // accept the narrow double-text window.
+            logger.warn(`[reschedule-sms] re-arming reminders for ${pending.scheduled_service_id} WITHOUT the pre-send snapshot guard (snapshot read had failed) — a concurrent newer reschedule may get a duplicate reminder`);
+            await db('appointment_reminders')
+              .where({ scheduled_service_id: pending.scheduled_service_id })
+              .where('suppressed_by_sibling', false)
+              .where('cancelled', false)
               .update({
                 reminder_72h_sent: false,
                 reminder_72h_sent_at: null,

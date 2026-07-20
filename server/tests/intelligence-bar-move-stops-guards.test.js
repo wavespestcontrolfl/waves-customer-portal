@@ -253,6 +253,73 @@ test('a same-day move whose every stop has already elapsed errors and reports th
   expect(result.skipped_elapsed).toEqual([{ id: 'svc-late', status: 'confirmed' }]);
 });
 
+test('a stop moved concurrently (stale date/window snapshot) lands in skipped_conflict via the field CAS; the rest still move', async () => {
+  // Two ordinary moves of the same confirmed stop both satisfied the
+  // status-only predicate — the later write silently clobbered the newer
+  // date. The CAS now carries the observed scheduled_date + window_start, so
+  // the stale writer matches zero rows and the stop is reported, not
+  // rewritten. Note the re-read status is still 'confirmed': this conflict is
+  // a concurrent MOVE, which the old status-only predicate could never see.
+  const listChain = chain({
+    select: jest.fn().mockResolvedValue([
+      stop('svc-stale', 'confirmed'),
+      stop('svc-ok', 'confirmed'),
+    ]),
+  });
+  const staleUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
+  const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
+  const okUpdate = chain();
+  const logChain = chain();
+  const svcChains = [staleUpdate, staleReread, okUpdate];
+  let svcIdx = 0;
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      if (listChain.select.mock.calls.length === 0) return listChain;
+      return svcChains[svcIdx++];
+    }
+    if (table === 'reschedule_log') return logChain;
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-stale', 'svc-ok'], new_date: '2099-01-15', confirmed: true,
+  });
+
+  expect(result).toMatchObject({ success: true, moved_count: 1, new_date: '2099-01-15' });
+  expect(result.stops.map((s) => s.id)).toEqual(['svc-ok']);
+  expect(result.skipped_conflict).toEqual([{ id: 'svc-stale', status: 'confirmed' }]);
+  // The CAS carried the full observed snapshot — status AND schedule fields.
+  expect(staleUpdate.where).toHaveBeenCalledWith('status', 'confirmed');
+  expect(staleUpdate.where).toHaveBeenCalledWith({ scheduled_date: '2026-05-20', window_start: '09:00:00' });
+  // Exactly one audit row — the skipped stop logged nothing.
+  expect(logChain.insert).toHaveBeenCalledTimes(1);
+  expect(logChain.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_service_id: 'svc-ok' }));
+});
+
+test('every stop conflicting away concurrently yields the all-skipped error with the conflict bucket', async () => {
+  const listChain = chain({
+    select: jest.fn().mockResolvedValue([stop('svc-stale', 'confirmed')]),
+  });
+  const staleUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
+  const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
+  const svcChains = [staleUpdate, staleReread];
+  let svcIdx = 0;
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      if (listChain.select.mock.calls.length === 0) return listChain;
+      return svcChains[svcIdx++];
+    }
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-stale'], new_date: '2099-01-15', confirmed: true,
+  });
+
+  expect(result.error).toMatch(/changed concurrently/);
+  expect(result.skipped_conflict).toEqual([{ id: 'svc-stale', status: 'confirmed' }]);
+});
+
 test('proposal (unconfirmed) lists only movable stops and flags the terminal ones', async () => {
   db.mockImplementation(() => chain({
     select: jest.fn().mockResolvedValue([stop('svc-ok', 'pending'), stop('svc-done', 'no_show')]),

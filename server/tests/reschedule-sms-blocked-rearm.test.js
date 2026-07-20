@@ -8,6 +8,12 @@
  * later reminder of the new time. The send is now wrapped: any no-send
  * outcome re-arms both windows (mirrors reschedule-public.js — "silence is
  * worse") and the original error still propagates.
+ *
+ * The pre-send snapshot read is BEST-EFFORT: it only guards the re-arm, so a
+ * transient failure on that read must never abort the confirmation send (the
+ * visit has already moved). Snapshot-read failure + blocked send degrades to
+ * the unguarded re-arm, scoped by the static predicates only — same
+ * "silence is worse" call.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
@@ -27,6 +33,7 @@ jest.mock('../services/appointment-reminders', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const RescheduleSMS = require('../services/reschedule-sms');
 
@@ -153,6 +160,70 @@ test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled row
 
   expect(rearmChain.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
   expect(rearmChain.where).toHaveBeenCalledWith('cancelled', false);
+});
+
+test('a failed reminder-guard snapshot read never suppresses the confirmation SMS (best-effort guard)', async () => {
+  // The snapshot only GUARDS the no-send re-arm. The visit has already moved
+  // when the reply lands, so a transient DB failure on the snapshot read must
+  // not abort before sendAppointmentSms — that would silence the one customer
+  // notice this path exists to deliver. Read fails → log, null snapshot,
+  // continue to the send.
+  const snapshotChain = chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) });
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+      chain(), // new_date/new_window update
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    // Only the (failing) snapshot read — the success path must not re-arm.
+    appointment_reminders: [snapshotChain],
+  });
+
+  const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+  expect(result).toMatchObject({ handled: true, action: 'rescheduled', smsSent: true });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('reminder-guard snapshot read failed'));
+});
+
+test('a blocked confirmation after a failed snapshot read re-arms UNGUARDED, scoped by the static predicates only', async () => {
+  // No snapshot to guard on (the read failed, distinct from the row-missing
+  // case below). Skipping the re-arm would risk total silence about the new
+  // time; the file's own precedent ("silence is worse") prefers the re-arm
+  // and accepts the narrow double-text window. Scope falls back to the
+  // service id + the carve-outs that don't depend on the snapshot.
+  sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) });
+  const rearmChain = chain();
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    appointment_reminders: [snapshotChain, rearmChain],
+  });
+
+  await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
+    .rejects.toThrow(/appointment SMS blocked/);
+
+  // Static scope: the service id + the sibling-suppressed/cancelled
+  // carve-outs…
+  expect(rearmChain.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
+  expect(rearmChain.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
+  expect(rearmChain.where).toHaveBeenCalledWith('cancelled', false);
+  // …and NO snapshot fields — there was no snapshot to guard on.
+  expect(rearmChain.where).not.toHaveBeenCalledWith('appointment_time', expect.anything());
+  expect(rearmChain.where).not.toHaveBeenCalledWith('updated_at', expect.anything());
+  expect(rearmChain.update).toHaveBeenCalledWith(expect.objectContaining({
+    reminder_72h_sent: false,
+    reminder_72h_sent_at: null,
+    reminder_24h_sent: false,
+    reminder_24h_sent_at: null,
+  }));
 });
 
 test('when the reminder row vanished before the send (no snapshot), the blocked path re-arms nothing and still throws', async () => {
