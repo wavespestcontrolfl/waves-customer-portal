@@ -1507,6 +1507,12 @@ function EstimateToolView() {
         /* ignore customer lookup errors */
       }
 
+      // The inner catch above deliberately swallows customer-lookup errors —
+      // including the AbortError a NEWER lookup raises by aborting this one —
+      // so re-check supersession before the satellite/status writes below, or
+      // a stale lookup paints its property data over the newer one's UI.
+      if (lookupSeq !== lookupSeqRef.current || formAddressRef.current.trim() !== address) return;
+
       // Satellite images
       if (data.satellite) {
         const aiSources = normalizeAiSources(
