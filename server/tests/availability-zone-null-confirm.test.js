@@ -193,9 +193,11 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(result.confirmationCode).toBeTruthy();
     // The zone-scoped occupied-set fast path still owns this branch's error
-    // shapes — its scheduled_services zone query ran (city-scoped join)...
-    expect(scheduledQueries.some((q) => q.whereIn.mock.calls
-      .some((c) => c[0] === 'customers.city'))).toBe(true);
+    // shapes — its scheduled_services zone query ran (city-scoped join; the
+    // city leg is the case-insensitive LOWER(customers.city) raw form from
+    // the small-fixes lane)...
+    expect(scheduledQueries.some((q) => q.whereRaw.mock.calls
+      .some((c) => String(c[0]).includes('LOWER(customers.city)')))).toBe(true);
     // ...but the branch no longer commits on it ALONE: the shared tech-blind
     // probe runs as the backstop. The zone set never selects an overlapping
     // visit whose customer city is outside the zone list, and rung 1 only
