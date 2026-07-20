@@ -75,6 +75,10 @@ function invoiceHref(row) {
   return `/admin/invoices?search=${encodeURIComponent(row.invoice_number || row.id)}`;
 }
 
+function dispatchDayHref(date) {
+  return `/admin/dispatch?date=${encodeURIComponent(date)}`;
+}
+
 function employee(row, role = 'technician') {
   const id = row.technician_id || row.assigned_to || row.created_by_technician_id || null;
   const name = row.tech_name || row.assigned_name || row.created_by_name || null;
@@ -431,6 +435,76 @@ async function getCustomerIssues() {
   });
 }
 
+const STALE_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+const STALE_VISIT_LIST_LIMIT = 50;
+
+// Plain DATE columns come back from pg as Date objects — normalize to the
+// YYYY-MM-DD string the hrefs and days-overdue math need.
+function dateOnly(value) {
+  return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : null;
+}
+
+function daysPast(dateStr, todayStr) {
+  const from = Date.parse(dateStr);
+  const to = Date.parse(todayStr);
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
+  return Math.round((to - from) / 86400000);
+}
+
+// Past-dated visits still sitting in an open status — the backlog the 6PM
+// missed-appointment check (yesterday→today, pending/confirmed only) and the
+// today-scoped late detectors never see. Fed by the same query shape the
+// nightly stale-visit sweep bells on (services/stale-visit-sweep.js); this
+// endpoint is the read surface the dashboard card lists rows from.
+async function getStaleVisits() {
+  const today = etDateString();
+  // scheduled_date is an ET wall-clock DATE — compare it to an ET calendar
+  // date string, never a UTC instant.
+  const base = () => db('scheduled_services as s')
+    .whereIn('s.status', STALE_VISIT_STATUSES)
+    .where('s.scheduled_date', '<', today);
+  const [{ count }] = await base().count('* as count');
+  const rows = await base()
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .select(
+      's.id',
+      's.customer_id',
+      's.service_type',
+      's.scheduled_date',
+      's.status',
+      'c.first_name',
+      'c.last_name',
+    )
+    .orderBy('s.scheduled_date', 'asc')
+    .limit(STALE_VISIT_LIST_LIMIT);
+
+  const visits = rows.map((row) => {
+    const name = customerName(row);
+    const scheduledDate = dateOnly(row.scheduled_date);
+    const daysOverdue = daysPast(scheduledDate, today);
+    return issue({
+      id: `${row.id}_stale_visit`,
+      type: 'stale_visit',
+      severity: 'medium',
+      label: 'Stale visit',
+      summary: `${name} · ${row.service_type || 'Scheduled service'} still ${row.status} ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} past its date.`,
+      sourceRecordType: 'job',
+      sourceRecordId: row.id,
+      href: dispatchDayHref(scheduledDate),
+      customer: { id: row.customer_id, name, href: customerHref(row.customer_id) },
+      employee: null,
+      occurredAt: scheduledDate,
+      metadata: {
+        serviceType: row.service_type,
+        status: row.status,
+        scheduledDate,
+        daysOverdue,
+      },
+    });
+  });
+  return { visits, total: Number(count || 0) };
+}
+
 function rollupTeamAttention(sections) {
   const counts = new Map();
   const sourceSections = ['jobsNeedingAttention', 'pipelineFollowUp', 'missedLeads'];
@@ -519,6 +593,20 @@ router.get('/', async (req, res, next) => {
       sections,
       generatedAt: new Date().toISOString(),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/command-center/stale-visits — past-dated open visits for the
+// dashboard's Stale visits card. Read-only and deliberately outside the main
+// GET / aggregate: these rows are a persistent backlog, not a per-day feed,
+// and syncing hundreds of them into admin_alerts lifecycle rows would bury
+// the actionable day-of alerts.
+router.get('/stale-visits', async (req, res, next) => {
+  try {
+    const { visits, total } = await getStaleVisits();
+    res.json({ visits, total, generatedAt: new Date().toISOString() });
   } catch (err) {
     next(err);
   }

@@ -101,6 +101,7 @@ export default function DashboardPageV2() {
   const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
   const [revenueOverview, setRevenueOverview] = useState(null); // /admin/revenue/overview (wave6 — margin by line)
   const [churnReasons, setChurnReasons] = useState(null); // /admin/dashboard/churn-reasons (wave7)
+  const [staleVisits, setStaleVisits] = useState(null); // /admin/command-center/stale-visits (wave8)
   // Mobile scorecard: below md the five sections render ONE at a time behind
   // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
   // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
@@ -317,6 +318,16 @@ export default function DashboardPageV2() {
     if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [cr] = wave7;
     setChurnReasons((prev) => cr ?? prev);
+
+    // Wave 8 — stale past-dated open visits (command-center exception feed).
+    // Same one-fetch-per-new-wave rate-limit rule; fails soft — the card
+    // hides itself while the feed is null/empty.
+    const wave8 = await Promise.all([
+      track("/stale-visits", adminFetch("/admin/command-center/stale-visits")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [sv] = wave8;
+    setStaleVisits((prev) => sv ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -610,7 +621,7 @@ export default function DashboardPageV2() {
 
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
       {sectionVisible("today") && (
-        <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+        <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} staleVisits={staleVisits} {...kpiStripProps} />
       )}
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off

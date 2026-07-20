@@ -814,6 +814,11 @@ const gates = {
   // send (uncompleted inspections, signed-but-unsent drafts, stuck holds).
   // Admin-notification-only; no customer contact.
   wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
+
+  // Stale-visit sweep — nightly admin bell for past-dated appointments still
+  // sitting in an open status (pending/confirmed/en_route/on_site).
+  // Detection-only: never mutates the rows, no customer contact.
+  staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
 };
 
 function isEnabled(gate) {

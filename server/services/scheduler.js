@@ -3917,6 +3917,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:40PM — Stale-visit sweep (past-dated open appointments)
+  // =========================================================================
+  // Runs after the 6PM missed-appointment check on purpose: that check only
+  // covers a yesterday→today window of pending/confirmed rows, so anything
+  // older accumulates silently (250 open past-dated rows in the July 2026
+  // audit). Detection only — one deduped admin bell, never a row mutation.
+  // Gated (GATE_STALE_VISIT_SWEEP) and cross-replica serialized inside the
+  // sweep itself, like the WDO attention sweep.
+  cron.schedule('40 18 * * *', async () => {
+    logger.info('Running: stale-visit sweep');
+    try {
+      const { runStaleVisitSweep } = require('./stale-visit-sweep');
+      const result = await runStaleVisitSweep();
+      if (result?.rang) {
+        logger.info(`Stale-visit sweep rang: ${result.items} open past-dated visit(s)`);
+      }
+    } catch (err) {
+      logger.error(`Stale-visit sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
   // annual-prepay payment reminders/sweeps that ride the same run.

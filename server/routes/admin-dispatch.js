@@ -545,6 +545,29 @@ function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
 }
 
+// Backdated quiet completion (stale-visit backlog closeout). `backfill: true`
+// on POST /:serviceId/complete stamps the completion's date fields from the
+// row's own scheduled_date instead of today, and forces every customer-facing
+// send off (completion SMS, report email, review ask, payer AP email) — the
+// work happened days ago; a "we just finished" text today would be a lie.
+// Only valid for a genuinely past-dated row (ET calendar-date compare):
+// today's visits complete through the normal path so the 6PM checker's and
+// same-day semantics stay untouched.
+function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString() } = {}) {
+  if (backfill !== true) return { active: false };
+  const serviceDate = scheduledDate ? serviceDateOnly(scheduledDate) : null;
+  if (!serviceDate || serviceDate >= today) {
+    return {
+      active: false,
+      error: {
+        error: 'backfill is only valid for a visit whose scheduled date is in the past',
+        code: 'backfill_not_past',
+      },
+    };
+  }
+  return { active: true, serviceDate };
+}
+
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
@@ -2355,6 +2378,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formStartedAt,
       invoiceAlreadySent = false,
       includePayLink = true,
+      backfill = false,             // backdated quiet completion of a stale past-dated visit — see backfillCompletionPlan
+
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
       treeShrubCompletion = null,
@@ -2532,6 +2557,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'future_scheduled_date',
       });
     }
+
+    // Backdated quiet completion — validated against the row's own
+    // scheduled_date (past days only). `let`: a crash-resumed completion may
+    // retry without the body flag; the frozen structured_notes recover it
+    // below, before any send/invoice decision reads it.
+    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date });
+    if (backfillPlan.error) {
+      return res.status(400).json(backfillPlan.error);
+    }
+    let isBackfillCompletion = backfillPlan.active;
 
     // No-show is terminal and non-completable. A completion/recap sheet
     // opened before another dispatcher marked the visit no_show would
@@ -2897,6 +2932,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
     let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+    // Backfill = quiet by contract: no completion SMS / report email / review
+    // ask regardless of the operator toggles or the delivery posture.
+    // (Re-forced after the frozen-posture re-derivation below, which could
+    // otherwise un-suppress an auto_send profile on resume.)
+    if (isBackfillCompletion) {
+      suppressTypedCustomerComms = true;
+      effectiveSendCompletionSms = false;
+    }
     // Internal-only consultation (e.g. Waves Assessment): advisory walkthrough,
     // not a treatment. Beyond suppressing delivery, it must NOT feed the
     // customer-report findings / Pest Pressure pipeline, and its suppression
@@ -3505,14 +3548,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
         await db.transaction(async (trx) => {
           const completionEndedAt = new Date();
-          const completionServiceDate = etDateString(completionEndedAt);
+          // Backfill: the service happened on its scheduled day — stamp the
+          // record (and everything keyed off it: activity-score dates, the
+          // completion invoice's service linkage) with that date, not today.
+          // completionEndedAt stays the real wall-clock instant on purpose:
+          // completed_at/check_out_time are audit timestamps of when the
+          // closeout was recorded, not of the visit.
+          const completionServiceDate = isBackfillCompletion
+            ? backfillPlan.serviceDate
+            : etDateString(completionEndedAt);
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
             // (stripe-webhook.js) also suppresses it for a billed assessment.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion) ? false : requestReview !== false,
+            // Backfill completions freeze it off for the same reason: a
+            // review ask days after the visit (or from the later payment)
+            // must never fire from a quiet backlog closeout.
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -3524,6 +3578,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             timeOnSite: timeOnSite || null,
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
+            // Backfill frozen on the record: a crash-resumed retry may lack
+            // the body flag, and the quiet/backdate posture must survive it.
+            ...(isBackfillCompletion ? { backfill: true } : {}),
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
@@ -5013,6 +5070,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
       }
     }
+    // Backfill survives resume via its own structured_notes freeze (the body
+    // flag may be absent on a crash-resumed retry), and re-forces quiet AFTER
+    // the frozen-delivery re-derivation above — an auto_send posture must not
+    // un-suppress a backdated closeout.
+    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
+      isBackfillCompletion = true;
+    }
+    if (isBackfillCompletion) {
+      suppressTypedCustomerComms = true;
+      effectiveSendCompletionSms = false;
+    }
     if (resumingCommittedCompletion && shouldRejectPhotoCaptionBannedCopy({
       captionBannedViolations,
       isInternalOnlyCompletion,
@@ -5236,7 +5304,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
           useScheduledReplay: true,
-          dueDate: serviceDateOnly(record.service_date),
+          // Backfill: record.service_date is the backdated visit day — using
+          // it here would mint the invoice instantly overdue and light up the
+          // dunning/overdue surfaces for a quiet backlog closeout. Due today
+          // instead: the exact net terms a normal same-day completion gets.
+          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
         });
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
@@ -5816,7 +5888,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
-      && !invoice.payer_id) {
+      && !invoice.payer_id
+      // Backfill closeouts are quiet end-to-end — a declined backlog charge
+      // parks on the admin payment-failed bell instead of texting the
+      // customer about a visit from days/weeks ago.
+      && !isBackfillCompletion) {
       try {
         const { formatCardLine, invoiceAmountDue } = require('../services/invoice-helpers');
         const attempted = Number(paymentFailedSmsContext.attemptedAmount);
@@ -6540,7 +6616,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
       || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
         .includes(String(invoice?.status || '').toLowerCase());
-    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered) {
+    // Backfill closeouts skip the automatic payer AP send too — the invoice
+    // stays unfinalized for the operator to review and send by hand (same
+    // recovery path as a failed AP send below).
+    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
       try {
         const InvoiceEmail = require('../services/invoice-email');
         const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
@@ -8537,4 +8616,5 @@ module.exports._test = {
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
+  backfillCompletionPlan,
 };
