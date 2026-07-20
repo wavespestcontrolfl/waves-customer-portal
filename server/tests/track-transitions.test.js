@@ -476,14 +476,19 @@ describe('track-transitions lifecycle side effects', () => {
     });
   });
 
-  test('markComplete under untrustedLifecycleSpan writes bookkeeping ONLY — no lifecycle rebuild (backfill closeouts)', async () => {
+  test('markComplete under untrustedLifecycleSpan with NO completedAt writes track_state/updated_at ONLY (unknown-end backfill)', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
-    // The backfill shape this flag exists for: a stale check-in weeks back,
-    // duration/end columns already stripped to NULL by admin-dispatch's
-    // applyBackfillDurationPolicy inside the completion transaction. The
-    // default rebuild would stamp today's end aliases and book the
-    // stale-start→now gap (weeks) as service_time_minutes — which
-    // job-costing's durable guard then prefers as explicit labor.
+    // The unknown-end backfill shape: a stale check-in weeks back, blank
+    // typed duration — the completion transaction stripped the end stamps
+    // (any end would complete a fabricated pair against the kept real
+    // start), and the caller passes NO completedAt. The default rebuild
+    // would stamp today's end aliases and book the stale-start→now gap
+    // (weeks) as service_time_minutes; a completed_at stamp — even the old
+    // wall-clock bookkeeping one — would re-feed the pair to
+    // pricing-reality-check's minutesBetween(arrived_at, completed_at)
+    // fallback and its lookback COALESCE (Codex P2, fix round 4). The
+    // column stays NULL — the state legacy pre-tracking rows already
+    // occupy.
     const staleStart = new Date('2026-06-20T14:00:00.000Z');
     const svc = {
       id: 'job-bf',
@@ -510,22 +515,57 @@ describe('track-transitions lifecycle side effects', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('complete');
+    expect(result.completedAt).toBeNull();
     const payload = update.update.mock.calls[0][0];
     // The tracker's own bookkeeping still lands…
     expect(payload).toMatchObject({
       track_state: 'complete',
-      completed_at: new Date('2026-07-19T16:00:00.000Z'),
       updated_at: new Date('2026-07-19T16:00:00.000Z'),
     });
-    // …and NOTHING else: no today end stamps completing the stale pair, no
-    // weeks-long duration for the costing guard, no start rewrites.
-    expect(Object.keys(payload).sort()).toEqual(['completed_at', 'track_state', 'updated_at']);
+    // …and NOTHING else: no completed_at completing the stale pair, no
+    // today end stamps, no weeks-long duration for the costing guard, no
+    // start rewrites.
+    expect(Object.keys(payload).sort()).toEqual(['track_state', 'updated_at']);
     // Non-duration side effects are untouched by the flag.
     expect(clearTechCurrentJob).toHaveBeenCalledWith({
       tech_id: 'tech-bf',
       current_job_id: 'job-bf',
       status: 'idle',
     });
+  });
+
+  test('markComplete under the flag stamps completed_at from the caller-backdated instant — never the wall clock', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    // The kept-end backfill shape: admin-dispatch derives the service-day
+    // end instant (backfillCompletionEndInstant) and passes it through, so
+    // the termite-bond sync, pricing-reality-check's window/month, and
+    // billing recovery all see the visit's day — not the closeout day.
+    const backdated = new Date('2026-06-20T14:45:00.000Z');
+    const svc = {
+      id: 'job-bd',
+      technician_id: 'tech-bd',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-06-20T14:00:00.000Z'),
+      service_time_minutes: 45,
+      actual_duration_minutes: 45,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-bd', {
+      untrustedLifecycleSpan: true,
+      completedAt: backdated,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toEqual(backdated);
+    const payload = update.update.mock.calls[0][0];
+    expect(payload.completed_at).toEqual(backdated);
+    // updated_at stays the real wall clock — it is row bookkeeping.
+    expect(payload.updated_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+    expect(Object.keys(payload).sort()).toEqual(['completed_at', 'track_state', 'updated_at']);
   });
 
   test('markComplete under the flag never overwrites a typed backfill duration either', async () => {
@@ -553,6 +593,32 @@ describe('track-transitions lifecycle side effects', () => {
     expect(payload).not.toHaveProperty('actual_duration_minutes');
     expect(payload).not.toHaveProperty('actual_end_time');
     expect(payload).not.toHaveProperty('check_out_time');
+    expect(payload).not.toHaveProperty('completed_at');
+  });
+
+  test('markComplete WITHOUT the flag still stamps wall-clock completed_at — a passed completedAt is ignored', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    // Backdating is exclusively an untrusted-span behavior; no live caller
+    // can shift completed_at by accident.
+    const svc = {
+      id: 'job-nf',
+      technician_id: 'tech-nf',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T15:00:00.000Z'),
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-nf', {
+      completedAt: new Date('2020-01-01T00:00:00.000Z'),
+    });
+
+    expect(result.ok).toBe(true);
+    const payload = update.update.mock.calls[0][0];
+    expect(payload.completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+    expect(result.completedAt).toEqual(new Date('2026-07-19T16:00:00.000Z'));
   });
 
   test('markComplete re-emits refresh when already complete', async () => {

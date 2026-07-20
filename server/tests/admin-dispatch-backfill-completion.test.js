@@ -36,6 +36,7 @@ const {
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,
+  backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
@@ -45,6 +46,7 @@ const {
   shouldCaptureApplicationConditions,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
+const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const { hashCompletionRequest } = require('../services/completion-attempts');
@@ -473,6 +475,152 @@ describe('backfill end-stamp policy — durations stay unknown despite a real st
   });
 });
 
+describe('backfillCompletionEndInstant — kept end stamps carry the backdated service day (Codex P2 ×3, fix round 4)', () => {
+  // The reported hazards on head 213e3d64c: (1) an empty scheduled_services
+  // UPDATE crashed the blank-duration checked-in closeout; (2) markComplete's
+  // wall-clock completed_at fed backfilled visits into pricing-reality-check's
+  // CURRENT window with fabricated arrived_at→completed_at spans; (3) the end
+  // stamps the policies KEEP (typed-duration rows; startless rows) started
+  // termite-bond terms on the closeout date (lifecycle-email-sweeps prefers
+  // actual_end_time/check_out_time/completed_at over scheduled_date). One
+  // rule resolves all three: every kept backfill end instant = the visit's
+  // backdated service day.
+  const SERVICE_DATE = '2026-07-01';
+  const REAL_START = '2026-07-01T13:07:00Z'; // 09:07 ET on the service day
+  const CHECKED_IN = {
+    status: 'on_site',
+    actual_start_time: REAL_START,
+    check_in_time: REAL_START,
+  };
+  const NEVER_STARTED = { status: 'pending' };
+  const CLOSEOUT_AT = new Date('2026-07-19T16:00:00Z'); // weeks later
+
+  test('real row-backed start + typed duration → start + duration (the pair IS the operator statement)', () => {
+    const instant = backfillCompletionEndInstant(SERVICE_DATE, 45, CHECKED_IN);
+    expect(instant).toEqual(new Date(new Date(REAL_START).getTime() + 45 * 60000));
+    expect(etDateString(instant)).toBe(SERVICE_DATE);
+  });
+
+  test('real row-backed start + blank duration → null (end genuinely unknown; stamps are stripped, never backdated)', () => {
+    expect(backfillCompletionEndInstant(SERVICE_DATE, undefined, CHECKED_IN)).toBeNull();
+    expect(backfillCompletionEndInstant(SERVICE_DATE, null, CHECKED_IN)).toBeNull();
+    // An over-cap "typed" value degrades to absent — same sanitizer as the
+    // duration policy, so instant and persisted minutes can never disagree.
+    expect(backfillCompletionEndInstant(SERVICE_DATE, BACKFILL_MAX_TIME_ON_SITE_MINUTES + 1, CHECKED_IN)).toBeNull();
+  });
+
+  test('no start anywhere → ET noon of the service day, typed or blank', () => {
+    for (const typed of [45, undefined]) {
+      const instant = backfillCompletionEndInstant(SERVICE_DATE, typed, NEVER_STARTED);
+      expect(etDateString(instant)).toBe(SERVICE_DATE);
+      expect(instant.toISOString()).toBe('2026-07-01T16:00:00.000Z'); // noon EDT
+    }
+  });
+
+  test('lifecycle leg composed as the route wires it: kept end stamps land on the service day, not the closeout day', () => {
+    // Typed duration, never-started row — the shape that KEEPS its end
+    // stamps with starts stripped. The route feeds the helper's instant as
+    // the builder's `at` (source contract below).
+    const endAt = backfillCompletionEndInstant(SERVICE_DATE, 45, NEVER_STARTED);
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(NEVER_STARTED, endAt || CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      NEVER_STARTED,
+    );
+    expect(etDateString(updates.actual_end_time)).toBe(SERVICE_DATE);
+    expect(etDateString(updates.check_out_time)).toBe(SERVICE_DATE);
+    expect(updates.service_time_minutes).toBe(45);
+    for (const field of BACKFILL_INFERRED_START_FIELDS) {
+      expect(updates).not.toHaveProperty(field);
+    }
+    // Termite-bond sync preference (actual_end_time first) now resolves to
+    // the visit's day — the bond term anchors correctly.
+    expect(etDateString(updates.actual_end_time || updates.check_out_time)).toBe(SERVICE_DATE);
+  });
+
+  test('lifecycle leg composed: checked-in + typed duration keeps history AND the pair equals the typed minutes', () => {
+    const endAt = backfillCompletionEndInstant(SERVICE_DATE, 45, CHECKED_IN);
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(CHECKED_IN, endAt || CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      CHECKED_IN,
+    );
+    expect(updates.service_time_minutes).toBe(45);
+    // The kept end completes the REAL pair exactly: start + 45.
+    const pairMinutes = (new Date(updates.actual_end_time) - new Date(REAL_START)) / 60000;
+    expect(pairMinutes).toBe(45);
+    expect(etDateString(updates.actual_end_time)).toBe(SERVICE_DATE);
+  });
+
+  test('record leg composed: the report row end stamps carry the service day too', () => {
+    const endAt = backfillCompletionEndInstant(SERVICE_DATE, 45, NEVER_STARTED);
+    const lifecycleUpdates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(NEVER_STARTED, endAt || CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      NEVER_STARTED,
+    );
+    const fields = applyBackfillRecordTimingPolicy(
+      buildServiceRecordCompletionTimingFields({
+        scheduledService: NEVER_STARTED,
+        lifecycleUpdates,
+        completedAt: endAt || CLOSEOUT_AT,
+        serviceRecordCols: {
+          started_at: true, arrived_at: true, actual_start_time: true, check_in_time: true,
+          ended_at: true, completed_at: true, actual_end_time: true, check_out_time: true,
+        },
+      }),
+      45,
+      NEVER_STARTED,
+    );
+    expect(etDateString(fields.ended_at)).toBe(SERVICE_DATE);
+    expect(etDateString(fields.completed_at)).toBe(SERVICE_DATE);
+    expect(fields.started_at).toBeNull();
+  });
+});
+
+describe('empty scheduled_services update — the blank-duration checked-in closeout completes (Codex P2, fix round 4)', () => {
+  const STALE_CHECKED_IN = {
+    status: 'on_site',
+    actual_start_time: '2026-06-20T14:00:00Z',
+    check_in_time: '2026-06-20T14:00:00Z',
+  };
+  const CLOSEOUT_AT = new Date('2026-07-19T16:00:00Z');
+
+  // The exact assembly the route performs for this shape.
+  function scheduledServiceUpdateFor(svc, timeOnSite) {
+    const endAt = backfillCompletionEndInstant('2026-06-20', timeOnSite, svc);
+    const lifecycleUpdates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(svc, endAt || CLOSEOUT_AT, { elapsed: timeOnSite }),
+      timeOnSite,
+      svc,
+    );
+    return { ...lifecycleUpdates }; // non-WaveGuard: no protocol fields join it
+  }
+
+  test('the hazard is real: knex throws on an empty .update() — the pre-fix closeout failed here', () => {
+    const knex = require('knex')({ client: 'pg' });
+    expect(() => knex('scheduled_services').where({ id: 'svc-1' }).update({}).toString())
+      .toThrow(/Empty \.update\(\)/);
+    // And this shape genuinely produces the empty object: blank typed time +
+    // real stale check-in strips every key the helper built.
+    expect(scheduledServiceUpdateFor(STALE_CHECKED_IN, undefined)).toEqual({});
+  });
+
+  test('the guard predicate skips exactly the empty shape and nothing else', () => {
+    // Empty (blank duration + real start) → skipped.
+    expect(Object.keys(scheduledServiceUpdateFor(STALE_CHECKED_IN, undefined)).length).toBe(0);
+    // Typed duration → writes minutes + service-day end stamps.
+    const typed = scheduledServiceUpdateFor(STALE_CHECKED_IN, 45);
+    expect(Object.keys(typed).length).toBeGreaterThan(0);
+    expect(typed.service_time_minutes).toBe(45);
+    // Never-started blank-duration → still writes the service-day end stamps.
+    const startless = scheduledServiceUpdateFor({ status: 'pending' }, undefined);
+    expect(Object.keys(startless).length).toBeGreaterThan(0);
+    expect(etDateString(startless.actual_end_time)).toBe('2026-06-20');
+    // (The route-side guard + ordering are pinned in the source contracts.)
+  });
+});
+
 describe('shouldCaptureApplicationConditions — no current-day weather on backdated records (Codex P1, PR #2897 fix round)', () => {
   // The capture is CURRENT FAWN/Open-Meteo at closeout time and lands on
   // service_records.conditions, which compliance.js copies verbatim into the
@@ -845,7 +993,36 @@ describe('completion route wiring (source contracts)', () => {
     // timeOnSite or unknown for the duration, and the pre-update row (svc)
     // so inferred start fields are stripped while row-backed ones survive
     // (behavioral coverage above).
-    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,600}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite, svc\);/);
+    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionLifecycleAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,600}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite, svc\);/);
+  });
+
+  test('the kept lifecycle stamps are built from the backdated end instant, and the wall clock survives only as policy input (fix round 4)', () => {
+    // Under backfill the builder's `at` is backfillCompletionEndInstant's
+    // service-day instant — so every end stamp the policy KEEPS already
+    // carries the visit's day. For the unknown-end shape the helper returns
+    // null and the wall clock flows in instead, but the duration policy
+    // strips those rows' end stamps entirely (behavioral coverage above), so
+    // no wall-clock end instant can reach the row.
+    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| completionEndedAt;/);
+  });
+
+  test('an empty scheduled_services timing update is skipped — the blank-duration checked-in closeout must complete (fix round 4)', () => {
+    // For a backfilled real-stale-check-in row with a blank typed duration
+    // the policy strips EVERY key the helper produced; spreading that into
+    // scheduledServiceUpdate and calling knex .update({}) throws (behavioral
+    // proof below), which failed the closeout for exactly the shape the UI
+    // allows. The route guards the call; transitionJobStatus immediately
+    // after owns the status flip + updated_at bump on the same row, so
+    // nothing downstream loses its row-touch.
+    expect(source).toMatch(/if \(Object\.keys\(scheduledServiceUpdate\)\.length\) \{\s*\n\s*await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.update\(scheduledServiceUpdate\);\s*\n\s*\}/);
+    // Ordering: the guarded update sits before the canonical status flip.
+    const guardAt = source.indexOf('if (Object.keys(scheduledServiceUpdate).length) {');
+    const flipAt = source.indexOf("// 5. Status flip via the canonical sole-writer.");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(flipAt).toBeGreaterThan(guardAt);
+    // And the sole-writer really does bump updated_at on the flip.
+    const jobStatusSource = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
+    expect(jobStatusSource).toMatch(/\.update\(\{ status: toStatus, updated_at: t\.fn\.now\(\) \}\)/);
   });
 
   test('typed one-time billing pre-gate: backfill bypasses the checkout detour, live keeps it', () => {
@@ -914,9 +1091,10 @@ describe('completion route wiring (source contracts)', () => {
     // and the job-costing durable guard prefers that persisted column as
     // explicit labor. Both post-commit call sites — the terminal flip and
     // the artifact-refresh re-emit (which performs the real flip whenever
-    // the first call failed) — must flag the span untrusted.
+    // the first call failed) — must flag the span untrusted AND carry the
+    // backdated completed_at stamp (fix round 4).
     const flaggedCalls = source.match(
-      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*\}\)/g,
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n\s*\}\)/g,
     ) || [];
     expect(flaggedCalls.length).toBe(2);
     // Exactly these two sites exist on the backfill-capable route; the third
@@ -931,10 +1109,31 @@ describe('completion route wiring (source contracts)', () => {
     expect(rederivation).toBeGreaterThan(-1);
     expect(firstFlagged).toBeGreaterThan(rederivation);
     // And the tracker honors the flag: the lifecycle rebuild is skipped
-    // wholesale under it (bookkeeping — track_state/completed_at/updated_at
-    // — still lands; behavioral coverage in track-transitions.test.js).
+    // wholesale under it (track_state/updated_at bookkeeping still lands;
+    // behavioral coverage in track-transitions.test.js).
     const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
     expect(trackerSource).toMatch(/\.\.\.\(opts\.untrustedLifecycleSpan \? \{\} : buildCompletionLifecycleUpdates\(svc, now\)\),/);
+  });
+
+  test('tracker completed_at rides the same backdated end-instant rule — or stays NULL for the unknown-end shape (fix round 4)', () => {
+    // The route derives the stamp ONCE, from the same helper the
+    // transaction used — svc's row-backed starts + scheduled_date + the
+    // typed duration (falling back to the FROZEN structured_notes value on
+    // a flagless crash-resume, whose body omits timeOnSite).
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite \?\? parseJsonObject\(record\?\.structured_notes\)\?\.timeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n\s*: null;/);
+    // Derived AFTER the crash-resume re-derivation (it reads the healed
+    // flag), BEFORE the first markComplete that consumes it.
+    const rederivation = source.indexOf('parseJsonObject(record.structured_notes)?.backfill === true');
+    const stampAt = source.indexOf('const backfillTrackerCompletedAt = isBackfillCompletion');
+    const firstCall = source.indexOf('completedAt: backfillTrackerCompletedAt,');
+    expect(stampAt).toBeGreaterThan(rederivation);
+    expect(firstCall).toBeGreaterThan(stampAt);
+    // And the tracker enforces the contract: under the flag completed_at is
+    // written only from the caller's instant (finiteDate-validated); absent
+    // → the column is omitted, never a wall-clock fallback.
+    const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
+    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan \? finiteDate\(opts\.completedAt\) : now;/);
+    expect(trackerSource).toMatch(/\.\.\.\(completedAtStamp \? \{ completed_at: completedAtStamp \} : \{\}\),/);
   });
 
   test('backfill + card hold parks for review instead of charging', () => {
@@ -1042,7 +1241,7 @@ describe('completion route wiring (source contracts)', () => {
     // through applyBackfillRecordTimingPolicy under isBackfillCompletion
     // (same sanitized timeOnSite + pre-update row as the lifecycle leg),
     // and only then assigned onto the insert payload.
-    expect(source).toMatch(/const recordTimingFields = buildServiceRecordCompletionTimingFields\(\{\s*\n\s*scheduledService: svc,\s*\n\s*lifecycleUpdates,\s*\n\s*completedAt: completionEndedAt,\s*\n\s*serviceRecordCols,\s*\n\s*\}\);[\s\S]{0,500}if \(isBackfillCompletion\) applyBackfillRecordTimingPolicy\(recordTimingFields, effectiveTimeOnSite, svc\);\s*\n\s*Object\.assign\(recordInsert, recordTimingFields\);/);
+    expect(source).toMatch(/const recordTimingFields = buildServiceRecordCompletionTimingFields\(\{\s*\n\s*scheduledService: svc,\s*\n\s*lifecycleUpdates,\s*\n(?:\s*\/\/[^\n]*\n)*\s*completedAt: completionLifecycleAt,\s*\n\s*serviceRecordCols,\s*\n\s*\}\);[\s\S]{0,500}if \(isBackfillCompletion\) applyBackfillRecordTimingPolicy\(recordTimingFields, effectiveTimeOnSite, svc\);\s*\n\s*Object\.assign\(recordInsert, recordTimingFields\);/);
   });
 
   test('the conditions capture is backfill-gated at the single fetch site (fix round 2)', () => {

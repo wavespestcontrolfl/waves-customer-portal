@@ -1,6 +1,7 @@
 const {
   buildPricingRealityCheckFromRows,
   extractQuotedMinutesFromEstimate,
+  resolveActualMinutes,
   serviceMetric,
   sqftBand,
   validateGroupBy,
@@ -159,6 +160,74 @@ describe('pricing reality check calculations', () => {
       excludedMissingActualCount: 1,
       excludedInvalidDurationCount: 1,
     });
+  });
+
+  test('backfilled unknown-end rows report NO actual minutes — never a fabricated arrived_at→completed_at span (Codex P2, PR #2897 fix round 4)', () => {
+    // The strip-shape backfill row as the write side now persists it: real
+    // stale arrived_at kept as history, duration columns NULL, every end
+    // stamp stripped, tracker completed_at left NULL, and the service
+    // record's structured timeOnSite null. Pre-fix, markComplete stamped
+    // completed_at = closeout NOW, and the minutesBetween(arrived_at,
+    // completed_at) fallback booked the weeks-long gap as time on site.
+    const stripShape = {
+      arrived_at: '2026-06-20T14:00:00.000Z',
+      check_in_time: '2026-06-20T14:00:00.000Z',
+      actual_start_time: '2026-06-20T14:00:00.000Z',
+      completed_at: null,
+      actual_end_time: null,
+      check_out_time: null,
+      service_time_minutes: null,
+      actual_duration_minutes: null,
+      time_entry_minutes: null,
+      time_entry_clock_in: null,
+      time_entry_clock_out: null,
+      service_record_started_at: '2026-06-20T14:00:00.000Z',
+      service_record_ended_at: null,
+      service_record_structured_notes: JSON.stringify({ timeOnSite: null, backfill: true }),
+    };
+    expect(resolveActualMinutes(stripShape)).toBeNull();
+    // The pre-fix shape really did fabricate weeks — the hazard this guards.
+    expect(resolveActualMinutes({ ...stripShape, completed_at: '2026-07-19T16:00:00.000Z' }))
+      .toBeGreaterThan(24 * 60);
+
+    // Through the full build: excluded as missing-actual (honest unknown),
+    // and its month keys off the scheduled day, not the closeout day.
+    const result = buildPricingRealityCheckFromRows([
+      completedRow({
+        service_id: 'backfill-strip',
+        estimated_duration_minutes: 30,
+        scheduled_date: '2026-06-20',
+        ...stripShape,
+      }),
+    ], { lookbackDays: 90, groupBy: 'month' });
+    expect(result.coverage).toMatchObject({
+      completedServiceCount: 1,
+      includedServiceCount: 0,
+      excludedMissingActualCount: 1,
+      excludedInvalidDurationCount: 0,
+    });
+    expect(result.availableFilters.months).toContain('2026-06');
+  });
+
+  test('backfilled kept-end rows bucket into the SERVICE month with the typed minutes (backdated completed_at)', () => {
+    // The kept shape: typed 45, end instants backdated to the service day
+    // by backfillCompletionEndInstant. The visit lands in ITS month with
+    // the operator's duration — not in the closeout month with a guess.
+    const result = buildPricingRealityCheckFromRows([
+      completedRow({
+        service_id: 'backfill-kept',
+        completed_at: '2026-06-20T16:00:00.000Z', // noon EDT on the visit day
+        actual_end_time: '2026-06-20T16:00:00.000Z',
+        check_out_time: '2026-06-20T16:00:00.000Z',
+        estimated_duration_minutes: 40,
+        service_time_minutes: 45,
+        actual_duration_minutes: 45,
+      }),
+    ], { lookbackDays: 90, groupBy: 'month' });
+
+    expect(result.coverage).toMatchObject({ completedServiceCount: 1, includedServiceCount: 1 });
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0]).toMatchObject({ key: '2026-06' });
   });
 
   test('validates lookbackDays and groupBy allowlists', () => {

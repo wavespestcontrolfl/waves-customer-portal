@@ -700,6 +700,43 @@ function applyBackfillRecordTimingPolicy(timingFields, timeOnSite, service = {})
   return timingFields;
 }
 
+// Single backfill end-instant rule (Codex P2 ×3, PR #2897 fix round 4): every
+// end/completion stamp a backfill closeout KEEPS — scheduled_services
+// actual_end_time/check_out_time, the service_records end fields, and the
+// tracker's completed_at — carries the visit's backdated service day, never
+// the closeout wall-clock. Day-scale readers key "when did the visit end" off
+// these columns: the termite-bond sync (lifecycle-email-sweeps prefers
+// actual_end_time/check_out_time/completed_at over scheduled_date, so a
+// today-stamped end started bond terms + renewal notices on the closeout
+// date), pricing-reality-check (its lookback COALESCE and month bucketing
+// pulled weeks-old backfills into the CURRENT window/month), and billing
+// recovery's completed_at aging. The record layer already dates service_date
+// to the visit day; this extends the same posture to the instants. The
+// closeout wall-clock stays on the audit trail (record/attempt created_at,
+// job_status_history).
+//
+// The instant, per row shape:
+//  - real row-backed start + typed duration → start + duration (the pair then
+//    equals the operator's statement exactly — the one honest end).
+//  - real row-backed start + blank duration → null: the end is genuinely
+//    unknown, and ANY instant would complete a fabricated pair against the
+//    kept stale start (the duration policies strip these rows' end stamps;
+//    the tracker skips completed_at — readers all fall back to
+//    scheduled_date, the same path legacy NULL-completed_at rows take).
+//  - no start anywhere → ET noon of the service day (no pair to poison;
+//    same backdated-instant convention the lawn-protocol completion already
+//    uses via toETNoonServiceDate).
+function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
+  const realStart = BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+  if (realStart) {
+    return explicitMinutes ? new Date(realStart.getTime() + explicitMinutes * 60000) : null;
+  }
+  return toETNoonServiceDate(serviceDate);
+}
+
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
@@ -3722,18 +3759,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
           // completion invoice's service linkage) with that date, not today.
-          // completionEndedAt stays the real wall-clock instant on purpose:
-          // completed_at/check_out_time are audit timestamps of when the
-          // closeout was recorded, not of the visit — EXCEPT when the row
-          // carries a real stale check-in and no typed duration, where the
-          // duration policies drop the end stamps so start→end readers can't
-          // book the stale span as time on site (Codex P1, PR #2897 fix
-          // round; see applyBackfillDurationPolicy /
-          // applyBackfillRecordTimingPolicy).
           const completionServiceDate = isBackfillCompletion
             ? backfillPlan.serviceDate
             : etDateString(completionEndedAt);
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: effectiveTimeOnSite });
+          // …and the end INSTANTS the closeout keeps carry that day too
+          // (Codex P2, PR #2897 fix round 4): a wall-clock end stamp made
+          // termite bonds start their term on the closeout date and let
+          // weeks-old backfills into pricing-reality-check's current
+          // window/month. completionEndedAt stays the wall-clock instant for
+          // the audit surfaces (attempt rows, job_status_history); the
+          // lifecycle/record stamps get the backdated instant — or, for a
+          // real stale check-in with no typed duration, keep the wall clock
+          // only as the policies' input, which then strips those rows' end
+          // stamps entirely (the end is genuinely unknown; see
+          // backfillCompletionEndInstant / applyBackfillDurationPolicy /
+          // applyBackfillRecordTimingPolicy).
+          const backfillEndedAt = isBackfillCompletion
+            ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
+            : null;
+          const completionLifecycleAt = backfillEndedAt || completionEndedAt;
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
           // never let a typed duration back-derive a today-dated arrival for
@@ -3952,7 +3997,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
             lifecycleUpdates,
-            completedAt: completionEndedAt,
+            // Backfill: the report row's end stamps carry the backdated
+            // service-day instant (same rule as the lifecycle leg above);
+            // the strip policy below then removes them entirely for the
+            // unknown-end shape.
+            completedAt: completionLifecycleAt,
             serviceRecordCols,
           });
           // Backfill: the report row must not pair the kept real check-in
@@ -4483,7 +4532,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
           });
         }
-        await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
+        // Empty-update guard (Codex P2, PR #2897 fix round 4): for a
+        // backfilled real-stale-check-in row with a blank typed duration the
+        // duration policy strips EVERY key the lifecycle helper produced —
+        // exactly the shape the closeout UI allows — and knex throws on
+        // .update({}), failing the whole closeout. Nothing downstream needs
+        // this row-touch when there is nothing to write: transitionJobStatus
+        // below owns the status flip and bumps updated_at on the same row.
+        if (Object.keys(scheduledServiceUpdate).length) {
+          await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
+        }
 
         // 5. Status flip via the canonical sole-writer.
         await transitionJobStatus({
@@ -4590,6 +4648,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
       isBackfillCompletion = true;
     }
+
+    // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
+    // end-instant rule the transaction applied to the kept lifecycle stamps,
+    // for markComplete's completed_at below — a wall-clock completed_at
+    // re-fed the closeout date to every scheduled_services reader the
+    // stripped end stamps were protecting (pricing-reality-check's lookback
+    // COALESCE + minutesBetween(arrived_at, completed_at) fallback, the
+    // termite-bond sync's third preference, billing recovery's aging).
+    // Deterministic across crash-resume: svc's row-backed starts and
+    // scheduled_date are stable, and the typed duration falls back to the
+    // FROZEN structured_notes.timeOnSite when the retry body omits it. Null
+    // for the unknown-end shape (real stale check-in, blank duration) — the
+    // tracker then leaves completed_at NULL, a state legacy pre-tracking
+    // rows already occupy and every reader COALESCEs past.
+    const backfillTrackerCompletedAt = isBackfillCompletion
+      ? backfillCompletionEndInstant(
+        serviceDateOnly(svc.scheduled_date),
+        effectiveTimeOnSite ?? parseJsonObject(record?.structured_notes)?.timeOnSite,
+        svc,
+      )
+      : null;
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
@@ -4787,9 +4866,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // applyBackfillDurationPolicy stripped (or set from the typed
         // duration), and job-costing's durable guard would then read the
         // rebuilt service_time_minutes as explicit labor. The flag keeps the
-        // tracker to its own bookkeeping (track_state/completed_at/
-        // updated_at); the policy's persisted values survive.
+        // tracker to its own bookkeeping (track_state/updated_at), and
+        // completed_at comes from the backdated end-instant rule (or stays
+        // NULL for the unknown-end shape); the policy's persisted values
+        // survive.
         untrustedLifecycleSpan: isBackfillCompletion,
+        completedAt: backfillTrackerCompletedAt,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -6773,8 +6855,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         actorId: req.technicianId,
         // Same backfill contract as the first markComplete above: normally
         // idempotent by now, but when that call failed this one performs the
-        // real flip — it must honor the duration policy too.
+        // real flip — it must honor the duration policy AND the backdated
+        // completed_at stamp too.
         untrustedLifecycleSpan: isBackfillCompletion,
+        completedAt: backfillTrackerCompletedAt,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -9014,6 +9098,7 @@ module.exports._test = {
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,
+  backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
