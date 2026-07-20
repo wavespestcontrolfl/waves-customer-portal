@@ -1331,6 +1331,26 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const primary = filterPastSlotsForToday(cachedPrimary, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const expander = filterPastSlotsForToday(cachedExpander, { minimumLeadMinutes: opts.minimumLeadMinutes });
     if (primary.length === cachedPrimary.length && expander.length === cachedExpander.length) {
+      // Gate-off must win over a cache entry written while the rain-chip
+      // gate was on: the gate resolves at process start and this cache is
+      // in-memory, so today the two can't actually disagree — but if the
+      // gates ever become dynamic, a kill-switch flip must not keep
+      // serving rainChance for up to 5 minutes of TTL (Codex 2026-07-20).
+      // The key deliberately excludes gate state; strip on read instead.
+      if (!isEnabled('bookingRainChips')
+        && [...primary, ...expander].some((s) => s.rainChance != null)) {
+        const strip = (slots) => slots.map((s) => {
+          const copy = { ...s };
+          delete copy.rainChance;
+          return copy;
+        });
+        return {
+          ...cached.result,
+          primary: strip(primary),
+          expander: strip(expander),
+          metadata: { ...cached.result.metadata, cacheHit: true },
+        };
+      }
       return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
     }
     wrapperCache.delete(cacheKey);

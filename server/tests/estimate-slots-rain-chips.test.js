@@ -161,4 +161,28 @@ describe('getAvailableSlots — rain chips (GATE_BOOKING_RAIN_CHIPS)', () => {
     }
     expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
   });
+
+  test('gate flipped OFF after a gate-on cache write: cache hits stop serving rainChance', async () => {
+    // First generation with the gate ON populates the 5-min wrapper cache
+    // with rainChance-stamped (signed) slots.
+    isEnabled.mockImplementation((gate) => gate === 'bookingRainChips');
+    getDailyRainOutlookBounded.mockResolvedValue({
+      '2027-05-20': { rainChance: 55, shortForecast: 'Showers' },
+    });
+    const warm = await getAvailableSlots('est-rain-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+    expect(allSlots(warm).every((s) => s.rainChance === 55)).toBe(true);
+
+    // Kill switch: same request now hits the cache, but the gate-off strip
+    // must win — no rainChance anywhere, and no new weather lookup.
+    isEnabled.mockImplementation(() => false);
+    getDailyRainOutlookBounded.mockClear();
+    const afterKill = await getAvailableSlots('est-rain-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+    expect(afterKill.metadata.cacheHit).toBe(true);
+    const slots = allSlots(afterKill);
+    expect(slots.length).toBeGreaterThan(0);
+    for (const slot of slots) {
+      expect(slot).not.toHaveProperty('rainChance');
+    }
+    expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
 });
