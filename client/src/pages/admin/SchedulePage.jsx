@@ -7702,6 +7702,14 @@ export function CompletionPanel({
   // ≥7 days past (stale-backlog cleanup from the dashboard card); OFF at 1–6
   // days past — a next-morning closeout of yesterday's visit is a normal
   // completion and must not silently go quiet.
+  // Backfill is admin-only server-side (it suppresses comms and the charge
+  // rails), and this panel is shared with technician users — so a tech must
+  // never see it defaulted on, or every stale closeout 403s until they find
+  // the checkbox. Same reasoning as the prepay CTA below.
+  const panelIsAdmin = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
+    catch { return false; }
+  })();
   const backfillScheduledDate = String(
     service.scheduledDate || service.scheduled_date || service.date || "",
   ).split("T")[0];
@@ -7711,9 +7719,9 @@ export function CompletionPanel({
           86400000,
       )
     : 0;
-  const backfillEligible = backfillDaysPast >= 1;
+  const backfillEligible = panelIsAdmin && backfillDaysPast >= 1;
   const [backfillCloseout, setBackfillCloseout] = useState(
-    backfillDaysPast >= 7,
+    panelIsAdmin && backfillDaysPast >= 7,
   );
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
@@ -7737,11 +7745,7 @@ export function CompletionPanel({
   // flags endpoint also serve technician users, so gate the CTA on the admin role
   // exactly like the Customer 360 prepay buttons — otherwise a tech hits a 403
   // after filling the modal.
-  const prepayIsAdmin = (() => {
-    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
-    catch { return false; }
-  })();
-  const showPrepayCta = prepayAtCompletionFlag && prepayIsAdmin;
+  const showPrepayCta = prepayAtCompletionFlag && panelIsAdmin;
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
