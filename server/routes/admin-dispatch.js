@@ -5440,7 +5440,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // actually delivers, the completion SMS goes report-only.
     let autoChargedReceiptPending = false;
     let paymentFailedSmsContext = null;
-    if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+    // Backfill closeouts never move money automatically: the visit is days
+    // old and an off-session charge (plus the receipt/decline texts it can
+    // spawn) would hit the customer with zero fresh context. Skipping the
+    // whole rail leaves the exact no-chargeable-method posture — invoice
+    // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
+    // untouched — for explicit operator collection.
+    if (isBackfillCompletion && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid
+      && customerAutopayActive) {
+      logger.info(`[dispatch] backfill completion: per-application auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
+    }
+    if (!isBackfillCompletion
+      && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -5672,6 +5683,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ status: 'charge_review', updated_at: db.fn.now() })
             .catch((e) => logger.error(`[admin-dispatch] failed to park card hold for payment reconciliation: ${e.message}`));
         }
+      } else if (isBackfillCompletion) {
+        // Backfill closeouts never move money automatically: skip the hold
+        // charge entirely, leaving any live hold 'held' — un-charged and
+        // reviewable, the same posture the hold service's own withheld-for-
+        // review paths use — and bell the office so it doesn't sit silent
+        // (holds don't surface on the unpaid-invoice feeds).
+        try {
+          const CardHolds = require('../services/estimate-card-holds');
+          const liveHold = await CardHolds.heldCardForScheduledService(svc.id);
+          if (liveHold) {
+            logger.warn(`[dispatch] backfill completion: card-hold charge skipped for visit ${svc.id} — hold left held for operator review`);
+            await require('../services/notification-service').notifyAdmin(
+              'billing',
+              'Card hold not charged — backfilled completion',
+              'A stale visit was closed out as a backdated backfill, so its saved-card hold was NOT charged. Review the visit and charge or release the hold manually.',
+              {
+                link: liveHold.customer_id ? `/admin/customers/${liveHold.customer_id}` : '/admin/dispatch',
+                metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, holdId: liveHold.id, source: 'backfill_completion' },
+              },
+            );
+          }
+        } catch (e) { logger.warn(`[dispatch] backfill card-hold review alert failed: ${e.message}`); }
       } else try {
         const CardHolds = require('../services/estimate-card-holds');
         const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });

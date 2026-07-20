@@ -21,6 +21,8 @@
  * writes nothing but admin notifications.
  */
 
+const crypto = require('crypto');
+
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
@@ -72,11 +74,19 @@ function oldestDate(visits) {
 }
 
 // Stable fingerprint of the backlog picture: total + per-status counts +
-// oldest date. Identical picture two nights running → no second bell.
+// oldest date + a hash of the sorted member IDs. Identical picture two nights
+// running → no second bell. The ID hash is what makes MEMBERSHIP churn ring
+// (WDO-attention precedent — its bells cover per-item ids): one visit
+// resolving while another goes stale can leave every count and the oldest
+// date unchanged, and that swap must still bell.
 function summarySignature(visits) {
   const counts = countsByStatus(visits);
   const parts = Object.keys(counts).sort().map((s) => `${s}:${counts[s]}`);
-  return `total:${visits.length}|${parts.join('|')}|oldest:${oldestDate(visits) || 'none'}`;
+  const idHash = crypto.createHash('sha256')
+    .update(visits.map((v) => String(v.id)).sort().join('|'))
+    .digest('hex')
+    .slice(0, 16);
+  return `total:${visits.length}|${parts.join('|')}|oldest:${oldestDate(visits) || 'none'}|ids:${idHash}`;
 }
 
 function summarize(visits) {

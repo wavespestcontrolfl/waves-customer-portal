@@ -84,4 +84,29 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/&& !invoice\.payer_id\s*\n\s*\/\/ Backfill closeouts are quiet end-to-end[\s\S]{0,200}&& !isBackfillCompletion\)/);
     expect(source).toMatch(/invoice\.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion/);
   });
+
+  test('backfill + saved payment method never auto-charges (per-application rail gated off)', () => {
+    // The per-application saved-card/ACH rail — and with it the receipt
+    // enqueue and combined-receipt arming that only happen inside it — runs
+    // exclusively for non-backfill completions. Invoice minting is untouched
+    // (shouldInvoice runs earlier), so a backfill invoice still mints, open
+    // and uncharged, for operator collection.
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& perApplicationBilling && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    // autoChargedReceiptPending starts false and is only ever set inside the
+    // gated rail — no charge, no combined receipt claim.
+    expect(source).toMatch(/let autoChargedReceiptPending = false;/);
+  });
+
+  test('backfill + card hold parks for review instead of charging', () => {
+    // The card-hold rail takes a dedicated backfill branch BEFORE the charge
+    // path: bell the office about the live hold, leave it held, and never
+    // call the charge helpers.
+    const backfillHoldBranch = source.match(/\} else if \(isBackfillCompletion\) \{([\s\S]*?)\} else try \{/);
+    expect(backfillHoldBranch).not.toBeNull();
+    expect(backfillHoldBranch[1]).toContain('heldCardForScheduledService');
+    expect(backfillHoldBranch[1]).not.toContain('chargeCardHoldOnCompletion');
+    expect(backfillHoldBranch[1]).not.toContain('chargeInvoiceWithSavedCard');
+    // The real charge call survives, unreachable for backfill completions.
+    expect(source).toMatch(/\} else try \{\s*\n\s*const CardHolds = require\('\.\.\/services\/estimate-card-holds'\);\s*\n\s*const holdCharge = await CardHolds\.chargeCardHoldOnCompletion/);
+  });
 });

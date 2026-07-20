@@ -62,6 +62,14 @@ describe('summarySignature / summarize', () => {
     expect(_private.summarySignature(asDates)).toBe(_private.summarySignature(BACKLOG));
   });
 
+  test('membership churn changes the signature even when counts and oldest date match', () => {
+    // One visit resolves while a different one goes stale with the same
+    // status and date — total, per-status counts, and oldest all unchanged.
+    // The sorted-ID hash must still ring the swap.
+    const swapped = [BACKLOG[0], { ...BACKLOG[1], id: 'z' }, BACKLOG[2]];
+    expect(_private.summarySignature(swapped)).not.toBe(_private.summarySignature(BACKLOG));
+  });
+
   test('summarize names non-zero statuses with counts and the oldest date', () => {
     const text = _private.summarize(BACKLOG);
     expect(text).toContain('3 past-dated visits still open');

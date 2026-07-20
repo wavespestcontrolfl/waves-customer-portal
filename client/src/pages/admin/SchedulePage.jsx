@@ -7695,6 +7695,26 @@ export function CompletionPanel({
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
+  // Backdated closeout ("backfill") of a past-dated visit: the server records
+  // the completion to the visit's scheduled day, sends NO customer messages
+  // (SMS / report email / review ask), and skips the automatic charge rails.
+  // Only offered when the scheduled date is before today (ET). Defaults ON at
+  // ≥7 days past (stale-backlog cleanup from the dashboard card); OFF at 1–6
+  // days past — a next-morning closeout of yesterday's visit is a normal
+  // completion and must not silently go quiet.
+  const backfillScheduledDate = String(
+    service.scheduledDate || service.scheduled_date || service.date || "",
+  ).split("T")[0];
+  const backfillDaysPast = /^\d{4}-\d{2}-\d{2}$/.test(backfillScheduledDate)
+    ? Math.round(
+        (Date.parse(etDateString()) - Date.parse(backfillScheduledDate)) /
+          86400000,
+      )
+    : 0;
+  const backfillEligible = backfillDaysPast >= 1;
+  const [backfillCloseout, setBackfillCloseout] = useState(
+    backfillDaysPast >= 7,
+  );
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -10199,6 +10219,10 @@ export function CompletionPanel({
             }
           : null,
         oneTimeRecapOnly,
+        // Backdated quiet closeout — only ever posted for a past-dated visit
+        // (the server 400s otherwise); the flag overrides the SMS/review
+        // toggles server-side.
+        ...(backfillEligible && backfillCloseout ? { backfill: true } : {}),
         sendCompletionSms: effectiveSendSms,
         // Only meaningful when an invoice/pay link would be texted; mirror the
         // sub-toggle's visibility (invoice + SMS being sent) so a stale false
@@ -12622,6 +12646,50 @@ export function CompletionPanel({
                   One-time recap + review only (no invoice)
                 </span>{" "}
               </label>{" "}
+              {backfillEligible && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${backfillCloseout ? M.ink : M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={backfillCloseout}
+                    onChange={(e) => setBackfillCloseout(e.target.checked)}
+                    style={{
+                      width: 18,
+                      height: 18,
+                      accentColor: M.ink,
+                      marginTop: 1,
+                    }}
+                  />{" "}
+                  <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                    Backdated closeout — {backfillDaysPast} day
+                    {backfillDaysPast === 1 ? "" : "s"} past its date
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 14,
+                        color: M.ink3,
+                        marginTop: 2,
+                      }}
+                    >
+                      {backfillCloseout
+                        ? "Records to the visit day, sends no customer messages, and skips auto-charge."
+                        : "Unchecked: completes as today with the normal customer messages."}
+                    </span>
+                  </span>{" "}
+                </label>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -14597,6 +14665,40 @@ export function CompletionPanel({
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
           </label>{" "}
+          {backfillEligible && (
+            <label
+              style={{
+                ...checkboxRow,
+                alignItems: "flex-start",
+                fontSize: 14,
+                borderColor: backfillCloseout ? D.teal : checkboxRow.borderColor,
+              }}
+            >
+              {" "}
+              <input
+                type="checkbox"
+                checked={backfillCloseout}
+                onChange={(e) => setBackfillCloseout(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />{" "}
+              <span>
+                Backdated closeout — {backfillDaysPast} day
+                {backfillDaysPast === 1 ? "" : "s"} past its date
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 14,
+                    color: D.muted,
+                    marginTop: 2,
+                  }}
+                >
+                  {backfillCloseout
+                    ? "Records to the visit day, sends no customer messages, and skips auto-charge."
+                    : "Unchecked: completes as today with the normal customer messages."}
+                </span>
+              </span>{" "}
+            </label>
+          )}{" "}
           <label style={checkboxRow}>
             {" "}
             <input
