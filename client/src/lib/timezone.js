@@ -80,6 +80,17 @@ export function formatETDate(date, options = {}) {
   return d.toLocaleDateString('en-US', { timeZone: TIMEZONE, ...options });
 }
 
+// A date-only value — a Postgres `date` column such as next_service_date —
+// arrives over JSON as UTC midnight ('2026-07-19T00:00:00.000Z') and slips to
+// the previous calendar day when formatted in ET. Anchor it at noon UTC first
+// so the calendar day survives any US timezone (matches formatInvoiceDate).
+export function formatETDateOnly(value, options = {}) {
+  if (!value) return '';
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+  if (!match) return '';
+  return formatETDate(`${match[1]}T12:00:00Z`, options);
+}
+
 export function formatETTime(date, options = {}) {
   const d = date instanceof Date ? date : new Date(date);
   return d.toLocaleTimeString('en-US', {
