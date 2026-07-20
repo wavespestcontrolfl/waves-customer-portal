@@ -63,6 +63,7 @@ function chain({
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
+  q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.del = jest.fn(async () => deleteResult);
@@ -802,7 +803,7 @@ describe('admin email template routes', () => {
     });
   });
 
-  test('processes due automation execution runs from the admin endpoint', async () => {
+  test('processes the previewed runs when a confirmed send names runIds', async () => {
     const dueRunsQuery = chain({ result: [] });
     setDbQueues({
       email_template_automation_runs: [dueRunsQuery],
@@ -812,14 +813,55 @@ describe('admin email template routes', () => {
       const res = await fetch(`${baseUrl}/admin/email-templates/automations/runs/process-due`, {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ limit: 10 }),
+        body: JSON.stringify({ limit: 10, runIds: ['run-1', 'run-2'] }),
       });
       const body = await res.json();
 
       expect(res.status).toBe(200);
       expect(body).toEqual({ processed: 0, results: [] });
-      expect(dueRunsQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'scheduled', 'retry_scheduled', 'running']);
+      expect(dueRunsQuery.whereIn).toHaveBeenCalledWith('id', ['run-1', 'run-2']);
       expect(dueRunsQuery.limit).toHaveBeenCalledWith(10);
+    });
+  });
+
+  test('a non-preview send without runIds is rejected (must preview + confirm)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/runs/process-due`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ limit: 10 }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/runIds is required/i);
+    });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('preview=true returns the due runs without sending', async () => {
+    const dueRunsQuery = chain({
+      result: [
+        { id: 'run-1', recipient_email: 'a@example.com', automation_key: 'k1', template_key: 't1', status: 'pending', run_after: new Date('2026-07-14T00:00:00.000Z') },
+      ],
+    });
+    setDbQueues({ email_template_automation_runs: [dueRunsQuery] });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/runs/process-due`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ limit: 50, preview: true }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      // preview shape (no `processed` key ⇒ the send loop never ran)
+      expect(body).toEqual({
+        preview: true,
+        dueCount: 1,
+        runs: [
+          { id: 'run-1', recipient_email: 'a@example.com', automation_key: 'k1', template_key: 't1', status: 'pending', run_after: '2026-07-14T00:00:00.000Z' },
+        ],
+      });
     });
   });
 
