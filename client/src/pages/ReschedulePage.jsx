@@ -21,6 +21,7 @@ import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
+import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import {
@@ -255,6 +256,13 @@ function SlotButton({ slot, selected, onSelect }) {
 }
 
 function DayGroup({ day, selectedSlot, onSelect }) {
+  // Rain chip (GATE_BOOKING_RAIN_CHIPS): daily value stamped by the shared
+  // availability builder on the day object (slots carry it too — fallback).
+  // ≥40 amber; ≥50 a stronger tone — steering customers OFF rainy days is
+  // desirable on the rescheduler. Field absent (gate off / no outlook) → nothing.
+  const rain = Number.isFinite(day.rainChance) ? day.rainChance : day.slots?.[0]?.rainChance;
+  const showRain = Number.isFinite(rain) && rain >= 40;
+  const heavyRain = showRain && rain >= 50;
   return (
     <div style={{ marginBottom: 18 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
@@ -265,6 +273,16 @@ function DayGroup({ day, selectedSlot, onSelect }) {
             background: '#DCFCE7', padding: '2px 8px', borderRadius: 999,
           }}>
             Tech nearby
+          </span>
+        ) : null}
+        {showRain ? (
+          <span data-glass="chip" style={{
+            fontSize: 12, fontWeight: 700,
+            color: heavyRain ? '#9A3412' : '#B45309',
+            background: heavyRain ? '#FFEDD5' : '#FFF7ED',
+            padding: '2px 8px', borderRadius: 999,
+          }}>
+            <Icon name="cloudRain" size={12} style={{ verticalAlign: '-2px', marginRight: 3 }} /> {Math.round(rain)}% rain
           </span>
         ) : null}
       </div>
@@ -485,6 +503,10 @@ function V2BestTimes({ slots, days, onPick }) {
               <span className="rsv2-best-when">{day.fullDate} {'·'} {slot.start_label}</span>
               <span className="rsv2-best-why">
                 {nearby ? "We're servicing a property close to you that day" : 'Our soonest opening'}
+                {/* Rain marker (GATE_BOOKING_RAIN_CHIPS): appended only ≥40% */}
+                {Number.isFinite(day.rainChance ?? slot.rainChance) && (day.rainChance ?? slot.rainChance) >= 40
+                  ? ` · ${Math.round(day.rainChance ?? slot.rainChance)}% rain`
+                  : ''}
               </span>
             </span>
             <span className="rsv2-best-go">Pick {'→'}</span>
@@ -518,6 +540,10 @@ function V2DayGrid({ availability, selectedDate, onSelectDay }) {
           const day = byDate.get(date);
           const open = !!day?.slots?.length;
           const label = day?.fullDate || formatDateLabel(date);
+          // Rain marker (GATE_BOOKING_RAIN_CHIPS): tiny corner umbrella on
+          // ≥40% days — the number sits center and the dots ride the bottom
+          // edge, so the top-right corner is free. Field absent → nothing.
+          const rainy = open && Number.isFinite(day.rainChance) && day.rainChance >= 40;
           return (
             <button
               type="button"
@@ -527,10 +553,11 @@ function V2DayGrid({ availability, selectedDate, onSelectDay }) {
               className={`rsv2-day${date === selectedDate ? ' rsv2-day-selected' : ''}`}
               disabled={!open}
               aria-label={open
-                ? `${label}${day.nearby ? ' — tech in your neighborhood' : ''}, ${day.slots.length} ${day.slots.length === 1 ? 'opening' : 'openings'}`
+                ? `${label}${day.nearby ? ' — tech in your neighborhood' : ''}${rainy ? ` — ${Math.round(day.rainChance)}% chance of rain` : ''}, ${day.slots.length} ${day.slots.length === 1 ? 'opening' : 'openings'}`
                 : `${label}, no open times`}
               onClick={() => open && onSelectDay(date)}
             >
+              {rainy ? <span className="rsv2-day-rain" aria-hidden="true"><Icon name="cloudRain" size={10} /></span> : null}
               <span className="rsv2-day-num">{shortMonthDay(date, { withMonth: false })}</span>
               {open ? (
                 <span className="rsv2-day-dots">
@@ -815,6 +842,7 @@ function V2Styles() {
       .rsv2-day:disabled { opacity: .35; cursor: default; }
       .rsv2-day-selected { background: ${COLORS.glassNavy}; color: ${COLORS.white}; border-color: ${COLORS.glassNavy}; }
       .rsv2-day-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      .rsv2-day-rain { position: absolute; top: 2px; right: 4px; font-size: 10px; line-height: 1; opacity: .85; }
       .rsv2-day-dots { position: absolute; left: 0; right: 0; bottom: 5px; display: flex; justify-content: center; gap: 3px; }
       .rsv2-day-dots i { width: 5px; height: 5px; border-radius: 999px; background: ${COLORS.yellow}; border: .5px solid rgba(4,57,94,.3); }
       .rsv2-day-dots i.rsv2-dot-nearby { background: ${COLORS.green}; border-color: transparent; }
