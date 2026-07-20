@@ -255,6 +255,32 @@ function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
 }
 
+// Default-deny tool authorization for non-admin (technician) tokens. A
+// technician may execute ONLY the isolated tech toolset, enforced on EVERY
+// execution path — the /query tool loop, /execute, and /confirm-action. The
+// tech IB context offers only these tools, so this never blocks a legitimate
+// tech session; it closes the /execute + /confirm-action bypass where the tool
+// name comes straight from the client instead of the model's offered-tool list
+// (ADMIN_ONLY_TOOL_NAMES only covered create_customer + email tools, leaving
+// customer-PII reads like get_customer_detail / query_customers reachable).
+// TECH_TOOL_NAMES is defined above.
+function isToolAllowedForRole(toolName, techRole) {
+  return techRole === 'admin' || TECH_TOOL_NAMES.has(toolName);
+}
+
+// Tech context for the direct-execution endpoints (/execute, /confirm-action).
+// Admins run unscoped (null, like the /query admin path); a technician runs
+// against their OWN scope so tech tools (e.g. get_my_route) filter to their
+// stops instead of returning every technician's customers. Mirrors the tech
+// context the /query loop builds.
+function techContextForExecution(req) {
+  if (req.techRole === 'admin') return null;
+  return {
+    techId: req.technicianId || req.technician?.id || null,
+    techName: req.technicianName || req.technician?.name || null,
+  };
+}
+
 // Photo attachments (vision). The operator/tech can attach images to a query —
 // a screenshot of a portal page, a pest/insect to ID, a property condition.
 // Images apply to the turn they're sent on; they are NOT persisted into the
@@ -1240,7 +1266,7 @@ The current date is ${etDateString()}.`;
 
 router.post('/query', async (req, res, next) => {
   try {
-    const { prompt, conversationHistory = [], context, pageData } = req.body;
+    const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
     const images = sanitizeQueryImages(req.body.images);
     const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
     const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
@@ -1248,15 +1274,23 @@ router.post('/query', async (req, res, next) => {
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+    // Role guards run on the REQUESTED context so a technician asking for a
+    // privileged context is refused with the specific reason (not silently
+    // downgraded). These fire before the tech-context pin below.
+    if (requestedContext === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
       return res.status(404).json({ error: 'Agent Estimate is not enabled' });
     }
-    if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
+    if (requestedContext === 'dashboard' && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
     }
-    if (context === 'banking' && req.techRole !== 'admin') {
+    if (requestedContext === 'banking' && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking intelligence' });
     }
+    // Technician tokens are hard-pinned to the isolated tech context so a forged
+    // `context` can't widen the OFFERED toolset (getToolsForContext). The
+    // execution-path default-deny (isToolAllowedForRole) is the matching gate
+    // for any tool the model still attempts.
+    const context = req.techRole === 'admin' ? requestedContext : 'tech';
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({
@@ -1383,6 +1417,14 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           errorMessage = result.error;
         } else if (ADMIN_ONLY_TOOL_NAMES.has(toolUse.name) && req.techRole !== 'admin') {
           result = { error: 'Admin access required for this action' };
+          failed = true;
+          errorMessage = result.error;
+        } else if (!isToolAllowedForRole(toolUse.name, req.techRole)) {
+          // Default-deny catch-all for technician tokens: any tool not covered
+          // by a specific guard above and not in the tech toolset. The tech
+          // context offers only tech tools, so this mainly guards forced/
+          // hallucinated tool names.
+          result = { error: 'This action is not available to your role' };
           failed = true;
           errorMessage = result.error;
         } else if (CONFIRMED_ACTION_TOOL_NAMES.has(toolUse.name)) {
@@ -1566,14 +1608,21 @@ router.post('/execute', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
+    if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for SEO actions' });
+    }
+    // Default-deny catch-all: a technician may execute only the tech toolset.
+    // The action name comes straight from the client, so this closes what the
+    // context pin can't — runs after all the specific role guards above so
+    // their messages win for the tools they cover.
+    if (!isToolAllowedForRole(action, req.techRole)) {
+      return res.status(403).json({ error: 'This action is not available to your role' });
+    }
     if ((uiConfirmEnabled() || action === AGENT_ESTIMATE_WRITE_TOOL) && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
       // With the UI-confirm gate on, gated writes commit exclusively through
       // /confirm-action — /execute would skip the claim, payload hash, and
       // single-use replay protection.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
-    }
-    if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required for SEO actions' });
     }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
@@ -1597,7 +1646,7 @@ router.post('/execute', async (req, res, next) => {
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: confirmed === true,
     };
-    const result = await executeToolByName(action, executionParams, null, actionContext);
+    const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
     logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
@@ -1647,6 +1696,13 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
 
+    // Default-deny catch-all: a technician may confirm/execute only the tech
+    // toolset (the tool name rides on the stored pending action). After the
+    // admin-only guard so its message wins for the tools it covers.
+    if (!isToolAllowedForRole(action.tool_name, req.techRole)) {
+      return res.status(403).json({ error: 'This action is not available to your role' });
+    }
+
     const execParams = { ...action.params };
     let approvedAgentEstimateFingerprint = null;
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
@@ -1675,7 +1731,7 @@ router.post('/confirm-action', async (req, res, next) => {
       execParams.confirmed = true;
     }
 
-    const result = await executeToolByName(action.tool_name, execParams, null, {
+    const result = await executeToolByName(action.tool_name, execParams, techContextForExecution(req), {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
@@ -1717,24 +1773,27 @@ router.post('/cancel-action', async (req, res, next) => {
 // ─── QUICK ACTIONS (pre-built prompts for common tasks) ─────────
 
 router.get('/quick-actions', async (req, res, next) => {
-  const { context } = req.query;
+  const requestedContext = req.query.context;
   // The flag lookup is this handler's only awaited call; Express 4 does not
   // forward a rejected handler promise, so an uncaught DB error here would
   // become an unhandled rejection instead of a 500.
   try {
-    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+    if (requestedContext === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
       return res.status(404).json({ error: 'Agent Estimate is not enabled' });
     }
   } catch (err) {
     logger.error('[intelligence-bar] quick-actions flag lookup failed:', err);
     return next(err);
   }
-  if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
+  // Role guards on the REQUESTED context so a technician asking for a privileged
+  // surface is refused (not silently downgraded), then the tech-context pin.
+  if (requestedContext === 'dashboard' && isNonAdminDashboardRequest(req)) {
     return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
   }
-  if (context === 'banking' && req.techRole !== 'admin') {
+  if (requestedContext === 'banking' && req.techRole !== 'admin') {
     return res.status(403).json({ error: 'Admin access required for banking intelligence' });
   }
+  const context = req.techRole === 'admin' ? requestedContext : 'tech';
 
   const baseActions = [
     { id: 'missing_city', group: 'Find', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile' },
