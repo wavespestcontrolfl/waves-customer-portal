@@ -1211,10 +1211,15 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // Standalone termite bait (owner 2026-07-20, billed per application):
   // new estimates persist visitsPerYear=4, so the line infers quarterly and
   // must seed its series — per-application billing on one lone visit would
-  // collect a quarter of the accepted annual. Legacy payloads (no
-  // visitsPerYear) infer no pattern here and keep today's behavior: office
-  // schedules follow-ups, flat-monthly-derived fee.
-  if (key === 'termite_bait') return pattern === 'quarterly';
+  // collect a quarter of the accepted annual. The explicit-visits check is
+  // the legacy gate (codex P2): a legacy row can still reach here with
+  // pattern 'quarterly' inherited from the accept flow's selected/inferred
+  // frequency (not from the row), and seeding those would break the
+  // legacy-preservation contract — no visitsPerYear, no series; office
+  // schedules follow-ups and the flat-monthly-derived fee stands.
+  if (key === 'termite_bait') {
+    return pattern === 'quarterly' && visitsPerYearForRecurringService(svc) === 4;
+  }
   // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
   // a sold program produced ONE visit and no series). The 6x Standard accept
   // restamps to the bi-monthly catalog row and the 4x Light downsell to

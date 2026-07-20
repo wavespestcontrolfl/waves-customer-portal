@@ -225,5 +225,10 @@ describe('termite bait per-application billing (owner 2026-07-20)', () => {
     expect(supportsConverterFollowUpSeeding(newTermiteRow, {}, 'quarterly')).toBe(true);
     expect(supportsConverterFollowUpSeeding(legacyTermiteRow, {}, 'monthly')).toBe(false);
     expect(supportsConverterFollowUpSeeding(newTermiteRow, {}, 'monthly')).toBe(false);
+    // Codex P2 (#2911): a legacy row can reach the gate with pattern
+    // 'quarterly' inherited from the accept flow's selected/inferred
+    // frequency rather than from the row itself — the persisted explicit
+    // visits are the seeding license, not the pattern.
+    expect(supportsConverterFollowUpSeeding(legacyTermiteRow, {}, 'quarterly')).toBe(false);
   });
 });
