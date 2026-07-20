@@ -433,7 +433,10 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
-    ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2026-06-12' }],
+    // Far-future target: move_stops_to_day now refuses past ET dates before
+    // its confirmation gate (schedule small-fixes wave), and this contract
+    // must exercise the gate, not the date guard.
+    ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2099-06-12' }],
     ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],

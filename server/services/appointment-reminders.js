@@ -1378,6 +1378,11 @@ const AppointmentReminders = {
           if (!prefs.serviceReminder72h || (channel72 === 'sms' && !prefs.smsEnabled)) {
             logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
+            // Close the window like the neighboring skip branches — an
+            // unmarked preference skip re-enters every 15-minute scan forever.
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
             continue;
           }
 
@@ -1428,12 +1433,23 @@ const AppointmentReminders = {
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
             });
 
-            await db('appointment_reminders')
+            // Guard on appointment_time: a concurrent move re-arms this row
+            // (DB sync trigger / handleReschedule) with the NEW time — an
+            // unguarded update by id would stomp that re-arm and silently
+            // close the new slot's reminder. 0 rows matched = the row moved
+            // out from under us; skip the sent bookkeeping (the re-armed row
+            // owns the new state).
+            const flagged72 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
 
-            results.sent72h++;
-            logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            if (flagged72 === 0) {
+              logger.info(`[appt-remind] 72h flag skipped for ${r.scheduled_service_id} — appointment moved during send; leaving re-armed row`);
+            } else {
+              results.sent72h++;
+              logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            }
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 72h reminder failed for ${r.scheduled_service_id}: ${err.message}`);
@@ -1450,6 +1466,11 @@ const AppointmentReminders = {
           if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
             logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
+            // Close the window like the neighboring skip branches — an
+            // unmarked preference skip re-enters every 15-minute scan forever.
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
             continue;
           }
 
@@ -1495,12 +1516,20 @@ const AppointmentReminders = {
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
             });
 
-            await db('appointment_reminders')
+            // Same appointment_time guard as the 72h flag above — a
+            // concurrent move re-armed this row for its new time; don't
+            // stomp that re-arm after sending for the old one.
+            const flagged24 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
 
-            results.sent24h++;
-            logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            if (flagged24 === 0) {
+              logger.info(`[appt-remind] 24h flag skipped for ${r.scheduled_service_id} — appointment moved during send; leaving re-armed row`);
+            } else {
+              results.sent24h++;
+              logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            }
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 24h reminder failed for ${r.scheduled_service_id}: ${err.message}`);

@@ -103,11 +103,22 @@ class AvailabilityEngine {
 
       // Also check if any scheduled_services exist in this zone for the day
       const zoneCities = zone.cities || [];
+      // Case-insensitive city match: customer city casing is free-text — an
+      // exact-case IN misses zone rows (the estimate generator lowercases
+      // both sides; match it).
+      const zoneCitiesLower = zoneCities.map((city) => String(city || '').toLowerCase());
       const scheduledInZone = await db('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', dateStr)
         .whereNotIn('scheduled_services.status', ['cancelled'])
-        .whereIn('customers.city', zoneCities)
+        .modify((q) => {
+          // Empty city list matches nothing — same as knex's empty whereIn.
+          if (!zoneCitiesLower.length) return q.whereRaw('1 = 0');
+          return q.whereRaw(
+            `LOWER(customers.city) IN (${zoneCitiesLower.map(() => '?').join(', ')})`,
+            zoneCitiesLower,
+          );
+        })
         .select('scheduled_services.*');
 
       // If no tech blocks AND no existing services in zone, skip this day
@@ -311,7 +322,16 @@ class AvailabilityEngine {
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
           .where('scheduled_services.scheduled_date', dateStr)
           .whereNotIn('scheduled_services.status', ['cancelled'])
-          .whereIn('customers.city', zoneCities)
+          .modify((q) => {
+            // Case-insensitive city match — same reasoning as the slot
+            // builder above; empty list matches nothing like an empty whereIn.
+            const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
+            if (!lowered.length) return q.whereRaw('1 = 0');
+            return q.whereRaw(
+              `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
+              lowered,
+            );
+          })
           .modify((q) => {
             if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
           })

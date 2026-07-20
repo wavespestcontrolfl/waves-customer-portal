@@ -7242,6 +7242,30 @@ async function markRescheduleReminderNotified(serviceIds) {
   }
 }
 
+// No-send compensation (mirrors reschedule-public.js): syncRescheduleReminder
+// with willNotify:true covers any due 24h/72h window in anticipation of THIS
+// route's own SMS. When that SMS never actually goes out (no phone / blocked /
+// send threw), the covered flags would suppress every reminder of the new
+// time — re-arm both windows so the 15-min cron still reminds the customer.
+// A possible duplicate was the risk covering guards against; silence is worse.
+async function rearmRescheduleReminderWindows(serviceIds) {
+  const ids = (Array.isArray(serviceIds) ? serviceIds : [serviceIds]).filter(Boolean);
+  if (!ids.length) return;
+  try {
+    await db('appointment_reminders')
+      .whereIn('scheduled_service_id', ids)
+      .update({
+        reminder_72h_sent: false,
+        reminder_72h_sent_at: null,
+        reminder_24h_sent: false,
+        reminder_24h_sent_at: null,
+        updated_at: db.fn.now(),
+      });
+  } catch (err) {
+    logger.error(`[dispatch] reminder re-arm after failed notice failed (${ids.join(', ')}): ${err.message}`);
+  }
+}
+
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
@@ -7520,6 +7544,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
             logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
           }
         }
+        if (!notificationSent) {
+          await rearmRescheduleReminderWindows(occurrences.map((occurrence) => occurrence.id));
+        }
       }
 
       const { rescheduledOccurrences, ...response } = result;
@@ -7597,6 +7624,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           notificationError = err.message;
           logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
         }
+      }
+      if (!notificationSent) {
+        await rearmRescheduleReminderWindows(req.params.serviceId);
       }
       return res.json({ ...result, notificationSent, notificationError });
     }
@@ -8537,4 +8567,5 @@ module.exports._test = {
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
+  rearmRescheduleReminderWindows,
 };

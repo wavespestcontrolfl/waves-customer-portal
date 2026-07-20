@@ -385,8 +385,23 @@ async function assignTechnician(input) {
 }
 
 
+// Terminal scheduled_services statuses — one-way; never movable. Live
+// (en_route/on_site) rows ARE movable, but the move must rewind the tracker
+// lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival timestamps
+// don't survive onto the new date.
+const TERMINAL_MOVE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
+
 async function moveStopsToDay(input) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
+
+  // scheduled_date is a plain DATE column holding ET calendar dates — a
+  // garbage or past target moves stops where no upcoming query finds them.
+  const dateStr = String(newDate || '').split('T')[0];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || dateStr < etDateString()) {
+    return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${newDate}")` };
+  }
+
   const services = await db('scheduled_services')
     .whereIn('id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -397,43 +412,79 @@ async function moveStopsToDay(input) {
 
   if (!services.length) return { error: 'No services found for the given IDs' };
 
-  const stops = services.map(s => ({
+  // Terminal rows are one-way — refuse to move them, and report them so the
+  // operator sees exactly what stays behind.
+  const movable = services.filter((s) => !TERMINAL_MOVE_STATUSES.has(String(s.status)));
+  const skippedTerminal = services
+    .filter((s) => TERMINAL_MOVE_STATUSES.has(String(s.status)))
+    .map((s) => ({ id: s.id, status: s.status }));
+  if (!movable.length) {
+    return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to move' };
+  }
+
+  const stops = movable.map(s => ({
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
     city: s.city,
     service_type: s.service_type,
     old_date: s.scheduled_date,
-    new_date: newDate,
+    new_date: dateStr,
   }));
 
   if (confirmed !== true) {
     return {
       proposal: true,
-      would_move_to: newDate,
+      would_move_to: dateStr,
       stop_count: stops.length,
       reason: reason || null,
       stops,
-      note: `Would move ${stops.length} stop(s) to ${newDate}. Re-call with confirmed:true to apply.`,
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      note: `Would move ${stops.length} stop(s) to ${dateStr}. Re-call with confirmed:true to apply.`,
     };
   }
 
-  for (const s of services) {
+  // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
+  const { LIVE_LIFECYCLE_RESET } = require('../rebooker');
+  for (const s of movable) {
     const oldDate = s.scheduled_date;
+    // A live (en_route/on_site) stop being moved rewinds its tracker
+    // lifecycle exactly like the rebooker's live override does.
+    const liveReset = LIVE_MOVE_STATUSES.has(String(s.status)) ? LIVE_LIFECYCLE_RESET : {};
     await db('scheduled_services').where('id', s.id).update({
-      scheduled_date: newDate,
+      scheduled_date: dateStr,
       notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
-      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, newDate, s.window_end),
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+      ...liveReset,
       updated_at: new Date(),
     });
+    // Audit row matching the rebooker's reschedule_log conventions.
+    // Best-effort: the move is committed — a log failure must not report
+    // the whole batch as failed.
+    try {
+      await db('reschedule_log').insert({
+        scheduled_service_id: s.id,
+        customer_id: s.customer_id,
+        original_date: oldDate,
+        new_date: dateStr,
+        reason_code: 'admin',
+        initiated_by: 'admin_ib',
+        original_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        new_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        notes: reason || null,
+      });
+    } catch (err) {
+      logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+    }
   }
 
-  logger.info(`[intelligence-bar:schedule] Moved ${stops.length} stops to ${newDate}`);
+  logger.info(`[intelligence-bar:schedule] Moved ${stops.length} stops to ${dateStr}`);
 
   return {
     success: true,
     moved_count: stops.length,
-    new_date: newDate,
+    new_date: dateStr,
     stops,
+    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
   };
 }
 

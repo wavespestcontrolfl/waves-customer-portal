@@ -1784,7 +1784,16 @@ async function createSelfBooking(payload = {}) {
       conflictQuery.where((q) => {
         if (technician_id) q.orWhere('scheduled_services.technician_id', technician_id);
         if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
-        if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+        if (zoneCities.length) {
+          // Case-insensitive: customer city casing is free-text — an
+          // exact-case IN silently drops zone conflicts (the estimate
+          // generator lowercases both sides; match it).
+          const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
+          q.orWhereRaw(
+            `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
+            lowered,
+          );
+        }
         q.orWhere((hold) => {
           hold.whereNull('scheduled_services.customer_id')
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');

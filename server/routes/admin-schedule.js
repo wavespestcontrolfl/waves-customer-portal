@@ -1379,10 +1379,15 @@ function getZone(city, zip) {
   const z = zip || '';
   if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
   if (c === 'palmetto') return 'palmetto';
-  if (c.includes('lakewood') || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
+  // Myakka City sits east of Lakewood Ranch — the eastern zone (explicit,
+  // not a fallthrough).
+  if (c.includes('lakewood') || c === 'myakka city' || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
   if (c.includes('bradenton')) return 'bradenton_north';
-  if (c === 'sarasota') return 'sarasota';
-  if (['venice', 'nokomis', 'north port'].includes(c)) return 'venice_north_port';
+  // Longboat Key + Siesta Key are Sarasota barrier islands.
+  if (['sarasota', 'longboat key', 'siesta key'].includes(c)) return 'sarasota';
+  // Osprey sits between Sarasota and Venice on the 41 corridor, same as
+  // Nokomis; North Venice is Venice.
+  if (['venice', 'north venice', 'nokomis', 'osprey', 'north port'].includes(c)) return 'venice_north_port';
   return 'lakewood_ranch';
 }
 
@@ -3410,15 +3415,50 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           }
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
+            // scheduled_date holds ET calendar dates — a past target moves the
+            // visit where no upcoming query will ever find it. Per-row throw so
+            // the batch result carries the reason instead of failing wholesale.
+            const bulkTargetDate = normalizeDateOnly(payload.scheduledDate);
+            if (!bulkTargetDate || bulkTargetDate < etDateString()) {
+              throw Object.assign(new Error('scheduledDate is invalid or in the past'), { isValidation: true });
+            }
             let reminderSyncTime = null;
             let callFollowUpShiftFrom = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+              // Terminal rows are one-way (#2717 pattern — see the cancel
+              // branch below): a stale board selection must not resurrect a
+              // finished visit onto a new date.
+              if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
+                throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
+              }
               const updates = { scheduled_date: payload.scheduledDate };
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
+              // A live (en_route/on_site) row being moved rewinds its tracker
+              // lifecycle like the rebooker's live override — stale arrival
+              // timestamps must not survive onto the new date.
+              if (['en_route', 'on_site'].includes(String(svc.status))) {
+                const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
+                Object.assign(updates, LIVE_LIFECYCLE_RESET);
+              }
               await trx('scheduled_services').where({ id }).update(updates);
+              // Audit row matching the rebooker's reschedule_log conventions.
+              await trx('reschedule_log').insert({
+                scheduled_service_id: id,
+                customer_id: svc.customer_id,
+                original_date: svc.scheduled_date,
+                new_date: bulkTargetDate,
+                reason_code: 'admin',
+                initiated_by: 'admin_bulk',
+                original_window: svc.window_start ? `${svc.window_start}-${svc.window_end}` : null,
+                new_window: (() => {
+                  const ws = payload?.windowStart || svc.window_start;
+                  const we = payload?.windowEnd || svc.window_end;
+                  return ws ? (we ? `${ws}-${we}` : String(ws)) : null;
+                })(),
+              });
               callFollowUpShiftFrom = svc.scheduled_date;
               const prevDate = svc.scheduled_date instanceof Date
                 ? svc.scheduled_date.toISOString().split('T')[0]

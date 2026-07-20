@@ -244,12 +244,35 @@ class RescheduleSMS {
         { date: displayDate, time: selectedOption.window.display },
         { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
       )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}\n\nReply STOP to opt out.`;
-      await sendAppointmentSms({
-        to: customer.phone,
-        body: confirmedBody,
-        customerId,
-        messageType: 'confirmation',
-      });
+      try {
+        await sendAppointmentSms({
+          to: customer.phone,
+          body: confirmedBody,
+          customerId,
+          messageType: 'confirmation',
+        });
+      } catch (err) {
+        // Covered-window compensation (mirrors reschedule-public.js): the
+        // handleReschedule sync above covered any due 24h/72h window in
+        // anticipation of THIS confirmation SMS. It didn't actually send
+        // (blocked number / carrier error), so re-arm both windows — the
+        // 15-min cron still reminds the customer of the new time; a possible
+        // duplicate was the risk covering guards against, silence is worse.
+        try {
+          await db('appointment_reminders')
+            .where({ scheduled_service_id: pending.scheduled_service_id })
+            .update({
+              reminder_72h_sent: false,
+              reminder_72h_sent_at: null,
+              reminder_24h_sent: false,
+              reminder_24h_sent_at: null,
+              updated_at: db.fn.now(),
+            });
+        } catch (rearmErr) {
+          logger.error(`[reschedule-sms] reminder re-arm after failed confirmation failed for ${pending.scheduled_service_id}: ${rearmErr.message}`);
+        }
+        throw err;
+      }
 
       await db('reschedule_log').where({ id: pending.id }).update({
         new_date: selectedOption.date,

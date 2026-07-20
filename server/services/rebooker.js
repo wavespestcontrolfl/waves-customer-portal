@@ -891,3 +891,6 @@ class SmartRebooker {
 }
 
 module.exports = new SmartRebooker();
+// Shared with the IB schedule tools + bulk admin movers so every reschedule
+// path applies the same live-lifecycle rewind (see comment on the constant).
+module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;

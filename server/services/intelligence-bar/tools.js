@@ -10,6 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
 const {
@@ -1250,8 +1251,64 @@ async function updatePropertyAccess(input) {
 }
 
 
+// Terminal scheduled_services statuses — one-way; never movable.
+const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// Live tracker-lifecycle statuses — movable, but the move must rewind the
+// tracker lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival
+// timestamps don't survive onto the new date.
+const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
+
+// Validate a YYYY-MM-DD schedule date (scheduled_date is a plain DATE column
+// holding ET calendar dates). Returns the normalized date string, or null for
+// garbage / past dates — callers surface a clear tool error instead of a PG
+// cast error or a visit no "upcoming" query will ever find.
+function validScheduleDate(value) {
+  const dateStr = String(value || '').split('T')[0];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  if (Number.isNaN(new Date(`${dateStr}T12:00:00Z`).getTime())) return null;
+  if (dateStr < etDateString()) return null;
+  return dateStr;
+}
+
+// Parse the tool's time_window contract — "morning" (8-12), "afternoon"
+// (12-5), or a specific time like "9:00 AM" / "14:30" — into an HH:MM
+// window start. Returns { start } (null start when no time was given) or
+// { error } for garbage input, so callers return a clear tool error instead
+// of a Postgres time-cast error.
+function parseTimeWindowStart(timeWindow) {
+  if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
+  const raw = String(timeWindow).trim().toLowerCase();
+  if (raw === 'morning') return { start: '08:00' };
+  if (raw === 'afternoon') return { start: '12:00' };
+  const m = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!m) {
+    return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
+  }
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] ? parseInt(m[2], 10) : 0;
+  if (m[3] === 'pm' && hour < 12) hour += 12;
+  if (m[3] === 'am' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) {
+    return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
+  }
+  return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
+}
+
+function addMinutesToHHMM(hhmm, minutes) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  const total = (h * 60 + m + minutes) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 async function createAppointment(input) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
+
+  const dateStr = validScheduleDate(scheduled_date);
+  if (!dateStr) {
+    return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
+  }
+  const win = parseTimeWindowStart(time_window);
+  if (win.error) return { error: win.error };
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
@@ -1263,25 +1320,34 @@ async function createAppointment(input) {
     if (tech) technician_id = tech.id;
   }
 
+  // Flat-60 convention (admin-schedule: every service call defaults to 60
+  // minutes) so overlap checks see a real block, not an open-ended start.
+  const windowEnd = win.start ? addMinutesToHHMM(win.start, 60) : null;
+
+  // status 'pending', matching the column default and every other writer —
+  // 'scheduled' is not in the scheduled_services status CHECK set and threw
+  // on every insert. track_token_expires_at is stamped by the INSERT trigger
+  // (set_default_track_token_expiry).
   const [appointment] = await db('scheduled_services').insert({
     customer_id,
-    scheduled_date,
+    scheduled_date: dateStr,
     service_type,
     technician_id,
-    status: 'scheduled',
-    window_start: time_window || null,
+    status: 'pending',
+    window_start: win.start,
+    window_end: windowEnd,
     notes: notes || null,
     created_at: new Date(),
     updated_at: new Date(),
   }).returning('*');
 
-  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for ${customer.first_name} ${customer.last_name} on ${scheduled_date}`);
+  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for ${customer.first_name} ${customer.last_name} on ${dateStr}`);
 
   return {
     success: true,
     appointment_id: appointment.id,
     customer_name: `${customer.first_name} ${customer.last_name}`,
-    date: scheduled_date,
+    date: dateStr,
     service_type,
     technician: technician_name || 'Unassigned',
   };
@@ -1294,24 +1360,70 @@ async function rescheduleAppointment(input) {
   const appt = await db('scheduled_services').where('id', appointment_id).first();
   if (!appt) return { error: 'Appointment not found' };
 
+  // Terminal rows are one-way — a completed/cancelled visit must not quietly
+  // come back to life on a new date.
+  if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
+    return { error: `Cannot reschedule a ${appt.status} appointment` };
+  }
+
+  const dateStr = validScheduleDate(new_date);
+  if (!dateStr) {
+    return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
+  }
+  const win = parseTimeWindowStart(new_time_window);
+  if (win.error) return { error: win.error };
+
   const customer = await db('customers').where('id', appt.customer_id).first();
   const oldDate = appt.scheduled_date;
 
+  // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
+  // same way the rebooker does, so stale arrival timestamps can't poison
+  // duration capture on the new date. Lazy require: rebooker is heavy.
+  const { LIVE_LIFECYCLE_RESET } = require('../rebooker');
+  const liveReset = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status))
+    ? LIVE_LIFECYCLE_RESET
+    : {};
+
   await db('scheduled_services').where('id', appointment_id).update({
-    scheduled_date: new_date,
-    window_start: new_time_window || appt.window_start,
+    scheduled_date: dateStr,
+    window_start: win.start || appt.window_start,
     notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
+    // Public track links live until the day after the visit — refresh onto
+    // the new date, same as schedule-tools' movers.
+    track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, appt.window_end),
+    ...liveReset,
     updated_at: new Date(),
   });
 
-  logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${new_date}`);
+  // Audit row, matching the rebooker's reschedule_log conventions.
+  // Best-effort: the move above is already committed — a log failure must
+  // not report the move itself as failed.
+  try {
+    await db('reschedule_log').insert({
+      scheduled_service_id: appointment_id,
+      customer_id: appt.customer_id,
+      original_date: oldDate,
+      new_date: dateStr,
+      reason_code: 'admin',
+      initiated_by: 'admin_ib',
+      original_window: appt.window_start ? `${appt.window_start}-${appt.window_end}` : null,
+      new_window: win.start
+        ? (appt.window_end ? `${win.start}-${appt.window_end}` : win.start)
+        : null,
+      notes: reason || null,
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar] reschedule_log insert failed for ${appointment_id}: ${err.message}`);
+  }
+
+  logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
 
   return {
     success: true,
     appointment_id,
     customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
     old_date: oldDate,
-    new_date,
+    new_date: dateStr,
     service_type: appt.service_type,
   };
 }

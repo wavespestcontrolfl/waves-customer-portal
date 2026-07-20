@@ -274,17 +274,21 @@ async function executeAction(alertId, actionIndex) {
   } else if (action.type === 'free_service' || action.type === 'complimentary') {
     // Schedule a complimentary $0 service
     try {
+      // scheduled_services has no `price` column — the visit price lives in
+      // estimated_price (a 0 here is the genuine complimentary price, not a
+      // missing value).
       await db('scheduled_services').insert({
         customer_id: customer.id,
         service_type: action.serviceType || 'General Pest - Complimentary',
         status: 'pending',
-        price: 0,
+        estimated_price: 0,
         notes: `Complimentary service — Health alert retention #${alertId}`,
         scheduled_date: etDateString(addETDays(new Date(), 7)),
         created_at: new Date(),
       });
       result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };
     } catch (err) {
+      logger.error(`[health-alerts] Complimentary service insert failed for alert ${alertId}: ${err.message}`);
       result = { success: false, message: `Free service scheduling failed: ${err.message}` };
     }
   }
