@@ -271,15 +271,17 @@ describe('appointment reminder registration deduplication', () => {
       // promotion and the sync trigger from ever arming it while windowless.
       suppressed_by_sibling: true,
       windows_preclosed: true,
-      confirmation_sent: false,
+      // Confirmation closes IN the insert — a post-transaction mark would
+      // leave a crash window where the stranded-confirmation sweep texts an
+      // 08:00 confirmation for a visit with no chosen time.
+      confirmation_sent: true,
     });
     expect(payload.reminder_72h_sent_at).toBeInstanceOf(Date);
     expect(payload.reminder_24h_sent_at).toBeInstanceOf(Date);
-    // Confirmation keeps its normal source-based handling (sendConfirmation
-    // false here → marked "not applicable" after the insert, no SMS).
-    expect(markConfirmationSkipped.update).toHaveBeenCalledWith(expect.objectContaining({
-      confirmation_sent: true,
-    }));
+    expect(payload.confirmation_sent_at).toBeInstanceOf(Date);
+    // The post-insert "not applicable" mark is skipped for placeholders —
+    // the flag is already stamped, so no redundant second write.
+    expect(markConfirmationSkipped.update).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

@@ -125,9 +125,10 @@ describe('scan marker exclusion', () => {
     // 08:00 placeholder time into the send set. A real window arrival
     // clears windows_preclosed (DB sync trigger) and re-admits the row.
     const scanQuery = chain({ select: jest.fn().mockResolvedValue([]) });
+    const strandedSweep = chain();
     wireDb({
       appointment_reminders: [
-        chain(), // stranded-confirmation sweep → []
+        strandedSweep, // stranded-confirmation sweep → []
         scanQuery,
       ],
     });
@@ -135,6 +136,12 @@ describe('scan marker exclusion', () => {
     await AppointmentReminders.checkAndSendReminders();
 
     expect(scanQuery.where).toHaveBeenCalledWith({ windows_preclosed: false });
+    // The stranded-confirmation sweep carries the same marker predicate:
+    // placeholders stamp confirmation_sent in their insert, but even a
+    // regressed flag must never heal into an 08:00 confirmation send.
+    expect(strandedSweep.where).toHaveBeenCalledWith(
+      expect.objectContaining({ windows_preclosed: false }),
+    );
   });
 });
 

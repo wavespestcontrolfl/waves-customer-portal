@@ -1100,10 +1100,11 @@ const AppointmentReminders = {
         // deliberately WITHOUT the same-slot dedup below: the placeholder
         // never owns the slot, never merges its label into a real owner,
         // never sends, and is never promoted, so it inserts the same way
-        // whether or not an owner holds 08:00. Only the 72h/24h stamps close
-        // here; confirmation keeps its normal source-based handling after
-        // the transaction. (suppressed_by_sibling is set explicitly, so the
-        // legacy fingerprint trigger has nothing to re-derive.)
+        // whether or not an owner holds 08:00. All three flags — 72h, 24h,
+        // AND confirmation — close in this one INSERT: the post-transaction
+        // confirmation mark would leave a crash window for the stranded-
+        // confirmation sweep. (suppressed_by_sibling is set explicitly, so
+        // the legacy fingerprint trigger has nothing to re-derive.)
         if (closeReminderWindows) {
           const windowsClosedAt = new Date();
           const [record] = await trx('appointment_reminders').insert({
@@ -1112,7 +1113,13 @@ const AppointmentReminders = {
             appointment_time: apptTime,
             service_type: serviceLabel,
             source,
-            confirmation_sent: false,
+            // Confirmation closes IN the insert, not via the post-transaction
+            // mark: a windowless visit has no time to confirm, and a crash
+            // between insert and mark would leave the row for the stranded-
+            // confirmation sweep, which would text an 08:00 confirmation —
+            // the exact send this placeholder exists to suppress.
+            confirmation_sent: true,
+            confirmation_sent_at: windowsClosedAt,
             reminder_72h_sent: true,
             reminder_72h_sent_at: windowsClosedAt,
             reminder_24h_sent: true,
@@ -1211,10 +1218,14 @@ const AppointmentReminders = {
       logger.info(`[appt-remind] Registered: ${scheduledServiceId} (source: ${source})`);
 
       if (!sendConfirmation) {
-        // non-confirmation sources — mark confirmation as "sent" (not applicable)
-        await db('appointment_reminders')
-          .where({ id: record.id })
-          .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        // non-confirmation sources — mark confirmation as "sent" (not
+        // applicable). Pre-closed placeholders already stamped it in their
+        // insert (crash-window fix) — skip the redundant write.
+        if (!record.windows_preclosed) {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        }
         return record;
       }
 
@@ -1391,7 +1402,10 @@ const AppointmentReminders = {
     try {
       const staleCutoff = new Date(now.getTime() - 2 * 60 * 1000);
       const stranded = await db('appointment_reminders')
-        .where({ cancelled: false, confirmation_sent: false })
+        // windows_preclosed belt-and-braces: placeholders insert with the
+        // confirmation already closed, but a pre-closed row must never be
+        // healable into an 08:00 confirmation even if a flag write regresses.
+        .where({ cancelled: false, confirmation_sent: false, windows_preclosed: false })
         .where('created_at', '<', staleCutoff)
         .whereNotExists(function () {
           this.select(1)
