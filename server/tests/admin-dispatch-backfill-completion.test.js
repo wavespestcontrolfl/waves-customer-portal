@@ -24,7 +24,11 @@
  * face value; the estimate's deposit stays unapplied, logged for the
  * reviewer), and the flagless-resume hash exclusion (a crash-resumed retry
  * without the body flag must reach the structured_notes re-derivation, not
- * strand on completion_resume_payload_mismatch).
+ * strand on completion_resume_payload_mismatch). Fix round 3 (Codex P1):
+ * the tracker-completion leg — both post-commit markComplete calls flag the
+ * span untrusted so the tracker's own lifecycle rebuild cannot re-stamp
+ * what the policy stripped, and the resume re-derivation sits before the
+ * first of them.
  */
 const fs = require('fs');
 const path = require('path');
@@ -901,6 +905,36 @@ describe('completion route wiring (source contracts)', () => {
     expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && startTime && endTime\) \{/);
     // calculateJobCost threads the options through to calcLaborCost.
     expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes \},\s*\n\s*\);/);
+  });
+
+  test('tracker completion honors the duration policy at BOTH markComplete call sites (fix round 3)', () => {
+    // markComplete's own UPDATE rebuilds lifecycle fields from the fresh row
+    // AFTER the transaction commits — today's actual_end_time/check_out_time
+    // plus a stale-start→now service_time_minutes/actual_duration_minutes —
+    // and the job-costing durable guard prefers that persisted column as
+    // explicit labor. Both post-commit call sites — the terminal flip and
+    // the artifact-refresh re-emit (which performs the real flip whenever
+    // the first call failed) — must flag the span untrusted.
+    const flaggedCalls = source.match(
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*\}\)/g,
+    ) || [];
+    expect(flaggedCalls.length).toBe(2);
+    // Exactly these two sites exist on the backfill-capable route; the third
+    // markComplete in this file belongs to PUT /:id/status, where backfill
+    // is unreachable (contract below) and the default rebuild is correct.
+    expect((source.match(/trackTransitions\.markComplete\(/g) || []).length).toBe(3);
+    // The crash-resume re-derivation sits BEFORE the first flagged call, so
+    // a flagless resumed retry that still owes the tracker flip reads the
+    // healed flag, not the body's stale `false`.
+    const rederivation = source.indexOf('parseJsonObject(record.structured_notes)?.backfill === true');
+    const firstFlagged = source.indexOf('untrustedLifecycleSpan: isBackfillCompletion,');
+    expect(rederivation).toBeGreaterThan(-1);
+    expect(firstFlagged).toBeGreaterThan(rederivation);
+    // And the tracker honors the flag: the lifecycle rebuild is skipped
+    // wholesale under it (bookkeeping — track_state/completed_at/updated_at
+    // — still lands; behavioral coverage in track-transitions.test.js).
+    const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
+    expect(trackerSource).toMatch(/\.\.\.\(opts\.untrustedLifecycleSpan \? \{\} : buildCompletionLifecycleUpdates\(svc, now\)\),/);
   });
 
   test('backfill + card hold parks for review instead of charging', () => {

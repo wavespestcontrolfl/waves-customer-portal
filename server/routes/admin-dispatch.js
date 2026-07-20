@@ -4573,6 +4573,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
+    // Backfill survives resume via its own structured_notes freeze (the body
+    // flag may be absent on a crash-resumed retry). Re-derived HERE — the
+    // first post-commit step — so the tracker completion below (whose
+    // markComplete must honor the duration policy via untrustedLifecycleSpan,
+    // Codex P1, PR #2897 fix round 3), the backfill review-invoice override
+    // in shouldAutoInvoiceCompletion, and every later backfill money/comms
+    // gate read the same truth on a resumed retry; the customer-comms
+    // re-force stays below, after the frozen-delivery re-derivation it must
+    // override. Reachable for a FLAGLESS retry only because
+    // hashCompletionRequest excludes `backfill` (Codex P2, PR #2897 fix
+    // round): the resume claim in claimCompletionAttempt compares request
+    // hashes first, and hashing the flag made the flagless retry 409
+    // (completion_resume_payload_mismatch) before this line — the recovery
+    // this comment promises was unreachable.
+    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
+      isBackfillCompletion = true;
+    }
+
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
     // resume the reading was written in a prior pass (so turfOcrReadingId is
@@ -4763,6 +4781,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: req.technicianId,
+        // Backfill: markComplete's own UPDATE rebuilds lifecycle fields from
+        // the row — today's end stamps plus a stale-start→now duration —
+        // which would re-pollute, AFTER the transaction, exactly the columns
+        // applyBackfillDurationPolicy stripped (or set from the typed
+        // duration), and job-costing's durable guard would then read the
+        // rebuilt service_time_minutes as explicit labor. The flag keeps the
+        // tracker to its own bookkeeping (track_state/completed_at/
+        // updated_at); the policy's persisted values survive.
+        untrustedLifecycleSpan: isBackfillCompletion,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -5135,21 +5162,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
     } catch (e) { /* non-blocking */ }
-    // Backfill survives resume via its own structured_notes freeze (the body
-    // flag may be absent on a crash-resumed retry). Re-derived HERE — before
-    // the invoice decision — so the backfill review-invoice override in
-    // shouldAutoInvoiceCompletion and every later backfill money/comms gate
-    // read the same truth on a resumed retry; the customer-comms re-force
-    // stays below, after the frozen-delivery re-derivation it must override.
-    // Reachable for a FLAGLESS retry only because hashCompletionRequest
-    // excludes `backfill` (Codex P2, PR #2897 fix round): the resume claim
-    // in claimCompletionAttempt compares request hashes first, and hashing
-    // the flag made the flagless retry 409 (completion_resume_payload_
-    // mismatch) before this line — the recovery this comment promises was
-    // unreachable.
-    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
-      isBackfillCompletion = true;
-    }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
@@ -6759,6 +6771,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: req.technicianId,
+        // Same backfill contract as the first markComplete above: normally
+        // idempotent by now, but when that call failed this one performs the
+        // real flip — it must honor the duration policy too.
+        untrustedLifecycleSpan: isBackfillCompletion,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,

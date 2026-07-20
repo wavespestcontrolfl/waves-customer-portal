@@ -595,6 +595,20 @@ async function markOnProperty(serviceId, opts = {}) {
  * Flip to 'complete'. Admin-dispatch's PUT /:id/status (status='completed')
  * and POST /:id/complete both route through here so the customer-visible
  * state machine stays canonical.
+ *
+ * opts.untrustedLifecycleSpan (backdated quiet closeouts — admin-dispatch
+ * `backfill: true`): skip the buildCompletionLifecycleUpdates rebuild. On a
+ * stale row that helper would stamp NOW into actual_end_time/check_out_time
+ * and book the stale-start→now gap as service_time_minutes/
+ * actual_duration_minutes — re-polluting, AFTER the completion transaction,
+ * exactly the columns applyBackfillDurationPolicy stripped (or set from the
+ * operator's typed duration). Job-costing's durable untrusted-span guard
+ * prefers persisted service_time_minutes as explicit labor, so the rebuilt
+ * span would also book weeks of labor. Under the flag the tracker writes
+ * only its own bookkeeping — the track_state flip, the completed_at audit
+ * stamp of when the tracker flipped, updated_at — and every lifecycle
+ * timing/duration column keeps whatever the policy persisted. Default
+ * (every non-backfill caller) is unchanged.
  */
 async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
@@ -617,7 +631,7 @@ async function markComplete(serviceId, opts = {}) {
     .update({
       track_state: 'complete',
       completed_at: now,
-      ...buildCompletionLifecycleUpdates(svc, now),
+      ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
       updated_at: now,
     });
   if (updated === 0) {
