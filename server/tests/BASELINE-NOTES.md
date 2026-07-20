@@ -8,6 +8,25 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-07-17 forget-all-floors ruling (later the same day)
+
+All pricing floors disarmed (owner ruling: margins surfaced, never
+enforced — see migration `20260717120000_forget_all_pricing_floors` and
+its `pricing_changelog` entry). Local baselines recaptured
+(`CAPTURE_BASELINE=1 LOCAL=1`) for both regression suites on the
+disarmed engine, then recaptured AGAIN after merging the spot-reserve
+fold (below) into the branch — the shipped baselines carry market-table
+prices with reserve-folded cost REPORTING. The lawn golden master was
+regenerated the same way (35 of 65 cases flipped floor→market). The DB
+baselines (`*.baseline.json`) remain pending post-deploy recapture.
+
+Merging the #2795 recovery (2026-07-18) brought in the post-discount
+margin-guard machinery below: it is KEPT but enforcement-gated on
+`useLawnCostFloor` (per-input, or the `lawn_pricing_v2.useLawnCostFloor`
+DB key, in-code default false) alongside the program-minimum kill value —
+disarmed baselines are unchanged; the re-armed tests in
+`lawn-pricing-followup.test.js` pin the armed behavior.
+
 ## 2026-07-16 lawn post-discount 35% margin guard
 
 Recurring lawn now keeps its 35% fully loaded collected-margin floor after
@@ -22,6 +41,7 @@ core cases and three v1-adapter cases moved, all containing discounted lawn;
 non-lawn line items, tier selection, and pre-discount totals stayed unchanged.
 See `pricing_changelog` entry `codex-2026-07-16` and migration
 `20260716150001_lawn_post_discount_margin_floor_changelog`.
+
 ## 2026-07-17 lawn spot-reserve fold
 
 Spot-treatment reserves folded into the lawn cost-floor material budgets

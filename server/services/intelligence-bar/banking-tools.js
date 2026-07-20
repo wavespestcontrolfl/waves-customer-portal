@@ -146,7 +146,7 @@ function getPayoutOptions(input) {
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeBankingTool(toolName, input) {
+async function executeBankingTool(toolName, input, context = {}) {
   try {
     switch (toolName) {
       case 'get_stripe_balance': return await getStripeBalance();
@@ -154,8 +154,8 @@ async function executeBankingTool(toolName, input) {
       case 'get_payout_details': return await getPayoutDetailsHandler(input);
       case 'get_cash_flow': return await getCashFlowHandler(input);
       case 'get_fee_analysis': return await getFeeAnalysis(input);
-      case 'request_instant_payout': return await requestInstantPayout(input);
-      case 'request_standard_payout': return await requestStandardPayout(input);
+      case 'request_instant_payout': return await requestInstantPayout(input, context);
+      case 'request_standard_payout': return await requestStandardPayout(input, context);
       case 'get_unreconciled_payouts': return await getUnreconciledPayouts(input);
       case 'export_payouts': return await exportPayouts(input);
       default: return { error: `Unknown banking tool: ${toolName}` };
@@ -347,7 +347,20 @@ async function getFeeAnalysis(input) {
 }
 
 
-async function requestInstantPayout(input) {
+// Payouts move real money: refuse unless the caller carries a server-derived
+// confirmed context (cf. runSeoPipeline in seo-tools). Only /execute attaches
+// it, after its own confirmed + idempotency + admin checks — the model loop
+// never does, so these executors are inert even if a future caller wires
+// executeBankingTool somewhere new.
+function payoutNotConfirmed(context) {
+  if (context?.confirmed === true) return null;
+  return { error: 'Explicit confirmation is required to request a payout. Use the confirmed action endpoint.' };
+}
+
+async function requestInstantPayout(input, context) {
+  const refused = payoutNotConfirmed(context);
+  if (refused) return refused;
+
   const amount = getValidPayoutAmount(input);
 
   if (amount == null) {
@@ -374,7 +387,10 @@ async function requestInstantPayout(input) {
   }
 }
 
-async function requestStandardPayout(input) {
+async function requestStandardPayout(input, context) {
+  const refused = payoutNotConfirmed(context);
+  if (refused) return refused;
+
   const amount = getValidPayoutAmount(input);
 
   if (amount == null) {

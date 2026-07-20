@@ -531,3 +531,85 @@ describe('/cancel-action', () => {
     });
   });
 });
+
+// 07-19 admin audit (P1-1): this router is requireTechOrAdmin, so a technician
+// token can reach /query; a forged `context` must not widen their surface. The
+// route hard-pins context='tech' for non-admin tokens. Observable: the tech
+// context uses max_tokens 1024 (every other context uses 4096), so a technician
+// who posts context='revenue' still gets the 1024-token tech call.
+describe('technician context is hard-pinned to tech (P0-1)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_IB_UI_CONFIRM;
+  });
+
+  test('forged non-tech context from a technician is coerced to tech', async () => {
+    scriptModelTurns([[{ type: 'text', text: 'Your next stop is 123 Main St.' }]]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'revenue this month', context: 'revenue' }, 'tech');
+      expect(status).toBe(200);
+      expect(mockMessagesCreate).toHaveBeenCalledTimes(1);
+      expect(mockMessagesCreate.mock.calls[0][0].max_tokens).toBe(1024);
+    });
+  });
+
+  test('an admin keeps the requested context (revenue → 4096-token call)', async () => {
+    scriptModelTurns([[{ type: 'text', text: 'Revenue is up 12% MoM.' }]]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'revenue this month', context: 'revenue' }, 'admin');
+      expect(status).toBe(200);
+      expect(mockMessagesCreate.mock.calls[0][0].max_tokens).toBe(4096);
+    });
+  });
+});
+
+// The context pin only limits which tools /query OFFERS. /execute and
+// /confirm-action take the tool name straight from the client, so they need
+// their own default-deny check — a technician may execute ONLY tech tools.
+// (TECH_TOOLS is mocked empty here, so every non-tech action is denied.)
+describe('technician tool execution is default-deny (P0)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_IB_UI_CONFIRM;
+  });
+
+  test.each(['get_customer_detail', 'query_customers', 'get_top_revenue_customers', 'update_customer'])(
+    '/execute rejects %s for a technician token', async (action) => {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, params: {}, confirmed: true }),
+        });
+        expect(res.status).toBe(403);
+        expect(mockExecuteTool).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  test('/execute lets an admin run a customer-PII read (passes the role gate)', async () => {
+    mockExecuteTool.mockResolvedValue({ customers: [], total_matching: 0 });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'query_customers', params: { search: 'Jeff' } }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledWith('query_customers', { search: 'Jeff' });
+    });
+  });
+
+  test('/confirm-action rejects a non-tech stored action for a technician', async () => {
+    mockClaimForConfirm.mockResolvedValue({ action: { id: 'pa-1', tool_name: 'query_customers', params: {} } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: 'pa-1' }),
+      });
+      expect(res.status).toBe(403);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+});

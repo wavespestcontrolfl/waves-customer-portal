@@ -100,13 +100,16 @@ function estimateResultRoot(estimateData) {
 const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
 // round(89 × v1 mult) per cadence — the exact values the client literal produces.
 const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+// The client fallback's own cadence multipliers (pestFrequencyTiers ft.disc)
+// — used to recognize CONFIGURED-floor client stamps below.
+const CLIENT_PEST_V1_MULTS = { 4: 1.0, 6: 0.85, 12: 0.7 };
 function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
   if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
   if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
   const cappedFloor = Math.min(floorAnn, pestAnn);
   return Math.max(0, roundMoney(pestAnn * discountPct - (pestAnn - cappedFloor)));
 }
-function normalizeClientPestFloorMetadata(estimateData) {
+function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = true } = {}) {
   const root = estimateResultRoot(estimateData);
   const results = root?.results;
   if (!results || typeof results !== 'object') return;
@@ -128,11 +131,67 @@ function normalizeClientPestFloorMetadata(estimateData) {
     ? pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn))
     : 0;
 
+  // The client fallback stamps its resolved per-visit floor into
+  // pricingMetadata (post round-9 #2827): a floorPa equal to round(that
+  // base × the client's v1 cadence mult) is a CLIENT stamp even when
+  // pest_base.floor is configured away from 89 — without this, a config
+  // change between fallback calculation and save would preserve stale
+  // client floor metadata as if it were a server snapshot (codex P2
+  // round 11). The 89-literal set still covers pre-stamp client saves.
+  const clientFloorBase = Number(root?.pricingMetadata?.pestProgramFloorPerVisit);
+  const clientStampForRow = (row) => {
+    const mult = CLIENT_PEST_V1_MULTS[Number(row.apps ?? row.v)];
+    if (!mult || !Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return null;
+    return Math.round(clientFloorBase * mult * 100) / 100;
+  };
+
+  // Fail-closed gates BEFORE any mutation (pre-push P0s on the main-merge).
+  // A client-priced pest payload cannot be normalized against config we
+  // could not verify as live — the restamp would persist billable totals
+  // against stale arm/floor values (the client just priced at whatever it
+  // fetched; this save is the last authoritative checkpoint).
+  if (isClientEngineResult && !liveConfigVerified) {
+    throw errorWithStatus('Live pricing configuration could not be verified — retry the save in a moment.', 503);
+  }
+  // While the floor is ARMED: restamping cannot REPRICE. A client row whose
+  // list price sits BELOW the live per-visit floor would persist pa/ann/mo
+  // and billable totals beneath the configured floor, and the accept-path
+  // lift caps at that old annual — the customer would be saved and charged
+  // below the live floor. Fallback payloads have no server recompute, so
+  // reject and require regeneration (EstimatePage refreshes config before
+  // every fallback quote, so a regenerate prices at live values). Rows at
+  // or above the live floor restamp safely — the floor is metadata there
+  // (rounds 11/13 behavior kept), and a floor that moved DOWN never binds.
+  if (PEST.enforceFloorPostDiscount === true) {
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const stampedPa = Number(row.floorPa);
+      const hasMetadata = Number.isFinite(stampedPa);
+      const isClientStamped = hasMetadata && (
+        CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
+        || (isClientEngineResult && stampedPa === clientStampForRow(row))
+      );
+      if (hasMetadata && !isClientStamped) continue; // server snapshot — untouched below
+      if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
+      const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
+      if (!frequencyKey) continue; // stripped below, never stamped
+      const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+      const liveFloorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
+      if (liveFloorPa !== null && Number.isFinite(Number(row.pa))
+        && Number(row.pa) < liveFloorPa - 0.005) {
+        throw errorWithStatus('Pricing configuration changed since this quote was generated — regenerate the estimate to price at the live floor.', 409);
+      }
+    }
+  }
+
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
-    const isClientStamped = hasMetadata && CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa);
+    const isClientStamped = hasMetadata && (
+      CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
+      || (isClientEngineResult && stampedPa === clientStampForRow(row))
+    );
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
     // Metadata-less rows get stamped only on client-engine payloads, where the
     // totals correction below applies the matching lift. Stamping a legacy
@@ -155,6 +214,25 @@ function normalizeClientPestFloorMetadata(estimateData) {
 
   // Replace the client-baked lift with the server-correct one in the totals.
   if (!isClientEngineResult) return;
+  // The rows/totals above were normalized to the LIVE config — the replay
+  // stamps must record the SAME source atomically, or a floor change
+  // between calculation and save leaves pricingMetadata claiming one floor
+  // while the persisted rows/totals collect another (pre-push P0, round 13
+  // on #2827). Client-priced payloads only; server engine stamps are
+  // authoritative snapshots and never pass through here.
+  const syncStamps = (meta) => {
+    if (!meta || typeof meta !== 'object') return;
+    meta.pestProgramFloorArmed = PEST.enforceFloorPostDiscount === true;
+    const liveFloor = Number(PEST.floor);
+    if (Number.isFinite(liveFloor) && liveFloor > 0) {
+      meta.pestProgramFloorPerVisit = liveFloor;
+    } else {
+      delete meta.pestProgramFloorPerVisit;
+    }
+  };
+  if (!root.pricingMetadata || typeof root.pricingMetadata !== 'object') root.pricingMetadata = {};
+  syncStamps(root.pricingMetadata);
+  syncStamps(root.routingMetadata);
   const serverLift = pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn));
   const delta = roundMoney(serverLift - clientLift);
   recurring.pestProgramFloorApplied = serverLift > 0;
@@ -601,20 +679,23 @@ async function resolveEstimateWritePayload({
   // Server-authoritative pest program floor: normalize client-stamped floor
   // metadata AND the client-baked lift in the totals BEFORE resolving the
   // billable preview, so CLIENT_FALLBACK persists collect per the live
-  // DB-synced floor/kill switch. Sync the pricing constants first —
-  // serverRecomputeFromEstimateData returns NO_INPUTS before any sync on
-  // fallback payloads, so without this the restamp could use a stale
-  // in-memory floor right after a pricing_config edit. Best-effort: a sync
-  // failure must not block the save (the restamp then uses the last-synced
-  // constants, same as every other pricing surface).
+  // DB-synced floor/kill switch. The sync is UNCONDITIONAL — the process-
+  // local 60s cache is not authority when another pod just edited
+  // pricing_config, and a client-priced payload has no server recompute to
+  // correct a stale restamp (pre-push P0 on the main-merge). A failed sync
+  // makes live config UNVERIFIABLE: the normalizer then fails the save
+  // CLOSED for client-priced pest payloads instead of normalizing billable
+  // totals against stale arm/floor values; every other save shape keeps the
+  // last-synced constants as before.
+  let liveConfigVerified = false;
   try {
-    if (pricingEngine.needsSync && pricingEngine.needsSync()) {
-      await pricingEngine.syncConstantsFromDB(database);
-    }
+    liveConfigVerified = typeof pricingEngine.syncConstantsFromDB === 'function'
+      ? (await pricingEngine.syncConstantsFromDB(database)) !== false
+      : true;
   } catch (err) {
-    logger.warn(`[admin-estimate] pricing-config sync before floor normalize skipped: ${err.message}`);
+    logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
   }
-  normalizeClientPestFloorMetadata(trustedEstimateData);
+  normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);

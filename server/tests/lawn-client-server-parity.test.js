@@ -39,7 +39,7 @@ function loadClientEstimator() {
     logLevel: 'silent',
   });
   const module = { exports: {} };
-  // eslint-disable-next-line no-new-func
+   
   new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
@@ -52,11 +52,15 @@ function roundedFloorFromRaw(rawAnnual, visits) {
   return { pa, ann, mo: Math.round(ann / 12 * 100) / 100 };
 }
 
-// Server's selected-tier price for a given turf/track/freq (+ optional property).
+// Server's selected-tier price for a given turf/track/freq (+ optional
+// property). Engine defaults apply — cost-floor selection is disarmed
+// (owner ruling 2026-07-17), so both sides price off the market table and
+// parity holds on the disarmed behavior. The floor-MATH parity block below
+// still exercises calcLawnFloorPrice against the server's reporting floor.
 function serverTier(sf, track, visits, { property = {} } = {}) {
   const result = priceLawnCare(
     { turfSf: sf, ...property },
-    { track, lawnFreq: visits, useLawnCostFloor: true },
+    { track, lawnFreq: visits },
   );
   const tier = result.tiers.find((t) => t.freq === visits);
   if (!tier) throw new Error(`no server tier for visits=${visits}`);

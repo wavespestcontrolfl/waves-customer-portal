@@ -35,27 +35,30 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
   const grid = [];
   for (const track of TRACKS) for (const sqft of SIZES) grid.push([track, sqft]);
 
-  it.each(grid)('%s @ %s sqft: three sold cadences, floor respected, monthly monotone in visits', (track, sqft) => {
+  it.each(grid)('%s @ %s sqft: three sold cadences, market-table priced (floors disarmed 2026-07-17), monthly monotone in visits', (track, sqft) => {
     const tiers = soldTiers(track, sqft);
     expect(tiers.map((t) => t.visits)).toEqual(SOLD_VISITS);
-    const programMin = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    // Owner 2026-07-17 ("forget all pricing floors"): the $50 program minimum
+    // ships as 0 and useLawnCostFloor defaults false, so EVERY cell prices
+    // off the market bracket table. Pin the disarm itself here.
+    expect(Number(LAWN_PRICING_V2.programMinimumMonthly)).toBe(0);
     for (let i = 0; i < tiers.length; i++) {
       const t = tiers[i];
       // Internal consistency: monthly and perApp derive from annual.
       expect(t.monthly).toBeCloseTo(Math.round((t.annual / 12) * 100) / 100, 2);
       expect(t.perApp).toBeCloseTo(Math.round((t.annual / t.visits) * 100) / 100, 2);
-      // No sold cadence below the program minimum.
-      expect(t.monthly).toBeGreaterThanOrEqual(programMin);
-      // The engine never prices below its own cost floor — including the
-      // cells where the floor BINDS (floor > market), which a min(market,
-      // floor) comparison would wave through.
-      expect(t.annual).toBeGreaterThanOrEqual(t.costFloorAnnual - 1e-9);
-      if (t.costFloorApplied) {
-        expect(t.annual).toBeGreaterThanOrEqual(Math.ceil(t.costFloorAnnual / t.visits) * t.visits);
-      } else {
-        expect(t.annual).toBeGreaterThanOrEqual(t.marketAnnual);
-      }
-      // Every price carries a known provenance mechanism.
+      // Floors are DISARMED: no cell ever binds to the cost floor or the
+      // program minimum — the market bracket is the sold price. The cost
+      // floor MATH still runs for reporting (costFloorAnnual stays a real
+      // dollar amount) and may legitimately sit ABOVE the sold price now.
+      expect(t.costFloorApplied).toBe(false);
+      expect(t.programMinimumApplied).toBeFalsy();
+      expect(t.annual).toBeGreaterThanOrEqual(t.marketAnnual);
+      expect(Number.isFinite(t.costFloorAnnual)).toBe(true);
+      expect(t.costFloorAnnual).toBeGreaterThan(0);
+      // Every price carries a known provenance mechanism — and with floors
+      // disarmed, only the two market mechanisms can appear.
+      expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE']).toContain(t.pricingSource);
       expect(KNOWN_SOURCES).toContain(t.pricingSource);
       // Monthly must increase (or hold, at the clamp) with more visits.
       if (i > 0) expect(t.monthly).toBeGreaterThanOrEqual(tiers[i - 1].monthly);
@@ -78,7 +81,10 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
     }
   });
 
-  test('the sweep grid scan is clean on code defaults (hard checks only)', () => {
+  test('the sweep grid scan is clean on code defaults (0 minimum = disarmed by design)', () => {
+    // Owner 2026-07-17 shipped programMinimumMonthly = 0; the sweep's config
+    // guard treats 0 as the designed disarm value (only non-numeric or
+    // negative values are malformed), so a default-config scan is clean.
     const { violations, cellsChecked, shapeChecks } = scanLadderGrid();
     expect(shapeChecks).toBe(false); // per-app shape check stays opt-in until Phase 2 repricing
     expect(cellsChecked).toBeGreaterThan(400);
@@ -191,6 +197,23 @@ describe('sweep red paths — failures become alert violations, never silent gre
   // first registration, so the factories below proxy through this mutable
   // holder — each test swaps behavior here instead of re-registering mocks.
   const current = {};
+
+  // Owner 2026-07-17 ("forget all pricing floors") shipped
+  // programMinimumMonthly = 0 as the code default (disarmed by design; the
+  // sweep's config guard only flags non-numeric/negative values). Each
+  // red-path test below pins exactly ONE failure lane (and its alert
+  // severity), and several exercise the below-minimum lane itself, so
+  // re-arm the pre-ruling $50 minimum here. Enforcement of the minimum
+  // never happens anymore regardless of this constant's value in the
+  // mocked priceLawnCare fixtures — the sweep only REPORTS.
+  let priorProgramMinimum;
+  beforeEach(() => {
+    priorProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 50;
+  });
+  afterEach(() => {
+    LAWN_PRICING_V2.programMinimumMonthly = priorProgramMinimum;
+  });
 
   function makeDbMock() {
     const calls = { updates: [], inserts: [] };

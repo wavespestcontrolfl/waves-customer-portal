@@ -11,6 +11,18 @@ const logger = require('./logger');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
+// Every platform checkAll() maintains. Rows outside this set are deprecated
+// leftovers, pruned by pruneStaleCredentials() (scheduled path only).
+const KNOWN_PLATFORMS = new Set([
+  'facebook', 'instagram', 'linkedin',
+  'meta_ads', 'meta_capi', 'meta_audiences',
+  'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
+  'bouncie', 'beehiiv', 'dataforseo',
+  'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'google',
+  'sendgrid',
+  'github',
+]);
+
 // Location ids used by google-business.js for OAuth token storage in
 // system_settings (`gbp.oauth_tokens.{locationId}`). Must stay in sync with
 // LOCATION_ENV_KEYS in services/google-business.js.
@@ -941,6 +953,8 @@ const TokenHealthService = {
    */
   async checkAll() {
     logger.info('[token-health] Running credential health checks...');
+    // Prune BEFORE checking so this pass's upserts land on clean rows.
+    await TokenHealthService.pruneStaleCredentials();
     const results = [];
 
     // Run checks sequentially to avoid overwhelming APIs
@@ -985,23 +999,14 @@ const TokenHealthService = {
   },
 
   /**
-   * Get all credential statuses from the database (no live checks).
-   * Purges any deprecated platforms not in KNOWN, and dedupes duplicate
-   * rows per platform before returning.
+   * Delete deprecated-platform rows and duplicate rows per platform.
+   * Runs from the scheduled checkAll() pass — NEVER from getAll(): reads
+   * (including the IB get_integration_token_health tool) must stay
+   * side-effect free.
    */
-  async getAll() {
+  async pruneStaleCredentials() {
     try {
-      const KNOWN = new Set([
-        'facebook', 'instagram', 'linkedin',
-        'meta_ads', 'meta_capi', 'meta_audiences',
-        'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
-        'bouncie', 'beehiiv', 'dataforseo',
-        'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'google',
-        'sendgrid',
-        'github',
-      ]);
-
-      await db('token_credentials').whereNotIn('platform', [...KNOWN]).del();
+      await db('token_credentials').whereNotIn('platform', [...KNOWN_PLATFORMS]).del();
 
       const rows = await db('token_credentials').orderBy('platform');
       const byPlatform = new Map();
@@ -1017,7 +1022,28 @@ const TokenHealthService = {
       if (duplicateIds.length) {
         await db('token_credentials').whereIn('id', duplicateIds).del();
       }
+    } catch (e) {
+      logger.warn(`[token-health] Prune failed: ${e.message}`);
+    }
+  },
 
+  /**
+   * Get all credential statuses from the database (no live checks, no
+   * writes). Unknown platforms are filtered and duplicates collapsed
+   * in-memory only — physical cleanup happens in pruneStaleCredentials().
+   */
+  async getAll() {
+    try {
+      const rows = await db('token_credentials')
+        .whereIn('platform', [...KNOWN_PLATFORMS])
+        .orderBy('platform');
+      const byPlatform = new Map();
+      for (const r of rows) {
+        const prev = byPlatform.get(r.platform);
+        const ts = (r.last_verified_at && new Date(r.last_verified_at).getTime()) || 0;
+        const prevTs = prev ? (prev.last_verified_at && new Date(prev.last_verified_at).getTime()) || 0 : -1;
+        if (!prev || ts >= prevTs) byPlatform.set(r.platform, r);
+      }
       return [...byPlatform.values()].sort((a, b) => a.platform.localeCompare(b.platform));
     } catch {
       return [];

@@ -197,7 +197,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(light.monthly).toBeLessThan(standard.monthly);
   });
 
-  test('post-discount margin guard caps unsafe Tree & Shrub discount', () => {
+  test('post-discount margin guard is report-only: unsafe Tree & Shrub discount applies uncapped (owner ruling 2026-07-17)', () => {
     constants.WAVEGUARD.tiers.platinum.discount = 0.40;
 
     const estimate = generateEstimate({
@@ -218,11 +218,16 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     const treeShrub = estimate.lineItems.find(item => item.service === 'tree_shrub');
     expect(treeShrub.requestedDiscountPct).toBeCloseTo(0.40, 3);
-    expect(treeShrub.marginGuardApplied).toBe(true);
-    expect(treeShrub.discountCapped).toBe(true);
-    expect(treeShrub.finalMargin).toBeGreaterThanOrEqual(0.35);
-    expect(treeShrub.actualDiscountPct).toBeLessThan(treeShrub.requestedDiscountPct);
-    expect(treeShrub.finalAnnual).toBeGreaterThanOrEqual(treeShrub.minAnnualForMargin);
+    // Owner ruling 2026-07-17 ("forget all pricing floors"): the guard no
+    // longer lifts the price — it only reports the margin shortfall.
+    expect(treeShrub.marginGuardApplied).toBe(false);
+    expect(treeShrub.discountCapped).toBe(false);
+    expect(treeShrub.actualDiscountPct).toBeCloseTo(0.40, 3);
+    expect(treeShrub.finalAnnual).toBeCloseTo(325.80, 2); // $543 list × (1 − 0.40), uncapped
+    expect(treeShrub.finalMargin).toBeCloseTo(0.084, 3); // well below 35%, price stands
+    expect(treeShrub.belowMarginFloor).toBe(true);
+    // Auto WaveGuard discounts still never raise margin warnings; the
+    // warn-only path for MANUAL discounts in estimate-engine is unchanged.
     expect(estimate.marginWarnings.some(w => w.service === 'tree_shrub')).toBe(false);
   });
 
@@ -352,7 +357,7 @@ describe('Tree & Shrub estimator hardening', () => {
     TS_ENHANCED_DEPRECATED_WARNING_CODE,
   } = require('../services/pricing-engine');
 
-  describe('post-discount margin guard', () => {
+  describe('post-discount margin guard (report-only since owner ruling 2026-07-17)', () => {
     const originalPlatinumDiscount = constants.WAVEGUARD.tiers.platinum.discount;
     afterEach(() => {
       constants.WAVEGUARD.tiers.platinum.discount = originalPlatinumDiscount;
@@ -377,31 +382,41 @@ describe('Tree & Shrub estimator hardening', () => {
       };
     }
 
-    test('guard uses directCost + adminCost (not directCost alone)', () => {
+    test('reported margin uses directCost + adminCost (not directCost alone)', () => {
       constants.WAVEGUARD.tiers.platinum.discount = 0.40;
       const estimate = generateEstimate(makeBaseEstimateInput());
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
-      const expectedMin = (ts.costs.directCost + ts.costs.adminCost) /
-        (1 - constants.TREE_SHRUB.marginFloor);
-      // ceilMoney → match to within a cent.
-      expect(ts.minAnnualForMargin).toBeCloseTo(Math.ceil(expectedMin * 100) / 100, 2);
-      // Implied finalAnnual must clear the protected floor.
-      expect(ts.finalAnnual).toBeGreaterThanOrEqual(ts.minAnnualForMargin);
+      // Owner ruling 2026-07-17: no lift, so minAnnualForMargin is no longer
+      // stamped — the guard only reports margin against the all-in cost basis.
+      expect(ts.minAnnualForMargin).toBeUndefined();
+      const allInMargin =
+        (ts.finalAnnual - ts.costs.directCost - ts.costs.adminCost) / ts.finalAnnual;
+      expect(ts.finalMargin).toBeCloseTo(allInMargin, 3);
+      // directCost alone would report ~24% here; admin-inclusive is ~8.4% —
+      // pin that the report is admin-inclusive.
+      const directOnlyMargin = (ts.finalAnnual - ts.costs.directCost) / ts.finalAnnual;
+      expect(Math.abs(ts.finalMargin - directOnlyMargin)).toBeGreaterThan(0.05);
+      expect(ts.belowMarginFloor).toBe(true);
     });
 
-    test('displayed margin never falls below 35% when a discount is applied', () => {
+    test('displayed margin may fall below 35% — the engine reports it instead of lifting (owner ruling 2026-07-17)', () => {
       constants.WAVEGUARD.tiers.platinum.discount = 0.40;
       const estimate = generateEstimate(makeBaseEstimateInput());
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
       const displayedMargin =
         (ts.finalAnnual - ts.costs.directCost - ts.costs.adminCost) / ts.finalAnnual;
-      expect(displayedMargin).toBeGreaterThanOrEqual(constants.TREE_SHRUB.marginFloor - 1e-9);
-      expect(ts.finalMargin).toBeGreaterThanOrEqual(0.35);
+      // 40% off drives the collected margin to ~8.4%; the price stands and the
+      // shortfall is surfaced only via finalMargin / belowMarginFloor.
+      expect(displayedMargin).toBeLessThan(constants.TREE_SHRUB.marginFloor);
+      expect(displayedMargin).toBeCloseTo(0.0838, 3);
+      expect(ts.finalMargin).toBeCloseTo(displayedMargin, 3);
+      expect(ts.belowMarginFloor).toBe(true);
     });
 
     test('guard never raises the discounted price above the original undiscounted annual', () => {
-      // 90% discount would push the price absurdly low; guard should lift it
-      // back to the margin floor, but never above the original list price.
+      // 90% discount pushes the price absurdly low; since the 2026-07-17
+      // owner ruling the guard no longer lifts it back — this pin only asserts
+      // the discounted price can never exceed the original list price.
       constants.WAVEGUARD.tiers.platinum.discount = 0.90;
       const estimate = generateEstimate(makeBaseEstimateInput());
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
@@ -412,9 +427,9 @@ describe('Tree & Shrub estimator hardening', () => {
       constants.WAVEGUARD.tiers.platinum.discount = 0.40;
       const estimate = generateEstimate(makeBaseEstimateInput());
       for (const item of estimate.lineItems) {
-        // Tree & Shrub and Pest Control are auto-discount margin-guarded;
-        // Lawn carries the $45/mo program-minimum guard (owner 2026-07-09),
-        // which sets discountCapped when the floor caps a discount.
+        // Tree & Shrub and Pest Control carry (report-only since the
+        // 2026-07-17 owner ruling) margin-guard fields; the lawn program
+        // minimum is now 0, so Lawn carries no guard fields.
         if (item.service === 'tree_shrub' || item.service === 'pest_control') continue;
         if (item.service === 'lawn_care') {
           expect(item.marginGuardApplied).toBeUndefined();
@@ -762,10 +777,10 @@ describe('Tree & Shrub estimator hardening', () => {
       };
     }
 
-    test('Platinum (20%) is intentionally clamped by the 35% post-discount guard', () => {
-      // 1 - 0.55/0.80 = 31.25% collected margin — below the guard, so the
-      // guard caps the effective T&S discount. This is the documented v4.6
-      // policy, not a bug.
+    test('Platinum (20%) is no longer clamped — the 35% post-discount guard is report-only (owner ruling 2026-07-17)', () => {
+      // 1 - 0.55/0.80 = 31.25% collected margin — below the 35% floor. The
+      // old v4.6 policy clamped this; since the 2026-07-17 owner ruling the
+      // full 20% applies and the shortfall is only reported.
       const estimate = generateEstimate(estimateInput({
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -774,8 +789,12 @@ describe('Tree & Shrub estimator hardening', () => {
       }));
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
       expect(estimate.waveGuard.tier).toBe('platinum');
-      expect(ts.discountCapped).toBe(true);
-      expect(ts.finalMargin).toBeGreaterThanOrEqual(0.35 - 1e-9);
+      expect(ts.discountCapped).toBe(false);
+      expect(ts.marginGuardApplied).toBe(false);
+      expect(ts.actualDiscountPct).toBeCloseTo(0.20, 3);
+      expect(ts.finalMargin).toBeCloseTo(0.313, 3);
+      expect(ts.finalMargin).toBeLessThan(0.35);
+      expect(ts.belowMarginFloor).toBe(true);
     });
 
     test('Gold (15%) survives the guard uncapped', () => {

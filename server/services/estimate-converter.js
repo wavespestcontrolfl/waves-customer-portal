@@ -863,8 +863,102 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 // discount — including the annual-prepay % — may cut into. Scans the same
 // dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
 // lineItems) and dedupes by key so a lawn line is only protected once.
+// Per-estimate lawn program minimum (pre-push codex P0s, round 9 on #2827) —
+// the SINGLE resolution shared by the converter's prepay protection and
+// estimate-public's ladder/bundle clamps (the route delegates here), so
+// billing and render can never disagree about which floor a quote carries:
+// 1. pricingMetadata stamp — the engine (and client fallback engine) record
+//    the RESOLVED minimum on every pricing run; a later global re-arm or
+//    disarm must never re-price a sent quote (0 = priced disarmed).
+// 2. Legacy row evidence — pre-stamp estimates saved while the minimum was
+//    armed carry it on the stored rows: priceLawnCare stamps
+//    programMinimumMonthly whenever armed (v1 mapper mirrors it at
+//    prov/lawnMeta), and clamped rows carry programMinimumApplied /
+//    PROGRAM_MINIMUM source (client-fallback rows are value-less — their
+//    clamped monthly IS the minimum they were held at). Without this, a
+//    pre-disarm $600 quote falls to the now-0 global and renders/accepts
+//    below what was saved.
+// 3. Live global — estimates with no stamp and no row evidence
+//    (post-ruling and pre-#2540 saves): their existing behavior.
+function legacyLawnProgramMinimumMonthly(estimateData = {}) {
+  const result = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result
+    : (estimateData || {});
+  const rows = [];
+  if (Array.isArray(result?.results?.lawn)) rows.push(...result.results.lawn);
+  if (result?.lawnMeta && typeof result.lawnMeta === 'object') rows.push(result.lawnMeta);
+  // v1 saves nest the selected-lawn provenance at results.lawnMeta.
+  if (result?.results?.lawnMeta && typeof result.results.lawnMeta === 'object') {
+    rows.push(result.results.lawnMeta);
+  }
+  const lineItemSources = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    // Admin V2 saves persist the raw engine result separately.
+    ...(Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : []),
+  ];
+  for (const li of lineItemSources) {
+    if ((li?.service || '') !== 'lawn_care') continue;
+    rows.push(li);
+    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
+  }
+  // Explicit value stamps are exact — prefer them outright. Value-less
+  // applied rows (client-fallback saves) only bound the minimum from above:
+  // each clamped annual is ceil'd to a whole per-application multiple, so a
+  // $50 minimum produces rows at $50 (6x/12x) and $50.25 (9x). The MIN over
+  // applied rows recovers the tightest cadence-rounding-free estimate and
+  // never raises any saved row (every applied row's own price ≥ the min, and
+  // the ladder clamp only lifts below-minimum values) — max would over-infer
+  // $50.25 and re-price $50 tiers (pre-push codex P0, round 9 on #2827).
+  let stampedMax = null;
+  let appliedMin = null;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const stampedValue = Number(row.programMinimumMonthly ?? row.prov?.programMinimumMonthly);
+    if (Number.isFinite(stampedValue) && stampedValue > 0) {
+      stampedMax = Math.max(stampedMax ?? 0, stampedValue);
+      continue;
+    }
+    const applied = row.programMinimumApplied === true
+      || row.prov?.programMinimumApplied === true
+      || row.pricingSource === 'PROGRAM_MINIMUM'
+      || row.prov?.pricingSource === 'PROGRAM_MINIMUM'
+      || row.programMinimumGuardApplied === true;
+    if (!applied) continue;
+    let monthly = Number(row.mo ?? row.monthly);
+    if (!(Number.isFinite(monthly) && monthly > 0)) {
+      const annual = Number(row.annualAfterDiscount ?? row.annual ?? row.ann);
+      monthly = Number.isFinite(annual) && annual > 0 ? Math.round((annual / 12) * 100) / 100 : NaN;
+    }
+    if (Number.isFinite(monthly) && monthly > 0) {
+      appliedMin = appliedMin == null ? monthly : Math.min(appliedMin, monthly);
+    }
+  }
+  return stampedMax ?? appliedMin;
+}
+
+// Signal-only variant: stamp → legacy row evidence → NULL (no live-global
+// fallback). estimate-public's engine-input replay uses this to decide
+// whether to thread a saved minimum into generateEstimate — a silent
+// estimate must replay under the live global, not a frozen copy of it.
+function estimateLawnProgramMinimumSignal(estimateData = {}) {
+  const stamped = estimateData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.engineResult?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.pricingMetadata?.lawnProgramMinimumMonthly
+    ?? estimateData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
+  const stampedN = Number(stamped);
+  if (stamped != null && Number.isFinite(stampedN) && stampedN >= 0) return stampedN;
+  return legacyLawnProgramMinimumMonthly(estimateData);
+}
+
+function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  const signal = estimateLawnProgramMinimumSignal(estimateData);
+  if (signal != null) return signal;
+  const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  return Number.isFinite(live) && live > 0 ? live : 0;
+}
+
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
-  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const minMonthly = resolveLawnProgramMinimumMonthlyForEstimate(estimateData);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
@@ -2686,6 +2780,8 @@ module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeedi
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.resolveLawnProgramMinimumMonthlyForEstimate = resolveLawnProgramMinimumMonthlyForEstimate;
+module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;

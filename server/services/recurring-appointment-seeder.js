@@ -309,6 +309,12 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     if (rOpts.nth != null) row.recurring_nth = rOpts.nth;
     if (rOpts.weekday != null) row.recurring_weekday = rOpts.weekday;
     if (rOpts.intervalDays != null) row.recurring_interval_days = rOpts.intervalDays;
+    // Classify from the row's own service_type rather than copying
+    // parent.appointment_type: the AppointmentTagger stamps the parent
+    // post-insert (fire-and-forget on the accept paths), so the parent's
+    // tag may not exist yet when follow-ups seed in the same request.
+    row.appointment_type = require('./appointment-tagger')
+      .classifyAppointmentType(row.service_type).tag;
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',

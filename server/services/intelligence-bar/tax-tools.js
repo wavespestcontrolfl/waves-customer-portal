@@ -101,7 +101,7 @@ Use for: "P&L this month", "compare this quarter's profit to last quarter", "net
   },
   {
     name: 'run_tax_advisor',
-    description: `Trigger the AI Tax Advisor to run a fresh analysis. Searches for regulation changes, identifies savings opportunities, checks compliance, and generates a graded report. Takes 15-30 seconds.
+    description: `Trigger the AI Tax Advisor to run a fresh analysis. Searches for regulation changes, identifies savings opportunities, checks compliance, and generates a graded report. Takes 15-30 seconds. Also texts a summary of the finished report to the admin's phone (internal alert, not a customer message).
 Use for: "run the tax advisor", "check for tax savings", "any regulation changes I should know about?"`,
     input_schema: {
       type: 'object',

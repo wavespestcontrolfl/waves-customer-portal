@@ -25,6 +25,18 @@ function guardedLineCost(item) {
       ? { cost: direct + admin, floor: Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR) }
       : null;
   }
+  if (item.service === 'lawn_care') {
+    // Report-only lawn margin visibility for the manual-discount audit
+    // (owner ruling 2026-07-17: margins surfaced, never enforced). With the
+    // cost floor disarmed the allocation may spend lawn's full annual, so
+    // the warn path must still price-check it — otherwise a below-margin
+    // lawn manual discount gets neither a cap nor the promised "looks low"
+    // warning while pest/tree lines do.
+    const cost = Number(item.costs?.total);
+    return Number.isFinite(cost)
+      ? { cost, floor: Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? GLOBAL.MARGIN_FLOOR) }
+      : null;
+  }
   return null;
 }
 
@@ -34,12 +46,22 @@ function guardedLineCost(item) {
 // they are never raised). Shared by the hard manual-discount guard and the
 // per-line manual audit so the aggregate cap and the per-line allocation can
 // never disagree about where lawn's floor sits.
-function lawnLineProtectedAnnual(item) {
-  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+// ENFORCEMENT helper only (owner ruling 2026-07-17: floors report, never
+// enforce): the margin floor counts toward the protected annual solely when
+// the caller passes marginFloorArmed (useLawnCostFloor re-armed) — the
+// reporting fields (minimumCollectedAnnualPrice/costFloorAnnual) ride every
+// quote regardless and must not arm this guard by their mere presence. The
+// program minimum keeps its own kill value (0 = disarmed).
+function lawnLineProtectedAnnual(item, { marginFloorArmed = false, programMinimumMonthly } = {}) {
+  const minMonthly = programMinimumMonthly != null
+    ? Number(programMinimumMonthly)
+    : Number(LAWN_PRICING_V2.programMinimumMonthly);
   const programFloorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
     ? roundMoney(minMonthly * 12)
     : 0;
-  const rawMarginFloor = Number(item.minimumCollectedAnnualPrice ?? item.costFloorAnnual);
+  const rawMarginFloor = marginFloorArmed
+    ? Number(item.minimumCollectedAnnualPrice ?? item.costFloorAnnual)
+    : NaN;
   const marginFloorAnnual = Number.isFinite(rawMarginFloor) && rawMarginFloor > 0
     ? rawMarginFloor
     : 0;
@@ -457,6 +479,43 @@ function stripBedBugInternalPricing(result) {
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
   const services = input.services || {};
+  // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
+  // report, never enforce). One resolution shared by the lawn pricer, the
+  // WaveGuard post-discount guard, and the manual-discount guard so
+  // selection and enforcement can never disagree. Re-arm = explicit input
+  // flag or the lawn_pricing_v2.useLawnCostFloor DB key (db-bridge resets
+  // it to false on every sync when absent, same kill-value pattern as
+  // programMinimumMonthly).
+  const lawnCostFloorArmed = !!(
+    services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
+      ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
+  );
+  // Lawn program minimum resolved once per run and shared by the lawn
+  // pricer, the WaveGuard lawn guard, and the manual-discount protection
+  // (0 = disarmed). An explicit input override wins — estimate-public's
+  // replay paths (extractEngineInputs) thread a stored estimate's saved
+  // minimum back in so re-running the engine after a global re-arm/disarm
+  // reprices the quote exactly as saved. Stamped into pricingMetadata below
+  // (pre-push codex P0s, round 9 on #2827).
+  const lawnProgramMinimumInput = services.lawn?.programMinimumMonthly ?? input.lawnProgramMinimumMonthly;
+  const lawnProgramMinimumMonthlyResolved = (() => {
+    const override = Number(lawnProgramMinimumInput);
+    if (lawnProgramMinimumInput != null && Number.isFinite(override) && override >= 0) return override;
+    const n = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
+  // Pest post-discount floor: same replay rule. The arm state and the
+  // per-visit floor VALUE resolve input-first (saved-estimate replays),
+  // then the live DB-synced constants.
+  const pestProgramFloorArmed = typeof input.pestProgramFloorArmed === 'boolean'
+    ? input.pestProgramFloorArmed
+    : PEST.enforceFloorPostDiscount === true;
+  const pestProgramFloorPerVisitResolved = (() => {
+    const override = Number(input.pestProgramFloorPerVisit);
+    if (Number.isFinite(override) && override > 0) return override;
+    const n = Number(PEST.floor);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
   const commercialSubtype = commercialSubtypeFromInput(input, services);
   // Risk-type CADENCE (owner-locked): the commercial business-type bucket drives
   // pest/rodent visits-per-year. NULL/unrecognized → nulls, so the pricers keep
@@ -569,6 +628,22 @@ function generateEstimate(input) {
     skippedServices: Array.isArray(inputPricingMetadata.skippedServices)
       ? [...inputPricingMetadata.skippedServices]
       : [],
+    // Resolved lawn cost-floor arm state for THIS pricing run — persisted
+    // with the result so view/accept replays clamp exactly as the estimate
+    // was priced even if the global switch flips between save and view
+    // (estimate-public estimateLawnFloorArmed reads it first; codex P2
+    // round 8 on #2827).
+    lawnCostFloorArmed,
+    // Resolved program minimum + pest floor state for THIS run — same
+    // replay rule as the arm state: a later global re-arm/disarm must never
+    // re-price a sent quote (estimate-public reads the stamps first and
+    // threads them back into engine-input replays; pre-push codex P0s,
+    // round 9).
+    lawnProgramMinimumMonthly: lawnProgramMinimumMonthlyResolved,
+    pestProgramFloorArmed,
+    ...(pestProgramFloorPerVisitResolved != null
+      ? { pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved }
+      : {}),
     ...(inputPricingMetadata.skippedDuplicateRoachLine
       ? {
           skippedDuplicateRoachLine: true,
@@ -658,6 +733,8 @@ function generateEstimate(input) {
         pricingVersion: services.pest.version || 'v1',
         roachType: services.pest.roachType || 'none',
         modifiers,
+        pestProgramFloorArmed,
+        pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
       });
       result.annual = Math.round(result.annual * 100) / 100;
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -713,7 +790,10 @@ function generateEstimate(input) {
         track: services.lawn.track || 'st_augustine',
         tier: services.lawn.tier || 'enhanced',
         lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
-        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? true,
+        // Default false since the 2026-07-17 owner ruling ("forget all
+        // floors") — callers can still opt in explicitly for previews.
+        useLawnCostFloor: lawnCostFloorArmed,
+        programMinimumMonthly: lawnProgramMinimumMonthlyResolved,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
         lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
@@ -1480,6 +1560,11 @@ function generateEstimate(input) {
   // downstream card-processing-fee display.
   const paymentMethod = input.paymentMethod || 'card';
 
+  // Report-only "looks low" entries from the automatic (WaveGuard) discount
+  // pass — merged into marginWarnings alongside the manual-discount audit's
+  // entries so the estimator's Pricing Review Notes surface them.
+  const waveGuardMarginWarnings = [];
+
   for (const item of lineItems) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
@@ -1522,7 +1607,10 @@ function generateEstimate(input) {
       // AUTO (WaveGuard) discounts are capped at the margin floor for the
       // services that expose a cost basis: Tree & Shrub and Pest Control.
       if (item.service === 'tree_shrub' || item.service === 'pest_control') {
-        const guarded = applyMarginGuard(item, discountedAnnual, discount.effectiveDiscount || 0);
+        const guarded = applyMarginGuard(item, discountedAnnual, discount.effectiveDiscount || 0, {
+          pestProgramFloorArmed,
+          pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
+        });
         item.preDiscountAnnual = item.annualBeforeDiscount;
         item.requestedDiscountPct = discount.effectiveDiscount || 0;
         item.actualDiscountPct = guarded.actualDiscountPct ?? (
@@ -1536,6 +1624,10 @@ function generateEstimate(input) {
         item.marginGuardApplied = guarded.marginGuardApplied;
         item.programFloorApplied = guarded.programFloorApplied === true;
         item.discountCapped = guarded.discountCapped;
+        // Report-only flags (owner ruling 2026-07-17): "this looks low"
+        // signals for the owner/estimator — nothing moves the price.
+        item.belowMarginFloor = guarded.belowMarginFloor === true;
+        item.belowProgramFloor = guarded.belowProgramFloor === true;
         if (guarded.minAnnualForMargin !== undefined) {
           item.minAnnualForMargin = guarded.minAnnualForMargin;
         }
@@ -1551,13 +1643,16 @@ function generateEstimate(input) {
         // $630.82/yr) discount all the way to $600 and silently miss margin.
         // Never raise above the pre-discount line: a stale/legacy floor that
         // exceeds the authored price merely makes the line undiscountable.
-        const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+        const minMonthly = lawnProgramMinimumMonthlyResolved;
         const programFloorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
           ? Math.round(minMonthly * 12 * 100) / 100
           : 0;
-        const rawMarginFloorAnnual = Number(
-          item.minimumCollectedAnnualPrice ?? item.costFloorAnnual,
-        );
+        // Margin-floor leg armed only with the cost-floor machinery (owner
+        // ruling 2026-07-17): the floor fields ride every quote for margin
+        // REPORTING, so their presence alone must never cap a discount.
+        const rawMarginFloorAnnual = lawnCostFloorArmed
+          ? Number(item.minimumCollectedAnnualPrice ?? item.costFloorAnnual)
+          : NaN;
         const marginFloorAnnual = Number.isFinite(rawMarginFloorAnnual) && rawMarginFloorAnnual > 0
           ? Math.round(rawMarginFloorAnnual * 100) / 100
           : 0;
@@ -1588,6 +1683,33 @@ function generateEstimate(input) {
             : 0;
         } else {
           item.annualAfterDiscount = discountedAnnual;
+        }
+        // Report-only "looks low" signal (owner ruling 2026-07-17: margins
+        // surfaced, never enforced): armed or not, a WaveGuard-discounted
+        // lawn line that lands under the 35% collected-margin target emits
+        // the same belowMarginFloor / finalMargin signals pest and
+        // tree/shrub carry, plus a Pricing Review Note via marginWarnings.
+        // Cent-rounded floor prices sit within ~1e-5 of target, so an
+        // at-floor armed cap must not read as a breach (same 1e-4 tolerance
+        // as the floor pins and the manual-discount audit).
+        const lawnCostTotal = Number(item.costs?.total);
+        const finalLawnAnnual = Number(item.annualAfterDiscount);
+        if (Number.isFinite(lawnCostTotal) && lawnCostTotal >= 0 && finalLawnAnnual > 0) {
+          const lawnMargin = (finalLawnAnnual - lawnCostTotal) / finalLawnAnnual;
+          const lawnTarget = Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? 0.35);
+          item.finalMargin = Math.round(lawnMargin * 1000) / 1000;
+          item.belowMarginFloor = lawnMargin < lawnTarget - 1e-4;
+          if (item.belowMarginFloor && (discount.effectiveDiscount || 0) > 0) {
+            waveGuardMarginWarnings.push({
+              service: 'lawn_care',
+              type: 'waveguard_discount_below_margin_floor',
+              margin: item.finalMargin,
+              marginFloor: lawnTarget,
+              finalAnnual: finalLawnAnnual,
+              annualCost: Math.round(lawnCostTotal * 100) / 100,
+              message: `lawn_care WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the ${(lawnTarget * 100).toFixed(0)}% review floor) — price stands as discounted`,
+            });
+          }
         }
       } else {
         item.annualAfterDiscount = discountedAnnual;
@@ -1686,7 +1808,7 @@ function generateEstimate(input) {
       let lawnMarginFloorBinding = false;
       const lawnFloorProtectedAnnual = roundMoney(manualLawnItems
         .reduce((sum, i) => {
-          const line = lawnLineProtectedAnnual(i);
+          const line = lawnLineProtectedAnnual(i, { marginFloorArmed: lawnCostFloorArmed, programMinimumMonthly: lawnProgramMinimumMonthlyResolved });
           if (line.marginFloorBinding) lawnMarginFloorBinding = true;
           return sum + line.protectedAnnual;
         }, 0));
@@ -1793,7 +1915,7 @@ function generateEstimate(input) {
     if (lawnSpill > 0) {
       const lawnEligible = manualEligibleItems.filter((i) => i.service === 'lawn_care');
       const lawnHeadrooms = lawnEligible.map((i) => {
-        const { lineAnnual, protectedAnnual } = lawnLineProtectedAnnual(i);
+        const { lineAnnual, protectedAnnual } = lawnLineProtectedAnnual(i, { marginFloorArmed: lawnCostFloorArmed, programMinimumMonthly: lawnProgramMinimumMonthlyResolved });
         return Math.max(0, lineAnnual - protectedAnnual);
       });
       const totalLawnHeadroom = lawnHeadrooms.reduce((sum, h) => sum + h, 0);
@@ -1818,7 +1940,12 @@ function generateEstimate(input) {
       const { cost: allInCost, floor: marginFloor } = guard;
       const lineMargin = lineFinalAnnual > 0 ? (lineFinalAnnual - allInCost) / lineFinalAnnual : -1;
       item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
-      if (lineMargin < marginFloor) {
+      // Lawn floor prices are cent-rounded off the margin target, so a
+      // re-armed cap can leave the line within ~1e-5 of 35% — the same
+      // tolerance the floor pins use (0.35 - 0.0001). An at-floor cap must
+      // not read as a breach; a real breach clears this epsilon easily.
+      const marginEpsilon = item.service === 'lawn_care' ? 1e-4 : 0;
+      if (lineMargin < marginFloor - marginEpsilon) {
         item.manualMarginWarning = true;
         manualMarginWarnings.push({
           service: item.service,
@@ -1834,9 +1961,11 @@ function generateEstimate(input) {
       // Pest program floor: manual owner discounts stay warn-only (deliberate
       // loss-leader pricing is an owner override), but surface a distinct
       // warning when the pest share of the pool cuts below the post-discount
-      // program floor that caps automatic WaveGuard discounts.
-      if (item.service === 'pest_control' && PEST.enforceFloorPostDiscount) {
-        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
+      // program-floor reference. The comparison reports UNCONDITIONALLY —
+      // signals are independent of the enforcement kill switch (codex P2 on
+      // #2827); only the WaveGuard lift in applyMarginGuard re-arms with it.
+      if (item.service === 'pest_control') {
+        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear, pestProgramFloorPerVisitResolved);
         if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
           item.manualPestFloorWarning = true;
           manualMarginWarnings.push({
@@ -1895,6 +2024,7 @@ function generateEstimate(input) {
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = [
     ...validateEstimateDiscounts(lineItems, waveGuardTier),
+    ...waveGuardMarginWarnings,
     ...manualMarginWarnings,
   ];
   const notes = [];

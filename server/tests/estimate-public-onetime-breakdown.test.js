@@ -62,6 +62,7 @@ const {
   cleanAssistantAnswer,
 } = require('../services/estimate-assistant');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
+const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 
 function savedAdminEstimateData() {
   return {
@@ -1017,12 +1018,15 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
-  test('snapshots violating the lawn program policy (retired Quarterly / below-floor lawn) are recomputed', async () => {
-    // A lawn-only estimate sent BEFORE the 2026-07-09 retirement/floor: its
+  test('snapshots carrying the retired Quarterly lawn cadence are recomputed; stored prices flow through unclamped', async () => {
+    // A lawn-only estimate sent BEFORE the 2026-07-09 Quarterly retirement: its
     // snapshot still offers the Basic cadence at $30.00/mo. The snapshot matches
     // the stored totals, but it must NOT short-circuit — the bundle re-derives
-    // through the clamped ladder builders so the retired/below-floor plan can
-    // neither render nor be accepted from the old link.
+    // through the ladder builders so the RETIRED cadence can neither render nor
+    // be accepted from the old link. Cadence policy is unchanged by the
+    // 2026-07-17 owner ruling ("forget all pricing floors"); what changed is
+    // that the surviving rows are no longer clamped to a program minimum —
+    // stored prices flow through as-is (re-armed clamp variant below).
     const payload = await buildPricingBundle({
       id: 'estimate-public-lawn-policy-violating-snapshot-test',
       monthly_total: 30,
@@ -1061,11 +1065,15 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.snapshotHit).not.toBe(true);
     const keys = payload.frequencies.map((frequency) => frequency.key);
     expect(keys).not.toContain('basic');
-    for (const frequency of payload.frequencies) {
-      if (frequency.serviceCategory === 'lawn_care') {
-        expect(frequency.monthly).toBeGreaterThanOrEqual(45);
-      }
-    }
+    // Floors disarmed (programMinimumMonthly = 0): the rebuilt ladder keeps
+    // the stored Standard/Enhanced prices exactly — no $50.00/mo clamp.
+    const lawnRows = payload.frequencies
+      .filter((frequency) => frequency.serviceCategory === 'lawn_care')
+      .map(({ key, monthly, annual }) => ({ key, monthly, annual }));
+    expect(lawnRows).toEqual([
+      { key: 'standard', monthly: 38, annual: 456 },
+      { key: 'enhanced', monthly: 47, annual: 564 },
+    ]);
   });
 
   test('snapshots with an AT-FLOOR 4-visit lawn row are still recomputed (retired cadence, any price)', async () => {
@@ -1185,11 +1193,12 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
   });
 
-  test('annual prepay is hidden when the lawn floor leaves no sellable discount (React /data gate)', async () => {
-    // Lawn-only plan AT the $50.00/mo program minimum: prepay would save $0.00
-    // (the whole annual is floor-protected), so the bundle must not expose
-    // annualPrepayEligible — PaymentPreferenceButtons renders off that
-    // boolean alone. The $87.00/mo case above stays eligible (real headroom).
+  test('annual prepay stays offered at the former $50.00/mo floor (floors disarmed 2026-07-17)', async () => {
+    // Owner ruling 2026-07-17 ("forget all pricing floors"): with
+    // programMinimumMonthly = 0 nothing is floor-protected, so a lawn-only
+    // plan at what used to be the $50.00/mo minimum has the full annual as
+    // sellable prepay headroom — annualPrepayEligible must stay true.
+    // (The re-armed variant below pins the gate machinery itself.)
     const payload = await buildPricingBundle({
       id: 'estimate-public-lawn-at-floor-prepay-gate-test',
       monthly_total: 50,
@@ -1215,7 +1224,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.annualPrepayEligible).toBe(false);
+    expect(payload.annualPrepayEligible).toBe(true);
   });
 
   test('annual prepay stays offered when a selectable higher cadence clears the floor', async () => {
@@ -1257,13 +1266,13 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.annualPrepayEligible).toBe(true);
   });
 
-  test('a manual discount the floor blocks on EVERY cadence is suppressed on the payload and combined card', async () => {
-    // Lawn-only plan AT the $50.00/mo minimum with a $10.00/mo manual discount:
-    // every frequency row suppresses the discount (zero room under the
-    // floor), so the TOP-LEVEL payload.manualDiscount must be suppressed
-    // too — buildCombinedRecurring prefers it over the frequency rows and
-    // the React page renders combined.manualDiscount, which would otherwise
-    // show savings no selectable price reflects.
+  test('a manual discount at the former floor flows through in full (floors disarmed 2026-07-17)', async () => {
+    // Lawn-only plan at what used to be the $50.00/mo minimum with a
+    // $10.00/mo manual discount: under the 2026-07-17 owner ruling
+    // (programMinimumMonthly = 0) there is no floor to block it, so the full
+    // discount lands on the frequency row, the top-level payload, and the
+    // combined card, and the row prices reflect it ($40.00/mo, $480.00/yr).
+    // (The re-armed variant below pins the suppression machinery itself.)
     const payload = await buildPricingBundle({
       id: 'estimate-public-lawn-floor-suppresses-top-level-discount-test',
       monthly_total: 50,
@@ -1284,10 +1293,146 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.manualDiscountSuppressed).toBe(true);
-    expect(payload.manualDiscount || null).toBeNull();
-    expect((payload.frequencies || []).every((f) => !f.manualDiscount)).toBe(true);
-    expect(payload.combinedRecurring?.manualDiscount || null).toBeNull();
+    expect(payload.manualDiscountSuppressed).not.toBe(true);
+    expect(payload.manualDiscount).toEqual(expect.objectContaining({ amount: 120, monthlyAmount: 10 }));
+    const lawnRow = (payload.frequencies || []).find((f) => f.serviceCategory === 'lawn_care');
+    expect(lawnRow).toEqual(expect.objectContaining({ monthly: 40, annual: 480 }));
+    expect(lawnRow.manualDiscount).toEqual(expect.objectContaining({ amount: 120, monthlyAmount: 10, capped: false }));
+    expect(payload.combinedRecurring?.manualDiscount).toEqual(expect.objectContaining({ amount: 120 }));
+  });
+
+  // ── Re-armed floor variants (owner ruling 2026-07-17 "forget all pricing
+  // floors" shipped programMinimumMonthly = 0 as the disarmed default; these
+  // tests exist to pin the guard MACHINERY, which stays in the code and
+  // re-activates the moment the config goes > 0 again). Pattern copied from
+  // tests/lawn-pricing-ladder-invariants.test.js — LAWN_PRICING_V2 is a live
+  // reference, so mutate + restore around each test. Estimate ids are distinct
+  // from the disarmed tests above: buildPricingBundle memoizes per id.
+  describe('re-armed program minimum ($50.00/mo) — floor machinery still works when configured', () => {
+    let priorProgramMinimum;
+    beforeEach(() => {
+      priorProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
+      LAWN_PRICING_V2.programMinimumMonthly = 50;
+    });
+    afterEach(() => {
+      LAWN_PRICING_V2.programMinimumMonthly = priorProgramMinimum;
+    });
+
+    test('retired-cadence snapshot recompute clamps surviving lawn rows to the configured floor', async () => {
+      const payload = await buildPricingBundle({
+        id: 'estimate-public-lawn-policy-violating-snapshot-rearmed-test',
+        monthly_total: 30,
+        annual_total: 360,
+        estimate_data: {
+          sendSnapshot: {
+            pricingBundle: {
+              source: 'pre_floor_lawn_snapshot',
+              frequencies: [
+                { key: 'basic', label: 'Quarterly', serviceCategory: 'lawn_care', serviceTierKey: 'basic', monthly: 30, annual: 360, visitsPerYear: 4 },
+                { key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard', monthly: 38, annual: 456, visitsPerYear: 6 },
+              ],
+            },
+          },
+          result: {
+            results: {
+              lawn: [
+                { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: false },
+                { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
+                { name: 'Enhanced', v: 9, mo: 47, ann: 564, pa: 62.67, recommended: true },
+              ],
+            },
+            recurring: {
+              monthlyTotal: 30,
+              annualAfterDiscount: 360,
+              services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 30 }],
+            },
+            oneTime: { total: 0, items: [] },
+            specItems: [],
+          },
+        },
+      });
+
+      expect(payload.snapshotHit).not.toBe(true);
+      const keys = payload.frequencies.map((frequency) => frequency.key);
+      expect(keys).not.toContain('basic');
+      // Standard ($38.00) floors to a decoy and is hidden; the recommended
+      // Enhanced row is clamped up to the $50.00/mo minimum and flagged.
+      const lawnRows = payload.frequencies.filter((f) => f.serviceCategory === 'lawn_care');
+      expect(lawnRows.length).toBeGreaterThan(0);
+      for (const frequency of lawnRows) {
+        expect(frequency.monthly).toBeGreaterThanOrEqual(50);
+      }
+      expect(lawnRows.map(({ key, monthly, annual }) => ({ key, monthly, annual }))).toEqual([
+        { key: 'enhanced', monthly: 50, annual: 600 },
+      ]);
+      expect(lawnRows[0].flooredAtMinimum).toBe(true);
+    });
+
+    test('annual prepay is hidden when the lawn floor leaves no sellable discount (React /data gate)', async () => {
+      // Lawn-only plan AT the $50.00/mo program minimum: prepay would save
+      // $0.00 (the whole annual is floor-protected), so the bundle must not
+      // expose annualPrepayEligible — PaymentPreferenceButtons renders off
+      // that boolean alone.
+      const payload = await buildPricingBundle({
+        id: 'estimate-public-lawn-at-floor-prepay-gate-rearmed-test',
+        monthly_total: 50,
+        annual_total: 600,
+        estimate_data: {
+          result: {
+            recurring: {
+              discount: 0,
+              waveGuardTier: 'Bronze',
+              monthlyTotal: 50,
+              annualAfterDiscount: 600,
+              services: [{
+                service: 'lawn_care',
+                name: 'Lawn Care',
+                mo: 50,
+                ann: 600,
+                perTreatment: 100,
+                visitsPerYear: 6,
+              }],
+            },
+            oneTime: { total: 0, items: [] },
+          },
+        },
+      });
+
+      expect(payload.annualPrepayEligible).toBe(false);
+    });
+
+    test('a manual discount the floor blocks on EVERY cadence is suppressed on the payload and combined card', async () => {
+      // Lawn-only plan AT the $50.00/mo minimum with a $10.00/mo manual
+      // discount: every frequency row suppresses the discount (zero room
+      // under the floor), so the TOP-LEVEL payload.manualDiscount must be
+      // suppressed too — buildCombinedRecurring prefers it over the frequency
+      // rows and the React page renders combined.manualDiscount, which would
+      // otherwise show savings no selectable price reflects.
+      const payload = await buildPricingBundle({
+        id: 'estimate-public-lawn-floor-suppresses-top-level-discount-rearmed-test',
+        monthly_total: 50,
+        annual_total: 600,
+        estimate_data: {
+          result: {
+            manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
+            recurring: {
+              discount: 0,
+              waveGuardTier: 'Bronze',
+              monthlyTotal: 50,
+              annualAfterDiscount: 600,
+              services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 50, ann: 600, visitsPerYear: 6 }],
+            },
+            results: { lawn: [{ name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true }] },
+            oneTime: { total: 0, items: [] },
+          },
+        },
+      });
+
+      expect(payload.manualDiscountSuppressed).toBe(true);
+      expect(payload.manualDiscount || null).toBeNull();
+      expect((payload.frequencies || []).every((f) => !f.manualDiscount)).toBe(true);
+      expect(payload.combinedRecurring?.manualDiscount || null).toBeNull();
+    });
   });
 
   test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
@@ -5980,11 +6125,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<span>Invoice total</span>');
     expect(html).not.toContain('Invoice includes WaveGuard setup');
     expect(html).not.toContain('we open the $99.00 setup invoice');
-    // Prepay is still offered, but the $50.00/mo lawn program minimum protects
-    // $600.00 of the $660.00 base — the 5% applies only to the $60.00 headroom:
-    // $660.00 → $657.00. The element carries the floor + configured rate so the
-    // client-side refresh re-derives the floor-aware total for ANY annual.
-    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657.00');
+    // Prepay is still offered. Owner ruling 2026-07-17 ("forget all pricing
+    // floors"): programMinimumMonthly = 0, so nothing is floor-protected and
+    // the full 5% applies to the whole $660.00 base: $660.00 → $627.00. The
+    // element still carries the (zero) floor + configured rate so the
+    // client-side refresh re-derives the total for ANY annual.
+    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="0" data-prepay-configured-rate="0.05">$627.00');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -6043,23 +6189,24 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('WaveGuard Membership Setup');
     expect(html).not.toContain('<strong><s>$99.00</s> $0.00</strong>');
     expect(html).toContain('Pay the 12-month plan in full');
-    // Prepay incentive is a 5% discount off the recurring annual, not a setup waiver.
-    // The lawn floor protects $600.00 of the $660.00 base — the effective prepay
-    // rate is 0.5% (one-decimal label so it never reads "save 0%").
-    expect(html).toContain('Choose the 12-month plan up front and save 0.5%; we send the annual invoice automatically after confirmation.');
-    expect(html).toContain('Prepay discount (0.5%)');
-    expect(html).toContain('Save 0.5%');
+    // Prepay incentive is a 5% discount off the recurring annual, not a setup
+    // waiver. Owner ruling 2026-07-17 ("forget all pricing floors"): the lawn
+    // program minimum is 0, so no slice of the base is floor-protected and the
+    // label shows the full configured 5%.
+    expect(html).toContain('Choose the 12-month plan up front and save 5%; we send the annual invoice automatically after confirmation.');
+    expect(html).toContain('Prepay discount (5%)');
+    expect(html).toContain('Save 5%');
     expect(html).not.toContain('Net setup fee: $0.00');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>−$99.00</strong>');
     expect(html).not.toContain('The $99.00 setup fee is waived on the prepay invoice.');
-    // Annual plan total $660.00 → prepay invoice $657.00 (5% off only the $60.00
-    // slice above the $600.00 lawn program minimum). The refresh attrs carry
-    // the floor + configured rate, never a flat effective rate.
-    expect(html).toContain('data-prepay-configured-rate="0.05">$657.00</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657.00</span>');
+    // Annual plan total $660.00 → prepay invoice $627.00 (5% off the full
+    // base — nothing floor-protected at config 0). The refresh attrs still
+    // carry the (zero) floor + configured rate, never a flat effective rate.
+    expect(html).toContain('data-prepay-configured-rate="0.05">$627.00</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="0" data-prepay-configured-rate="0.05">$627.00</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
-    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 657;');
+    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 627;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be available for optional payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');

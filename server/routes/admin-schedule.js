@@ -1489,6 +1489,16 @@ async function loadProjectCompletionContextByServiceId(services) {
   return new Map(entries);
 }
 
+// Series-generated rows (recurring children, boosters, auto-extends,
+// alert extend/convert) get the classifier tag stamped at insert. The
+// AppointmentTagger post-insert hook runs only for the parent booking —
+// its prep/welcome side effects are one-per-booking by design — so
+// without this stamp every generated sibling lands appointment_type NULL.
+// Lazy require matches the tagger's existing call sites in this file.
+function classifyAppointmentTag(serviceType) {
+  return require('../services/appointment-tagger').classifyAppointmentType(serviceType).tag;
+}
+
 function getZone(city, zip) {
   const c = (city || '').toLowerCase();
   const z = zip || '';
@@ -2947,6 +2957,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(serviceType);
         if (cols.service_id && serviceId) childData.service_id = serviceId;
         if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
         if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
@@ -3020,6 +3031,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             recurring_parent_id: svc.id,
             notes: combinedNotes,
           };
+          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(serviceType);
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
@@ -4847,6 +4859,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             try {
               const cols = await db('scheduled_services').columnInfo();
               if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
+              if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(parent.service_type);
               if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
               if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
@@ -6136,6 +6149,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.skip_weekends) nextData.skip_weekends = skipParent;
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
           if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
+          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
           copyLineDiscountFields(nextData, parent, cols);
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
@@ -8232,6 +8246,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
@@ -8284,6 +8299,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;

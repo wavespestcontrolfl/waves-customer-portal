@@ -8,7 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 
@@ -114,15 +114,73 @@ Use for: "should I spray today?", "what's the wind like?", "rain probability?"`,
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
+// A technician may only read customers on their OWN CURRENT route. Admin/
+// unscoped callers (no techId) are unrestricted. Customer-reading tech tools
+// take a customer_id/name straight from the caller, so without this a
+// technician could enumerate any customer's address, CRM notes, and gate/
+// lockbox codes. This is the canonical current-assignment policy from
+// admin-customers.js (PR #2847): a real assignment must be non-terminal and
+// dated within the ET access window — a cancelled visit or a years-old
+// completion never authorizes access.
+const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_WINDOW_DAYS = 7;
+
+// The customer_ids currently on this technician's route: a non-terminal
+// scheduled visit dated within the ET access window. Bounded by the tech's
+// route (~dozens), so it is safe to constrain the customer lookup with it.
+async function assignedCustomerIds(techId) {
+  const cutoff = etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
+  const rows = await db('scheduled_services')
+    .distinct('customer_id')
+    .where('technician_id', techId)
+    .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
+    .where('scheduled_date', '>=', cutoff);
+  return rows.map((r) => r.customer_id);
+}
+
+// Resolve the customer a tech tool is asking about, returning one only if the
+// caller is authorized to read it. The assignment constraint is applied IN SQL
+// (whereIn the technician's assigned ids) with a LIMIT-1 .first(), so a caller-
+// controlled name wildcard can't load the whole customers table and a name that
+// matches several customers still resolves to the technician's own. Admin/
+// unscoped callers (no techId) are unrestricted. Returns null → generic
+// "not found".
+async function resolveAuthorizedCustomer(input, techId) {
+  let ids = null;
+  if (techId) {
+    ids = await assignedCustomerIds(techId);
+    if (ids.length === 0) return null;
+  }
+  const scoped = (q) => (techId ? q.whereIn('id', ids) : q);
+
+  if (input.customer_id) {
+    return (await scoped(db('customers').where('id', input.customer_id)).first()) || null;
+  }
+  if (input.customer_name) {
+    const s = `%${input.customer_name}%`;
+    return (await scoped(db('customers').where(function () {
+      this.whereILike('first_name', s).orWhereILike('last_name', s)
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+    })).first()) || null;
+  }
+  if (input.service_id) {
+    const svc = await db('scheduled_services').where('id', input.service_id).first();
+    if (!svc) return null;
+    return (await scoped(db('customers').where('id', svc.customer_id)).first()) || null;
+  }
+  return null;
+}
+
 async function executeTechTool(toolName, input, techContext) {
   try {
+    const techId = techContext?.techId || null;
     switch (toolName) {
       case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date);
-      case 'get_stop_details': return await getStopDetails(input);
-      case 'get_service_history': return await getServiceHistory(input);
+      case 'get_stop_details': return await getStopDetails(input, techId);
+      case 'get_service_history': return await getServiceHistory(input, techId);
       case 'get_product_info': return await getProductInfo(input.product_name);
       case 'get_protocol': return await getProtocol(input);
-      case 'check_customer_status': return await checkCustomerStatus(input);
+      case 'check_customer_status': return await checkCustomerStatus(input, techId);
       case 'search_knowledge_base': return await searchKnowledgeBase(input.query);
       case 'get_weather_conditions': return await getWeatherConditions();
       default: return { error: `Unknown tech tool: ${toolName}` };
@@ -196,21 +254,11 @@ async function getMyRoute(techId, techName, date) {
 }
 
 
-async function getStopDetails(input) {
-  let customer;
-  if (input.customer_id) {
-    customer = await db('customers').where('id', input.customer_id).first();
-  } else if (input.customer_name) {
-    customer = await db('customers').where(function () {
-      const s = `%${input.customer_name}%`;
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).first();
-  } else if (input.service_id) {
-    const svc = await db('scheduled_services').where('id', input.service_id).first();
-    if (svc) customer = await db('customers').where('id', svc.customer_id).first();
-  }
-
+async function getStopDetails(input, techId = null) {
+  // Resolves only a customer this technician is authorized to read; an
+  // unauthorized or missing match both return the generic not-found below so a
+  // technician can't probe for customers assigned to someone else.
+  const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
   // Property preferences
@@ -269,20 +317,11 @@ async function getStopDetails(input) {
 }
 
 
-async function getServiceHistory(input) {
-  const { customer_name, customer_id, service_type, limit: rawLimit } = input;
+async function getServiceHistory(input, techId = null) {
+  const { service_type, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 5, 20);
 
-  let customer;
-  if (customer_id) {
-    customer = await db('customers').where('id', customer_id).first();
-  } else if (customer_name) {
-    customer = await db('customers').where(function () {
-      const s = `%${customer_name}%`;
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).first();
-  }
+  const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
   let query = db('service_records').where({ customer_id: customer.id, status: 'completed' })
@@ -365,19 +404,8 @@ async function getProtocol(input) {
 }
 
 
-async function checkCustomerStatus(input) {
-  const { customer_name, customer_id } = input;
-
-  let customer;
-  if (customer_id) {
-    customer = await db('customers').where('id', customer_id).first();
-  } else if (customer_name) {
-    customer = await db('customers').where(function () {
-      const s = `%${customer_name}%`;
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).first();
-  }
+async function checkCustomerStatus(input, techId = null) {
+  const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
   const balance = await db('invoices')
