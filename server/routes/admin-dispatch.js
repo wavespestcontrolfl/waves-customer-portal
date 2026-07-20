@@ -88,6 +88,7 @@ const {
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
 const {
+  finiteDate,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -612,7 +613,15 @@ function backfillTimeOnSiteMinutes(timeOnSite) {
   return minutes > 0 && minutes <= BACKFILL_MAX_TIME_ON_SITE_MINUTES ? minutes : null;
 }
 
-function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite) {
+// The start fields buildCompletionLifecycleUpdates back-derives from a typed
+// duration when the row carries no start of its own (inferredStart =
+// completion instant − duration; service-duration-capture.js). Enumerated so
+// the backfill policy strips exactly what the helper fabricates — no more.
+const BACKFILL_INFERRED_START_FIELDS = ['actual_start_time', 'check_in_time', 'arrived_at'];
+
+// `service` is the pre-update scheduled_services row — the policy needs it to
+// tell a row-backed start timestamp from one the helper inferred.
+function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite, service = {}) {
   const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
   if (explicitMinutes) {
     lifecycleUpdates.service_time_minutes = explicitMinutes;
@@ -620,6 +629,22 @@ function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite) {
   } else {
     delete lifecycleUpdates.service_time_minutes;
     delete lifecycleUpdates.actual_duration_minutes;
+  }
+  // No fabricated arrivals (Codex P1, PR #2897): with a typed duration and a
+  // never-started stale row (pending/confirmed — no start timestamps), the
+  // shared helper infers actual_start_time/check_in_time/arrived_at =
+  // closeout instant − duration, i.e. the backdated visit would record
+  // arriving TODAY — on the scheduled_services row and, through
+  // buildServiceRecordCompletionTimingFields, on the service_records report
+  // row. Keep a start field only when the ROW itself carries a real
+  // timestamp for it (checked per field, so the strip stays correct even if
+  // the helper ever starts echoing row values through): stale-but-real
+  // timestamps are historical truth and stay untouched; inferred ones are
+  // dropped and the arrival stays unknown. The typed duration still lands
+  // above — the duration is the operator's statement, the arrival instant
+  // is not.
+  for (const field of BACKFILL_INFERRED_START_FIELDS) {
+    if (!finiteDate(service?.[field])) delete lifecycleUpdates[field];
   }
   return lifecycleUpdates;
 }
@@ -3183,6 +3208,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Typed one-time billing profile — the exact population the billing
+    // pre-gate below governs. Hoisted to a named flag because a backfill
+    // completion skips the gate and must reach the same billing outcome
+    // through the in-transaction invoice decision instead
+    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input).
+    const typedOneTimeBillingProfile = !!typedFindingsType
+      && !isIncompleteVisit
+      && !recapReviewOnly
+      && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+      && svc.followup_included !== true;
     // Billing pre-gate for typed one-time completions — ports the project
     // flow's enforcement (resolveProjectCompletionBilling) so a one-time
     // specialty job can't complete unbilled, and fires BEFORE any customer
@@ -3192,13 +3227,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Bypasses: $0 visits resolve as not_billable inside the resolver, and
     // included follow-up appointments (followup_included, set by the
     // schedule-followup endpoint) skip the gate entirely.
+    // Backfill bypass (Codex P1, PR #2897): the 409 here detours the client
+    // into the checkout/payment flow — the exact payment interaction the
+    // quiet backdated closeout forbids — which made a stale typed one-time
+    // visit impossible to close quietly at all. The backfill plan was
+    // already validated well above this gate (admin-only 403 + past-date at
+    // intake), so skip the detour and let the in-transaction backfill
+    // invoice policy mint the DRAFT review invoice instead: same amount
+    // basis the resolver reads (the row's own estimated_price first —
+    // completionInvoiceAmount), left open and uncharged, and no payment
+    // sheet (invoicePaymentActionRequired is forced false under backfill).
     if (
       claim.action === 'proceed'
-      && typedFindingsType
-      && !isIncompleteVisit
-      && !recapReviewOnly
-      && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
-      && svc.followup_included !== true
+      && typedOneTimeBillingProfile
+      && !isBackfillCompletion
     ) {
       // Money-correctness guard — FAIL CLOSED on lookup errors (pre-push
       // Codex P0). A transient DB failure must not let a one-time service
@@ -3628,9 +3670,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             : etDateString(completionEndedAt);
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
-          // timestamps (a weeks-old check-in against today's checkout) —
-          // sanitized timeOnSite or unknown. See applyBackfillDurationPolicy.
-          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite);
+          // timestamps (a weeks-old check-in against today's checkout), and
+          // never let a typed duration back-derive a today-dated arrival for
+          // a row that has no start of its own — sanitized timeOnSite or
+          // unknown; row-backed start timestamps or none. See
+          // applyBackfillDurationPolicy.
+          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite, svc);
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -5088,6 +5133,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // inspection_only / customer_declined = no application performed
       // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
       visitPerformed,
+      // Typed one-time completions bypass the billing pre-gate under
+      // backfill — this mint is what stands in for the checkout detour, so
+      // the helper needs to know the visit belongs to that gated population.
+      typedOneTimeBilling: typedOneTimeBillingProfile,
       // Backfill review-invoice override: an out-of-band prepaid_amount must
       // not suppress the promised open invoice; the annual-prepay leg keeps
       // suppressing (see the helper's comment). isBackfillCompletion is
@@ -8565,6 +8614,7 @@ function shouldAutoInvoiceCompletion({
   serviceType,
   isCallback,
   visitPerformed = true,
+  typedOneTimeBilling = false,
   isBackfillCompletion = false,
   annualPrepayCovered = false,
 }) {
@@ -8633,6 +8683,29 @@ function shouldAutoInvoiceCompletion({
   // A RETURN either way: falling through to the tier branch would let a
   // lingering tier bill a callback/always-free visit these lanes exempt.
   if (explicitPerVisitLane) {
+    return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
+  }
+  // Backfill bypass of the typed one-time billing pre-gate (Codex P1, PR
+  // #2897): live, a typed one-time completion with no invoice on file 409s
+  // (completion_billing_required) into the checkout detour, so this function
+  // only ever decided those visits with an invoice/coverage already in place
+  // — every such state is a suppressor above. A backdated closeout skips the
+  // detour by design (no payment interaction on the quiet path), so the
+  // promised open review invoice must mint HERE. Same population the gate
+  // covers (typed profile billingType one_time, not an included follow-up —
+  // the caller's typedOneTimeBillingProfile), same amount basis the gate's
+  // resolver reads: the row's own estimated_price (hasVisitPrice —
+  // completionInvoiceAmount puts it first), NEVER the legacy monthly-rate
+  // fallback, which the resolver only bills behind the scheduler flag
+  // (createInvoiceOnComplete already returned true above). Unpriced visits
+  // fall through exactly as a live not_billable resolution would. Performed,
+  // non-callback, non-always-free work only — the same exclusions every
+  // explicit lane applies (a return either way, so a lingering tier can't
+  // bill an exempt visit) — and the suppressors above (existing/pre-minted
+  // invoice incl. the estimate first-application invoice, already-paid,
+  // annual-prepay coverage, autopay dues) still win, so already-billed work
+  // never double-mints.
+  if (isBackfillCompletion && typedOneTimeBilling && hasVisitPrice) {
     return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
   }
   // An explicit monthly_membership lane stands in for the tier here just as
@@ -8817,4 +8890,5 @@ module.exports._test = {
   applyBackfillDurationPolicy,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
+  BACKFILL_INFERRED_START_FIELDS,
 };

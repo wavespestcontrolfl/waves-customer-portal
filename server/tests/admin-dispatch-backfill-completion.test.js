@@ -11,8 +11,12 @@
  * paid — so it is GATED like the other money rails, not "safe by nature"),
  * the fully-prepaid review-invoice mint (out-of-band coverage must not
  * suppress the promised open invoice — behavioral via the exported
- * shouldAutoInvoiceCompletion), the no-fabricated-durations policy, and the
- * labor-costing guard — must not be refactored away silently.
+ * shouldAutoInvoiceCompletion), the no-fabricated-durations policy, the
+ * no-fabricated-arrivals strip (a typed duration must not back-derive a
+ * today-dated start onto a backdated row), the typed one-time pre-gate
+ * bypass (backfill mints the draft review invoice instead of detouring to
+ * checkout), and the labor-costing guard — must not be refactored away
+ * silently.
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,6 +25,7 @@ const {
   applyBackfillDurationPolicy,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
+  BACKFILL_INFERRED_START_FIELDS,
   shouldAutoInvoiceCompletion,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
@@ -182,6 +187,124 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
   });
 });
 
+describe('applyBackfillDurationPolicy — no fabricated arrivals (Codex P1, PR #2897)', () => {
+  const CLOSEOUT_AT = new Date('2026-07-19T16:00:00Z');
+  // A stale pending/confirmed row: nobody ever checked in, so the row has no
+  // start timestamps at all.
+  const NEVER_STARTED = { status: 'pending' };
+
+  test('the hazard is real: a typed duration makes the shared helper back-derive a TODAY arrival', () => {
+    const raw = buildCompletionLifecycleUpdates(NEVER_STARTED, CLOSEOUT_AT, { elapsed: 45 });
+    const fabricated = new Date(CLOSEOUT_AT.getTime() - 45 * 60000);
+    expect(raw.actual_start_time).toEqual(fabricated);
+    expect(raw.check_in_time).toEqual(fabricated);
+    expect(raw.arrived_at).toEqual(fabricated);
+  });
+
+  test('the strip list mirrors exactly the fields the helper infers from a typed duration', () => {
+    const raw = buildCompletionLifecycleUpdates(NEVER_STARTED, CLOSEOUT_AT, { elapsed: 45 });
+    const nonStartKeys = ['actual_end_time', 'check_out_time', 'service_time_minutes', 'actual_duration_minutes'];
+    const inferredKeys = Object.keys(raw).filter((k) => !nonStartKeys.includes(k));
+    expect([...inferredKeys].sort()).toEqual([...BACKFILL_INFERRED_START_FIELDS].sort());
+  });
+
+  test('row without start timestamps + typed 45 → no arrival fields written, duration kept', () => {
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(NEVER_STARTED, CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      NEVER_STARTED,
+    );
+    for (const field of BACKFILL_INFERRED_START_FIELDS) {
+      expect(updates).not.toHaveProperty(field);
+    }
+    // The round-earlier policy still lands the typed duration…
+    expect(updates.service_time_minutes).toBe(45);
+    expect(updates.actual_duration_minutes).toBe(45);
+    // …and the closeout audit stamps survive (they record when the closeout
+    // was recorded, not the visit — see the route comment).
+    expect(updates.actual_end_time).toEqual(CLOSEOUT_AT);
+    expect(updates.check_out_time).toEqual(CLOSEOUT_AT);
+  });
+
+  test('a row WITH stale real timestamps keeps them untouched — historical truth is never stripped or rewritten', () => {
+    const staleStarted = {
+      status: 'on_site',
+      actual_start_time: '2026-06-20T14:00:00Z',
+      check_in_time: '2026-06-20T14:05:00Z',
+      arrived_at: '2026-06-20T13:55:00Z',
+    };
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(staleStarted, CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      staleStarted,
+    );
+    // The helper never rewrites an existing start, and the policy must not
+    // turn "keep" into a null-out — the columns are simply absent from the
+    // update, so the row's own (stale but real) values persist.
+    for (const field of BACKFILL_INFERRED_START_FIELDS) {
+      expect(updates).not.toHaveProperty(field);
+    }
+    expect(updates.service_time_minutes).toBe(45);
+  });
+
+  test('per-field contract: a start key survives ONLY where the row itself carries a real timestamp', () => {
+    const synthetic = () => ({
+      actual_start_time: new Date('2026-07-19T15:15:00Z'),
+      check_in_time: new Date('2026-07-19T15:15:00Z'),
+      arrived_at: new Date('2026-07-19T15:15:00Z'),
+      service_time_minutes: 45,
+      actual_duration_minutes: 45,
+    });
+    // Row backs one field → only that key may pass through.
+    const rowWithOne = { check_in_time: '2026-06-20T14:00:00Z' };
+    const kept = applyBackfillDurationPolicy(synthetic(), 45, rowWithOne);
+    expect(kept).toHaveProperty('check_in_time');
+    expect(kept).not.toHaveProperty('actual_start_time');
+    expect(kept).not.toHaveProperty('arrived_at');
+    // An unparseable row value is not a real timestamp — still stripped.
+    const garbageRow = { actual_start_time: 'not-a-date' };
+    expect(applyBackfillDurationPolicy(synthetic(), 45, garbageRow))
+      .not.toHaveProperty('actual_start_time');
+  });
+
+  test('the backdated service RECORD carries no fabricated arrival either — timing fields fall back to null', () => {
+    const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
+    const allCols = {
+      started_at: true, arrived_at: true, actual_start_time: true, check_in_time: true,
+      ended_at: true, completed_at: true, actual_end_time: true, check_out_time: true,
+    };
+    const stripped = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(NEVER_STARTED, CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      NEVER_STARTED,
+    );
+    const fields = buildServiceRecordCompletionTimingFields({
+      scheduledService: NEVER_STARTED,
+      lifecycleUpdates: stripped,
+      completedAt: CLOSEOUT_AT,
+      serviceRecordCols: allCols,
+    });
+    expect(fields.started_at).toBeNull();
+    expect(fields.arrived_at).toBeNull();
+    expect(fields.actual_start_time).toBeNull();
+    expect(fields.check_in_time).toBeNull();
+    // A row with a real stale timestamp stamps THAT into the record (the
+    // builder reads the scheduled row first).
+    const staleRow = { arrived_at: '2026-06-20T13:55:00Z' };
+    const staleFields = buildServiceRecordCompletionTimingFields({
+      scheduledService: staleRow,
+      lifecycleUpdates: applyBackfillDurationPolicy(
+        buildCompletionLifecycleUpdates(staleRow, CLOSEOUT_AT, { elapsed: 45 }),
+        45,
+        staleRow,
+      ),
+      completedAt: CLOSEOUT_AT,
+      serviceRecordCols: allCols,
+    });
+    expect(staleFields.arrived_at).toBe('2026-06-20T13:55:00Z');
+  });
+});
+
 describe('backfillTimeOnSiteMinutes — the shared workday-cap sanitizer (Codex P1, PR #2897)', () => {
   // One function feeds BOTH the persisted duration (applyBackfillDurationPolicy)
   // and the job-costing explicitLaborMinutes forward — so "rejected" here IS
@@ -274,6 +397,86 @@ describe('shouldAutoInvoiceCompletion — backfill review-invoice override (Code
 
   test('the override removes only the prepaid suppression — an otherwise-unbillable visit still mints nothing', () => {
     expect(shouldAutoInvoiceCompletion({ ...prepaidBackfill, invoiceAmount: 0 })).toBe(false);
+  });
+});
+
+describe('shouldAutoInvoiceCompletion — typed one-time backfill mints the review invoice (Codex P1, PR #2897)', () => {
+  // The reported shape: a stale typed one-time visit (profile billingType
+  // 'one_time') with no invoice anywhere. Live, the pre-transaction billing
+  // gate 409s (completion_billing_required) and the client detours into
+  // checkout — a payment interaction the quiet backdated closeout forbids,
+  // so the visit could not take the quiet path AT ALL. Under backfill the
+  // gate is bypassed and the draft review invoice must mint here instead.
+  // No scheduler flag, no membership tier, no explicit customer lane,
+  // priced-visits gate off — the exact population that previously fell
+  // through every branch and completed uninvoiced.
+  const typedOneTimeBackfill = {
+    recapReviewOnly: false,
+    alreadyPaid: false,
+    prepaidCovered: false,
+    autopayCoversVisit: false,
+    preMintedInvoice: null,
+    existingCompletionInvoice: null,
+    createInvoiceOnComplete: false,
+    waveguardTier: null,
+    hasVisitPrice: true,
+    invoiceAmount: 350, // = the row's own estimated_price (completionInvoiceAmount precedence)
+    autoInvoicePricedVisits: false,
+    serviceType: 'Bed Bug Treatment',
+    isCallback: false,
+    visitPerformed: true,
+    typedOneTimeBilling: true,
+    isBackfillCompletion: true,
+    annualPrepayCovered: false,
+  };
+
+  test('backfill + typed one-time + row price → the draft review invoice mints at the row amount', () => {
+    expect(shouldAutoInvoiceCompletion(typedOneTimeBackfill)).toBe(true);
+  });
+
+  test('live behavior unchanged: the same visit outside backfill still declines here — the pre-gate owns it', () => {
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, isBackfillCompletion: false })).toBe(false);
+    // …and a caller that never passes the new input (the pre-change shape)
+    // keeps the identical decline — the default is inert.
+    const legacyShape = { ...typedOneTimeBackfill };
+    delete legacyShape.typedOneTimeBilling;
+    expect(shouldAutoInvoiceCompletion(legacyShape)).toBe(false);
+  });
+
+  test('amount basis is the row price — an unpriced typed one-time never bills the legacy monthly-rate fallback', () => {
+    // Pre-gate parity: projectCompletionInvoiceAmount reads estimated_price
+    // first and bills the monthly rate ONLY behind create_invoice_on_complete
+    // (which returns true on its own branch above). An unpriced visit
+    // resolves not_billable live; under backfill it must equally mint
+    // nothing, even when the legacy fallback computed a positive amount.
+    expect(shouldAutoInvoiceCompletion({
+      ...typedOneTimeBackfill, hasVisitPrice: false, invoiceAmount: 89,
+    })).toBe(false);
+  });
+
+  test('performed, non-callback, non-always-free work only — the quiet path never invents a bill', () => {
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, visitPerformed: false })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, isCallback: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, serviceType: 'Bed Bug Follow-Up Visit' })).toBe(false);
+  });
+
+  test('suppressors still win — already-billed or settled work never double-mints', () => {
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, existingCompletionInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, preMintedInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...typedOneTimeBackfill, alreadyPaid: true })).toBe(false);
+    // Annual-prepay-covered plan work stays settled on its own paper trail.
+    expect(shouldAutoInvoiceCompletion({
+      ...typedOneTimeBackfill, prepaidCovered: true, annualPrepayCovered: true,
+    })).toBe(false);
+  });
+
+  test('an out-of-band prepaid stamp still mints the open invoice (the backfill prepaid override composes)', () => {
+    // Cash/Zelle recorded on the visit: the invoice mints anyway and the
+    // gated prepaid rail leaves it open with the amount unapplied — the
+    // reviewer reconciles, same as every other backfill invoice.
+    expect(shouldAutoInvoiceCompletion({
+      ...typedOneTimeBackfill, prepaidCovered: true, annualPrepayCovered: false,
+    })).toBe(true);
   });
 });
 
@@ -381,11 +584,36 @@ describe('completion route wiring (source contracts)', () => {
     // above) — reconciliation is the reviewer's explicit step.
   });
 
-  test('backfill durations come from the policy, not the stale lifecycle timestamps', () => {
+  test('backfill durations AND start timestamps come from the policy, not the stale lifecycle inference', () => {
     // The route builds lifecycle updates from the shared helper, then under
-    // backfill immediately re-derives the duration through the policy
-    // (sanitized timeOnSite or unknown — behavioral coverage above).
-    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,400}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite\);/);
+    // backfill immediately re-derives them through the policy — sanitized
+    // timeOnSite or unknown for the duration, and the pre-update row (svc)
+    // so inferred start fields are stripped while row-backed ones survive
+    // (behavioral coverage above).
+    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,600}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite, svc\);/);
+  });
+
+  test('typed one-time billing pre-gate: backfill bypasses the checkout detour, live keeps it', () => {
+    // The gated population is hoisted to a named flag…
+    expect(source).toMatch(/const typedOneTimeBillingProfile = !!typedFindingsType\s*\n\s*&& !isIncompleteVisit\s*\n\s*&& !recapReviewOnly\s*\n\s*&& String\(completionProfile\?\.billingType \|\| ''\)\.toLowerCase\(\) === 'one_time'\s*\n\s*&& svc\.followup_included !== true;/);
+    // …and the pre-gate itself now excludes backfill completions, so the
+    // 409 → checkout detour can no longer strand a stale typed one-time
+    // visit outside the quiet path.
+    expect(source).toMatch(/claim\.action === 'proceed'\s*\n\s*&& typedOneTimeBillingProfile\s*\n\s*&& !isBackfillCompletion\s*\n\s*\) \{/);
+    // The detour is still live for non-backfill typed one-time completions.
+    expect(source).toContain("code: 'completion_billing_required',");
+    // Ordering: the backfill plan (and its admin-only 403) is derived at
+    // intake, BEFORE the pre-gate reads isBackfillCompletion — a
+    // non-admin/invalid backfill flag fails there and never reaches the
+    // bypass.
+    const planAt = source.indexOf('const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });');
+    const gate409At = source.indexOf("code: 'completion_billing_required',");
+    expect(planAt).toBeGreaterThan(-1);
+    expect(gate409At).toBeGreaterThan(planAt);
+    // And the bypassed population is fed into the in-transaction invoice
+    // decision, where the backfill branch mints the draft review invoice
+    // (behavioral coverage above).
+    expect(source).toMatch(/typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n(\s*\/\/[^\n]*\n)*\s*isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\}\);/);
   });
 
   test('timeOnSite is sanitized ONCE at intake — every consumer reads the same value or absence', () => {
