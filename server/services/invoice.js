@@ -1570,7 +1570,14 @@ const InvoiceService = {
    */
   async createFromService(
     serviceRecordId,
-    { amount, description, taxRate, useScheduledReplay = false, dueDate },
+    {
+      amount,
+      description,
+      taxRate,
+      useScheduledReplay = false,
+      dueDate,
+      skipDepositCredit = false,
+    },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
@@ -1622,8 +1629,18 @@ const InvoiceService = {
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
     // machinery failures NEVER block visit invoicing — fall back to the
     // plain create and alert for manual reconciliation.
+    //
+    // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
+    // contract is an UNTOUCHED invoice for operator review — the backdated
+    // backfill closeout — opt out entirely. The ledger is neither read nor
+    // consumed, no credit line is added, and the invoice mints at face
+    // value; the unapplied balance stays on the estimate for the reviewer
+    // to apply deliberately. (The consume path is pure ledger math — no
+    // receipt or customer notification — but it moves deposit money and
+    // reduces/zeroes the invoice, which is exactly the mutation the review
+    // contract forbids.)
     let sourceEstimateId = null;
-    if (sr.scheduled_service_id) {
+    if (!skipDepositCredit && sr.scheduled_service_id) {
       try {
         const ss = await db("scheduled_services")
           .where({ id: sr.scheduled_service_id })

@@ -619,6 +619,21 @@ function backfillTimeOnSiteMinutes(timeOnSite) {
 // the backfill policy strips exactly what the helper fabricates — no more.
 const BACKFILL_INFERRED_START_FIELDS = ['actual_start_time', 'check_in_time', 'arrived_at'];
 
+// The end fields the completion path stamps with the closeout instant: on the
+// scheduled_services row via buildCompletionLifecycleUpdates, and on the
+// service_records report row via buildServiceRecordCompletionTimingFields
+// (which additionally stamps ended_at/completed_at). Enumerated per surface
+// so the policies below strip exactly the closeout-instant stamps — no more.
+const BACKFILL_LIFECYCLE_END_FIELDS = ['actual_end_time', 'check_out_time'];
+const BACKFILL_RECORD_END_FIELDS = ['ended_at', 'completed_at', 'actual_end_time', 'check_out_time'];
+
+// True when the scheduled_services row itself carries a real start timestamp
+// — a stale check-in is history; anything else on those fields is an
+// artifact the policies strip.
+function backfillRowHasRealStart(service = {}) {
+  return BACKFILL_INFERRED_START_FIELDS.some((field) => finiteDate(service?.[field]));
+}
+
 // `service` is the pre-update scheduled_services row — the policy needs it to
 // tell a row-backed start timestamp from one the helper inferred.
 function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite, service = {}) {
@@ -629,6 +644,24 @@ function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite, service = {})
   } else {
     delete lifecycleUpdates.service_time_minutes;
     delete lifecycleUpdates.actual_duration_minutes;
+    // Keep backfilled on-site durations unknown (Codex P1, PR #2897 fix
+    // round): stripping the duration KEYS above is not enough when the row
+    // carries a real stale check-in — the helper still stamps today's
+    // closeout instant into actual_end_time/check_out_time, and every
+    // start→end reader (service-report metrics-band computeOnSiteMin,
+    // pricing-reality-check resolveActualMinutes) re-derives the weeks-long
+    // span AT READ TIME from the kept start against today's end whenever
+    // structured_notes.timeOnSite is null. With no typed duration the
+    // visit's end is genuinely unknown, so drop the end stamps too: the
+    // stale check-in stays untouched (historical truth), the pair never
+    // completes, and the duration reads as unknown everywhere. The closeout
+    // instant itself is still on the audit trail (service_record/attempt-row
+    // created_at, job_status_history). A row with no start of its own keeps
+    // the end stamps — no start anywhere means no pair to poison, and the
+    // stamp records when the closeout happened.
+    if (backfillRowHasRealStart(service)) {
+      for (const field of BACKFILL_LIFECYCLE_END_FIELDS) delete lifecycleUpdates[field];
+    }
   }
   // No fabricated arrivals (Codex P1, PR #2897): with a typed duration and a
   // never-started stale row (pending/confirmed — no start timestamps), the
@@ -647,6 +680,24 @@ function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite, service = {})
     if (!finiteDate(service?.[field])) delete lifecycleUpdates[field];
   }
   return lifecycleUpdates;
+}
+
+// service_records leg of the duration policy (Codex P1, PR #2897 fix round):
+// buildServiceRecordCompletionTimingFields copies the row's real stale
+// check-in into started_at/arrived_at/... AND stamps every end field with the
+// closeout instant — re-creating on the report row the exact start→end pair
+// the lifecycle leg above refuses to complete. metrics-band's
+// computeOnSiteMin (service report "time on site") and pricing-reality-check
+// both fall back to that pair when structured_notes.timeOnSite is null, so a
+// blank typed duration would read as days-or-weeks on site. Same predicate as
+// the lifecycle leg: a typed duration keeps everything (readers prefer it);
+// no row-backed start keeps the end stamps (no pair to poison). Mutates and
+// returns the fields object. Pure for testability (_test).
+function applyBackfillRecordTimingPolicy(timingFields, timeOnSite, service = {}) {
+  if (backfillTimeOnSiteMinutes(timeOnSite)) return timingFields;
+  if (!backfillRowHasRealStart(service)) return timingFields;
+  for (const field of BACKFILL_RECORD_END_FIELDS) delete timingFields[field];
+  return timingFields;
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
@@ -2642,7 +2693,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Backdated quiet completion — validated against the row's own
     // scheduled_date (past days only). `let`: a crash-resumed completion may
     // retry without the body flag; the frozen structured_notes recover it
-    // below, before any send/invoice decision reads it.
+    // below, before any send/invoice decision reads it. That flagless retry
+    // only reaches the resume claim because hashCompletionRequest excludes
+    // `backfill` from the request hash (Codex P2, PR #2897 fix round) —
+    // hashed, the missing flag 409'd completion_resume_payload_mismatch in
+    // claimCompletionAttempt and stranded the committed completion before
+    // the re-derivation could run.
     const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });
     if (backfillPlan.error) {
       return res.status(backfillPlan.status || 400).json(backfillPlan.error);
@@ -3589,6 +3645,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           useServiceReportV1,
           isIncompleteVisit,
           productCount: Array.isArray(products) ? products.length : 0,
+          // Backfill: today's weather is not the scheduled day's weather —
+          // the record (and the FDACS ledger rows that copy its conditions)
+          // stays honestly unknown. See the helper's comment.
+          isBackfillCompletion,
         })
           ? await fetchApplicationConditions({
             latitude: svc.customer_latitude,
@@ -3664,7 +3724,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // completion invoice's service linkage) with that date, not today.
           // completionEndedAt stays the real wall-clock instant on purpose:
           // completed_at/check_out_time are audit timestamps of when the
-          // closeout was recorded, not of the visit.
+          // closeout was recorded, not of the visit — EXCEPT when the row
+          // carries a real stale check-in and no typed duration, where the
+          // duration policies drop the end stamps so start→end readers can't
+          // book the stale span as time on site (Codex P1, PR #2897 fix
+          // round; see applyBackfillDurationPolicy /
+          // applyBackfillRecordTimingPolicy).
           const completionServiceDate = isBackfillCompletion
             ? backfillPlan.serviceDate
             : etDateString(completionEndedAt);
@@ -3884,12 +3949,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
-          Object.assign(recordInsert, buildServiceRecordCompletionTimingFields({
+          const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
             lifecycleUpdates,
             completedAt: completionEndedAt,
             serviceRecordCols,
-          }));
+          });
+          // Backfill: the report row must not pair the kept real check-in
+          // with today's closeout stamp when no duration was typed — the
+          // start→end fallback readers would book the stale span. See
+          // applyBackfillRecordTimingPolicy.
+          if (isBackfillCompletion) applyBackfillRecordTimingPolicy(recordTimingFields, effectiveTimeOnSite, svc);
+          Object.assign(recordInsert, recordTimingFields);
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
@@ -5070,6 +5141,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // shouldAutoInvoiceCompletion and every later backfill money/comms gate
     // read the same truth on a resumed retry; the customer-comms re-force
     // stays below, after the frozen-delivery re-derivation it must override.
+    // Reachable for a FLAGLESS retry only because hashCompletionRequest
+    // excludes `backfill` (Codex P2, PR #2897 fix round): the resume claim
+    // in claimCompletionAttempt compares request hashes first, and hashing
+    // the flag made the flagless retry 409 (completion_resume_payload_
+    // mismatch) before this line — the recovery this comment promises was
+    // unreachable.
     if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
       isBackfillCompletion = true;
     }
@@ -5457,7 +5534,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
           dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          // Backfill: createFromService otherwise rolls an accepted
+          // estimate's unapplied deposit forward into this invoice
+          // (consumeDepositCredit + a credit line that reduces or zeroes the
+          // total) — deposit-ledger movement and invoice mutation the quiet
+          // path leaves to the reviewer, exactly like the prepaid/account-
+          // credit/auto-charge rails gated off below (Codex P1, PR #2897
+          // fix round). The invoice mints at face value; the deposit stays
+          // on the estimate's ledger for the reviewer to apply.
+          skipDepositCredit: isBackfillCompletion,
         });
+        // Point the reviewer at the money the skip left behind — the same
+        // breadcrumb the prepaid skip logs (applyPrepaidCreditToInvoice).
+        if (isBackfillCompletion && svc.source_estimate_id) {
+          try {
+            const { pendingDepositCredit } = require('../services/estimate-deposits');
+            const unappliedDeposit = await pendingDepositCredit(svc.source_estimate_id);
+            if (unappliedDeposit?.amount > 0) {
+              logger.info(`[dispatch] backfill completion: estimate deposit NOT auto-applied for visit ${svc.id} — $${Number(unappliedDeposit.amount).toFixed(2)} unapplied deposit credit on estimate ${svc.source_estimate_id}; invoice ${invoice.invoice_number || invoice.id} left open for review`);
+            }
+          } catch (e) { logger.warn(`[dispatch] backfill deposit-credit review log failed: ${e.message}`); }
+        }
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
         payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
@@ -8567,8 +8664,20 @@ function shouldCaptureApplicationConditions({
   useServiceReportV1,
   isIncompleteVisit,
   productCount,
+  isBackfillCompletion = false,
 }) {
   if (!hasConditionsColumn) return false;
+  // Backdated closeout: NEVER capture (Codex P1, PR #2897 fix round). The
+  // fetch is CURRENT FAWN/Open-Meteo weather at office-closeout time, but a
+  // backfilled record is dated to the scheduled day — and service_records.
+  // conditions is copied verbatim into the FDACS application ledger
+  // (compliance.js → property_application_history.weather_conditions/
+  // wind_speed_mph), so a week-old treatment would carry today's wind and
+  // sky as its application-day conditions on a state-auditable record.
+  // Absent conditions are an honest unknown for a past day; no historical
+  // re-fetch — the capture exists to record what was observed at
+  // application time, not a reconstruction.
+  if (isBackfillCompletion) return false;
   if (useServiceReportV1 && !isIncompleteVisit) return true;
   return Number(productCount) > 0;
 }
@@ -8888,7 +8997,10 @@ module.exports._test = {
   completionSavedCardFallbackPolicy,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
+  applyBackfillRecordTimingPolicy,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
+  BACKFILL_LIFECYCLE_END_FIELDS,
+  BACKFILL_RECORD_END_FIELDS,
 };

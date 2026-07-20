@@ -19,7 +19,18 @@ function hashCompletionRequest(body) {
   // completionTelemetry carries per-attempt timestamps (submitClickedAt) —
   // including it would make every legitimate retry an
   // idempotency_key_mismatch for typed completions.
-  const { idempotencyKey, timeOnSite, completionTelemetry, ...stableBody } = body || {};
+  //
+  // `backfill` is a completion-MODE flag, not visit data (Codex P2, PR
+  // #2897 fix round): once the service record commits, its truth is frozen
+  // in structured_notes.backfill and admin-dispatch re-derives it on
+  // resume. A crash-resumed retry (fresh panel mount, auto-retry) can
+  // arrive WITHOUT the flag, and hashing it stranded exactly the committed
+  // backfill the re-derivation exists to recover — the resume claim 409'd
+  // completion_resume_payload_mismatch before the quiet side effects could
+  // run. Excluding it loses nothing pre-commit either: with no committed
+  // record the body governs the fresh run, the same outcome a fresh
+  // idempotency key would produce.
+  const { idempotencyKey, timeOnSite, completionTelemetry, backfill, ...stableBody } = body || {};
   return crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');

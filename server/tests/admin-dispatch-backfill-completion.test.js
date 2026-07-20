@@ -16,19 +16,34 @@
  * today-dated start onto a backdated row), the typed one-time pre-gate
  * bypass (backfill mints the draft review invoice instead of detouring to
  * checkout), and the labor-costing guard — must not be refactored away
- * silently.
+ * silently. Fix round 2 (Codex, PR #2897) adds: the end-stamp policy (a
+ * kept real stale check-in must never pair with today's closeout stamp, so
+ * blank-typed durations stay UNKNOWN to every start→end fallback reader),
+ * the conditions gate (no current-day weather on a backdated record or its
+ * FDACS ledger rows), the deposit-credit skip (the review invoice mints at
+ * face value; the estimate's deposit stays unapplied, logged for the
+ * reviewer), and the flagless-resume hash exclusion (a crash-resumed retry
+ * without the body flag must reach the structured_notes re-derivation, not
+ * strand on completion_resume_payload_mismatch).
  */
 const fs = require('fs');
 const path = require('path');
 const {
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
+  applyBackfillRecordTimingPolicy,
   backfillTimeOnSiteMinutes,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
+  BACKFILL_LIFECYCLE_END_FIELDS,
+  BACKFILL_RECORD_END_FIELDS,
   shouldAutoInvoiceCompletion,
+  shouldCaptureApplicationConditions,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
+const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
+const { computeOnSiteMin } = require('../services/service-report/metrics-band');
+const { hashCompletionRequest } = require('../services/completion-attempts');
 
 const TODAY = '2026-07-19';
 
@@ -118,12 +133,16 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
     const updates = applyBackfillDurationPolicy(
       buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT),
       undefined,
+      STALE_SVC,
     );
     expect(updates).not.toHaveProperty('service_time_minutes');
     expect(updates).not.toHaveProperty('actual_duration_minutes');
-    // The audit timestamps survive — only the derived duration is dropped.
-    expect(updates.actual_end_time).toEqual(CLOSEOUT_AT);
-    expect(updates.check_out_time).toEqual(CLOSEOUT_AT);
+    // Fix round 2 (Codex P1): the end stamps are dropped too — with the
+    // row's real stale check-in kept, today's actual_end_time/check_out_time
+    // would complete a start→end pair every timeOnSite-null fallback reader
+    // re-derives the stale span from (dedicated coverage below).
+    expect(updates).not.toHaveProperty('actual_end_time');
+    expect(updates).not.toHaveProperty('check_out_time');
   });
 
   test('explicit timeOnSite is honored in every shape the completion body sends', () => {
@@ -177,13 +196,19 @@ describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix
     }
   });
 
-  test('a never-checked-in stale row (pending/confirmed) stays unknown too', () => {
+  test('a never-checked-in stale row (pending/confirmed) stays unknown too — and keeps the closeout audit stamps', () => {
+    const neverStarted = { status: 'pending' };
     const updates = applyBackfillDurationPolicy(
-      buildCompletionLifecycleUpdates({ status: 'pending' }, CLOSEOUT_AT),
+      buildCompletionLifecycleUpdates(neverStarted, CLOSEOUT_AT),
       undefined,
+      neverStarted,
     );
     expect(updates).not.toHaveProperty('service_time_minutes');
     expect(updates).not.toHaveProperty('actual_duration_minutes');
+    // With no start anywhere there is no pair to poison: the end stamps stay
+    // as the record of when the closeout was recorded.
+    expect(updates.actual_end_time).toEqual(CLOSEOUT_AT);
+    expect(updates.check_out_time).toEqual(CLOSEOUT_AT);
   });
 });
 
@@ -268,7 +293,6 @@ describe('applyBackfillDurationPolicy — no fabricated arrivals (Codex P1, PR #
   });
 
   test('the backdated service RECORD carries no fabricated arrival either — timing fields fall back to null', () => {
-    const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
     const allCols = {
       started_at: true, arrived_at: true, actual_start_time: true, check_in_time: true,
       ended_at: true, completed_at: true, actual_end_time: true, check_out_time: true,
@@ -302,6 +326,233 @@ describe('applyBackfillDurationPolicy — no fabricated arrivals (Codex P1, PR #
       serviceRecordCols: allCols,
     });
     expect(staleFields.arrived_at).toBe('2026-06-20T13:55:00Z');
+  });
+});
+
+describe('backfill end-stamp policy — durations stay unknown despite a real stale check-in (Codex P1, PR #2897 fix round)', () => {
+  const CLOSEOUT_AT = new Date('2026-07-19T16:00:00Z');
+  // The reported shape: a stale on_site row with a REAL weeks-old check-in,
+  // closed out with Time on site left blank. The kept start is historical
+  // truth; today's end stamps are not — and every consumer that falls back
+  // to start→end when structured_notes.timeOnSite is null (service-report
+  // metrics-band computeOnSiteMin, pricing-reality-check
+  // resolveActualMinutes) would re-derive the stale span AT READ TIME.
+  const STALE_CHECKED_IN = {
+    status: 'on_site',
+    actual_start_time: '2026-06-20T14:00:00Z',
+    check_in_time: '2026-06-20T14:00:00Z',
+    arrived_at: '2026-06-20T13:55:00Z',
+  };
+  const ALL_RECORD_COLS = {
+    started_at: true, arrived_at: true, actual_start_time: true, check_in_time: true,
+    ended_at: true, completed_at: true, actual_end_time: true, check_out_time: true,
+  };
+  const buildRecordTiming = (svc, timeOnSite) => {
+    const lifecycleUpdates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(svc, CLOSEOUT_AT, { elapsed: timeOnSite }),
+      timeOnSite,
+      svc,
+    );
+    return applyBackfillRecordTimingPolicy(
+      buildServiceRecordCompletionTimingFields({
+        scheduledService: svc,
+        lifecycleUpdates,
+        completedAt: CLOSEOUT_AT,
+        serviceRecordCols: ALL_RECORD_COLS,
+      }),
+      timeOnSite,
+      svc,
+    );
+  };
+
+  test('the hazard is real: the codex-named reader books the stale span from a kept start against a today end', () => {
+    // metrics-band with timeOnSite null falls back to started_at→ended_at —
+    // the exact pair the pre-fix record carried.
+    const derived = computeOnSiteMin({
+      started_at: STALE_CHECKED_IN.check_in_time,
+      ended_at: CLOSEOUT_AT.toISOString(),
+      timeOnSite: null,
+    });
+    expect(derived).toBeGreaterThan(24 * 60); // weeks, not a visit
+  });
+
+  test('lifecycle leg: blank typed time + real check-in → NO end stamps, NO durations, start columns untouched', () => {
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(STALE_CHECKED_IN, CLOSEOUT_AT),
+      undefined,
+      STALE_CHECKED_IN,
+    );
+    for (const field of BACKFILL_LIFECYCLE_END_FIELDS) {
+      expect(updates).not.toHaveProperty(field);
+    }
+    expect(updates).not.toHaveProperty('service_time_minutes');
+    expect(updates).not.toHaveProperty('actual_duration_minutes');
+    // The kept start is absent from the UPDATE — the row's own (real, stale)
+    // values persist untouched; keeping is never a rewrite.
+    for (const field of BACKFILL_INFERRED_START_FIELDS) {
+      expect(updates).not.toHaveProperty(field);
+    }
+  });
+
+  test('lifecycle leg: the strip list mirrors exactly the end fields the shared helper stamps', () => {
+    const raw = buildCompletionLifecycleUpdates(STALE_CHECKED_IN, CLOSEOUT_AT);
+    const endKeys = Object.keys(raw).filter((key) => raw[key] instanceof Date);
+    expect([...endKeys].sort()).toEqual([...BACKFILL_LIFECYCLE_END_FIELDS].sort());
+  });
+
+  test('lifecycle leg: a typed duration keeps the end stamps — readers prefer the explicit minutes', () => {
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(STALE_CHECKED_IN, CLOSEOUT_AT, { elapsed: 45 }),
+      45,
+      STALE_CHECKED_IN,
+    );
+    expect(updates.service_time_minutes).toBe(45);
+    expect(updates.actual_end_time).toEqual(CLOSEOUT_AT);
+    expect(updates.check_out_time).toEqual(CLOSEOUT_AT);
+  });
+
+  test('record leg: blank typed time + real check-in → start kept as history, EVERY end field absent', () => {
+    const fields = buildRecordTiming(STALE_CHECKED_IN, undefined);
+    // Historical truth stays on the report row…
+    expect(fields.started_at).toBe(STALE_CHECKED_IN.actual_start_time);
+    expect(fields.arrived_at).toBe(STALE_CHECKED_IN.arrived_at);
+    // …and no end field completes the pair (completed_at included — the
+    // report's completion-time resolver reads it first).
+    for (const field of BACKFILL_RECORD_END_FIELDS) {
+      expect(fields).not.toHaveProperty(field);
+    }
+  });
+
+  test('record leg: the strip list mirrors exactly the end fields the record builder stamps', () => {
+    const raw = buildServiceRecordCompletionTimingFields({
+      scheduledService: STALE_CHECKED_IN,
+      lifecycleUpdates: {},
+      completedAt: CLOSEOUT_AT,
+      serviceRecordCols: ALL_RECORD_COLS,
+    });
+    const endKeys = Object.keys(raw).filter((key) => raw[key] === CLOSEOUT_AT);
+    expect([...endKeys].sort()).toEqual([...BACKFILL_RECORD_END_FIELDS].sort());
+  });
+
+  test('end to end: the codex-named reader now reports UNKNOWN for the stale checked-in row', () => {
+    const fields = buildRecordTiming(STALE_CHECKED_IN, undefined);
+    expect(computeOnSiteMin({ ...fields, timeOnSite: null })).toBeNull();
+  });
+
+  test('record leg: a typed duration keeps the record end stamps and the explicit metric wins', () => {
+    const fields = buildRecordTiming(STALE_CHECKED_IN, 45);
+    expect(fields.ended_at).toEqual(CLOSEOUT_AT);
+    expect(fields.completed_at).toEqual(CLOSEOUT_AT);
+    expect(computeOnSiteMin({ ...fields, timeOnSite: 45 })).toBe(45);
+  });
+
+  test('record leg: a never-started row keeps the end stamps — no start anywhere, no pair to poison', () => {
+    const fields = buildRecordTiming({ status: 'pending' }, undefined);
+    expect(fields.started_at).toBeNull();
+    expect(fields.ended_at).toEqual(CLOSEOUT_AT);
+    expect(computeOnSiteMin({ ...fields, timeOnSite: null })).toBeNull();
+  });
+
+  test('non-backfill completions are untouched — the record policy only ever runs under isBackfillCompletion', () => {
+    // The route wires the record policy behind the backfill flag (source
+    // contract below); the function itself is also a no-op passthrough for
+    // typed/startless shapes, so nothing here can leak into live closeouts.
+    const fields = buildServiceRecordCompletionTimingFields({
+      scheduledService: STALE_CHECKED_IN,
+      lifecycleUpdates: {},
+      completedAt: CLOSEOUT_AT,
+      serviceRecordCols: ALL_RECORD_COLS,
+    });
+    const untouched = { ...fields };
+    expect(applyBackfillRecordTimingPolicy(fields, 45, STALE_CHECKED_IN)).toEqual(untouched);
+    expect(applyBackfillRecordTimingPolicy({ ...untouched }, undefined, { status: 'pending' })).toEqual(untouched);
+  });
+});
+
+describe('shouldCaptureApplicationConditions — no current-day weather on backdated records (Codex P1, PR #2897 fix round)', () => {
+  // The capture is CURRENT FAWN/Open-Meteo at closeout time and lands on
+  // service_records.conditions, which compliance.js copies verbatim into the
+  // FDACS application ledger (weather_conditions / wind_speed_mph). A
+  // backfilled record is dated to the scheduled day, so today's sky must
+  // never be recorded as that day's application conditions.
+  const productLedgerShape = {
+    hasConditionsColumn: true,
+    useServiceReportV1: false,
+    isIncompleteVisit: false,
+    productCount: 3,
+  };
+  const v1ReportShape = {
+    hasConditionsColumn: true,
+    useServiceReportV1: true,
+    isIncompleteVisit: false,
+    productCount: 0,
+  };
+
+  test('backfill + products logged → NO capture (the FDACS-ledger trigger is the dangerous one)', () => {
+    expect(shouldCaptureApplicationConditions({ ...productLedgerShape, isBackfillCompletion: true })).toBe(false);
+  });
+
+  test('backfill + V1 report completion → NO capture (report-render trigger gated too)', () => {
+    expect(shouldCaptureApplicationConditions({ ...v1ReportShape, isBackfillCompletion: true })).toBe(false);
+    // Even an incomplete-with-products backfill stays dark.
+    expect(shouldCaptureApplicationConditions({
+      ...productLedgerShape, isIncompleteVisit: true, isBackfillCompletion: true,
+    })).toBe(false);
+  });
+
+  test('live completions are unchanged — both capture triggers still fire without the flag', () => {
+    expect(shouldCaptureApplicationConditions(productLedgerShape)).toBe(true);
+    expect(shouldCaptureApplicationConditions(v1ReportShape)).toBe(true);
+    expect(shouldCaptureApplicationConditions({ ...productLedgerShape, isBackfillCompletion: false })).toBe(true);
+    // The pre-change caller shape (no flag at all) keeps the identical truth
+    // table — the default is inert.
+    expect(shouldCaptureApplicationConditions({ ...v1ReportShape, isIncompleteVisit: true, productCount: 0 })).toBe(false);
+  });
+
+  test('a missing conditions column short-circuits everything, backfill or not', () => {
+    expect(shouldCaptureApplicationConditions({ ...productLedgerShape, hasConditionsColumn: false })).toBe(false);
+    expect(shouldCaptureApplicationConditions({
+      ...productLedgerShape, hasConditionsColumn: false, isBackfillCompletion: true,
+    })).toBe(false);
+  });
+});
+
+describe('hashCompletionRequest — flagless backfill resumes reach the re-derivation (Codex P2, PR #2897 fix round)', () => {
+  // The crash-resume contract: after the service record commits, a retry may
+  // arrive WITHOUT `backfill` (fresh panel mount). claimCompletionAttempt
+  // compares request hashes before the route's structured_notes
+  // re-derivation can heal the flag — so the flag must not be part of the
+  // hash, or the committed quiet completion strands on
+  // completion_resume_payload_mismatch with its invoice/side effects never
+  // run.
+  const committedBody = {
+    idempotencyKey: 'key-1',
+    notes: 'Quarterly service completed',
+    visitOutcome: 'routine',
+    backfill: true,
+    timeOnSite: 45,
+  };
+
+  test('the flag never splits the hash — a flagless retry hashes identically to the original', () => {
+    const original = hashCompletionRequest(committedBody);
+    const flaglessRetry = { ...committedBody };
+    delete flaglessRetry.backfill;
+    expect(hashCompletionRequest(flaglessRetry)).toBe(original);
+    // …and an explicit false is equally irrelevant (mode truth lives in the
+    // frozen structured_notes, either direction).
+    expect(hashCompletionRequest({ ...committedBody, backfill: false })).toBe(original);
+  });
+
+  test('real payload changes still mismatch — the strip is surgical', () => {
+    expect(hashCompletionRequest({ ...committedBody, notes: 'different work entirely' }))
+      .not.toBe(hashCompletionRequest(committedBody));
+    expect(hashCompletionRequest({ ...committedBody, visitOutcome: 'customer_concern' }))
+      .not.toBe(hashCompletionRequest(committedBody));
+  });
+
+  test('the volatile-field strip list stays exact: idempotencyKey, timeOnSite, telemetry, backfill', () => {
+    const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
+    expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
   });
 });
 
@@ -723,6 +974,9 @@ describe('completion route wiring (source contracts)', () => {
       // prepaid-credit application (gate lives inside the helper, defined
       // and called after the re-derivation)
       'prepaid credit NOT auto-applied',
+      // estimate-deposit roll-forward skip + reviewer breadcrumb (fix round 2)
+      'skipDepositCredit: isBackfillCompletion,',
+      'estimate deposit NOT auto-applied',
       // job-costing labor guard
       'untrustedLifecycleSpan: true',
     ];
@@ -747,5 +1001,40 @@ describe('completion route wiring (source contracts)', () => {
 
     const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(scheduleSource).not.toMatch(/backfill\s*=\s*false|backfill\s*,/);
+  });
+
+  test('the record-timing policy is wired between the builder and the insert, backfill-gated (fix round 2)', () => {
+    // The service_records timing fields are built into a variable, run
+    // through applyBackfillRecordTimingPolicy under isBackfillCompletion
+    // (same sanitized timeOnSite + pre-update row as the lifecycle leg),
+    // and only then assigned onto the insert payload.
+    expect(source).toMatch(/const recordTimingFields = buildServiceRecordCompletionTimingFields\(\{\s*\n\s*scheduledService: svc,\s*\n\s*lifecycleUpdates,\s*\n\s*completedAt: completionEndedAt,\s*\n\s*serviceRecordCols,\s*\n\s*\}\);[\s\S]{0,500}if \(isBackfillCompletion\) applyBackfillRecordTimingPolicy\(recordTimingFields, effectiveTimeOnSite, svc\);\s*\n\s*Object\.assign\(recordInsert, recordTimingFields\);/);
+  });
+
+  test('the conditions capture is backfill-gated at the single fetch site (fix round 2)', () => {
+    // shouldCaptureApplicationConditions is the one authority deciding the
+    // FAWN/Open-Meteo fetch, and the route feeds it the backfill flag; the
+    // fetched object is only ever written via recordInsert.conditions, so
+    // gating the capture gates the record AND the FDACS ledger copy
+    // (compliance.js reads sr.conditions).
+    expect(source).toMatch(/conditionsAtApplication = shouldCaptureApplicationConditions\(\{[\s\S]{0,700}isBackfillCompletion,\s*\n\s*\}\)/);
+    expect(source).toMatch(/if \(serviceRecordCols\.conditions && conditionsAtApplication\) recordInsert\.conditions = serializeJsonb\(conditionsAtApplication\);/);
+    // Exactly one fetch site in the completion path.
+    expect(source.match(/fetchApplicationConditions\(/g) || []).toHaveLength(1);
+  });
+
+  test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
+    // The route passes the opt-out on the completion mint…
+    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,1200}skipDepositCredit: isBackfillCompletion,\s*\n\s*\}\);/);
+    // …and logs the unapplied balance for review, like the prepaid skip.
+    expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
+    // The service honors the opt-out BEFORE any ledger read: the
+    // source-estimate lookup (and with it pendingDepositCredit /
+    // consumeDepositCredit and the reconcile alert) is gated off.
+    const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    expect(invoiceSource).toMatch(/skipDepositCredit = false,/);
+    expect(invoiceSource).toMatch(/if \(!skipDepositCredit && sr\.scheduled_service_id\) \{/);
+    // Behavioral coverage lives in invoice-deposit-credit-tax.test.js
+    // (ledger untouched, full-value invoice, no reconcile alert).
   });
 });

@@ -332,6 +332,39 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
   });
 
+  it('skipDepositCredit (backfill review invoices) leaves the ledger untouched — full-value invoice, no reads, no consumption, no alert (Codex P1, PR #2897 fix round)', async () => {
+    // The backdated quiet closeout's contract is an invoice the reviewer
+    // finds EXACTLY as minted: the deposit roll-forward moves deposit-ledger
+    // money and reduces/zeroes the total, so the completion route opts out
+    // and the unapplied balance stays on the estimate for a deliberate
+    // application during review.
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 }); // would-be credit — must never be read
+
+    const inv = await InvoiceService.createFromService('sr-1', {
+      amount: 250, description: 'Rodent exclusion', skipDepositCredit: true,
+    });
+
+    expect(mockPendingDepositCredit).not.toHaveBeenCalled();
+    expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    const row = getInsertedInvoice();
+    expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
+    expect(row.total).toBe(250);
+    expect(inv.total).toBe(250);
+  });
+
+  it('the opt-out defaults OFF — the pre-change caller shape still rolls the deposit forward', async () => {
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
+    mockConsumeDepositCredit.mockResolvedValue(99);
+
+    await InvoiceService.createFromService('sr-1', { amount: 250, description: 'Rodent exclusion' });
+
+    expect(getInsertedInvoice().total).toBe(151);
+    expect(mockConsumeDepositCredit).toHaveBeenCalled();
+  });
+
   it('an allocation mismatch never blocks visit invoicing — falls back to an uncredited invoice and alerts', async () => {
     const { getInsertedInvoice } = setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
