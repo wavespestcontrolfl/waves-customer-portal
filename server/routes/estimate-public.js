@@ -7334,7 +7334,7 @@ async function handleEstimateView(req, res, next) {
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
       pricingFrequencies: Array.isArray(pricingBundleForView?.frequencies)
-        ? pricingBundleForView.frequencies
+        ? stripInternalMarginFieldsDeep(pricingBundleForView.frequencies)
         : [],
       existingAppointment: shapeLinkedAppointment(linkedAppointment),
       depositPolicy: depositPolicyForView.enforced ? {
@@ -15889,6 +15889,25 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
   return 0;
 }
 
+// Customer-response boundary strip: marginFloorMonthly is the ARMED
+// 35%-margin floor basis (ceil(costFloorAnnual/12)) that
+// lawnFrequenciesFromRows emits for the server-side ladder/section clamps
+// (bundleSectionLadderForService) — all of which run BEFORE serialization.
+// A customer payload carrying it lets the customer derive Waves' cost
+// basis, so it is stripped from every customer-bound bundle shape (margin
+// data is surfaced to the OWNER, never to customers). Depth-bounded clone:
+// never mutates the cached bundle.
+function stripInternalMarginFieldsDeep(value, depth = 0) {
+  if (depth > 6 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => stripInternalMarginFieldsDeep(entry, depth + 1));
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'marginFloorMonthly') continue;
+    out[key] = stripInternalMarginFieldsDeep(nested, depth + 1);
+  }
+  return out;
+}
+
 async function buildPricingBundle(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -17031,7 +17050,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         membership: publicMembershipView(membership),
       },
       pricing: {
-        ...pricingBundle,
+        ...stripInternalMarginFieldsDeep(pricingBundle),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
@@ -17162,6 +17181,7 @@ module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate
 module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
+module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.isPestServiceName = isPestServiceName;

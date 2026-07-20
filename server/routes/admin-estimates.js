@@ -1414,6 +1414,17 @@ router.get('/', async (req, res, next) => {
               lane: estData.estimatorEngine.lane || null,
               laneReasons: estData.estimatorEngine.laneReasons || [],
               reviewNotes: estData.estimatorEngine.reviewNotes || null,
+              // Margin visibility (owner ruling: surfaced, never enforced):
+              // the engine's report-only warnings ride the stored result —
+              // without projecting them, an engine draft's review modal
+              // shows no sub-35% signal (only the row badge does).
+              marginWarnings: (() => {
+                const result = estData?.result || estData?.engineResult || null;
+                const list = result?.marginWarnings
+                  || result?.recurring?.marginWarnings
+                  || [];
+                return Array.isArray(list) ? list.slice(0, 10) : [];
+              })(),
             }
             : null,
           // ai_agent (IB quoting agent) drafts keep their reasoning /
