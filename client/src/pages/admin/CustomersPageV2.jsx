@@ -72,6 +72,7 @@ import {
   cn,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { formatETDateOnly } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -1767,10 +1768,10 @@ export default function CustomersPageV2() {
                       </div>{" "}
                       <div className="u-nums text-11 text-ink-secondary text-center">
                         {c.nextServiceDate ? (
-                          new Date(c.nextServiceDate).toLocaleDateString(
-                            "en-US",
-                            { month: "short", day: "numeric" },
-                          )
+                          formatETDateOnly(c.nextServiceDate, {
+                            month: "short",
+                            day: "numeric",
+                          })
                         ) : (
                           <span className="text-ink-tertiary">—</span>
                         )}
