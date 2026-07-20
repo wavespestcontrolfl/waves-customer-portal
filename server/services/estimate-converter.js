@@ -1566,6 +1566,92 @@ const EstimateConverter = {
       .count('id as count')
       .first();
     const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
+    // Loaded here rather than inside the reservation branch so the multi-unit
+    // lock pre-pass below can read the reserved row's service identity before
+    // any seeding unit processes.
+    const reservedRows = reservationRowsExist
+      ? await database('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNotNull('customer_id')
+        .whereNull('reservation_expires_at')
+        .orderBy('scheduled_date', 'asc')
+      : [];
+
+    // ——— Multi-unit lock-order pre-pass (P1: cross-conversion deadlock) ———
+    // Only the CALLER-TRANSACTION path needs it: with a caller-provided trx
+    // every runSeedingStep reuses that trx, so each unit's series-create
+    // advisory locks are held to the OUTER commit — two concurrent
+    // multi-service conversions processing the same families in different
+    // unit order each hold one family's locks while waiting on the other's,
+    // and Postgres aborts one acceptance (deadlock detected). The fix is the
+    // total-order discipline: collect every unit's lock keys up front and
+    // acquire the sorted union (same canonical sort checkActiveSeriesLocked
+    // applies within a unit) before any unit processes; the per-unit guard
+    // calls then merely re-acquire held keys, which pg advisory xact locks
+    // allow without waiting (re-entrant within the owning transaction — see
+    // acquireSeriesCreateLocks).
+    //
+    // When seedsInOwnTransaction, each seeding step opens and COMMITS its own
+    // transaction, releasing its locks before the next unit starts — no step
+    // ever waits while holding another unit's locks, so the sequential
+    // acquisition is already deadlock-free AND a pre-pass would be inert
+    // anyway (its xact locks would die with whichever step transaction ran
+    // it). The pre-pass therefore applies to the caller-trx path only.
+    //
+    // The collected union is a SUPERSET of what the units will lock: reserved
+    // rows contribute their current identity plus every combo-route rewrite
+    // target, and catalog ids resolve through the same services.service_key
+    // lookups the units run. Extra keys only over-serialize a touch; a MISSED
+    // key is what would reopen a mid-hold wait. Single-service conversions
+    // (<2 units) skip the pre-pass entirely — their one sorted key-pair
+    // already conforms to the global order — keeping them behaviorally
+    // identical. Fail-open like the guard: a pre-pass failure degrades to
+    // today's per-unit locking and never blocks the acceptance.
+    if (!seedsInOwnTransaction && !suppressRecurringConversion && !skipAutoSchedule) {
+      try {
+        // SAVEPOINT (knex nested transaction): a pre-pass failure must not
+        // abort the caller's accept transaction, and the advisory xact locks
+        // taken inside survive savepoint release and hold to the outer
+        // commit — the same isolation trick checkActiveSeriesLocked uses.
+        await database.transaction(async (lockTrx) => {
+          const lockUnits = [];
+          const catalogIdByKey = new Map();
+          const catalogIdFor = async (serviceKey) => {
+            if (!serviceKey) return null;
+            if (!catalogIdByKey.has(serviceKey)) {
+              const catalogRow = await lockTrx('services').where({ service_key: serviceKey }).first('id');
+              catalogIdByKey.set(serviceKey, catalogRow?.id || null);
+            }
+            return catalogIdByKey.get(serviceKey);
+          };
+          const addUnit = async (serviceType, catalogServiceKey, knownServiceId = null) => {
+            const serviceId = knownServiceId != null ? knownServiceId : await catalogIdFor(catalogServiceKey);
+            if (!serviceType && serviceId == null) return;
+            lockUnits.push({ customerId, serviceType: serviceType || null, serviceId });
+          };
+          const { remaining, combos, standalone } = combinedScheduling;
+          if (reservationRowsExist) {
+            for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
+            const reservedStart = reservedRows[0] || null;
+            if (reservedStart) {
+              await addUnit(reservedStart.service_type, null, reservedStart.service_id || null);
+              for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
+            }
+          } else {
+            for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
+            for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
+            for (const svc of remaining) {
+              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc));
+            }
+          }
+          if (lockUnits.length > 1) {
+            await RecurringAppointmentSeeder.acquireSeriesCreateLocks(lockTrx, lockUnits);
+          }
+        });
+      } catch (preLockErr) {
+        logger.warn(`[estimate-converter] series-lock pre-pass failed (per-unit locking still applies): ${preLockErr.message}`);
+      }
+    }
 
     if (suppressRecurringConversion) {
       logger.info(
@@ -1577,11 +1663,7 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
-      const reservedRows = await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
-        .whereNotNull('customer_id')
-        .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc');
+      // reservedRows hoisted above the branch (lock pre-pass needs it).
       const reservedStart = reservedRows[0] || null;
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;

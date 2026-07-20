@@ -502,14 +502,7 @@ async function findActiveRecurringSeries(conn, {
 async function checkActiveSeriesLocked(trx, opts = {}) {
   try {
     const matches = await trx.transaction(async (guardTrx) => {
-      const lockKeys = [];
-      if (opts.serviceType) {
-        lockKeys.push(`${opts.customerId}:family:${serviceKeyFor({ service_type: opts.serviceType })}`);
-      }
-      if (opts.serviceId != null) {
-        lockKeys.push(`${opts.customerId}:svc:${opts.serviceId}`);
-      }
-      lockKeys.sort();
+      const lockKeys = seriesCreateLockKeys(opts).sort();
       for (const lockKey of lockKeys) {
         await guardTrx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -522,6 +515,59 @@ async function checkActiveSeriesLocked(trx, opts = {}) {
   } catch (guardError) {
     return { matches: [], guardError };
   }
+}
+
+// The lock keys checkActiveSeriesLocked acquires for one series-creating
+// unit — extracted so the derivation lives in exactly one place (the
+// sorted-union pre-pass below must emit byte-identical keys or it stops
+// covering the per-unit acquisitions).
+function seriesCreateLockKeys({ customerId, serviceId = null, serviceType = null } = {}) {
+  const keys = [];
+  if (serviceType) {
+    keys.push(`${customerId}:family:${serviceKeyFor({ service_type: serviceType })}`);
+  }
+  if (serviceId != null) {
+    keys.push(`${customerId}:svc:${serviceId}`);
+  }
+  return keys;
+}
+
+// Sorted-union pre-acquisition for MULTI-UNIT series creators that hold their
+// locks to a shared outer commit (P1: cross-conversion deadlock).
+//
+// checkActiveSeriesLocked sorts WITHIN one unit's keys, so single-unit
+// creators can never swap-deadlock — but a caller-transaction conversion
+// seeding several units acquires each unit's keys sequentially and holds all
+// of them to the OUTER commit. Two such conversions processing the same
+// families in different unit order each hold one family's locks while
+// waiting on the other's → Postgres aborts one of them (deadlock detected)
+// and the acceptance fails. The fix is the classic total-order discipline:
+// collect EVERY unit's keys up front, sort the deduped union with the same
+// default lexicographic comparator checkActiveSeriesLocked uses, and acquire
+// them once before any unit processes. Each key is then > every key already
+// held, for every creator (single-unit creators' sorted pairs conform to the
+// same global order), so no hold-and-wait cycle can form.
+//
+// The per-unit checkActiveSeriesLocked calls that follow re-acquire keys the
+// pre-pass already holds. pg_advisory_xact_lock is re-entrant within the
+// owning session/transaction — "a lock can be acquired multiple times by its
+// owning process" (PostgreSQL docs, Advisory Locks); transaction-level locks
+// need no matching unlock and release at transaction end — so the re-acquire
+// succeeds immediately without ever waiting, and creates no new wait edges.
+//
+// Acquired directly on the caller's transaction (no savepoint needed — the
+// statement can only fail on connection loss, and callers treat this pass as
+// protective/fail-open like the guard itself). Returns the sorted key list
+// (asserted by the lane tests).
+async function acquireSeriesCreateLocks(conn, units = []) {
+  const keys = [...new Set(units.flatMap((unit) => seriesCreateLockKeys(unit)))].sort();
+  for (const lockKey of keys) {
+    await conn.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-create', lockKey],
+    );
+  }
+  return keys;
 }
 
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
@@ -575,9 +621,11 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 }
 
 module.exports = {
+  acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,
   findActiveRecurringSeries,
+  seriesCreateLockKeys,
   inferRecurringPattern,
   markParentRecurring,
   normalizeRecurringPattern,

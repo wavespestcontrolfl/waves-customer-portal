@@ -30,7 +30,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const { checkActiveSeriesLocked, findActiveRecurringSeries, serviceKeyFor } = require('../services/recurring-appointment-seeder');
+const {
+  acquireSeriesCreateLocks,
+  checkActiveSeriesLocked,
+  findActiveRecurringSeries,
+  seriesCreateLockKeys,
+  serviceKeyFor,
+} = require('../services/recurring-appointment-seeder');
 const { etDateString } = require('../utils/datetime-et');
 
 const bookingSrc = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
@@ -413,6 +419,109 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     );
     expect(seeded).toBe(2);
     expect(state.parents).toHaveLength(2);
+  });
+});
+
+describe('acquireSeriesCreateLocks — sorted-union pre-pass (P1: multi-unit conversion deadlock)', () => {
+  const PEST = { customerId: 5, serviceId: 'cat-1', serviceType: 'Quarterly Pest Control' };
+  const MOSQ = { customerId: 5, serviceId: 'cat-9', serviceType: 'Mosquito Control' };
+
+  test('acquires the DEDUPED union of every unit\'s keys once, in sorted order, whatever the unit order', async () => {
+    const units = [
+      MOSQ,
+      PEST,
+      // Same svc dimension as PEST under a differently-normalized label —
+      // its family key is shared, its svc key duplicates: the union dedupes.
+      { customerId: 5, serviceId: 'cat-1', serviceType: 'General Pest Control Service' },
+    ];
+    const expected = [...new Set(units.flatMap((u) => seriesCreateLockKeys(u)))].sort();
+    // The union lists every dimension of every unit, sorted — the same
+    // canonical (default lexicographic) order checkActiveSeriesLocked sorts
+    // a single unit's keys with, so pre-pass and per-unit acquisitions live
+    // in ONE global total order.
+    expect(expected).toEqual([
+      `5:family:${serviceKeyFor({ service_type: 'Mosquito Control' })}`,
+      `5:family:${serviceKeyFor({ service_type: 'Quarterly Pest Control' })}`,
+      '5:svc:cat-1',
+      '5:svc:cat-9',
+    ].sort());
+    const { db, rawCalls } = makeLockEnv({ parents: [] });
+    let returned;
+    await db.transaction(async (trx) => { returned = await acquireSeriesCreateLocks(trx, units); });
+    expect(returned).toEqual(expected);
+    expect(lockKeysFrom(rawCalls)).toEqual(expected);
+    // Reversed unit order emits the IDENTICAL acquisition sequence.
+    const { db: db2, rawCalls: raw2 } = makeLockEnv({ parents: [] });
+    await db2.transaction((trx) => acquireSeriesCreateLocks(trx, [...units].reverse()));
+    expect(lockKeysFrom(raw2)).toEqual(expected);
+  });
+
+  test('per-unit guards after the pre-pass re-acquire held keys without waiting (pg xact-lock re-entrancy)', async () => {
+    // pg_advisory_xact_lock is re-entrant within the owning transaction (the
+    // env models it: a held key resolves immediately) — so the per-unit
+    // checkActiveSeriesLocked calls inside a pre-passed conversion are
+    // no-op re-acquires, never new wait edges. This completing at all —
+    // inside ONE transaction that already holds every key — is the proof.
+    const { db } = makeLockEnv({ parents: [] });
+    await db.transaction(async (trx) => {
+      await acquireSeriesCreateLocks(trx, [PEST, MOSQ]);
+      const first = await checkActiveSeriesLocked(trx, PEST);
+      expect(first.guardError).toBeNull();
+      expect(first.matches).toEqual([]);
+      const second = await checkActiveSeriesLocked(trx, MOSQ);
+      expect(second.guardError).toBeNull();
+      expect(second.matches).toEqual([]);
+    });
+  });
+
+  test('P1: two multi-service conversions with OPPOSITE unit order both complete — no swap deadlock, one series per family', async () => {
+    // The bug: with a caller-provided trx each unit's locks are held to the
+    // OUTER commit, so [pest, mosquito] vs [mosquito, pest] each held one
+    // family while waiting on the other — in this env (like pg without its
+    // detector) that is a hard hang; in production Postgres aborts one
+    // acceptance. The sorted-union pre-pass serializes the conversions on
+    // their first common key instead, so this test completing IS the fix.
+    const { db, state } = makeLockEnv({ parents: [] });
+    const conversion = (units) => db.transaction(async (trx) => {
+      await acquireSeriesCreateLocks(trx, units); // the fix — remove it and this test deadlocks
+      for (const unit of units) {
+        const { matches, guardError } = await checkActiveSeriesLocked(trx, unit);
+        expect(guardError).toBeNull();
+        if (matches.length === 0) {
+          await trx('scheduled_services').insert({
+            customer_id: unit.customerId, service_type: unit.serviceType,
+            service_id: unit.serviceId, is_recurring: true, recurring_ongoing: true,
+            scheduled_date: FUTURE, status: 'pending',
+          });
+        }
+      }
+    });
+    await Promise.all([conversion([PEST, MOSQ]), conversion([MOSQ, PEST])]);
+    // Each family seeded exactly once across both conversions.
+    expect(state.parents).toHaveLength(2);
+    expect(new Set(state.parents.map((p) => p.service_type)).size).toBe(2);
+  });
+
+  test('estimate-converter wires the pre-pass to the caller-trx path only, before any unit processes (source guard)', () => {
+    const prePass = converterSrc.indexOf('Multi-unit lock-order pre-pass');
+    expect(prePass).toBeGreaterThan(-1);
+    // Caller-trx path only: the self-trx path commits (and releases) per
+    // seeding step, so its sequential acquisition is already deadlock-free —
+    // and a pre-pass there would be inert anyway (xact locks die with the
+    // step transaction that ran it).
+    expect(converterSrc).toContain('if (!seedsInOwnTransaction && !suppressRecurringConversion && !skipAutoSchedule) {');
+    // Savepoint-wrapped: a pre-pass failure can't abort the accept
+    // transaction, while the xact locks survive the savepoint release.
+    expect(converterSrc).toContain('await database.transaction(async (lockTrx) => {');
+    expect(converterSrc).toContain('await RecurringAppointmentSeeder.acquireSeriesCreateLocks(lockTrx, lockUnits);');
+    // Single-service conversions skip the pre-pass — behaviorally identical.
+    expect(converterSrc).toContain('if (lockUnits.length > 1) {');
+    // The pre-pass precedes every seeding branch.
+    const firstBranch = converterSrc.indexOf('if (suppressRecurringConversion) {');
+    expect(firstBranch).toBeGreaterThan(-1);
+    expect(prePass).toBeLessThan(firstBranch);
+    // Fail-open, like the guard itself.
+    expect(converterSrc).toContain('series-lock pre-pass failed (per-unit locking still applies)');
   });
 });
 

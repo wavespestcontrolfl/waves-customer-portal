@@ -21,8 +21,9 @@ const fs = require('fs');
 const path = require('path');
 
 const adminScheduleRouter = require('../routes/admin-schedule');
-const { runRecurringSeriesMaintenance } = adminScheduleRouter._test;
+const { runRecurringSeriesMaintenance, runRecurringAlertAction } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
+const { etDateString } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
@@ -91,6 +92,7 @@ function makeConn(handler, opts = {}) {
     // Advisory lock (SELECT pg_advisory_xact_lock(...)) — nothing to assert on
     // the result; the real lock's serialization is modelled by opts.mutex.
     fn.raw = () => Promise.resolve();
+    fn.fn = { now: () => new Date() }; // knex.fn.now() (alert resolution stamps)
     fn.transaction = (cb) => {
       const exec = () => Promise.resolve().then(() => cb(build(true)));
       // Only top-level transactions serialize on the mutex (= the per-parent
@@ -272,11 +274,12 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
   });
 
   test('alert-route extension registrations run the same terminal re-check (source guard)', () => {
-    // The recurring-alert action route holds no series lock, so its two
-    // spawn loops have the same registration/cancellation window as the
-    // auto-extend wrapper (behavior pinned above via the shared helper).
-    const alertRechecks = src.match(/cancelSpawnedReminderIfVisitTerminal\(db, row\?\.id, 'recurring-alerts'\);/g) || [];
-    expect(alertRechecks.length).toBe(2);
+    // The alert actions now commit their spawns under the maintenance lock
+    // and run addon mirror + reminder registration + the terminal re-check
+    // POST-COMMIT (maintenance pattern) — one loop covers both the extend
+    // and convert_ongoing spawns, and it still closes the commit→
+    // registration cancellation window via the shared helper.
+    expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, row.id, 'recurring-alerts');");
     expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');");
   });
 
@@ -358,10 +361,22 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(inserted[0].scheduled_date).toBe('2026-10-15');
   });
 
-  test('the latest-anchor query pins the cancelled/rescheduled exclusion (source guard)', () => {
-    expect(src).toContain(
-      ".whereNotIn('status', ['cancelled', 'rescheduled'])\n        .orderBy('scheduled_date', 'desc').first();",
-    );
+  test('the latest-anchor query pins the cancelled/rescheduled exclusion — one shared helper, both consumers (source guard)', () => {
+    // The anchor now lives in latestLiveSeriesVisit, consumed by BOTH the
+    // maintenance auto-extend and the alert-action route — so the alert
+    // route can never regrow the unfiltered anchor that pushed manual
+    // extensions a cadence past a cancelled future visit.
+    const helper = src.indexOf('function latestLiveSeriesVisit(');
+    const helperEnd = src.indexOf('async function loadActiveSeriesDates(');
+    expect(helper).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helper);
+    const helperBody = src.slice(helper, helperEnd);
+    expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
+    expect(helperBody).toContain(".orderBy('scheduled_date', 'desc')");
+    expect(helperBody).toContain(".where('is_recurring', true)");
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(2);
+    // The occupied-dates preload is shared the same way.
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(2);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
@@ -500,5 +515,277 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 
   test('schedule status route still runs the maintenance after completion', () => {
     expect(src).toContain('await runRecurringSeriesMaintenance(db, svc);');
+  });
+});
+
+// Stateful scenario for the alert-action tests: series rows, the parent's
+// recurring_ongoing flag, and the alert row all live in shared mutable state,
+// and the handler answers the anchor / occupied-dates / upcoming-count
+// queries DB-honestly (whereNotIn + status/date filters applied) — so a
+// second run sees exactly what the first committed. Dates live in 2098 so
+// the honest today-or-later upcoming math never rots.
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null } = {}) {
+  const state = {
+    parent: {
+      id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_ongoing: false, status: 'completed', scheduled_date: '2098-01-15',
+      window_start: '08:00', window_end: '10:00',
+      service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
+      estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
+      create_invoice_on_complete: false,
+      ...parentOverrides,
+    },
+    alert: alertRow ? { ...alertRow } : null,
+    insertedVisits: [],
+    auditInserts: [],
+    activityInserts: [],
+    flagWrites: [],
+  };
+  const liveRows = () => [
+    ...seriesRows,
+    ...state.insertedVisits.map((v) => ({ scheduled_date: v.scheduled_date, status: v.status })),
+  ];
+  const today = etDateString();
+  const upcomingCount = () => liveRows()
+    .filter((r) => ['pending', 'confirmed'].includes(r.status) && r.scheduled_date >= today)
+    .length;
+  const statusVisible = (calls, rows) => {
+    const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
+    return notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+  };
+  const handler = ({ table, calls, op, data }) => {
+    if (table === 'scheduled_services') {
+      if (op === 'columnInfo') return COLS;
+      if (op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount()) };
+        if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: !!state.parent.recurring_ongoing };
+        if (firstCall[1] === 'create_invoice_on_complete') return undefined;
+        // Post-registration terminal re-check: visit still live.
+        if (firstCall[1] === 'status') return { status: 'pending' };
+        if (calls.some((c) => c[0] === 'orderBy')) {
+          // DB-honest anchor: honor the status filter, then latest date — so
+          // these tests fail if the shared filtered anchor is dropped again.
+          const sorted = statusVisible(calls, liveRows()).map((r) => r.scheduled_date).sort();
+          return sorted.length ? { scheduled_date: sorted[sorted.length - 1] } : undefined;
+        }
+        return { ...state.parent };
+      }
+      if (op === 'await') {
+        const update = calls.find((c) => c[0] === 'update');
+        if (update) {
+          state.flagWrites.push(calls);
+          if (update[1] && update[1].recurring_ongoing === false) {
+            let cleared = 0;
+            if (state.parent.recurring_ongoing) { state.parent.recurring_ongoing = false; cleared++; }
+            for (const v of state.insertedVisits) {
+              if (v.recurring_ongoing) { v.recurring_ongoing = false; cleared++; }
+            }
+            return cleared;
+          }
+          if (update[1] && update[1].recurring_ongoing === true) { state.parent.recurring_ongoing = true; return 1; }
+          return 1;
+        }
+        if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+          return statusVisible(calls, liveRows()).map((r) => ({ scheduled_date: r.scheduled_date }));
+        }
+        return [];
+      }
+      if (op === 'insertReturning' || op === 'insert') {
+        const row = { id: 900 + state.insertedVisits.length, ...data };
+        state.insertedVisits.push(data);
+        return op === 'insertReturning' ? [row] : [row.id];
+      }
+    }
+    if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+    if (table === 'recurring_plan_alerts') {
+      if (op === 'first') return state.alert ? { ...state.alert } : null;
+      if (op === 'await') {
+        const update = calls.find((c) => c[0] === 'update');
+        if (update && state.alert) { Object.assign(state.alert, update[1]); return 1; }
+        return 1;
+      }
+      if (op === 'insert' || op === 'insertReturning') { state.auditInserts.push(data); return [1]; }
+    }
+    if (table === 'activity_log') { state.activityInserts.push(data); return [1]; }
+    return null;
+  };
+  return { state, handler };
+}
+
+describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('P0: two concurrent extend clicks on the same alert insert exactly ONE set of visits — the loser no-ops on the resolved alert', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-01-15', status: 'completed' },
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+      ],
+      alertRow: { id: 55, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    // Shared mutex = the per-parent maintenance advisory lock: the loser's
+    // transaction re-reads the alert AFTER the winner committed its inserts
+    // and stamped resolved_at, and no-ops instead of double-inserting.
+    const mutex = { tail: Promise.resolve() };
+    const conn = makeConn(handler, { mutex });
+    const [a, b] = await Promise.all([
+      runRecurringAlertAction(conn, { idParam: '55', action: 'extend', count: 1, adminUserId: 'admin-1' }),
+      runRecurringAlertAction(conn, { idParam: '55', action: 'extend', count: 1, adminUserId: 'admin-1' }),
+    ]);
+    expect(state.insertedVisits).toHaveLength(1);
+    expect(state.insertedVisits[0]).toMatchObject({
+      recurring_parent_id: 10, is_recurring: true, status: 'pending',
+    });
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    const bodies = [a.body, b.body];
+    expect(bodies.filter((x) => x.created === 1)).toHaveLength(1);
+    expect(bodies.filter((x) => x.alreadyResolved && x.created === 0)).toHaveLength(1);
+    expect(state.alert.resolved_action).toBe('extend');
+    // Exactly one reminder registered (post-commit), for the one insert.
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledTimes(1);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      900, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
+      'recurring_alert_action', { sendConfirmation: false },
+    );
+  });
+
+  test('P0: let_lapse on an exhausted ONGOING plan clears recurring_ongoing series-wide in the locked trx — and a later stale completion cannot re-extend or re-bill', async () => {
+    const seriesRows = [
+      { scheduled_date: '2098-01-15', status: 'completed' },
+      { scheduled_date: '2098-04-15', status: 'completed' },
+      { scheduled_date: '2098-07-15', status: 'completed' },
+    ];
+    // Control: with the flag still set, completing a stale retained visit
+    // DOES auto-extend — this is the re-bill chain let_lapse must disarm.
+    const armed = alertActionScenario({ parentOverrides: { recurring_ongoing: true }, seriesRows });
+    await runRecurringSeriesMaintenance(makeConn(armed.handler), {
+      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15',
+    });
+    expect(armed.state.insertedVisits).toHaveLength(1);
+
+    // let_lapse (derived ongoing_plan_exhausted id) stops the plan…
+    const { state, handler } = alertActionScenario({ parentOverrides: { recurring_ongoing: true }, seriesRows });
+    const conn = makeConn(handler);
+    const out = await runRecurringAlertAction(conn, { idParam: 'derived-10', action: 'let_lapse', count: undefined, adminUserId: 'admin-1' });
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ success: true, action: 'let_lapse', created: 0 });
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.parent.recurring_ongoing).toBe(false);
+    // …series-wide (parent OR children) and only rows still flagged, in the
+    // same locked transaction as the alert resolution.
+    const clear = state.flagWrites.find((calls) => calls.some((c) => c[0] === 'update' && c[1] && c[1].recurring_ongoing === false));
+    expect(clear).toBeDefined();
+    expect(clear).toEqual(expect.arrayContaining([
+      ['whereFn', [['where', 'id', 10], ['orWhere', 'recurring_parent_id', 10]]],
+      ['where', 'recurring_ongoing', true],
+    ]));
+    // Resolution audit row + the plan-stop activity stamp.
+    expect(state.auditInserts).toHaveLength(1);
+    expect(state.auditInserts[0]).toMatchObject({ recurring_parent_id: 10, resolved_action: 'let_lapse' });
+    expect(state.activityInserts).toHaveLength(1);
+    expect(state.activityInserts[0]).toMatchObject({ action: 'recurring_plan_stopped', customer_id: 5 });
+
+    // …so the derived exhausted scan (pinned above: requires
+    // recurring_ongoing=true) can no longer resurrect the alert, and the
+    // stale completion now takes the FIXED branch: an alert at most, never a
+    // fresh billable visit.
+    await runRecurringSeriesMaintenance(makeConn(handler), {
+      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15',
+    });
+    expect(state.insertedVisits).toHaveLength(0);
+  });
+
+  test('let_lapse on a FIXED plan stays a pure alert-resolve (no flag rows matched, no stop stamp)', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [{ scheduled_date: '2098-07-15', status: 'completed' }],
+      alertRow: { id: 56, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '56', action: 'let_lapse', count: undefined, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_action).toBe('let_lapse');
+    // The clear matched zero rows (recurring_ongoing already false), so no
+    // plan-stop activity line is written — fixed plans have no auto-extend
+    // exposure to disarm (the maintenance fixed branch only inserts alerts).
+    expect(state.activityInserts).toHaveLength(0);
+  });
+
+  test('P1: a cancelled FUTURE visit never anchors the alert-route extension — the cancelled slot is refilled', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-01-15', status: 'completed' },
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+        // Before the fix the alert route's anchor had no status filter, so
+        // this row anchored the extension and pushed it to 2099-01-15 — a
+        // quarter-long gap instead of refilling the cancelled slot.
+        { scheduled_date: '2098-10-15', status: 'cancelled' },
+      ],
+      alertRow: { id: 57, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '57', action: 'extend', count: 1, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(out.body.created).toBe(1);
+    expect(state.insertedVisits).toHaveLength(1);
+    expect(state.insertedVisits[0].scheduled_date).toBe('2098-10-15');
+  });
+
+  test('a series cancelled before the click is refused under the lock (409), inserting nothing', async () => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [{ scheduled_date: '2098-07-15', status: 'cancelled' }],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test('derived ids recompute the derived-scan condition under the lock — a concurrent refill makes the second click a no-op', async () => {
+    // Ongoing plans derive (ongoing_plan_exhausted) only at ZERO upcoming
+    // visits: a pending future visit — e.g. a concurrent click's insert or
+    // the auto-extend — means the alert condition is gone.
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { recurring_ongoing: true },
+      seriesRows: [
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-10-15', status: 'pending' },
+      ],
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: 'derived-10', action: 'extend', count: 4, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ success: true, created: 0, alreadyResolved: true });
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.auditInserts).toHaveLength(0);
+  });
+
+  test('alert actions run under the SAME per-parent maintenance lock, every dependent read after it (source guard)', () => {
+    const core = src.indexOf('async function runRecurringAlertAction(');
+    const routePost = src.indexOf("router.post('/recurring-alerts/:id/action'");
+    expect(core).toBeGreaterThan(-1);
+    expect(routePost).toBeGreaterThan(core);
+    const body = src.slice(core, routePost);
+    const lock = body.indexOf('await acquireRecurringSeriesMaintenanceLock(trx, parentId);');
+    expect(lock).toBeGreaterThan(-1);
+    // Anchor, occupied-dates preload, and the insert loops all sit after the
+    // lock inside the locked transaction — nothing the writes depend on is
+    // read unlocked anymore.
+    for (const marker of [
+      'await latestLiveSeriesVisit(trx, parentId)',
+      'await loadActiveSeriesDates(trx, parentId)',
+      "await trx('scheduled_services').insert(data).returning('*')",
+    ]) {
+      expect(body.indexOf(marker)).toBeGreaterThan(lock);
+    }
+    // The route handler delegates to the locked core.
+    expect(src.slice(routePost)).toContain('await runRecurringAlertAction(db, {');
+    // Byte-identical key derivation with the maintenance wrapper + dispatch
+    // cancel lives in the shared helper.
+    expect(src).toContain("['recurring-series-maintenance', String(parentId)],");
+    expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(2);
   });
 });
