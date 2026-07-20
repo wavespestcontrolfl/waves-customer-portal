@@ -973,6 +973,118 @@ describe('slot reservation helpers', () => {
     // The graduation was refused — the row was never updated.
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
+
+  // ── preLockedDate: the accept-txn pre-lock handshake ─────────────────────
+  // The estimate-accept txn takes rung 1 on the hold's date as its FIRST
+  // statement (before its estimate/customer row locks) and passes the locked
+  // key down. commitReservation must (a) re-take the matching key — a
+  // reentrant no-op for the owning txn — and (b) NEVER acquire a different
+  // date's key mid-txn when the hold moved: that unsorted second key is the
+  // exact inversion the ordering contract bans.
+
+  function makeCommitHarness({ preReadDate, rowDate }) {
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ scheduled_date: preReadDate }),
+    };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'scheduled-123',
+        source_estimate_id: 'estimate-456',
+        scheduled_date: rowDate,
+        window_start: '09:00:00',
+        window_end: '10:00:00',
+        technician_id: 'tech-1',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      }),
+    };
+    const updateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123', customer_id: 'customer-1' }]),
+    };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, makeGlobalProbeBuilder([]), updateBuilder];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    const advisoryCalls = () => trx.raw.mock.calls
+      .filter((c) => String(c[0]).includes('pg_advisory_xact_lock'))
+      .map((c) => c[1]);
+    return { trx, scheduledBuilders, reservationBuilder, updateBuilder, advisoryCalls };
+  }
+
+  test('commitReservation with a MATCHING preLockedDate proceeds — the re-acquisition is the reentrant no-op', async () => {
+    // Null profile keeps the harness narrow (no tech-scoped conflict query);
+    // the pre-lock handshake is what is under test.
+    estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce(null);
+    const { trx, updateBuilder, advisoryCalls } = makeCommitHarness({
+      preReadDate: '2027-05-20',
+      rowDate: '2027-05-20',
+    });
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      preLockedDate: '2027-05-20',
+      trx,
+    })).resolves.toEqual({ id: 'scheduled-123', customer_id: 'customer-1' });
+
+    // The key is still taken here (unconditional — pg advisory xact locks
+    // stack for the owning txn), and it is the caller's exact key.
+    expect(advisoryCalls()).toEqual([['slot-reserve', 'occupancy:2027-05-20']]);
+    expect(updateBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'customer-1',
+      reservation_expires_at: null,
+    }));
+  });
+
+  test('commitReservation with a STALE preLockedDate (hold moved dates) fails RESERVATION_EXPIRED without taking ANY lock', async () => {
+    const { trx, scheduledBuilders, reservationBuilder, advisoryCalls } = makeCommitHarness({
+      preReadDate: '2027-05-21', // moved after the accept txn pre-locked 05-20
+      rowDate: '2027-05-21',
+    });
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      preLockedDate: '2027-05-20',
+      trx,
+    })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
+
+    // The caller holds occupancy:2027-05-20 — acquiring 2027-05-21 here,
+    // mid-txn and unsorted, would open the two-key inversion. NO advisory
+    // lock was taken, and the row was never even FOR UPDATE'd (the throw
+    // fires from the unlocked pre-read).
+    expect(advisoryCalls()).toEqual([]);
+    expect(reservationBuilder.forUpdate).not.toHaveBeenCalled();
+    expect(scheduledBuilders).toHaveLength(3); // only the pre-read builder was consumed
+  });
+
+  test('commitReservation re-checks the LOCKED row against the pre-read date (moved between read and FOR UPDATE) — RESERVATION_EXPIRED, never a second key', async () => {
+    const { trx, scheduledBuilders, advisoryCalls } = makeCommitHarness({
+      preReadDate: '2027-05-20',
+      rowDate: '2027-05-21', // moved between the unlocked pre-read and the row lock
+    });
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx,
+    })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
+
+    // Exactly the pre-read date's key was taken — the moved-to date's key
+    // never was — and the commit never proceeded past the re-check.
+    expect(advisoryCalls()).toEqual([['slot-reserve', 'occupancy:2027-05-20']]);
+    expect(scheduledBuilders).toHaveLength(2); // probe + update never consumed
+  });
 });
 
 describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {

@@ -708,7 +708,17 @@ async function reserveSlot({
  * Intended to run inside the accept
  * handler's existing transaction — pass trx explicitly when doing so.
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, trx? }
+ * When the caller's transaction pre-acquired this hold's rung-1 date lock at
+ * its own start (the estimate-accept txn does — see the ORDERING CONTRACT in
+ * scheduling/occupancy.js), it passes the key it locked as `preLockedDate`.
+ * The unlocked pre-read below is then RE-CHECKED against it: a hold that
+ * moved dates in between fails into RESERVATION_EXPIRED instead of this
+ * function acquiring the new date's key mid-txn (an unsorted second date
+ * key — the exact inversion shape the contract bans). When the dates match,
+ * the acquisition below is a reentrant no-op (pg advisory xact locks are
+ * re-acquirable by the owning transaction).
+ *
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -720,6 +730,7 @@ async function commitReservation({
   serviceMode = 'recurring',
   selectedFrequency = '',
   durationMinutes,
+  preLockedDate = null,
   trx,
 }) {
   // Body is shared between the "caller already has a txn" path (use it) and
@@ -746,6 +757,11 @@ async function commitReservation({
     // RESERVATION_EXPIRED recovery the accept flow already handles (the
     // customer re-picks a time) rather than taking a second date lock and
     // opening a two-key inversion.
+    //
+    // When handed the estimate-accept transaction, that txn ALREADY holds
+    // this key: it pre-acquires rung 1 as its first statements — before its
+    // estimates UPDATE / customers insert take row locks — and passes the
+    // locked key down as preLockedDate (checked against the pre-read below).
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('scheduled_date');
@@ -755,6 +771,21 @@ async function commitReservation({
       throw err;
     }
     const lockedDate = dateOnly(preRow.scheduled_date);
+    // Caller pre-locked rung 1 (the accept txn, at its start, before its
+    // estimate/customer row locks): if the hold moved dates between the
+    // caller's unlocked read and now, the caller holds the WRONG key —
+    // and acquiring the moved-to date's key here, mid-txn and unsorted,
+    // would open the two-key inversion the contract's read→lock→re-check
+    // pattern exists to prevent. Fail into the same RESERVATION_EXPIRED
+    // recovery the accept flow already handles (the customer re-picks a
+    // time) WITHOUT taking any lock.
+    if (preLockedDate && lockedDate !== dateOnly(preLockedDate)) {
+      const err = new Error('reservation moved off the pre-locked date');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    // Reentrant no-op when the caller pre-locked this same key; kept
+    // unconditional so the standalone path still takes rung 1 first.
     if (lockedDate) await acquireOccupancyLock(client, lockedDate);
 
     const row = await client('scheduled_services')

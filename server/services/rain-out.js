@@ -571,57 +571,56 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // there fires its reply-alt SMS first.
   const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
 
-  // Exclusion is OUTCOME-BASED, never anticipatory. A batch member's row
-  // leaves the rebooker's occupancy probe only once its OLD position is
-  // provably out of play:
-  //   (a) the row being moved RIGHT NOW — the probe must not clash a move
-  //       against that row's own pre-move position; and
-  //   (b) members whose moves have already COMMITTED — their old windows
-  //       are vacated, and their rows now sit at new positions the batch's
-  //       order math keeps consistent with every later member's target
-  //       (this also preserves the batch's final-state semantics for stops
-  //       that already overlapped each other before the rain-out).
-  // Members NOT yet processed are NOT excluded. Blanket-excluding the whole
-  // batch up front opened a race: another actor (customer /reschedule link,
-  // dispatch board) could concurrently move a to-be-processed member INTO
-  // an earlier member's target window — that freshly COMMITTED row was
-  // invisible to the earlier move's probe purely because its id sat in the
-  // exclusion set, and dropping the id later (when the member's own move
-  // failed) could not undo the already-committed overlap. The rebooker's
-  // own gates are the last line and they work only on non-excluded rows:
-  // its tech-blind probe runs under the rung-1 date lock, so a member moved
-  // by another txn IS visible at its committed new position, and its status
-  // CAS re-checks the moving row's own state at write time.
-  //
-  // Why the not-yet-processed members' OLD rows need no exclusion — the
-  // ordering proof, per batch shape:
-  //   - Day move (target.date differs from the anchor's date): every
-  //     unprocessed member still sits on the OLD date, and the occupancy
-  //     probe is date-scoped to the TARGET date — those rows cannot match
-  //     at all. Members already landed on the target date are covered by
-  //     (b) explicitly.
-  //   - Same-day forward push (delta > 0, processed tail-first): the
-  //     unprocessed members sit EARLIER in the route order, and the current
-  //     member's target is its own window shifted LATER by delta — moving
-  //     AWAY from every earlier stop's window, so no overlap when the
-  //     route's stops run in time order without overlapping one another.
+  // Exclusion = ONLY the row being moved, per move. Its own pre-move
+  // position must not clash against its own target (the rebooker also
+  // self-excludes the moving row; passing it keeps the contract explicit).
+  // EVERY other row stays visible to the rebooker's occupancy probe —
+  // including batch members whose moves already COMMITTED:
+  //   - An already-moved member's NEW position is real committed occupancy.
+  //     Excluding it (the old accumulated moved-ids set) hid the race where
+  //     another actor (customer /reschedule link, dispatch board)
+  //     concurrently RE-MOVES that committed row INTO a later member's
+  //     target window — the later probe sailed past the committed overlap
+  //     purely because the id sat in the exclusion set, and no later
+  //     bookkeeping could undo the double-book. If a moved member's
+  //     committed position genuinely overlaps a later member's target, that
+  //     is a REAL conflict → SLOT_TAKEN → the per-member failure path
+  //     below.
+  //   - A member still awaiting its move keeps its OLD row visible for the
+  //     same reason: another actor may have already re-committed it
+  //     anywhere. The rebooker's own gates work only on non-excluded rows:
+  //     its tech-blind probe runs under the rung-1 date lock, so any
+  //     committed position IS visible to it, and its status CAS re-checks
+  //     the moving row's own state at write time.
+  // Self-blocking is impossible in the proven shapes because the batch's
+  // OWN targets never overlap one another — the ordering proof, per batch
+  // shape:
+  //   - Day move (target.date differs from the anchor's date): every member
+  //     keeps its own window on the target date, so pairwise non-overlap on
+  //     the old date carries over verbatim to members already landed there;
+  //     members not yet moved still sit on the OLD date, which the
+  //     TARGET-date-scoped probe cannot match at all.
+  //   - Same-day forward push (delta > 0, processed tail-first): every
+  //     member's target is its own window shifted LATER by the same delta —
+  //     a time-ordered, non-overlapping route stays non-overlapping after
+  //     the uniform shift (moved members' new positions included), and the
+  //     current member's target moves AWAY from every not-yet-moved earlier
+  //     stop's old window.
   //   - Same-day backward pull (delta < 0, processed head-first): the
-  //     mirror image — unprocessed members sit LATER, the target shifts
-  //     EARLIER, away from them.
+  //     mirror image.
   //   - Windowless stops (window_start NULL) are inert to the occupancy
-  //     predicate (scheduling/occupancy.js header), so an unprocessed
-  //     windowless sibling can never block anything.
+  //     predicate (scheduling/occupancy.js header) wherever they sit.
   // The shapes the order math does NOT cover — stops whose current windows
   // already overlap each other, a manual route_order that inverts time
   // order (sort position no longer implies time position), or a same-day
   // windowless sibling AS THE MOVER (its fallback target is the anchor's
   // window, not an order-preserving shift of its own): there a target CAN
-  // land on an unprocessed sibling's old window, the probe now SEES that
-  // row, and the move fails SLOT_TAKEN into the existing per-member
-  // failure path below (recorded on the sheet; the tech re-runs the
-  // straggler). Deliberate: a loud partial failure beats the silent
-  // double-book the blanket pre-exclusion risked.
-  const movedIds = [];
+  // land on another member's row — old position or committed new one — the
+  // probe SEES it, and the move fails SLOT_TAKEN into the existing
+  // per-member failure path below (recorded on the sheet; the tech re-runs
+  // the straggler). Deliberate, and deliberately LOUD: the old exclusion
+  // silently recreated a pre-overlapped pair's overlap at the new
+  // positions; now the later member fails visibly instead.
   const results = [];
   // Shared across the whole rain-out: the first slow NWS pair degrades
   // forecast decoration for every remaining stop's SMS.
@@ -646,26 +645,22 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     try {
-      // excludeServiceIds = the current row + the members already VACATED
-      // (see the exclusion rationale above the loop). The rebooker also
-      // self-excludes the moving row; passing it keeps the contract
-      // explicit. A sibling still awaiting its move is deliberately NOT in
-      // this list — its old row (or a position another actor concurrently
-      // committed it to) must stay visible to the rebooker's occupancy
-      // probe.
+      // excludeServiceIds = the CURRENT row only (see the exclusion
+      // rationale above the loop). Every other member's row — old position
+      // or committed new one — stays visible to the rebooker's occupancy
+      // probe: an already-committed position is real occupancy, and hiding
+      // it let another actor re-move a committed member into a later
+      // member's target unseen.
       await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
         allowLive: true,
-        excludeServiceIds: [job.id, ...movedIds],
+        excludeServiceIds: [job.id],
       });
-      // COMMITTED: this member's old window is vacated — later members'
-      // probes may ignore its row from here on.
-      movedIds.push(job.id);
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
       // of a bulk rain-out — record and continue. This member did NOT move:
-      // it never entered movedIds, so every later member's occupancy check
-      // keeps seeing its row at the old position and refuses to schedule on
-      // top of it.
+      // its row is still live at its old position and (like every member's
+      // row, moved or not) stays visible to every later member's occupancy
+      // probe, which refuses to schedule on top of it.
       logger.warn(`[rain-out] reschedule failed for ${job.id}: ${err.message}`);
       results.push({ id: job.id, ok: false, error: err.message, statusCode: err.statusCode || 500 });
       continue;

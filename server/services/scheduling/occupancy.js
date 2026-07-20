@@ -95,14 +95,20 @@ const DEFAULT_DURATION_MINUTES = 60;
 // moved in between, the held key is wrong; fail into the writer's existing
 // recovery (commitReservation throws RESERVATION_EXPIRED into the accept
 // flow's re-pick path) instead of taking a second date key mid-txn.
-// Known, deliberate residual: the estimate-accept txn row-locks
-// estimates/customers/leads long before it reaches rung 1 inside
-// commitReservation (the same property the call-recording exemption below
-// exists for). Its only inverted partner is a concurrent reserveSlot for
-// the SAME estimate whose slot is on the SAME date as the hold being
-// accepted (rung 1 held, waiting on that estimate row) — a same-customer
-// two-tab race Postgres resolves by deadlock-aborting one side, accepted
-// as narrow rather than restructuring the accept route's txn.
+// The estimate-accept txn (routes/estimate-public.js PUT /:token/accept)
+// follows the same pattern whenever it will graduate a held slot: its FIRST
+// statements read the hold row's scheduled_date UNLOCKED and take rung 1 —
+// BEFORE the estimates UPDATE / customers insert row locks that txn takes —
+// then pass the locked key down as commitReservation's preLockedDate.
+// commitReservation re-checks its own unlocked pre-read against that key
+// and fails a moved hold into RESERVATION_EXPIRED without acquiring the new
+// date's key; its acquisition of the matching key is a reentrant no-op.
+// This closed the former deliberate residual where the accept txn reached
+// rung 1 only inside commitReservation, after those row locks — deadlocking
+// against a concurrent reserveSlot (rung 1 held, waiting on the estimate
+// FOR UPDATE) and killing a customer acceptance as an unmapped 500. The
+// accept route additionally maps a residual in-txn deadlock abort
+// (PG 40P01) to its retryable 409 conflict shape.
 //
 // WHY EVERY BLOCKING WRITER MUST TAKE RUNG 1 — not just the tech-blind ones:
 // findConflictingVisits is GLOBAL but reads COMMITTED rows only. A writer that
@@ -157,7 +163,11 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   services/slot-reservation.js commitReservation  1
 //     Keys rung 1 off an UNLOCKED read of the hold row's date; its
 //     FOR UPDATE follows the lock, and a date moved in between fails into
-//     RESERVATION_EXPIRED (the row-lock rule above).
+//     RESERVATION_EXPIRED (the row-lock rule above). Inside the estimate-
+//     accept txn the SAME key was already pre-locked at txn start and
+//     passed as preLockedDate — a pre-read/preLockedDate mismatch fails
+//     into RESERVATION_EXPIRED before any lock, and the matching-key
+//     acquisition is a reentrant no-op.
 //     + probe with includeHolds:false excluding its own hold row — runs even
 //     when no accept-time duration resolved (the narrow tech-scoped check is
 //     skipped then, but graduation still commits real occupancy).
@@ -173,8 +183,11 @@ const DEFAULT_DURATION_MINUTES = 60;
 // unassigned case is worse: commitReservation's own conflict query drops its
 // technician predicate when the row has no tech, making it a tech-blind
 // writer outright. Both now take rung 1 first. commitReservation is often
-// handed the estimate-accept transaction (routes/estimate-public.js), which
-// takes no scheduling locks of its own, so rung 1 is still that txn's first.
+// handed the estimate-accept transaction (routes/estimate-public.js) — that
+// txn pre-acquires rung 1 as its FIRST statement (before its estimate and
+// customer row locks) and hands the key down as preLockedDate, so rung 1
+// still precedes every row lock in that txn and commitReservation's own
+// acquisition is a reentrant no-op.
 //
 // EXEMPT — read-only or occupancy-shrinking, no lock required:
 //   routes/booking.js buildBookingAvailability, availability.getAvailableSlots,
@@ -186,11 +199,13 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   services/call-recording-processor.js booking txn — the ONE writer whose
 //     COMMIT is exempt by owner rule (book + flag, never block), so its
 //     in-txn conflict read stays advisory and lock-free. Deliberately so:
-//     that txn's post-insert work row-locks leads/customers/estimates, and
-//     the estimate-accept txn locks those same tables BEFORE taking rung 1
-//     inside commitReservation — holding rung 1 across the call txn would
-//     invert that order (deadlock-abort risk to a booking that must never
-//     fail on a lock). Reliable DETECTION is restored post-commit: a
+//     taking rung 1 means WAITING on whoever holds the date, and this
+//     booking must never fail or stall on a lock. (Historically the
+//     exemption also dodged a real inversion — the estimate-accept txn used
+//     to row-lock these same leads/customers/estimates tables before
+//     reaching rung 1 inside commitReservation; that residual is closed by
+//     the accept txn's rung-1 pre-lock above, but the owner rule stands on
+//     its own.) Reliable DETECTION is restored post-commit: a
 //     dedicated short rung-1 transaction (date locks — one per distinct
 //     date, sorted ascending — + one findConflictingVisits read PER ROW the
 //     call created, the primary and its follow-up child each against its
