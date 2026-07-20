@@ -180,10 +180,13 @@ describe('reschedule_appointment', () => {
 
     expect(result).toMatchObject({ success: true, new_date: '2099-01-15', old_date: '2026-07-01' });
     const payload = updateChain.update.mock.calls[0][0];
-    expect(payload).toMatchObject({ scheduled_date: '2099-01-15', window_start: '10:00' });
-    expect(payload.track_token_expires_at).toMatchObject({ bindings: ['2099-01-15', '10:00:00'] });
-    // Non-live row: no lifecycle rewind fields.
+    // Start moved 09:00→10:00; the 60-min window length is preserved, so the
+    // new end is 11:00 — not the stale stored 10:00 that would collapse it.
+    expect(payload).toMatchObject({ scheduled_date: '2099-01-15', window_start: '10:00', window_end: '11:00' });
+    expect(payload.track_token_expires_at).toMatchObject({ bindings: ['2099-01-15', '11:00'] });
+    // Non-live row: no lifecycle rewind fields, no status flip.
     expect(payload).not.toHaveProperty('track_state');
+    expect(payload).not.toHaveProperty('status');
 
     expect(logChain.insert.mock.calls[0][0]).toMatchObject({
       scheduled_service_id: 'svc-1',
@@ -196,7 +199,7 @@ describe('reschedule_appointment', () => {
     });
   });
 
-  test('an en_route row gets the rebooker LIVE_LIFECYCLE_RESET applied', async () => {
+  test('an en_route row gets the rebooker LIVE_LIFECYCLE_RESET applied AND is flipped to confirmed', async () => {
     const updateChain = chain();
     wireDb({
       scheduled_services: [
@@ -213,6 +216,7 @@ describe('reschedule_appointment', () => {
 
     expect(result.success).toBe(true);
     expect(updateChain.update.mock.calls[0][0]).toMatchObject({
+      // Tracker fields rewound...
       track_state: 'scheduled',
       en_route_at: null,
       arrived_at: null,
@@ -220,7 +224,52 @@ describe('reschedule_appointment', () => {
       check_in_time: null,
       track_sms_sent_at: null,
       arrival_sms_sent_at: null,
+      // ...and the status is landed back on 'confirmed' in the SAME update,
+      // so the moved row is never left en_route/on_site on a future date.
+      status: 'confirmed',
     });
+  });
+
+  test('a start-only move keeps the original stored window_end when no new time is given', async () => {
+    // No new_time_window: window stays 09:00:00–10:00:00, so the token expiry
+    // and log must use the original end, not a collapsed/derived one.
+    const updateChain = chain();
+    const logChain = chain({ insert: jest.fn().mockResolvedValue() });
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [logChain],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15',
+    });
+
+    expect(result.success).toBe(true);
+    const payload = updateChain.update.mock.calls[0][0];
+    expect(payload).toMatchObject({ window_start: '09:00:00', window_end: '10:00:00' });
+    expect(payload.track_token_expires_at).toMatchObject({ bindings: ['2099-01-15', '10:00:00'] });
+    expect(logChain.insert.mock.calls[0][0]).toMatchObject({ new_window: '09:00:00-10:00:00' });
+  });
+
+  test('rejects an impossible calendar date (2099-02-31) with a clear error and never moves the row', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-02-31',
+    });
+    // Strict round-trip validation: JS Date would normalize this to March 3;
+    // it must be refused with the clear tool error, and no UPDATE fires.
+    expect(result.error).toMatch(/valid YYYY-MM-DD/);
+    expect(updateChain.update).not.toHaveBeenCalled();
   });
 
   test('a failed reschedule_log insert never fails the already-committed move', async () => {

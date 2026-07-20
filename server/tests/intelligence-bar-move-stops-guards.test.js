@@ -70,6 +70,18 @@ test('refuses a past target date (ET)', async () => {
   expect(db).not.toHaveBeenCalled();
 });
 
+test('refuses an impossible calendar date (2099-02-31) before touching the DB', async () => {
+  // A shape-only regex passed 2099-02-31 / 2099-99-99 straight to the DATE
+  // update (raw PG cast error). The shared strict validator rejects them.
+  for (const bad of ['2099-02-31', '2099-99-99', '2099-13-01']) {
+    const result = await executeScheduleTool('move_stops_to_day', {
+      service_ids: ['svc-1'], new_date: bad, confirmed: true,
+    });
+    expect(result.error).toMatch(/valid YYYY-MM-DD/);
+  }
+  expect(db).not.toHaveBeenCalled();
+});
+
 test('all-terminal selection errors instead of resurrecting finished visits', async () => {
   db.mockImplementation(() => chain({
     select: jest.fn().mockResolvedValue([stop('svc-1', 'completed'), stop('svc-2', 'cancelled')]),
@@ -111,7 +123,8 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
   expect(result).toMatchObject({ success: true, moved_count: 2, new_date: '2099-01-15' });
   expect(result.skipped_terminal).toEqual([{ id: 'svc-done', status: 'completed' }]);
 
-  // First update (en_route row) carries the live-lifecycle rewind.
+  // First update (en_route row) carries the live-lifecycle rewind AND is
+  // landed back on 'confirmed' — never left live on a future date.
   expect(updates[0].update.mock.calls[0][0]).toMatchObject({
     scheduled_date: '2099-01-15',
     track_state: 'scheduled',
@@ -119,9 +132,11 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
     arrived_at: null,
     track_sms_sent_at: null,
     arrival_sms_sent_at: null,
+    status: 'confirmed',
   });
-  // Second update (confirmed row) does NOT.
+  // Second update (confirmed row) does NOT rewind or restamp status.
   expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('track_state');
+  expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('status');
 
   // One audit row per moved stop, rebooker conventions.
   expect(logInserts[0].insert.mock.calls[0][0]).toMatchObject({

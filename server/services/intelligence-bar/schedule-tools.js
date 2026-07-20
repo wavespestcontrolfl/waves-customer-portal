@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validScheduleDate } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 
 const SCHEDULE_TOOLS = [
@@ -396,9 +396,11 @@ async function moveStopsToDay(input) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
 
   // scheduled_date is a plain DATE column holding ET calendar dates — a
-  // garbage or past target moves stops where no upcoming query finds them.
-  const dateStr = String(newDate || '').split('T')[0];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || dateStr < etDateString()) {
+  // garbage, impossible (2099-02-31), or past target moves stops where no
+  // upcoming query finds them, or throws a raw PG cast error. Shared strict
+  // validator: a shape-only regex let impossible dates reach the DATE update.
+  const dateStr = validScheduleDate(newDate);
+  if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${newDate}")` };
   }
 
@@ -449,11 +451,16 @@ async function moveStopsToDay(input) {
     const oldDate = s.scheduled_date;
     // A live (en_route/on_site) stop being moved rewinds its tracker
     // lifecycle exactly like the rebooker's live override does.
-    const liveReset = LIVE_MOVE_STATUSES.has(String(s.status)) ? LIVE_LIFECYCLE_RESET : {};
+    const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
+    const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
     await db('scheduled_services').where('id', s.id).update({
       scheduled_date: dateStr,
       notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
       track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
+      // moved en_route/on_site stop back on 'confirmed' so it isn't left live
+      // on a future date, matching the rebooker's own path.
+      ...(wasLive ? { status: 'confirmed' } : {}),
       ...liveReset,
       updated_at: new Date(),
     });

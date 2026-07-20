@@ -178,6 +178,9 @@ test('a live en_route row moves WITH the lifecycle rewind and gets an admin_bulk
     check_in_time: null,
     track_sms_sent_at: null,
     arrival_sms_sent_at: null,
+    // Landed back on 'confirmed' in the same UPDATE — never left en_route on
+    // a future date.
+    status: 'confirmed',
   });
   expect(logChain.insert.mock.calls[0][0]).toMatchObject({
     scheduled_service_id: 'svc-1',
@@ -206,4 +209,6 @@ test('a pending row moves WITHOUT lifecycle fields', async () => {
 
   expect(body.updated).toEqual(['svc-1']);
   expect(updateChain.update.mock.calls[0][0]).not.toHaveProperty('track_state');
+  // A non-live row's status is not restamped.
+  expect(updateChain.update.mock.calls[0][0]).not.toHaveProperty('status');
 });

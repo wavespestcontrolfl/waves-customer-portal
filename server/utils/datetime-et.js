@@ -149,8 +149,32 @@ function etWeekStart(date = new Date()) {
   return etDateString(addETDays(date, offsetToMonday));
 }
 
+// Strict calendar-date validator for scheduled_date (a plain DATE column
+// holding ET calendar dates). A plain regex + `new Date(...)` is not enough:
+// JS silently normalizes impossible dates (2099-02-31 → 2099-03-03), and a
+// shape-only regex lets 2099-99-99 reach the DATE update as a raw PG cast
+// error. We parse Y/M/D, construct a UTC date, and reject the value unless
+// every component reproduces exactly — then reject past-ET dates too. Returns
+// the normalized YYYY-MM-DD string, or null for garbage / impossible / past
+// input so callers surface a clear tool error instead of a Postgres failure
+// or a visit no "upcoming" query ever finds.
+function validScheduleDate(value) {
+  const dateStr = String(value == null ? '' : value).split('T')[0];
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) {
+    return null;
+  }
+  if (dateStr < etDateString()) return null;
+  return dateStr;
+}
+
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
-  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart,
+  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
 };

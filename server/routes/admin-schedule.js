@@ -3438,10 +3438,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
               // A live (en_route/on_site) row being moved rewinds its tracker
               // lifecycle like the rebooker's live override — stale arrival
-              // timestamps must not survive onto the new date.
+              // timestamps must not survive onto the new date. LIVE_LIFECYCLE_RESET
+              // clears the tracker fields but not status, so also land the row
+              // back on 'confirmed' in the same UPDATE — otherwise it stays live
+              // on a future date, matching the rebooker's own path.
               if (['en_route', 'on_site'].includes(String(svc.status))) {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
-                Object.assign(updates, LIVE_LIFECYCLE_RESET);
+                Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
               }
               await trx('scheduled_services').where({ id }).update(updates);
               // Audit row matching the rebooker's reschedule_log conventions.

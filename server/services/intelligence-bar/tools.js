@@ -9,7 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validScheduleDate } = require('../../utils/datetime-et');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1258,17 +1258,10 @@ const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_
 // timestamps don't survive onto the new date.
 const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 
-// Validate a YYYY-MM-DD schedule date (scheduled_date is a plain DATE column
-// holding ET calendar dates). Returns the normalized date string, or null for
-// garbage / past dates — callers surface a clear tool error instead of a PG
-// cast error or a visit no "upcoming" query will ever find.
-function validScheduleDate(value) {
-  const dateStr = String(value || '').split('T')[0];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
-  if (Number.isNaN(new Date(`${dateStr}T12:00:00Z`).getTime())) return null;
-  if (dateStr < etDateString()) return null;
-  return dateStr;
-}
+// scheduled_date validation is the shared strict calendar-date helper
+// (datetime-et.validScheduleDate) — same rules as schedule-tools' mover, so
+// an impossible date like 2099-02-31 is rejected here, not normalized by JS
+// Date into a real day or passed on to a raw PG cast error.
 
 // Parse the tool's time_window contract — "morning" (8-12), "afternoon"
 // (12-5), or a specific time like "9:00 AM" / "14:30" — into an HH:MM
@@ -1298,6 +1291,18 @@ function addMinutesToHHMM(hhmm, minutes) {
   const [h, m] = String(hhmm).split(':').map(Number);
   const total = (h * 60 + m + minutes) % (24 * 60);
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// Minutes spanned by an HH:MM[:SS] window, defaulting to the flat-60
+// admin-schedule convention when either bound is missing or the stored span
+// is non-positive — so preserving a window's length across a move never
+// collapses it to zero.
+function windowDurationMinutes(start, end) {
+  if (!start || !end) return 60;
+  const [sh, sm] = String(start).split(':').map(Number);
+  const [eh, em] = String(end).split(':').map(Number);
+  const diff = (eh * 60 + em) - (sh * 60 + sm);
+  return diff > 0 ? diff : 60;
 }
 
 async function createAppointment(input) {
@@ -1376,21 +1381,34 @@ async function rescheduleAppointment(input) {
   const customer = await db('customers').where('id', appt.customer_id).first();
   const oldDate = appt.scheduled_date;
 
+  // Preserve the original visit's window length when a new start is given.
+  // Persisting only window_start against a stale window_end collapses the
+  // window to zero (09:00→10:00 against a stored 10:00 end) — token expiry
+  // and the audit log both read window_end, so both would break.
+  const newStart = win.start || appt.window_start;
+  const newWindowEnd = win.start
+    ? addMinutesToHHMM(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
+    : appt.window_end;
+
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
   const { LIVE_LIFECYCLE_RESET } = require('../rebooker');
-  const liveReset = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status))
-    ? LIVE_LIFECYCLE_RESET
-    : {};
+  const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
+  const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
 
   await db('scheduled_services').where('id', appointment_id).update({
     scheduled_date: dateStr,
-    window_start: win.start || appt.window_start,
+    window_start: newStart,
+    window_end: newWindowEnd,
     notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
     // Public track links live until the day after the visit — refresh onto
     // the new date, same as schedule-tools' movers.
-    track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, appt.window_end),
+    track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
+    // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
+    // en_route/on_site row would keep a live status on a future date. Land it
+    // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
+    ...(wasLive ? { status: 'confirmed' } : {}),
     ...liveReset,
     updated_at: new Date(),
   });
@@ -1407,8 +1425,8 @@ async function rescheduleAppointment(input) {
       reason_code: 'admin',
       initiated_by: 'admin_ib',
       original_window: appt.window_start ? `${appt.window_start}-${appt.window_end}` : null,
-      new_window: win.start
-        ? (appt.window_end ? `${win.start}-${appt.window_end}` : win.start)
+      new_window: newStart
+        ? (newWindowEnd ? `${newStart}-${newWindowEnd}` : newStart)
         : null,
       notes: reason || null,
     });
