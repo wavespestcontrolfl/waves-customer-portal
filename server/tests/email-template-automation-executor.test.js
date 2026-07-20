@@ -24,6 +24,7 @@ function chain({ result = [], first, returning } = {}) {
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
+  q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -613,5 +614,75 @@ describe('email template automation executor', () => {
     });
 
     expect(result.results[0].run.status).toBe('blocked');
+  });
+
+  describe('processDueRuns preview mode', () => {
+    const dueRows = [
+      { id: 'run-1', recipient_email: 'a@example.com', automation_key: 'k1', template_key: 't1', status: 'pending', run_after: new Date('2026-07-14T00:00:00.000Z') },
+      { id: 'run-2', recipient_email: 'b@example.com', automation_key: 'k2', template_key: 't2', status: 'pending', run_after: new Date('2026-07-14T00:00:00.000Z') },
+    ];
+
+    test('preview returns the due runs WITHOUT sending', async () => {
+      setDbQueues({ email_template_automation_runs: [chain({ result: dueRows })] });
+
+      const result = await AutomationExecutor.processDueRuns({ preview: true });
+
+      expect(result).toEqual({
+        preview: true,
+        dueCount: 2,
+        runs: [
+          { id: 'run-1', recipient_email: 'a@example.com', automation_key: 'k1', template_key: 't1', status: 'pending', run_after: dueRows[0].run_after },
+          { id: 'run-2', recipient_email: 'b@example.com', automation_key: 'k2', template_key: 't2', status: 'pending', run_after: dueRows[1].run_after },
+        ],
+      });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('preview with nothing due reports zero and sends nothing', async () => {
+      setDbQueues({ email_template_automation_runs: [chain({ result: [] })] });
+
+      const result = await AutomationExecutor.processDueRuns({ preview: true });
+
+      expect(result).toEqual({ preview: true, dueCount: 0, runs: [] });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a confirmed send restricts the due query to the previewed run ids', async () => {
+      const dueQuery = chain({ result: [] });
+      setDbQueues({ email_template_automation_runs: [dueQuery] });
+
+      await AutomationExecutor.processDueRuns({ runIds: ['run-1', 'run-2'] });
+
+      // .modify runs the callback with the same builder, which calls whereIn('id', ...)
+      expect(dueQuery.whereIn).toHaveBeenCalledWith('id', ['run-1', 'run-2']);
+    });
+
+    test('an empty runIds is fail-closed: sends nothing and never queries', async () => {
+      db.mockClear();
+
+      const result = await AutomationExecutor.processDueRuns({ runIds: [] });
+
+      expect(result).toEqual({ processed: 0, results: [] });
+      expect(db).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('empty runIds in preview mode reports zero due', async () => {
+      db.mockClear();
+
+      const result = await AutomationExecutor.processDueRuns({ preview: true, runIds: [] });
+
+      expect(result).toEqual({ preview: true, dueCount: 0, runs: [] });
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('undefined runIds (scheduler path) runs the full unscoped batch', async () => {
+      const dueQuery = chain({ result: [] });
+      setDbQueues({ email_template_automation_runs: [dueQuery] });
+
+      await AutomationExecutor.processDueRuns();
+
+      expect(dueQuery.whereIn).not.toHaveBeenCalledWith('id', expect.anything());
+    });
   });
 });
