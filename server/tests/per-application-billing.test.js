@@ -231,4 +231,18 @@ describe('termite bait per-application billing (owner 2026-07-20)', () => {
     // visits are the seeding license, not the pattern.
     expect(supportsConverterFollowUpSeeding(legacyTermiteRow, {}, 'quarterly')).toBe(false);
   });
+
+  test('a monthly/bimonthly PLAN fallback cannot suppress the termite series — explicit visits win (codex r3 P1)', () => {
+    const { converterFollowUpSeedingPattern } = EstimateConverter;
+    // Monthly pest + termite: the plan-level fallback used to win the
+    // seeder's text-candidate loop before visits were read, returning
+    // 'monthly' and seeding nothing for the quarterly termite program.
+    expect(converterFollowUpSeedingPattern(newTermiteRow, { service_type: 'Termite Bait' }, 'monthly')).toBe('quarterly');
+    expect(converterFollowUpSeedingPattern(newTermiteRow, { service_type: 'Termite Bait' }, 'bimonthly')).toBe('quarterly');
+    // Legacy rows (no explicit visits) keep fallback semantics and stay
+    // unseeded either way.
+    expect(converterFollowUpSeedingPattern(legacyTermiteRow, { service_type: 'Termite Bait' }, 'monthly')).toBeNull();
+    // Non-termite services keep the fallback semantics unchanged.
+    expect(converterFollowUpSeedingPattern({ name: 'Quarterly Pest Control' }, { service_type: 'Quarterly Pest Control' }, 'quarterly')).toBe('quarterly');
+  });
 });
