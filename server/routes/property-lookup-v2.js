@@ -2926,6 +2926,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       system: o.termiteBaitSystem || 'advance',
       monitoringTier: o.termiteMonitoringTier || 'basic',
       ...(o.termiteBaitComplexity ? { complexity: o.termiteBaitComplexity } : {}),
+      // Residential bond rider (owner 2026-07-20): 1yr/5yr/10yr adds the
+      // fixed quarterly warranty rate as its own recurring line; 'none'/''
+      // omits it. Replays on re-price via engineInputs like the rest.
+      ...(o.termiteBondTerm && o.termiteBondTerm !== 'none' ? { bondTerm: o.termiteBondTerm } : {}),
       // Liability scope-split (bond/warranty/install → manual quote); admin-set.
       // Persisted in engineInputs.services.termite so it replays on re-price.
       ...(o.termiteScope ? { scope: o.termiteScope } : {}),

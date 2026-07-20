@@ -386,6 +386,7 @@ function mapV1ToLegacyShape(v1Result) {
   const palmLI = lineItems.find(l => l.service === 'palm_injection');
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
+  const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
   const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
   // Commercial auto-priced recurring lines (guard on .annual so a manual
@@ -608,6 +609,11 @@ function mapV1ToLegacyShape(v1Result) {
       quoteRequired: !!tbLI.quoteRequired,
       requiresManualReview: !!tbLI.requiresManualReview,
       manualReviewReasons: tbLI.manualReviewReasons || [],
+      // Bond rider (owner 2026-07-20): quote-time option snapshot + the
+      // estimator's preselected term (null = no bond). The customer-facing
+      // selector renders and re-prices from THESE persisted figures.
+      bondOptions: tbLI.bondOptions || null,
+      selectedBondTerm: (lineItems.find(l => l.service === 'termite_bond') || {}).bondTerm || null,
     };
   }
 
@@ -673,6 +679,23 @@ function mapV1ToLegacyShape(v1Result) {
   }
   if (tbLI && !tbLI.quoteRequired && !tbLI.requiresMeasurement) {
     svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+    // Termite bond rider (owner 2026-07-20) — standalone recurring line in
+    // the totals, NOT tier-counted and NOT bundle-discountable (fixed
+    // warranty rate; same posture as Recurring Foam). The row name is the
+    // termite_bonds lifecycle contract ("Termite Bond (N-Year Term)") and
+    // the service key is the catalog row for the sold term.
+    if (tbBondLI) {
+      svcAdd(tbBondLI.name, tbBondLI, {
+        service: `termite_bond_${tbBondLI.bondTerm}`,
+        bondTerm: tbBondLI.bondTerm,
+        bondYears: tbBondLI.bondYears,
+        annual: Number(tbBondLI.annual) || null,
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+      });
+    }
   }
   // Recurring Foam — standalone recurring line (cadence-discounted). Stays in
   // summary.recurringAnnual* (so it's part of monthlyTotal/year totals) but does

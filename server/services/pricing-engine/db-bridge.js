@@ -1012,6 +1012,12 @@ async function syncConstantsFromDB(dbInstance) {
       if (config.termite_monitoring.basic) constants.TERMITE.monitoring.basic.monthly = r(config.termite_monitoring.basic);
       if (config.termite_monitoring.premier) constants.TERMITE.monitoring.premier.monthly = r(config.termite_monitoring.premier);
     }
+    if (config.termite_bond) {
+      const tb = config.termite_bond;
+      if (tb.term_1yr) constants.TERMITE.bond['1yr'].quarterly = r(tb.term_1yr);
+      if (tb.term_5yr) constants.TERMITE.bond['5yr'].quarterly = r(tb.term_5yr);
+      if (tb.term_10yr) constants.TERMITE.bond['10yr'].quarterly = r(tb.term_10yr);
+    }
 
     // ── Rodent ───────────────────────────────────────────────
     // Bait stations (recurring monthly)

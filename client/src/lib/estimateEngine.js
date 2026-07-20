@@ -1304,6 +1304,7 @@ export function calculateEstimate(inputs) {
     termiteBaitComplexity,
     termiteBaitSystem,
     termiteMonitoringTier,
+    termiteBondTerm,
     trenchingPerimeterLF: _trenchingPerimeterLF,
     trenchingConcreteLF: _trenchingConcreteLF,
     trenchingDirtLF: _trenchingDirtLF,
@@ -2121,6 +2122,35 @@ export function calculateEstimate(inputs) {
         perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
         visitsPerYear: 4,
       });
+      // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
+      // the engine's quote-time bondOptions snapshot. Fixed quarterly rate
+      // per term on the shared quarterly check; NOT tier-counted, NOT
+      // bundle-discountable.
+      const TERMITE_BOND_OPTIONS = [
+        { key: '1yr', label: '1-Year', years: 1, quarterly: 60, perApp: 60, annual: 240, monthly: 20, name: 'Termite Bond (1-Year Term)', serviceKey: 'termite_bond_1yr' },
+        { key: '5yr', label: '5-Year', years: 5, quarterly: 54, perApp: 54, annual: 216, monthly: 18, name: 'Termite Bond (5-Year Term)', serviceKey: 'termite_bond_5yr' },
+        { key: '10yr', label: '10-Year', years: 10, quarterly: 45, perApp: 45, annual: 180, monthly: 15, name: 'Termite Bond (10-Year Term)', serviceKey: 'termite_bond_10yr' },
+      ];
+      R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
+      const tmBond = TERMITE_BOND_OPTIONS.find((o) => o.key === termiteBondTerm) || null;
+      R.tmBait.selectedBondTerm = tmBond ? tmBond.key : null;
+      if (tmBond) {
+        R.tmBond = tmBond;
+        wgServices.push({
+          name: tmBond.name,
+          service: tmBond.serviceKey,
+          bondTerm: tmBond.key,
+          bondYears: tmBond.years,
+          mo: tmBond.monthly,
+          perTreatment: tmBond.perApp,
+          visitsPerYear: 4,
+          annual: tmBond.annual,
+          discountable: false,
+          discountEligible: false,
+          waveGuardDiscountEligible: false,
+          countsTowardWaveGuardTier: false,
+        });
+      }
     } else {
       R.tmBait = {
         quoteRequired: true,
@@ -2849,6 +2879,12 @@ export function calculateEstimate(inputs) {
     ac++;
     ra += termiteMonthly * 12;
     lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
+    // Bond rider: in the recurring totals, no tier count (no ac++), no
+    // bundle % discount — mirrors server excludedFromPercentDiscount.
+    if (R.tmBond) {
+      ra += R.tmBond.annual;
+      lineItems.push({ name: R.tmBond.name, service: 'termite_bond', ann: R.tmBond.annual, discountable: false });
+    }
   }
   // Recurring Foam: standalone — flows into the recurring annual/monthly total
   // but does NOT count toward the WaveGuard tier (no ac++) and is not discountable
