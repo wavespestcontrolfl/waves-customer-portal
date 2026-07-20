@@ -2706,6 +2706,11 @@ export default function EmailTemplatesPanelV2() {
                   <iframe
                     title="Email preview"
                     srcDoc={preview.html}
+                    // sandbox with no allow-scripts / allow-same-origin: the
+                    // preview renders HTML/CSS but can't run scripts or navigate
+                    // in the admin origin, so a javascript: CTA in the template
+                    // can't execute when clicked.
+                    sandbox=""
                     className="w-full h-[520px] rounded-sm border-hairline border-zinc-200 bg-white"
                   />
                 </div>

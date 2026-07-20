@@ -52,12 +52,18 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
-  }).then((r) => {
+  }).then(async (r) => {
     if (r.status === 401) {
       window.location.href = "/admin/login";
       throw new Error("Session expired");
     }
-    return r.json();
+    const data = await r.json().catch(() => ({}));
+    // Reject on any non-2xx so save handlers hit their catch instead of showing
+    // "saved" on a 403/500 (the body carries the server's error message).
+    if (!r.ok) {
+      throw new Error(data?.error || `Request failed (${r.status})`);
+    }
+    return data;
   });
 }
 

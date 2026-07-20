@@ -435,8 +435,9 @@ router.put('/:id/read', async (req, res, next) => {
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
-    await NotificationService.markRead(id);
-    res.json({ success: true });
+    // Scoped to admin notifications — an admin can't clear a customer's row by id.
+    const updated = await NotificationService.markReadAdmin(id);
+    res.json({ success: true, updated });
   } catch (err) { next(err); }
 });
 
