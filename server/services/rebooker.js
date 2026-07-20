@@ -4,7 +4,7 @@ const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove } = require('./call-booking-catalog');
-const { findConflictingVisits } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -287,9 +287,20 @@ class SmartRebooker {
         ? options.technicianId
         : service.technician_id;
       if (updates.window_start && windowEnd) {
-        // Same slot-reserve namespace + `${techId || 'unassigned'}` key shape
-        // slot-reservation.js uses — techless moves now serialize too instead
-        // of skipping the lock along with the (formerly tech-only) check.
+        // COARSEST scheduling lock FIRST: the date-wide occupancy lock guards
+        // the tech-blind findConflictingVisits check below. Without a
+        // date-scoped key, two writers with DIFFERENT techs (or one assigned +
+        // one unassigned) take different tech locks, both pass the global
+        // check, and both commit an overlap. Taken before the tech lock so the
+        // single path, the series path, and the zone-null confirm all acquire
+        // date-occupancy -> tech in one order (no deadlock inversion). See the
+        // ORDERING CONTRACT in scheduling/occupancy.js.
+        await acquireOccupancyLock(trx, newDateStr);
+        // Then the tech-scoped slot-reserve lock (same namespace + `${techId ||
+        // 'unassigned'}` key shape slot-reservation.js uses). STILL needed even
+        // with the date lock above: the kept-tech overlap check must serialize
+        // against slot-reservation.js estimate reserves + createSelfBooking,
+        // which take this tech lock but NOT the date-occupancy one.
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
@@ -659,6 +670,18 @@ class SmartRebooker {
             : nextRecurringDate(newDate, parent.recurring_pattern, oi, opts));
         }
         if (projectedDates.length) {
+          // Date-wide occupancy locks for EVERY target date this sweep will
+          // write, acquired UP FRONT in sorted order (acquireOccupancyLocks
+          // dedups + sorts) — before any per-sibling tech lock in the loop
+          // below and before the reads here. This serializes the series
+          // against the single-visit path and the zone-null confirm on each
+          // shared date (they all take date-occupancy first), and two
+          // concurrent series moving overlapping date sets grab the shared
+          // date locks in the same order, so neither the series-vs-single nor
+          // the series-vs-series case can deadlock. See the ORDERING CONTRACT
+          // in scheduling/occupancy.js.
+          await acquireOccupancyLocks(trx, projectedDates);
+
           const seriesClash = await trx('scheduled_services')
             .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
             .whereNotIn('id', sweptIds)

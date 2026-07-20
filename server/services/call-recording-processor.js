@@ -7191,6 +7191,14 @@ const CallRecordingProcessor = {
                 // keeps the existing same-customer semantics (the same-day
                 // guard above already owns those). Best-effort: a query
                 // failure must never fail the booking txn.
+                //
+                // NO date-wide occupancy lock here (unlike the rebooker /
+                // zone-null confirm writers): this check is purely advisory —
+                // the call booking commits regardless of what it finds, so
+                // serializing it against other writers would buy nothing. A
+                // lock only matters when the check can BLOCK a write; this one
+                // can't. (occupancy.js acquireOccupancyLock guards the writers
+                // whose commit the gate actually gates.)
                 try {
                   const { findConflictingVisits } = require('./scheduling/occupancy');
                   bookingTimeConflicts = await findConflictingVisits({

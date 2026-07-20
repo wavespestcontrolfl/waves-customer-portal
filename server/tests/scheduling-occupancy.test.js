@@ -13,6 +13,8 @@ const {
   findConflictingVisits,
   listOccupiedWindows,
   windowsOverlap,
+  acquireOccupancyLock,
+  acquireOccupancyLocks,
   DEFAULT_EXCLUDE_STATUSES,
 } = require('../services/scheduling/occupancy');
 
@@ -190,5 +192,48 @@ describe('windowsOverlap', () => {
     expect(windowsOverlap(540, 600, 600, 660)).toBe(false); // back-to-back touch
     expect(windowsOverlap(540, 600, 480, 540)).toBe(false); // back-to-back before
     expect(windowsOverlap(540, 600, 660, 720)).toBe(false); // disjoint
+  });
+});
+
+describe('date-wide occupancy advisory lock', () => {
+  const makeTrx = () => ({ raw: jest.fn().mockResolvedValue(undefined) });
+
+  test('acquireOccupancyLock takes ONE tech-independent xact lock keyed by calendar date', async () => {
+    const trx = makeTrx();
+    await acquireOccupancyLock(trx, '2099-01-05');
+    expect(trx.raw).toHaveBeenCalledTimes(1);
+    // Same two-int advisory family as the tech/zone slot-reserve locks —
+    // shared namespace string, DISTINCT occupancy:<date> key.
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'occupancy:2099-01-05'],
+    );
+  });
+
+  test('a datetime-ish date is clamped to its calendar day (same key as the plain-date caller)', async () => {
+    const trx = makeTrx();
+    await acquireOccupancyLock(trx, '2099-01-05T14:00:00.000Z');
+    expect(trx.raw.mock.calls[0][1]).toEqual(['slot-reserve', 'occupancy:2099-01-05']);
+  });
+
+  test('acquireOccupancyLocks dedups and locks in ascending date order regardless of input order', async () => {
+    // Two concurrent series movers with overlapping date sets must grab the
+    // shared dates in the SAME order — sorted acquisition is the only thing
+    // standing between them and a swap deadlock.
+    const trx = makeTrx();
+    await acquireOccupancyLocks(trx, [
+      '2099-02-01', '2099-01-05T09:00', null, '2099-01-05', '2099-01-19', undefined,
+    ]);
+    expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual([
+      'occupancy:2099-01-05', 'occupancy:2099-01-19', 'occupancy:2099-02-01',
+    ]);
+  });
+
+  test('acquireOccupancyLocks with nothing to lock never touches the DB', async () => {
+    const trx = makeTrx();
+    await acquireOccupancyLocks(trx, []);
+    await acquireOccupancyLocks(trx, [null, undefined]);
+    await acquireOccupancyLocks(trx, undefined);
+    expect(trx.raw).not.toHaveBeenCalled();
   });
 });

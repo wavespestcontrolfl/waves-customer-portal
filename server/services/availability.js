@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -359,6 +359,17 @@ class AvailabilityEngine {
         // scheduled_services row is a real clash. Status set matches the
         // zone path (non-cancelled occupies); live holds count, expired
         // ones don't. Zone-resolved behavior above is unchanged.
+        // Date-wide occupancy lock (shared module) — this CONFIRM inserts a
+        // scheduled_services row behind the tech-blind gate, so it must
+        // serialize with the other date-wide writers (rebooker single/series).
+        // Without it, a zone-null confirm and a rebooker move on the same date
+        // both pass their tech-blind checks under READ COMMITTED and
+        // double-book. A zone-null confirm shares only THIS lock with the
+        // rebooker (the rebooker takes neither the zone lock nor the day-cap
+        // lock already held above), so taking it here — after zone + day-cap —
+        // can't invert against anyone: one shared lock never deadlocks. See
+        // the ORDERING CONTRACT in scheduling/occupancy.js.
+        await acquireOccupancyLock(trx, dateStr);
         const zoneNullExcludes = [];
         if (options.excludeServiceId) zoneNullExcludes.push(options.excludeServiceId);
         if (options.excludeSelfBookingId) {

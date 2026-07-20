@@ -9,6 +9,8 @@ jest.mock('../services/logger', () => ({
 // file exercises track-token expiry, so stub the gate clean.
 jest.mock('../services/scheduling/occupancy', () => ({
   findConflictingVisits: jest.fn().mockResolvedValue([]),
+  acquireOccupancyLock: jest.fn().mockResolvedValue(undefined),
+  acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
 }));
 
 const db = require('../models/db');

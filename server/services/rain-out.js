@@ -570,6 +570,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // a different (empty) date — order doesn't matter, and keeping anchor-first
   // there fires its reply-alt SMS first.
   const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
+
+  // Every batch member starts EXCLUDED from the others' tech-blind occupancy
+  // checks: the delta/own-window math above preserves each member's relative
+  // order, so a member's FINAL (moved) window can't collide with the batch,
+  // and the tail-first/head-first ordering keeps a not-yet-moved member's OLD
+  // window clear of the current target too. A member that FAILS to move is the
+  // exception — its row stays live at its OLD position, which a later member's
+  // new window CAN land on — so we drop failed ids from this set as we go,
+  // letting the occupancy gate see (and block on) the stranded row. (Without
+  // this, a mid-batch failure left an invisible row that a subsequent move
+  // could silently double-book.)
+  const batchExcludeIds = new Set(orderedJobs.map((j) => j.id));
   const results = [];
   // Shared across the whole rain-out: the first slow NWS pair degrades
   // forecast decoration for every remaining stop's SMS.
@@ -594,21 +606,28 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     try {
-      // excludeServiceIds = the whole batch this rain-out is moving: the
-      // rebooker's tech-blind occupancy check would otherwise clash each
-      // move against siblings still sitting in (or already shifted to)
-      // their same-relative-order windows. Relative order within the batch
-      // is preserved by the delta/own-window math above, so intra-batch
-      // overlap can't be introduced; conflicts against rows OUTSIDE the
-      // batch still block. (The tech-scoped check keeps relying on the
-      // tail-first/head-first ordering, unchanged.)
+      // excludeServiceIds = the batch members that are OR WILL BE cleanly
+      // moved (batchExcludeIds, minus any that have already failed): the
+      // rebooker's tech-blind occupancy check would otherwise clash each move
+      // against siblings still sitting in (or already shifted to) their
+      // same-relative-order windows. Relative order within the batch is
+      // preserved by the delta/own-window math above, so intra-batch overlap
+      // among the MOVED members can't be introduced; conflicts against rows
+      // OUTSIDE the batch — and against a FAILED member left at its old spot
+      // (dropped from the set in the catch below) — still block. (The
+      // tech-scoped check keeps relying on the tail-first/head-first ordering,
+      // unchanged.)
       await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
         allowLive: true,
-        excludeServiceIds: orderedJobs.map((j) => j.id),
+        excludeServiceIds: [...batchExcludeIds],
       });
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
-      // of a bulk rain-out — record and continue.
+      // of a bulk rain-out — record and continue. This member did NOT move,
+      // so its row is still live at its OLD position: drop it from the shared
+      // exclusion set so every subsequent member's occupancy check sees it and
+      // refuses to schedule on top of it.
+      batchExcludeIds.delete(job.id);
       logger.warn(`[rain-out] reschedule failed for ${job.id}: ${err.message}`);
       results.push({ id: job.id, ok: false, error: err.message, statusCode: err.statusCode || 500 });
       continue;

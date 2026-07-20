@@ -39,6 +39,62 @@ const defaultDb = require('../../models/db');
 
 const DEFAULT_DURATION_MINUTES = 60;
 
+// ---- date-wide occupancy advisory lock (shared by every gate writer) -------
+//
+// findConflictingVisits is GLOBAL — all techs + unassigned + live holds — but
+// the per-writer slot-reserve locks are keyed by TECH or ZONE. Two writers on
+// the same date with different techs (or one assigned + one unassigned) take
+// DIFFERENT locks, both pass this tech-blind check under READ COMMITTED, and
+// both commit overlapping rows (the P1 this module's callers close). One key
+// per calendar date, taken by EVERY writer that COMMITS behind this gate
+// (rebooker single + series, availability.js zone-null confirm), serializes
+// them so exactly one wins the window.
+//
+// Namespace note: reuses the 'slot-reserve' namespace the tech/zone locks
+// already live in — pg_advisory_xact_lock(hashtext(ns), hashtext(key)) is a
+// two-int lock, so the distinct `occupancy:<date>` KEY is a different lock
+// from `<tech>:<date>` or `zone:<id>:<date>`; sharing the namespace string
+// just keeps the family together, it does not make them collide.
+//
+// ORDERING CONTRACT: this is the COARSEST scheduling lock (a whole calendar
+// day), so a writer that ALSO takes a tech/zone slot-reserve lock acquires
+// THIS ONE FIRST (rebooker: date-occupancy -> tech). That gives one global
+// order — date-occupancy before tech/zone/day-cap — so the rebooker single
+// path, the series path, and the zone-null confirm can never invert against
+// each other. It composes with createSelfBooking's customer -> tech -> zone ->
+// day-cap sequence because those callers don't take THIS lock, and the only
+// lock they share with a date-occupancy writer is a single tech/zone key (one
+// shared lock can't deadlock). Multi-date callers (series) must take their
+// date locks in ascending date order — use acquireOccupancyLocks().
+// pg_advisory_xact_lock auto-releases at commit/rollback.
+const OCCUPANCY_LOCK_NS = 'slot-reserve';
+
+function occupancyLockKey(dateStr) {
+  return `occupancy:${String(dateStr).split('T')[0]}`;
+}
+
+async function acquireOccupancyLock(trx, dateStr) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [OCCUPANCY_LOCK_NS, occupancyLockKey(dateStr)],
+  );
+}
+
+// Acquire the date-wide occupancy lock for MANY dates in one transaction
+// (series reschedules probe/write several target dates). Dedups + sorts so two
+// concurrent multi-date movers always grab a shared pair in the SAME order and
+// can never deadlock by swapping them.
+async function acquireOccupancyLocks(trx, dateStrs) {
+  const dates = [...new Set(
+    (dateStrs || []).filter(Boolean).map((d) => String(d).split('T')[0]),
+  )].sort();
+  for (const d of dates) {
+    // Sequential on purpose: a Promise.all would fire the lock statements in
+    // arbitrary completion order, defeating the sorted-acquisition guarantee.
+    await acquireOccupancyLock(trx, d);
+  }
+}
+
 // Matches createSelfBooking's commit-gate status predicate. See header.
 const DEFAULT_EXCLUDE_STATUSES = ['cancelled'];
 
@@ -196,7 +252,9 @@ module.exports = {
   findConflictingVisits,
   listOccupiedWindows,
   windowsOverlap,
+  acquireOccupancyLock,
+  acquireOccupancyLocks,
   DEFAULT_DURATION_MINUTES,
   DEFAULT_EXCLUDE_STATUSES,
-  _internals: { timeToMinutes, normalizeDate },
+  _internals: { timeToMinutes, normalizeDate, occupancyLockKey },
 };

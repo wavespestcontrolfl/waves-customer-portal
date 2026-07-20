@@ -742,6 +742,40 @@ describe('rain-out service', () => {
       expect(failed.id).toBe('svc-2');
       expect(failed.statusCode).toBe(409);
     });
+
+    test('a FAILED member re-enters the conflict domain for every later move (outcome-aware exclusion)', async () => {
+      wireRoute();
+      SmartRebooker.reschedule
+        .mockResolvedValueOnce({ success: true })
+        .mockRejectedValueOnce(Object.assign(new Error('Cannot reschedule a completed job'), { statusCode: 409 }))
+        .mockResolvedValueOnce({ success: true });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+      });
+
+      // Up to (and including) svc-2's own attempt, the whole batch is
+      // excluded — the delta/own-window math preserves relative order, so
+      // members that WILL move cleanly can't collide.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
+        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-2', 'svc-3'] });
+      // svc-2 FAILED — its row is still live at its OLD position, so it must
+      // be dropped from svc-3's exclusion set: the rebooker's tech-blind
+      // occupancy check has to see (and be able to block on) the stranded
+      // row instead of silently double-booking on top of it.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
+        'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1', 'svc-3'] });
+    });
   });
 
   describe('getOptions', () => {

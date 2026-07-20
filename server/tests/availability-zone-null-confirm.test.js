@@ -20,6 +20,9 @@ jest.mock('../services/scheduling/blackout-dates', () => ({
   getBlackoutDates: jest.fn().mockResolvedValue(new Set()),
 }));
 jest.mock('../services/scheduling/occupancy', () => ({
+  // Real lock helper (it only issues a trx.raw advisory-lock statement the
+  // suite asserts on); only the probe itself is stubbed.
+  ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn().mockResolvedValue([]),
 }));
 
@@ -139,6 +142,21 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
       windowEnd: '10:00',
       excludeServiceIds: [],
     });
+
+    // The zone-null confirm WRITES behind the tech-blind gate, so it takes
+    // the same date-wide occupancy lock the rebooker writers use — without
+    // it, this confirm and a rebooker move on the same date both pass their
+    // checks under READ COMMITTED and double-book.
+    expect(trx.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['slot-reserve', `occupancy:${DATE}`],
+    );
+    // ...and holds it BEFORE the probe runs.
+    const occupancyLockIdx = trx.raw.mock.calls.findIndex(
+      (c) => Array.isArray(c[1]) && c[1][1] === `occupancy:${DATE}`,
+    );
+    expect(trx.raw.mock.invocationCallOrder[occupancyLockIdx])
+      .toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
   });
 
   test('onboarding-reschedule exclusions thread through (service row + replaced self-booking row)', async () => {
@@ -155,12 +173,18 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
   });
 
   test('zone resolved → zone path unchanged, fallback never runs', async () => {
-    wireConfirm({
+    const { trx } = wireConfirm({
       zones: [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }],
     });
 
     const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(result.confirmationCode).toBeTruthy();
     expect(findConflictingVisits).not.toHaveBeenCalled();
+    // The date-wide occupancy lock belongs to the tech-blind gate; the
+    // zone-resolved path keeps its own zone+day-cap serialization only.
+    const lockKeys = trx.raw.mock.calls
+      .filter((c) => Array.isArray(c[1]))
+      .map((c) => c[1][1]);
+    expect(lockKeys).not.toContain(`occupancy:${DATE}`);
   });
 });

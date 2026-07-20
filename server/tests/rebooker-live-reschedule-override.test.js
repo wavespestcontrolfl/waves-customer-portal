@@ -18,6 +18,10 @@ jest.mock('../sockets', () => ({
 // stubbed clean here to keep the table-queue mocks focused.
 jest.mock('../services/scheduling/occupancy', () => ({
   findConflictingVisits: jest.fn().mockResolvedValue([]),
+  // Date-wide occupancy locks (asserted in rebooker-occupancy-conflict /
+  // scheduling-occupancy) stubbed inert here too.
+  acquireOccupancyLock: jest.fn().mockResolvedValue(undefined),
+  acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
 }));
 
 const db = require('../models/db');
