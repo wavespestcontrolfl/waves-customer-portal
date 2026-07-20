@@ -20,6 +20,7 @@ import {
 } from "recharts";
 import { etDateString } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useIsMobile from "../../hooks/useIsMobile";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -39,7 +40,6 @@ const D = {
   inputBorder: "#D4D4D8",
 };
 const MONO = "'JetBrains Mono', monospace";
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API}${path}`, {
@@ -489,6 +489,7 @@ function PayoutsTab() {
 // CASH FLOW TAB
 // ═══════════════════════════════════════════════════════════════
 function CashFlowTab() {
+  const isMobile = useIsMobile(640);
   const [period, setPeriod] = useState("weekly");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -685,6 +686,7 @@ function CashFlowTooltip({ active, payload, label }) {
 }
 
 function SummaryCard({ label, value, color }) {
+  const isMobile = useIsMobile(640);
   return (
     <div
       style={{
@@ -1563,16 +1565,22 @@ function PayoutModal({
 // ═══════════════════════════════════════════════════════════════
 export default function BankingPage() {
   const [tab, setTab] = useState("payouts");
+  const isMobile = useIsMobile(640);
   const [balance, setBalance] = useState(null);
   const [stats, setStats] = useState(null);
+  const [balanceError, setBalanceError] = useState(false);
+  const [statsError, setStatsError] = useState(false);
   const [payoutModalMethod, setPayoutModalMethod] = useState(null);
 
   const loadBalance = useCallback(async () => {
     try {
       const d = await adminFetch("/admin/banking/balance");
       setBalance(d);
-    } catch (e) {
-      /* no-op */
+      setBalanceError(false);
+    } catch {
+      // Surface the failure instead of leaving balance null — the render
+      // must not present a fetch error as an authoritative $0.00.
+      setBalanceError(true);
     }
   }, []);
 
@@ -1580,8 +1588,9 @@ export default function BankingPage() {
     try {
       const d = await adminFetch("/admin/banking/stats");
       setStats(d);
-    } catch (e) {
-      /* no-op */
+      setStatsError(false);
+    } catch {
+      setStatsError(true);
     }
   }, []);
 
@@ -1650,17 +1659,30 @@ export default function BankingPage() {
             lineHeight: 1.1,
           }}
         >
-          {fmtM(available)}
+          {balanceError ? "—" : fmtM(available)}
         </div>{" "}
-        <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
-          Available balance · Waves Pest Control
-        </div>{" "}
+        {balanceError ? (
+          <div style={{ fontSize: 14, color: D.danger || "#dc2626", marginTop: 6 }}>
+            Couldn&apos;t load balance.{" "}
+            <button
+              type="button"
+              onClick={loadBalance}
+              style={{ background: "none", border: "none", color: D.heading, textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
+            Available balance · Waves Pest Control
+          </div>
+        )}{" "}
         <div
           style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}
         >
           <button
             onClick={() => setPayoutModalMethod("standard")}
-            disabled={!available || available <= 0}
+            disabled={balanceError || !available || available <= 0}
             style={{
               background: D.heading,
               border: "none",
@@ -1669,8 +1691,8 @@ export default function BankingPage() {
               color: D.white,
               fontSize: 14,
               fontWeight: 600,
-              cursor: !available || available <= 0 ? "not-allowed" : "pointer",
-              opacity: !available || available <= 0 ? 0.4 : 1,
+              cursor: balanceError || !available || available <= 0 ? "not-allowed" : "pointer",
+              opacity: balanceError || !available || available <= 0 ? 0.4 : 1,
               minHeight: 44,
             }}
           >
@@ -1770,7 +1792,7 @@ export default function BankingPage() {
               color: D.heading,
             }}
           >
-            {fmtM(balance?.next_payout?.amount)}
+            {balanceError ? "—" : fmtM(balance?.next_payout?.amount)}
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
             {balance?.next_payout?.arrival_date
@@ -1805,7 +1827,7 @@ export default function BankingPage() {
               color: D.heading,
             }}
           >
-            {fmtM(stats?.mtd_deposited)}
+            {statsError ? "—" : fmtM(stats?.mtd_deposited)}
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
             {stats?.payout_count ?? 0} payout
