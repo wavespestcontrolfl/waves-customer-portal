@@ -9221,6 +9221,56 @@ router.put('/:token/accept', async (req, res, next) => {
       void AppointmentTagger.onServiceScheduled(appointment.id, { suppressWelcome: true })
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
+    // Geo visibility for future route scoring: the accept path creates the
+    // visit series with no coordinates, and find-time's detour math silently
+    // treats coordless stops as zero drive time — so these visits are
+    // invisible as route anchors to every later offer. Geocode the ESTIMATE
+    // property once (the offer generator already geocoded the same string,
+    // so this is usually an in-process memo hit) and stamp lat/lng onto the
+    // accepted rows, keyed by source_estimate_id so the reserved parent,
+    // standalone units, and seeded follow-ups are all covered.
+    //
+    // Same-property proof (Codex 2026-07-20 ×3): the rows' displayed
+    // destination is the customer's primary address (service_address_* is
+    // not stamped on this path), so coordinates may only be written when
+    // the estimate property IS that address — proven by comparing GEOCODE
+    // RESULTS (estimate address vs the customer's own address, ≤0.15 mi),
+    // which string heuristics can't do safely ('1 Main St' vs '21 Main
+    // St', same street in two cities). A phone-matched accept reusing an
+    // existing customer for a different property skips the stamp entirely
+    // rather than making coords contradict the displayed address. When the
+    // properties match and the customer had no coords, backfill
+    // customers.latitude/longitude from the same result — coherent by
+    // construction. Post-commit, fail-soft.
+    if (estimate.address && customerId) {
+      void (async () => {
+        const { geocodeAddress, buildAddress } = require('../services/geocoder');
+        const { haversine } = require('../services/route-optimizer');
+        const estCoords = await geocodeAddress(estimate.address);
+        if (!estCoords) return;
+        const cust = await db('customers')
+          .where({ id: customerId })
+          .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
+        if (!cust) return;
+        const custCoords = (cust.latitude != null && cust.longitude != null)
+          ? { lat: Number(cust.latitude), lng: Number(cust.longitude) }
+          : await geocodeAddress(buildAddress(cust));
+        if (!custCoords) return;
+        const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
+        if (!(samePlaceMiles <= 0.15)) return;
+        await db('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNull('lat')
+          .update({ lat: estCoords.lat, lng: estCoords.lng });
+        if (cust.latitude == null || cust.longitude == null) {
+          await db('customers').where({ id: customerId }).update({
+            latitude: custCoords.lat,
+            longitude: custCoords.lng,
+            updated_at: new Date(),
+          });
+        }
+      })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
+    }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows
       : [];

@@ -76,6 +76,16 @@ const gates = {
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
+  // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
+  // funnel's offered slots lead with the guaranteed soonest card, then
+  // route-fit days (detour ≤ the existing 20-min proximity bound to a stop
+  // already on the calendar), then pure-capacity days — instead of pure
+  // soonest-first ordering. Read-only re-ordering of the same bookable
+  // pool; no slot is added or removed. Opt-in in EVERY environment so
+  // offer-ordering tests stay deterministic. Kill switch: unset — ordering
+  // instantly reverts to soonest-first.
+  geoSlotRanking: process.env.GATE_GEO_SLOT_RANKING === 'true',
+
   // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
   // /book funnel entries see zero conversions across a window — the July
   // slot_sig outage signature. Opt-in in EVERY environment (it texts
