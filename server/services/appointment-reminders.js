@@ -1376,13 +1376,24 @@ const AppointmentReminders = {
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
           if (!prefs.serviceReminder72h || (channel72 === 'sms' && !prefs.smsEnabled)) {
-            logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
-            results.skipped++;
             // Close the window like the neighboring skip branches — an
             // unmarked preference skip re-enters every 15-minute scan forever.
-            await db('appointment_reminders')
+            // Guarded on appointment_time like the post-send flag update
+            // below: a concurrent move re-arms this row with the NEW time,
+            // and an unguarded close by id would stomp the re-arm and
+            // silently close the new appointment's reminder. 0 rows matched
+            // = the row moved out from under us; skip the bookkeeping and
+            // leave the re-armed row alone.
+            const closed72 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+            if (closed72 === 0) {
+              logger.info(`[appt-remind] 72h preference-skip close skipped for ${r.scheduled_service_id} — appointment moved during scan; leaving re-armed row`);
+            } else {
+              logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+              results.skipped++;
+            }
             continue;
           }
 
@@ -1464,13 +1475,20 @@ const AppointmentReminders = {
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
           if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
-            logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
-            results.skipped++;
-            // Close the window like the neighboring skip branches — an
-            // unmarked preference skip re-enters every 15-minute scan forever.
-            await db('appointment_reminders')
+            // Close the window like the neighboring skip branches — see the
+            // 72h twin above: guarded on appointment_time so a concurrent
+            // move's re-arm is never stomped; 0 rows matched = the row
+            // moved, skip the bookkeeping and leave the re-armed row alone.
+            const closed24 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            if (closed24 === 0) {
+              logger.info(`[appt-remind] 24h preference-skip close skipped for ${r.scheduled_service_id} — appointment moved during scan; leaving re-armed row`);
+            } else {
+              logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+              results.skipped++;
+            }
             continue;
           }
 

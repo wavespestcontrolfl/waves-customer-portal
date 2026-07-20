@@ -1346,7 +1346,28 @@ async function createAppointment(input) {
     updated_at: new Date(),
   }).returning('*');
 
-  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for ${customer.first_name} ${customer.last_name} on ${dateStr}`);
+  // Register the durable confirmation/reminder row synchronously with the
+  // insert, like the canonical admin create path (admin-schedule POST) —
+  // without it the 72h/24h reminder cron never sees the visit. Registration
+  // only: sendConfirmation:false marks the confirmation not-applicable
+  // (mirroring an admin-created visit with the "Send confirmation SMS"
+  // checkbox off), so no SMS goes out — sends stay operator-initiated.
+  // Best-effort like the admin path: a registration failure must not fail
+  // the already-committed insert (registerAppointment also self-alerts).
+  try {
+    const AppointmentReminders = require('../appointment-reminders');
+    await AppointmentReminders.registerAppointment(
+      appointment.id, customer_id,
+      `${dateStr}T${win.start || '08:00'}`,
+      service_type, 'admin_ib',
+      { sendConfirmation: false },
+    );
+  } catch (err) {
+    logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
+  }
+
+  // Ids only — customer names/phones/addresses never go to logs (PII rule).
+  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
 
   return {
     success: true,
@@ -1393,7 +1414,7 @@ async function rescheduleAppointment(input) {
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison
   // duration capture on the new date. Lazy require: rebooker is heavy.
-  const { LIVE_LIFECYCLE_RESET } = require('../rebooker');
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
   const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
   const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
 
@@ -1412,6 +1433,18 @@ async function rescheduleAppointment(input) {
     ...liveReset,
     updated_at: new Date(),
   });
+
+  // Rebooker-parity side effects of the live → confirmed flip above:
+  // job_status_history audit row, tech_status release, customer tracker
+  // refresh. Best-effort: the move is committed — a side-effect failure
+  // must not report the move itself as failed.
+  if (wasLive) {
+    try {
+      await applyLiveMoveSideEffects(db, appt);
+    } catch (err) {
+      logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+    }
+  }
 
   // Audit row, matching the rebooker's reschedule_log conventions.
   // Best-effort: the move above is already committed — a log failure must

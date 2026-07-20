@@ -10,7 +10,10 @@
  *      so the "sent" bookkeeping is skipped.
  *   2. A customer-preference skip `continue`d without closing the window
  *      (unlike the neighboring skip branches), so the row re-entered every
- *      15-minute scan forever. Preference skips now mark the flag sent.
+ *      15-minute scan forever. Preference skips now mark the flag sent —
+ *      with the SAME appointment_time guard as (1): an unguarded close by
+ *      id would stomp a concurrent move's re-arm and silently close the
+ *      NEW appointment's reminder. 0 rows matched = skip the bookkeeping.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -115,12 +118,13 @@ afterEach(() => {
 });
 
 describe('preference-skip closes the window', () => {
-  test('72h preference skip marks reminder_72h_sent so the row stops rescanning', async () => {
+  test('72h preference skip marks reminder_72h_sent (guarded on appointment_time) so the row stops rescanning', async () => {
+    const reminderRow = row72();
     const flagUpdate = chain();
     wireDb({
       appointment_reminders: [
         chain(), // stranded-confirmation sweep → []
-        chain({ select: jest.fn().mockResolvedValue([row72()]) }),
+        chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
         flagUpdate,
       ],
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) })],
@@ -135,14 +139,18 @@ describe('preference-skip closes the window', () => {
     expect(flagUpdate.update).toHaveBeenCalledWith(
       expect.objectContaining({ reminder_72h_sent: true }),
     );
+    // Same appointment_time guard as the post-send flag update — an
+    // unguarded close by id would stomp a concurrent move's re-arm.
+    expect(flagUpdate.where).toHaveBeenCalledWith('appointment_time', reminderRow.appointment_time);
   });
 
-  test('24h preference skip marks reminder_24h_sent so the row stops rescanning', async () => {
+  test('24h preference skip marks reminder_24h_sent (guarded on appointment_time) so the row stops rescanning', async () => {
+    const reminderRow = row24();
     const flagUpdate = chain();
     wireDb({
       appointment_reminders: [
         chain(),
-        chain({ select: jest.fn().mockResolvedValue([row24()]) }),
+        chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
         flagUpdate,
       ],
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) })],
@@ -156,6 +164,50 @@ describe('preference-skip closes the window', () => {
     expect(results.sent24h).toBe(0);
     expect(flagUpdate.update).toHaveBeenCalledWith(
       expect.objectContaining({ reminder_24h_sent: true }),
+    );
+    expect(flagUpdate.where).toHaveBeenCalledWith('appointment_time', reminderRow.appointment_time);
+  });
+
+  test('72h preference-skip close that matches 0 rows (raced move) skips the bookkeeping and leaves the re-armed row', async () => {
+    const flagUpdate = chain({ update: jest.fn().mockResolvedValue(0) }); // row moved concurrently
+    wireDb({
+      appointment_reminders: [
+        chain(),
+        chain({ select: jest.fn().mockResolvedValue([row72()]) }),
+        flagUpdate,
+      ],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) })],
+      notification_prefs: [chain({ first: jest.fn().mockResolvedValue({ service_reminder_72h: false }) })],
+      customers: [chain()],
+    });
+
+    const results = await AppointmentReminders.checkAndSendReminders();
+
+    // The re-armed row owns the new state — nothing counted as skipped.
+    expect(results.skipped).toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('72h preference-skip close skipped'),
+    );
+  });
+
+  test('24h preference-skip close that matches 0 rows (raced move) skips the bookkeeping and leaves the re-armed row', async () => {
+    const flagUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
+    wireDb({
+      appointment_reminders: [
+        chain(),
+        chain({ select: jest.fn().mockResolvedValue([row24()]) }),
+        flagUpdate,
+      ],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) })],
+      notification_prefs: [chain({ first: jest.fn().mockResolvedValue({ service_reminder_24h: false }) })],
+      customers: [chain()],
+    });
+
+    const results = await AppointmentReminders.checkAndSendReminders();
+
+    expect(results.skipped).toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('24h preference-skip close skipped'),
     );
   });
 });

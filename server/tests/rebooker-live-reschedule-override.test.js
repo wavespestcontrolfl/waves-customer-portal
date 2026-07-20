@@ -551,3 +551,84 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(result.rescheduledOccurrences[1].conflicted).toBe(true);
   });
 });
+
+describe('applyLiveMoveSideEffects (shared with the raw movers)', () => {
+  // The raw movers (admin bulk reschedule, IB reschedule_appointment, IB
+  // move_stops_to_day) flip en_route/on_site → confirmed outside
+  // SmartRebooker — this helper carries the side effects reschedule()
+  // applies around that flip: history append, tech_status release,
+  // customer tracker refresh.
+  const { applyLiveMoveSideEffects } = SmartRebooker;
+
+  function connMock() {
+    const historyInsert = chain();
+    const conn = jest.fn((table) => {
+      if (table === 'job_status_history') return historyInsert;
+      throw new Error(`Unexpected conn table ${table}`);
+    });
+    return { conn, historyInsert };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test.each(['en_route', 'on_site'])(
+    'appends the %s → confirmed history row on the caller conn, frees the tech, and refreshes the tracker',
+    async (status) => {
+      const { conn, historyInsert } = connMock();
+
+      await applyLiveMoveSideEffects(conn, liveService(status), { actor: 'staff-1' });
+
+      // History append matches reschedule()'s own insert shape.
+      expect(historyInsert.insert).toHaveBeenCalledWith({
+        job_id: 'svc-1',
+        from_status: status,
+        to_status: 'confirmed',
+        transitioned_by: 'staff-1',
+      });
+      // tech_status pointer released so the tech goes idle.
+      expect(clearTechCurrentJob).toHaveBeenCalledWith({
+        tech_id: 'tech-1',
+        current_job_id: 'svc-1',
+        status: 'idle',
+      });
+      // Open TrackPage / customer portal gets the refresh.
+      expect(mockIoTo).toHaveBeenCalledWith('customer:cust-1');
+      expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+        job_id: 'svc-1',
+        status: 'confirmed',
+        eta: null,
+        tech_first_name: null,
+      }));
+    },
+  );
+
+  test('defaults history attribution to null (system), matching reschedule()', async () => {
+    const { conn, historyInsert } = connMock();
+
+    await applyLiveMoveSideEffects(conn, liveService('en_route'));
+
+    expect(historyInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      transitioned_by: null,
+    }));
+  });
+
+  test('unassigned job: no tech_status touch, but history + refresh still fire', async () => {
+    const { conn, historyInsert } = connMock();
+
+    await applyLiveMoveSideEffects(conn, { ...liveService('on_site'), technician_id: null });
+
+    expect(historyInsert.insert).toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).toHaveBeenCalled();
+  });
+
+  test('a tech_status clear failure is swallowed (best-effort, like reschedule()) — the refresh still fires', async () => {
+    const { conn } = connMock();
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('tech_status down'));
+
+    await expect(applyLiveMoveSideEffects(conn, liveService('en_route'))).resolves.toBeUndefined();
+    expect(mockIoEmit).toHaveBeenCalled();
+  });
+});

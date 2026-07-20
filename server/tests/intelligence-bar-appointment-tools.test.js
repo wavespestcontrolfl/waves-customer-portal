@@ -10,12 +10,30 @@
  *   - time_window parsing per the tool's documented contract
  *   - reschedule_appointment: terminal-status + past-date refusal,
  *     reschedule_log audit row (initiated_by 'admin_ib'), track-token refresh,
- *     and the rebooker's LIVE_LIFECYCLE_RESET on en_route/on_site rows.
+ *     and the rebooker's LIVE_LIFECYCLE_RESET on en_route/on_site rows
+ *   - create registers the durable reminder row (registration only, no SMS)
+ *     like the canonical admin create path, and logs ids only (no PII)
+ *   - live moves carry the rebooker-parity side effects
+ *     (applyLiveMoveSideEffects): job_status_history append, tech_status
+ *     release, customer tracker refresh
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/tech-status', () => ({
+  clearTechCurrentJob: jest.fn().mockResolvedValue(null),
+}));
+const mockIoEmit = jest.fn();
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
+}));
+jest.mock('../services/appointment-reminders', () => ({
+  registerAppointment: jest.fn().mockResolvedValue({ id: 'rem-1' }),
+}));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
+const { clearTechCurrentJob } = require('../services/tech-status');
+const AppointmentReminders = require('../services/appointment-reminders');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
 function chain(overrides = {}) {
@@ -95,6 +113,68 @@ describe('create_appointment', () => {
       window_start: '09:00',
       window_end: '10:00',
     });
+  });
+
+  test('registers the durable reminder row with the insert — registration only, no confirmation SMS', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
+      scheduled_services: [chain()],
+    });
+
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+      time_window: '9:00 AM',
+    });
+
+    expect(result.success).toBe(true);
+    // Canonical admin-create semantics: durable row for the 72h/24h cron,
+    // sendConfirmation:false so NO SMS goes out (sends stay operator-initiated).
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      'appt-1', 'cust-1', '2099-01-15T09:00', 'Pest Control', 'admin_ib',
+      { sendConfirmation: false },
+    );
+  });
+
+  test('windowless create registers the reminder at the 08:00 default (canonical admin convention)', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
+      scheduled_services: [chain()],
+    });
+    await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+    });
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      'appt-1', 'cust-1', '2099-01-15T08:00', 'Pest Control', 'admin_ib',
+      { sendConfirmation: false },
+    );
+  });
+
+  test('a reminder-registration failure never fails the already-committed create', async () => {
+    AppointmentReminders.registerAppointment.mockRejectedValueOnce(new Error('reminders down'));
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
+      scheduled_services: [chain()],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+    });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reminder registration failed'));
+  });
+
+  test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
+      scheduled_services: [chain()],
+    });
+    await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
+    });
+    const logged = logger.info.mock.calls.map((c) => String(c[0]));
+    expect(logged.some((line) => line.includes('appt-1') && line.includes('cust-1'))).toBe(true);
+    for (const line of logged) {
+      expect(line).not.toMatch(/Ada|Lovelace/);
+    }
   });
 
   test('"morning"/"afternoon" map to the documented window starts', async () => {
@@ -197,15 +277,22 @@ describe('reschedule_appointment', () => {
       initiated_by: 'admin_ib',
       notes: 'customer asked',
     });
+
+    // Non-live move: no rebooker live-move side effects fire (no history
+    // queue is wired either — an unexpected insert would throw above).
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
   test('an en_route row gets the rebooker LIVE_LIFECYCLE_RESET applied AND is flipped to confirmed', async () => {
     const updateChain = chain();
+    const historyChain = chain({ insert: jest.fn().mockResolvedValue() });
     wireDb({
       scheduled_services: [
-        chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, status: 'en_route' }) }),
+        chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, status: 'en_route', technician_id: 'tech-1' }) }),
         updateChain,
       ],
+      job_status_history: [historyChain],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
       reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
@@ -228,6 +315,43 @@ describe('reschedule_appointment', () => {
       // so the moved row is never left en_route/on_site on a future date.
       status: 'confirmed',
     });
+
+    // Rebooker-parity side effects of the live flip: history append…
+    expect(historyChain.insert).toHaveBeenCalledWith(expect.objectContaining({
+      job_id: 'svc-1',
+      from_status: 'en_route',
+      to_status: 'confirmed',
+    }));
+    // …tech_status release…
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({
+      tech_id: 'tech-1',
+      current_job_id: 'svc-1',
+      status: 'idle',
+    });
+    // …and the customer tracker refresh.
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1',
+      status: 'confirmed',
+    }));
+  });
+
+  test('a live-move side-effect failure never fails the already-committed move', async () => {
+    const historyChain = chain({ insert: jest.fn().mockRejectedValue(new Error('history table down')) });
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, status: 'on_site', technician_id: 'tech-1' }) }),
+        chain(),
+      ],
+      job_status_history: [historyChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15',
+    });
+    expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('live-move side effects failed'));
   });
 
   test('a start-only move keeps the original stored window_end when no new time is given', async () => {

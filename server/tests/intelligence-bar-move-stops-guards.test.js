@@ -9,11 +9,22 @@
  *   - terminal rows are refused and reported (skipped_terminal), never moved
  *   - a reschedule_log audit row per moved stop (initiated_by 'admin_ib')
  *   - the rebooker's LIVE_LIFECYCLE_RESET on en_route/on_site rows
+ *   - live moves carry the rebooker-parity side effects
+ *     (applyLiveMoveSideEffects): job_status_history append, tech_status
+ *     release, customer tracker refresh — non-live moves don't
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/tech-status', () => ({
+  clearTechCurrentJob: jest.fn().mockResolvedValue(null),
+}));
+const mockIoEmit = jest.fn();
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
+}));
 
 const db = require('../models/db');
+const { clearTechCurrentJob } = require('../services/tech-status');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 
 function chain(overrides = {}) {
@@ -95,13 +106,14 @@ test('all-terminal selection errors instead of resurrecting finished visits', as
 test('mixed selection moves only non-terminal rows, reports skipped, logs each move', async () => {
   const listChain = chain({
     select: jest.fn().mockResolvedValue([
-      stop('svc-live', 'en_route'),
+      stop('svc-live', 'en_route', { technician_id: 'tech-1' }),
       stop('svc-ok', 'confirmed'),
       stop('svc-done', 'completed'),
     ]),
   });
   const updates = [chain(), chain()];
   const logInserts = [chain(), chain()];
+  const historyChain = chain();
   let updateIdx = 0;
   let logIdx = 0;
   db.mockImplementation((table) => {
@@ -110,6 +122,7 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
       return updates[updateIdx++];
     }
     if (table === 'reschedule_log') return logInserts[logIdx++];
+    if (table === 'job_status_history') return historyChain;
     throw new Error(`Unexpected db('${table}') call`);
   });
 
@@ -137,6 +150,28 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
   // Second update (confirmed row) does NOT rewind or restamp status.
   expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('track_state');
   expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('status');
+
+  // The live stop ALONE carries the rebooker-parity side effects:
+  // exactly one history append (en_route → confirmed)…
+  expect(historyChain.insert).toHaveBeenCalledTimes(1);
+  expect(historyChain.insert).toHaveBeenCalledWith(expect.objectContaining({
+    job_id: 'svc-live',
+    from_status: 'en_route',
+    to_status: 'confirmed',
+  }));
+  // …one tech_status release…
+  expect(clearTechCurrentJob).toHaveBeenCalledTimes(1);
+  expect(clearTechCurrentJob).toHaveBeenCalledWith({
+    tech_id: 'tech-1',
+    current_job_id: 'svc-live',
+    status: 'idle',
+  });
+  // …and one customer tracker refresh.
+  expect(mockIoEmit).toHaveBeenCalledTimes(1);
+  expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+    job_id: 'svc-live',
+    status: 'confirmed',
+  }));
 
   // One audit row per moved stop, rebooker conventions.
   expect(logInserts[0].insert.mock.calls[0][0]).toMatchObject({

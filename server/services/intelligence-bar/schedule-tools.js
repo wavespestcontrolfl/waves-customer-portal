@@ -446,7 +446,7 @@ async function moveStopsToDay(input) {
   }
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
-  const { LIVE_LIFECYCLE_RESET } = require('../rebooker');
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
   for (const s of movable) {
     const oldDate = s.scheduled_date;
     // A live (en_route/on_site) stop being moved rewinds its tracker
@@ -464,6 +464,17 @@ async function moveStopsToDay(input) {
       ...liveReset,
       updated_at: new Date(),
     });
+    // Rebooker-parity side effects of the live → confirmed flip above:
+    // job_status_history audit row, tech_status release, customer tracker
+    // refresh. Best-effort: the move is committed — a side-effect failure
+    // must not report the whole batch as failed.
+    if (wasLive) {
+      try {
+        await applyLiveMoveSideEffects(db, s);
+      } catch (err) {
+        logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+      }
+    }
     // Audit row matching the rebooker's reschedule_log conventions.
     // Best-effort: the move is committed — a log failure must not report
     // the whole batch as failed.

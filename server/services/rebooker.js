@@ -890,7 +890,46 @@ class SmartRebooker {
   }
 }
 
+// Side effects reschedule() applies around a live (en_route/on_site) move,
+// shared with the raw movers that flip live rows → 'confirmed' outside
+// SmartRebooker (admin bulk reschedule, IB reschedule_appointment, IB
+// move_stops_to_day). Without these, a live move flips the row but:
+//   1. skips the job_status_history append (the repo's audit trail) — runs
+//      on `conn`, so a transactional caller keeps it atomic with the flip;
+//   2. leaves tech_status pointing at the moved job (tech shows en route /
+//      on site forever) — released best-effort, same as the post-commit
+//      cleanup in reschedule(); clearTechCurrentJob only clears when the
+//      pointer still targets this job;
+//   3. leaves an open TrackPage on the stale live screen — refresh pushed.
+// Call AFTER the caller's status UPDATE, and only for rows that were live.
+// `svc` is the pre-update row (id / status / customer_id / technician_id);
+// `actor` is the acting technician/staff uuid for history attribution
+// (null = system, matching reschedule()'s own insert).
+async function applyLiveMoveSideEffects(conn, svc, { actor = null } = {}) {
+  if (String(svc.status) !== 'confirmed') {
+    await conn('job_status_history').insert({
+      job_id: svc.id,
+      from_status: svc.status,
+      to_status: 'confirmed',
+      transitioned_by: actor,
+    });
+  }
+  if (svc.technician_id) {
+    try {
+      await clearTechCurrentJob({
+        tech_id: svc.technician_id,
+        current_job_id: svc.id,
+        status: 'idle',
+      });
+    } catch (err) {
+      logger.error(`[rebooker] tech_status clear after live move failed for ${svc.id}: ${err.message}`);
+    }
+  }
+  emitCustomerJobRefresh(svc, 'confirmed');
+}
+
 module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;

@@ -3442,11 +3442,20 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // clears the tracker fields but not status, so also land the row
               // back on 'confirmed' in the same UPDATE — otherwise it stays live
               // on a future date, matching the rebooker's own path.
-              if (['en_route', 'on_site'].includes(String(svc.status))) {
+              const wasLive = ['en_route', 'on_site'].includes(String(svc.status));
+              if (wasLive) {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
               }
               await trx('scheduled_services').where({ id }).update(updates);
+              // Rebooker-parity side effects of the live → confirmed flip:
+              // job_status_history audit row (same trx — atomic with the
+              // flip, like the rebooker's own path), tech_status release,
+              // customer tracker refresh.
+              if (wasLive) {
+                const { applyLiveMoveSideEffects } = require('../services/rebooker');
+                await applyLiveMoveSideEffects(trx, svc, { actor: req.technicianId || null });
+              }
               // Audit row matching the rebooker's reschedule_log conventions.
               await trx('reschedule_log').insert({
                 scheduled_service_id: id,

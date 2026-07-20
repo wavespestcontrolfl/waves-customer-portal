@@ -9,6 +9,10 @@
  *   - a past scheduledDate lands in failed[] per-row
  *   - moved rows get a reschedule_log row (initiated_by 'admin_bulk')
  *   - en_route/on_site rows get the rebooker LIVE_LIFECYCLE_RESET
+ *   - live moves carry the rebooker-parity side effects
+ *     (applyLiveMoveSideEffects, same trx for the history append):
+ *     job_status_history row attributed to the acting staff, tech_status
+ *     release, customer tracker refresh
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -46,8 +50,16 @@ jest.mock('../services/appointment-reminders', () => ({
   handleCancellation: jest.fn().mockResolvedValue({}),
   markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 0 }),
 }));
+jest.mock('../services/tech-status', () => ({
+  clearTechCurrentJob: jest.fn().mockResolvedValue(null),
+}));
+const mockIoEmit = jest.fn();
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
+}));
 
 const db = require('../models/db');
+const { clearTechCurrentJob } = require('../services/tech-status');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
 
@@ -151,11 +163,13 @@ test('a past scheduledDate produces per-row failed[] entries instead of moving a
 test('a live en_route row moves WITH the lifecycle rewind and gets an admin_bulk reschedule_log row', async () => {
   const updateChain = chain();
   const logChain = chain();
+  const historyChain = chain();
   wireTrx({
     scheduled_services: [
-      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route' }) }),
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route', technician_id: 'tech-1' }) }),
       updateChain,
     ],
+    job_status_history: [historyChain],
     reschedule_log: [logChain],
   });
 
@@ -189,6 +203,27 @@ test('a live en_route row moves WITH the lifecycle rewind and gets an admin_bulk
     reason_code: 'admin',
     initiated_by: 'admin_bulk',
   });
+
+  // Rebooker-parity side effects of the live flip — history append runs on
+  // the SAME trx (atomic with the flip) and is attributed to the acting
+  // staff…
+  expect(historyChain.insert).toHaveBeenCalledWith({
+    job_id: 'svc-1',
+    from_status: 'en_route',
+    to_status: 'confirmed',
+    transitioned_by: 'staff-1',
+  });
+  // …the tech_status pointer is released…
+  expect(clearTechCurrentJob).toHaveBeenCalledWith({
+    tech_id: 'tech-1',
+    current_job_id: 'svc-1',
+    status: 'idle',
+  });
+  // …and an open TrackPage gets the refresh.
+  expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+    job_id: 'svc-1',
+    status: 'confirmed',
+  }));
 });
 
 test('a pending row moves WITHOUT lifecycle fields', async () => {
@@ -211,4 +246,8 @@ test('a pending row moves WITHOUT lifecycle fields', async () => {
   expect(updateChain.update.mock.calls[0][0]).not.toHaveProperty('track_state');
   // A non-live row's status is not restamped.
   expect(updateChain.update.mock.calls[0][0]).not.toHaveProperty('status');
+  // And no live-move side effects fire (an unexpected trx('job_status_history')
+  // would throw above).
+  expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  expect(mockIoEmit).not.toHaveBeenCalled();
 });
