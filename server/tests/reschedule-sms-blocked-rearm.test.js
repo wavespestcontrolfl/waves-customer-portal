@@ -11,7 +11,13 @@
  * re-arms while the cron can still deliver it
  * (AppointmentReminders.reminder72hStillReachable — more than 24.25h out);
  * inside that boundary only the 24h window re-arms, since a cleared 72h flag
- * there can never fire and would just re-enter every 15-minute scan.
+ * there can never fire and would just re-enter every 15-minute scan. The 24h
+ * window has its own band (reminder24hStillReachable — the START still in
+ * the future; the cron's 24h branch requires hoursUntil > 0): a same-day
+ * reschedule is valid while the window END hasn't elapsed, so the blocked
+ * compensation can run after the start passed — with neither window
+ * deliverable, the re-arm skips the write entirely instead of parking a
+ * dead armed flag in every scan.
  *
  * The pre-send snapshot read is BEST-EFFORT: it only guards the re-arm, so a
  * transient failure on that read must never abort the confirmation send (the
@@ -37,11 +43,12 @@ jest.mock('../utils/datetime-et', () => ({
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
   markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
-  // Band predicate consulted by the blocked-send re-arm. Default: still
-  // reachable (both windows re-arm); the same/next-day test flips it. The
-  // real boundary math is pinned by admin-dispatch-rearm-reminders.test.js,
-  // which runs the unmocked helper.
+  // Band predicates consulted by the blocked-send re-arm. Default: still
+  // reachable (both windows re-arm); the same/next-day test flips the 72h
+  // one, the past-start test flips both. The real boundary math is pinned by
+  // admin-dispatch-rearm-reminders.test.js, which runs the unmocked helpers.
   reminder72hStillReachable: jest.fn(() => true),
+  reminder24hStillReachable: jest.fn(() => true),
 }));
 
 const db = require('../models/db');
@@ -161,6 +168,40 @@ test('a blocked confirmation for a same/next-day slot re-arms ONLY the 24h windo
   expect(payload).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
   expect(payload).not.toHaveProperty('reminder_72h_sent');
   expect(payload).not.toHaveProperty('reminder_72h_sent_at');
+});
+
+test('a blocked confirmation whose appointment START already passed re-arms NOTHING — no window the cron could deliver', async () => {
+  // Same-day reschedules stay valid while the window END hasn't elapsed, so
+  // this compensation can run after the start passed. The cron's 24h branch
+  // requires hoursUntil > 0 — a cleared 24h flag here could never send and
+  // would just re-enter every 15-minute scan until something else closed the
+  // row. With neither window deliverable the write is skipped entirely (no
+  // updated_at bump on a row whose flags aren't changing); the error still
+  // propagates.
+  AppointmentReminders.reminder72hStillReachable.mockReturnValueOnce(false);
+  AppointmentReminders.reminder24hStillReachable.mockReturnValueOnce(false);
+  sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(guardRow()) });
+  const rearmChain = chain();
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    appointment_reminders: [snapshotChain, rearmChain],
+  });
+
+  await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
+    .rejects.toThrow(/appointment SMS blocked/);
+
+  // Both bands were judged against the row's own snapshot time…
+  expect(AppointmentReminders.reminder72hStillReachable).toHaveBeenCalledWith(APPT);
+  expect(AppointmentReminders.reminder24hStillReachable).toHaveBeenCalledWith(APPT);
+  // …and with neither deliverable, no re-arm write happened at all.
+  expect(rearmChain.update).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('no reminder window re-armed'));
 });
 
 test('a successful confirmation reads the snapshot but never re-arms the covered windows', async () => {

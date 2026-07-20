@@ -282,24 +282,35 @@ class RescheduleSMS {
         // reminds the customer of the new time; a possible duplicate was the
         // risk covering guards against, silence is worse.
         //
-        // The 24h window re-arms unconditionally; the 72h window only while
-        // the cron can still deliver it (reminder72hStillReachable — the
-        // cron's 72h branch never fires inside 24.25h, so clearing that flag
-        // for a same/next-day slot leaves a dead armed window the scan
-        // re-selects every 15 minutes forever; the re-armed 24h window
-        // carries the fallback notice for those). Shared boundary predicate,
-        // never a local copy of the cron's cutoff.
+        // Each window only re-arms while the cron can still deliver it
+        // (shared boundary predicates, never a local copy of the cron's
+        // cutoffs): the 72h window needs the appointment more than 24.25h
+        // out (reminder72hStillReachable — the cron's 72h branch never fires
+        // inside that, so clearing the flag for a same/next-day slot leaves
+        // a dead armed window the scan re-selects every 15 minutes forever);
+        // the 24h window needs the START still in the future
+        // (reminder24hStillReachable — a same-day slot can be valid because
+        // its window END hasn't elapsed while the start already passed, and
+        // the cron's 24h branch requires hoursUntil > 0, so a cleared flag
+        // there can never send either). Nothing deliverable → null: skip
+        // the write entirely rather than bump updated_at on a row whose
+        // flags we aren't changing.
         try {
-          const { reminder72hStillReachable } = require('./appointment-reminders');
-          const rearmUpdateFor = (apptTime) => ({
-            ...(reminder72hStillReachable(apptTime) ? {
-              reminder_72h_sent: false,
-              reminder_72h_sent_at: null,
-            } : {}),
-            reminder_24h_sent: false,
-            reminder_24h_sent_at: null,
-            updated_at: db.fn.now(),
-          });
+          const { reminder72hStillReachable, reminder24hStillReachable } = require('./appointment-reminders');
+          const rearmUpdateFor = (apptTime) => {
+            const windows = {
+              ...(reminder72hStillReachable(apptTime) ? {
+                reminder_72h_sent: false,
+                reminder_72h_sent_at: null,
+              } : {}),
+              ...(reminder24hStillReachable(apptTime) ? {
+                reminder_24h_sent: false,
+                reminder_24h_sent_at: null,
+              } : {}),
+            };
+            if (Object.keys(windows).length === 0) return null;
+            return { ...windows, updated_at: db.fn.now() };
+          };
           // Guard the re-arm on the appointment_time + updated_at captured
           // before this SMS (reminderGuard). A newer reschedule of this visit
           // that committed while the confirmation was in flight re-stamped the
@@ -309,21 +320,26 @@ class RescheduleSMS {
           // = the row moved on underneath; skip, the newer reschedule owns it.
           // Same guard shape as handleReschedule's own failed-notice re-arm.
           if (reminderGuard) {
-            await db('appointment_reminders')
-              .where({ id: reminderGuard.id })
-              // A sibling-suppressed row is suppressed BY SETTING both sent
-              // flags — clearing them would put it back in the cron's send set
-              // alongside the slot's owner (duplicate reminders). Same carve-out
-              // markRescheduleNoticeSent takes on the success path.
-              .where('suppressed_by_sibling', false)
-              .where('cancelled', false)
-              .where('appointment_time', reminderGuard.appointment_time)
-              .where('updated_at', reminderGuard.updated_at)
-              // Band check against the row's own appointment_time — the
-              // predicate above pins the update to a row still at exactly
-              // that time, so the decision is judged against the appointment
-              // the cleared flag would fire for.
-              .update(rearmUpdateFor(reminderGuard.appointment_time));
+            // Band check against the row's own appointment_time — the
+            // appointment_time predicate below pins the update to a row
+            // still at exactly that time, so the decision is judged against
+            // the appointment the cleared flag would fire for.
+            const rearmUpdate = rearmUpdateFor(reminderGuard.appointment_time);
+            if (!rearmUpdate) {
+              logger.info(`[reschedule-sms] no reminder window re-armed for ${pending.scheduled_service_id} — the appointment start has already passed, so the cron could never deliver a cleared flag`);
+            } else {
+              await db('appointment_reminders')
+                .where({ id: reminderGuard.id })
+                // A sibling-suppressed row is suppressed BY SETTING both sent
+                // flags — clearing them would put it back in the cron's send set
+                // alongside the slot's owner (duplicate reminders). Same carve-out
+                // markRescheduleNoticeSent takes on the success path.
+                .where('suppressed_by_sibling', false)
+                .where('cancelled', false)
+                .where('appointment_time', reminderGuard.appointment_time)
+                .where('updated_at', reminderGuard.updated_at)
+                .update(rearmUpdate);
+            }
           } else if (reminderGuardReadFailed) {
             // The pre-send snapshot READ failed (this is not the row-missing
             // case — that skips below), so the re-arm can't be scoped by the
@@ -336,18 +352,23 @@ class RescheduleSMS {
             // row mid-send; skipping the re-arm instead risks the customer
             // never hearing about the new time at all. Prefer the re-arm and
             // accept the narrow double-text window.
-            logger.warn(`[reschedule-sms] re-arming reminders for ${pending.scheduled_service_id} WITHOUT the pre-send snapshot guard (snapshot read had failed) — a concurrent newer reschedule may get a duplicate reminder`);
-            await db('appointment_reminders')
-              .where({ scheduled_service_id: pending.scheduled_service_id })
-              .where('suppressed_by_sibling', false)
-              .where('cancelled', false)
-              // No snapshot to judge the 72h band against — use the slot this
-              // reply just confirmed (the same date+start string the
-              // handleReschedule sync stamped onto the row above), which is
-              // what the cleared flag would fire for.
-              .update(rearmUpdateFor(parseETDateTime(
-                `${selectedOption.date}T${selectedOption.window?.start || '08:00'}`,
-              )));
+            // No snapshot to judge the send bands against — use the slot this
+            // reply just confirmed (the same date+start string the
+            // handleReschedule sync stamped onto the row above), which is
+            // what the cleared flags would fire for.
+            const fallbackRearmUpdate = rearmUpdateFor(parseETDateTime(
+              `${selectedOption.date}T${selectedOption.window?.start || '08:00'}`,
+            ));
+            if (!fallbackRearmUpdate) {
+              logger.info(`[reschedule-sms] no reminder window re-armed for ${pending.scheduled_service_id} — the appointment start has already passed, so the cron could never deliver a cleared flag`);
+            } else {
+              logger.warn(`[reschedule-sms] re-arming reminders for ${pending.scheduled_service_id} WITHOUT the pre-send snapshot guard (snapshot read had failed) — a concurrent newer reschedule may get a duplicate reminder`);
+              await db('appointment_reminders')
+                .where({ scheduled_service_id: pending.scheduled_service_id })
+                .where('suppressed_by_sibling', false)
+                .where('cancelled', false)
+                .update(fallbackRearmUpdate);
+            }
           }
         } catch (rearmErr) {
           logger.error(`[reschedule-sms] reminder re-arm after failed confirmation failed for ${pending.scheduled_service_id}: ${rearmErr.message}`);

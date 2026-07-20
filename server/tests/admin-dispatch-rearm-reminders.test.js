@@ -14,12 +14,18 @@
  * send — a row that moved on underneath matches zero rows and is skipped, the
  * newer reschedule owns it. Mirrors handleReschedule's own re-arm guard.
  *
- * The 72h window additionally only re-arms while the cron can still deliver
- * it (the REAL AppointmentReminders.reminder72hStillReachable — appointment
- * more than 24.25h out, the cron's own send boundary): clearing it for a
- * same/next-day appointment leaves a dead armed flag the 15-minute scan
- * re-selects forever, so those guards re-arm ONLY the 24h window (which
- * carries the fallback notice). This pins both helpers' contract.
+ * Each window additionally only re-arms while the cron can still deliver it
+ * (the REAL AppointmentReminders band helpers — this suite pins the actual
+ * boundary math, not stubs): the 72h window needs the appointment more than
+ * 24.25h out (reminder72hStillReachable — clearing it for a same/next-day
+ * appointment leaves a dead armed flag the 15-minute scan re-selects
+ * forever, so those guards re-arm ONLY the 24h window, which carries the
+ * fallback notice); the 24h window needs the START still in the future
+ * (reminder24hStillReachable — a same-day move is valid while its window
+ * END hasn't elapsed, but the cron's 24h branch requires hoursUntil > 0, so
+ * a past-start clear could never send either). A guard with neither window
+ * deliverable skips its write entirely — no updated_at bump on a row whose
+ * flags aren't changing, and no forever-rescanning armed flag.
  *
  * The snapshot read itself is BEST-EFFORT with a DISTINCT failure result:
  * captureReminderGuards returned [] both for "no reminder rows" and for a
@@ -58,6 +64,7 @@ function chain(overrides = {}) {
 const FUTURE_APPT = new Date(Date.now() + 72 * 3600 * 1000); // inside the 72h send band
 const NEAR_APPT = new Date(Date.now() + 20 * 3600 * 1000);   // < 24.25h — 72h can never fire
 const FAR_APPT = new Date(Date.now() + 200 * 3600 * 1000);   // beyond the band — 72h fires later
+const PAST_APPT = new Date(Date.now() - 1 * 3600 * 1000);    // start already passed — NO window can fire
 const APPT = new Date('2026-07-10T14:00:00Z');
 const UPD = new Date('2026-07-04T17:00:00Z');
 const guard = (id, appointmentTime = FUTURE_APPT, updatedAt = UPD) => ({
@@ -125,6 +132,23 @@ test('a guard beyond the 72h send band (no upper bound) still re-arms the 72h wi
   }));
 });
 
+test('a guard whose appointment START already passed re-arms NOTHING — the write is skipped entirely', async () => {
+  // Same-day moves are valid while the window END hasn't elapsed, so the
+  // blocked-send compensation can run after the start passed. The cron's
+  // 24h branch requires hoursUntil > 0 (and the 72h branch needs > 24.25h),
+  // so clearing either flag could never send — the row would just re-enter
+  // every 15-minute scan until something else closed it. Real helpers here:
+  // this pins reminder24hStillReachable's actual start-in-the-future
+  // boundary.
+  db.mockImplementation(() => { throw new Error('should not query'); });
+
+  await rearmRescheduleReminderWindows(guard('svc-1', PAST_APPT));
+
+  expect(db).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('no reminder window re-armed'));
+  expect(logger.error).not.toHaveBeenCalled();
+});
+
 test('re-arms every occurrence of a series move (one guarded update per guard), each judged on its OWN time', async () => {
   const q = chain();
   db.mockImplementation(() => q);
@@ -142,6 +166,23 @@ test('re-arms every occurrence of a series move (one guarded update per guard), 
   expect(q.update.mock.calls[0][0]).toHaveProperty('reminder_72h_sent', false);
   expect(q.update.mock.calls[1][0]).not.toHaveProperty('reminder_72h_sent');
   expect(q.update.mock.calls[2][0]).toHaveProperty('reminder_72h_sent', false);
+});
+
+test('a series move mixing a past-start stop with live ones re-arms ONLY the live ones', async () => {
+  const q = chain();
+  db.mockImplementation(() => q);
+
+  await rearmRescheduleReminderWindows([
+    guard('svc-past', PAST_APPT), guard('svc-live', NEAR_APPT),
+  ]);
+
+  // The past-start guard is skipped before any query; the live one still
+  // gets its (24h-only, < 24.25h out) re-arm.
+  expect(q.update).toHaveBeenCalledTimes(1);
+  expect(q.where).not.toHaveBeenCalledWith({ scheduled_service_id: 'svc-past' });
+  expect(q.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-live' });
+  expect(q.update.mock.calls[0][0]).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('svc-past'));
 });
 
 test('a newer reschedule that moved the row on underneath is not stomped (zero-row skip, no throw)', async () => {
@@ -255,6 +296,15 @@ describe('snapshot-read-failure fallback (unguarded re-arm)', () => {
     expect(q.update.mock.calls[0][0]).toHaveProperty('reminder_72h_sent', false);
     expect(q.update.mock.calls[1][0]).not.toHaveProperty('reminder_72h_sent');
     expect(q.update.mock.calls[1][0]).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+  });
+
+  test('a fallback entry whose START already passed is skipped too — no window the cron could deliver', async () => {
+    db.mockImplementation(() => { throw new Error('should not query'); });
+
+    await rearmRescheduleReminderWindows(FAILED, [entry('svc-1', PAST_APPT)]);
+
+    expect(db).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('no reminder window re-armed'));
   });
 
   test('capture failure piped straight into the re-arm (the call-site shape) fires the fallback', async () => {

@@ -7283,13 +7283,19 @@ async function captureReminderGuards(serviceIds) {
 // time — re-arm so the 15-min cron still reminds the customer. A possible
 // duplicate was the risk covering guards against; silence is worse.
 //
-// The 24h window re-arms for any guard; the 72h window only while the cron
-// can still deliver it (AppointmentReminders.reminder72hStillReachable — the
-// cron's 72h branch never fires once the appointment is within 24.25h, so
-// clearing the flag for a same/next-day appointment leaves a dead armed
-// window the scan re-selects every 15 minutes forever, and the covered flag
-// the sync stamped was already the correct terminal state; the re-armed 24h
-// window carries the fallback notice for those).
+// Each window only re-arms while the cron can still deliver it (shared
+// AppointmentReminders boundary predicates): the 72h window needs the
+// appointment more than 24.25h out (reminder72hStillReachable — the cron's
+// 72h branch never fires once the appointment is within 24.25h, so clearing
+// the flag for a same/next-day appointment leaves a dead armed window the
+// scan re-selects every 15 minutes forever, and the covered flag the sync
+// stamped was already the correct terminal state; the re-armed 24h window
+// carries the fallback notice for those); the 24h window needs the START
+// still in the future (reminder24hStillReachable — a same-day move can be
+// valid because its window END hasn't elapsed while the start already
+// passed, and the cron's 24h branch requires hoursUntil > 0, so a cleared
+// flag there can never send either — the row would just rescan forever).
+// A guard with neither window deliverable skips its write entirely.
 //
 // Guarded per-row on the appointment_time + updated_at captured at read time
 // (captureReminderGuards, before the SMS): the re-arm is scoped by service id
@@ -7327,20 +7333,26 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
     if (snapshotFailed) logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
     return;
   }
-  // Shared boundary predicate — never a local copy of the cron's 24.25h cutoff.
-  const { reminder72hStillReachable } = require('../services/appointment-reminders');
-  // Same update-builder shape as reschedule-sms.js's rearmUpdateFor: the 24h
-  // window always re-arms; the 72h window only while the cron can still
-  // deliver it.
-  const rearmUpdateFor = (apptTime) => ({
-    ...(reminder72hStillReachable(apptTime) ? {
-      reminder_72h_sent: false,
-      reminder_72h_sent_at: null,
-    } : {}),
-    reminder_24h_sent: false,
-    reminder_24h_sent_at: null,
-    updated_at: db.fn.now(),
-  });
+  // Shared boundary predicates — never a local copy of the cron's cutoffs.
+  const { reminder72hStillReachable, reminder24hStillReachable } = require('../services/appointment-reminders');
+  // Same update-builder shape as reschedule-sms.js's rearmUpdateFor: each
+  // window re-arms only while the cron can still deliver it; null when
+  // neither can (skip the write — don't bump updated_at on a row whose
+  // flags aren't changing).
+  const rearmUpdateFor = (apptTime) => {
+    const windows = {
+      ...(reminder72hStillReachable(apptTime) ? {
+        reminder_72h_sent: false,
+        reminder_72h_sent_at: null,
+      } : {}),
+      ...(reminder24hStillReachable(apptTime) ? {
+        reminder_24h_sent: false,
+        reminder_24h_sent_at: null,
+      } : {}),
+    };
+    if (Object.keys(windows).length === 0) return null;
+    return { ...windows, updated_at: db.fn.now() };
+  };
   if (snapshotFailed) {
     logger.warn(`[dispatch] re-arming reminders for ${list.map((g) => g.scheduledServiceId).join(', ')} WITHOUT the pre-send snapshot guard (snapshot read had failed) — a concurrent newer reschedule may get a duplicate reminder`);
   }
@@ -7353,6 +7365,11 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
       // the update only lands on a row still at that time — so the band
       // decision is judged against exactly the appointment the cleared flag
       // would fire for.
+      const rearmUpdate = rearmUpdateFor(g.appointmentTime);
+      if (!rearmUpdate) {
+        logger.info(`[dispatch] no reminder window re-armed for ${g.scheduledServiceId} — the appointment start has already passed, so the cron could never deliver a cleared flag`);
+        continue;
+      }
       let query = db('appointment_reminders')
         .where({ scheduled_service_id: g.scheduledServiceId })
         // A sibling-suppressed row is suppressed BY SETTING both sent flags —
@@ -7369,7 +7386,7 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
           .where('appointment_time', g.appointmentTime)
           .where('updated_at', g.updatedAt);
       }
-      await query.update(rearmUpdateFor(g.appointmentTime));
+      await query.update(rearmUpdate);
     } catch (err) {
       logger.error(`[dispatch] reminder re-arm after failed notice failed (${g.scheduledServiceId}): ${err.message}`);
     }

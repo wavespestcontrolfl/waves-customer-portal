@@ -475,10 +475,13 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   // the label: a 'rescheduled' pending-rebook placeholder or terminal row
   // parked on the slot must not be advertised in confirmations/reminders.
   // Suppressed-but-sendable siblings stay — the owner texts on their behalf.
+  // EXCEPT windowless pre-closed placeholders (windows_preclosed): those
+  // services only share the 08:00 slot by convention, not by clock time, so
+  // an 8 AM owner's texts must never advertise them.
   // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false, 'ar.windows_preclosed': false })
     .andWhere(function liveServiceSendableOrLegacy() {
       this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
     })
@@ -561,6 +564,21 @@ function reminder72hStillReachable(appointmentTime, now = new Date()) {
   const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
   if (isNaN(apptTime.getTime())) return false;
   return (apptTime.getTime() - now.getTime()) / 3600000 > 24.25;
+}
+
+// The 24h twin: the cron's 24h branch only delivers while the appointment
+// START is still in the future (checkAndSendReminders: `hoursUntil > 0`).
+// That band matters because a same-day reschedule can be VALID with a past
+// start — the slot is judged by its window END, which hasn't elapsed — so a
+// compensating re-arm that clears reminder_24h_sent after the start passed
+// leaves an armed flag the cron can never fire, and the row re-enters every
+// 15-minute scan until something else closes it. Same contract as the 72h
+// helper above: every compensating re-arm consults this before clearing
+// reminder_24h_sent, never a local copy of the boundary.
+function reminder24hStillReachable(appointmentTime, now = new Date()) {
+  const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
+  if (isNaN(apptTime.getTime())) return false;
+  return apptTime.getTime() > now.getTime();
 }
 
 // ── Landline detection ──
@@ -1021,12 +1039,30 @@ const AppointmentReminders = {
    * Pass `options.closeReminderWindows` (boolean) when the visit has NO time
    * window: the row still registers at the canonical date+08:00 slot time
    * (the convention the DB sync trigger, the self-heal sweep, and the
-   * same-slot dedup all COALESCE on), but both reminder windows land
-   * pre-closed so the cron never texts a customer "at 8:00 AM" for a time
-   * nobody chose. When a real window is later set, the sync trigger's
-   * time_changed branch re-arms the windows from the real start; until then
-   * the row's existence keeps selfHealMissingReminderRows (which registers
-   * windowless visits at 08:00 ARMED) from resurrecting the 8 AM promise.
+   * same-slot dedup all COALESCE on), but it is inserted as a NON-DELIVERING
+   * PLACEHOLDER — both reminder windows pre-closed in the same insert, so the
+   * cron never texts "at 8:00 AM" for a time nobody chose, plus two markers:
+   *   • suppressed_by_sibling=true takes the row out of slot OWNERSHIP
+   *     everywhere the one-owner-per-slot machinery looks (this method's
+   *     dedup, registerVisitReminderInTx's dedup, the DB sync trigger's
+   *     arrival check, promotion's no-owner-remains check). A REAL 8 AM
+   *     visit registered later therefore inserts ARMED instead of landing
+   *     suppressed behind a row that will never send — and conversely this
+   *     path SKIPS the same-slot dedup entirely, so an existing real 8 AM
+   *     owner never absorbs the date-only service (no label merge, no
+   *     promotable sibling): the placeholder inserts identically whether or
+   *     not an owner holds the 08:00 slot.
+   *   • windows_preclosed=true is the durable marker the DB machinery keys
+   *     placeholder semantics on: sibling promotion on slot departure skips
+   *     it (the placeholder must never be promoted into an armed 08:00
+   *     sender), and the sync trigger holds it suppressed with both windows
+   *     closed across date-only moves while the service stays windowless.
+   * When a real window is later set, the sync trigger's time_changed branch
+   * clears the marker, re-decides slot ownership, and re-arms the windows
+   * from the real start — from then on the row is an ordinary registration.
+   * Until then, the row's existence keeps selfHealMissingReminderRows (which
+   * registers row-less windowless visits at 08:00 ARMED) from resurrecting
+   * the 8 AM promise. Confirmation keeps its normal source-based handling.
    */
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
@@ -1056,6 +1092,39 @@ const AppointmentReminders = {
 
         if (existing) {
           return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
+        }
+
+        // Windowless pre-closed placeholder — see the closeReminderWindows
+        // JSDoc above. One INSERT (a register-then-close pair would leave a
+        // gap where a cron tick could send an 08:00-stamped reminder), and
+        // deliberately WITHOUT the same-slot dedup below: the placeholder
+        // never owns the slot, never merges its label into a real owner,
+        // never sends, and is never promoted, so it inserts the same way
+        // whether or not an owner holds 08:00. Only the 72h/24h stamps close
+        // here; confirmation keeps its normal source-based handling after
+        // the transaction. (suppressed_by_sibling is set explicitly, so the
+        // legacy fingerprint trigger has nothing to re-derive.)
+        if (closeReminderWindows) {
+          const windowsClosedAt = new Date();
+          const [record] = await trx('appointment_reminders').insert({
+            scheduled_service_id: scheduledServiceId,
+            customer_id: customerId,
+            appointment_time: apptTime,
+            service_type: serviceLabel,
+            source,
+            confirmation_sent: false,
+            reminder_72h_sent: true,
+            reminder_72h_sent_at: windowsClosedAt,
+            reminder_24h_sent: true,
+            reminder_24h_sent_at: windowsClosedAt,
+            // Placeholder markers — suppressed_by_sibling removes the row
+            // from slot ownership; windows_preclosed keeps promotion and the
+            // sync trigger from ever arming it while the visit is windowless.
+            suppressed_by_sibling: true,
+            windows_preclosed: true,
+          }).returning('*');
+
+          return { record, serviceLabel, inserted: true };
         }
 
         // Owner-only dedup — see registerVisitReminderInTx: a suppressed
@@ -1113,14 +1182,6 @@ const AppointmentReminders = {
           };
         }
 
-        // closeReminderWindows: pre-close both windows IN the insert (see the
-        // JSDoc above) — a register-then-close pair would leave a gap where a
-        // cron tick could send an 08:00-stamped reminder for a windowless
-        // visit. Only the 72h/24h stamps close here; confirmation keeps its
-        // normal source-based handling. (At insert confirmation_sent is
-        // false, so the legacy sibling-suppression fingerprint — which needs
-        // all three flags stamped identically — can't misread this row.)
-        const windowsClosedAt = closeReminderWindows ? new Date() : null;
         const [record] = await trx('appointment_reminders').insert({
           scheduled_service_id: scheduledServiceId,
           customer_id: customerId,
@@ -1128,12 +1189,6 @@ const AppointmentReminders = {
           service_type: serviceLabel,
           source,
           confirmation_sent: false,
-          ...(closeReminderWindows ? {
-            reminder_72h_sent: true,
-            reminder_72h_sent_at: windowsClosedAt,
-            reminder_24h_sent: true,
-            reminder_24h_sent_at: windowsClosedAt,
-          } : {}),
         }).returning('*');
 
         return { record, serviceLabel, inserted: true };
@@ -2159,10 +2214,11 @@ AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel
 // resolution the appointment reminders use.
 AppointmentReminders.apptChannel = apptChannel;
 AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
-// Shared 72h re-arm boundary (see the function's own comment) — the dispatch
-// and reschedule-sms compensating re-arms consult this instead of hardcoding
-// the cron's 24.25h cutoff.
+// Shared re-arm boundaries (see each function's own comment) — the dispatch
+// and reschedule-sms compensating re-arms consult these instead of hardcoding
+// the cron's 24.25h / start-in-the-future cutoffs.
 AppointmentReminders.reminder72hStillReachable = reminder72hStillReachable;
+AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
 
 AppointmentReminders._test = {
   maskPhone,

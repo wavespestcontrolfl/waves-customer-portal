@@ -218,6 +218,123 @@ describe('appointment reminder registration deduplication', () => {
     expect(db.mock.calls.map(([table]) => table)).not.toContain('customers');
   });
 
+  test('closeReminderWindows inserts a suppressed pre-closed placeholder and NEVER consults the same-slot dedupe (no owner absorb, no label merge)', async () => {
+    const insertedPlaceholder = {
+      id: 'reminder-placeholder',
+      scheduled_service_id: 'svc-untimed',
+      customer_id: 'customer-1',
+      suppressed_by_sibling: true,
+      windows_preclosed: true,
+    };
+    const byScheduledService = chain({ first: jest.fn().mockResolvedValue(null) });
+    const addons = chain({ pluck: jest.fn().mockResolvedValue([]) });
+    const insertPlaceholder = chain({
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([insertedPlaceholder]),
+    });
+    const markConfirmationSkipped = chain();
+    // NO same-slot dedupe read and NO owner label-merge update in this
+    // queue: an existing real 8 AM owner must never absorb the date-only
+    // service (merged label advertising it "at 8:00 AM") and the placeholder
+    // must never land as a promotable suppressed sibling under it — the
+    // placeholder path skips the dedupe entirely, inserting identically
+    // whether or not an owner holds the slot. Any extra
+    // appointment_reminders query would misalign this queue and fail loudly.
+    const reminderQueries = [byScheduledService, insertPlaceholder, markConfirmationSkipped];
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'scheduled_service_addons') return addons;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.registerAppointment(
+      'svc-untimed',
+      'customer-1',
+      '2099-08-01T08:00',
+      'Lawn Care',
+      'admin_ib',
+      { sendConfirmation: false, closeReminderWindows: true },
+    );
+
+    expect(result).toBe(insertedPlaceholder);
+    const payload = insertPlaceholder.insert.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      scheduled_service_id: 'svc-untimed',
+      customer_id: 'customer-1',
+      // Both windows pre-closed in the same insert (no armed-gap for the cron)…
+      reminder_72h_sent: true,
+      reminder_24h_sent: true,
+      // …plus the placeholder markers: suppressed_by_sibling takes the row
+      // out of slot OWNERSHIP everywhere (dedupe, trigger arrival check,
+      // promotion's no-owner-remains check), and windows_preclosed keeps
+      // promotion and the sync trigger from ever arming it while windowless.
+      suppressed_by_sibling: true,
+      windows_preclosed: true,
+      confirmation_sent: false,
+    });
+    expect(payload.reminder_72h_sent_at).toBeInstanceOf(Date);
+    expect(payload.reminder_24h_sent_at).toBeInstanceOf(Date);
+    // Confirmation keeps its normal source-based handling (sendConfirmation
+    // false here → marked "not applicable" after the insert, no SMS).
+    expect(markConfirmationSkipped.update).toHaveBeenCalledWith(expect.objectContaining({
+      confirmation_sent: true,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a REAL timed registration dedupes only against non-suppressed owners — a pre-closed placeholder cannot own the slot, so the real visit lands ARMED', async () => {
+    const insertedArmed = {
+      id: 'reminder-real',
+      scheduled_service_id: 'svc-real-8am',
+      customer_id: 'customer-1',
+      confirmation_sent: false,
+    };
+    const byScheduledService = chain({ first: jest.fn().mockResolvedValue(null) });
+    const addons = chain({ pluck: jest.fn().mockResolvedValue([]) });
+    // The dedupe query filters suppressed_by_sibling=false in SQL, so a
+    // placeholder parked on the 08:00 slot resolves to NO owner here.
+    const byCustomerAndTime = chain({ first: jest.fn().mockResolvedValue(null) });
+    const insertReminder = chain({
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([insertedArmed]),
+    });
+    const markConfirmationSkipped = chain();
+    const reminderQueries = [byScheduledService, byCustomerAndTime, insertReminder, markConfirmationSkipped];
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'scheduled_service_addons') return addons;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.registerAppointment(
+      'svc-real-8am',
+      'customer-1',
+      '2099-08-01T08:00',
+      'Pest Control',
+      'admin_manual',
+      { sendConfirmation: false },
+    );
+
+    expect(result).toBe(insertedArmed);
+    // The ownership filter that makes the placeholder invisible: only
+    // non-cancelled, non-suppressed rows can be the slot owner.
+    expect(byCustomerAndTime.where).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'customer-1',
+      cancelled: false,
+      suppressed_by_sibling: false,
+    }));
+    // The real visit's row inserts ARMED: no pre-closed stamps, no
+    // suppression markers — the cron delivers its 72h/24h reminders.
+    const payload = insertReminder.insert.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('reminder_72h_sent');
+    expect(payload).not.toHaveProperty('reminder_24h_sent');
+    expect(payload).not.toHaveProperty('suppressed_by_sibling');
+    expect(payload).not.toHaveProperty('windows_preclosed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('does not send confirmation SMS when a past appointment is registered', async () => {
     jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-06T20:00:00.000Z').getTime());
 

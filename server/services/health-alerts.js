@@ -274,18 +274,42 @@ async function executeAction(alertId, actionIndex) {
   } else if (action.type === 'free_service' || action.type === 'complimentary') {
     // Schedule a complimentary $0 service
     try {
+      const compServiceType = action.serviceType || 'General Pest - Complimentary';
+      const compDate = etDateString(addETDays(new Date(), 7));
       // scheduled_services has no `price` column — the visit price lives in
       // estimated_price (a 0 here is the genuine complimentary price, not a
       // missing value).
-      await db('scheduled_services').insert({
+      const [compVisit] = await db('scheduled_services').insert({
         customer_id: customer.id,
-        service_type: action.serviceType || 'General Pest - Complimentary',
+        service_type: compServiceType,
         status: 'pending',
         estimated_price: 0,
         notes: `Complimentary service — Health alert retention #${alertId}`,
-        scheduled_date: etDateString(addETDays(new Date(), 7)),
+        scheduled_date: compDate,
         created_at: new Date(),
-      });
+      }).returning('id');
+      // Register the reminder row NOW, as a windowless pre-closed
+      // placeholder — the same closeReminderWindows registration the IB
+      // create_appointment path uses for untimed visits. Left row-less,
+      // this visit (windowless, NULL source_action) would be picked up by
+      // selfHealMissingReminderRows within 15 minutes and registered with
+      // ARMED 72h/24h reminders telling the customer "8:00 AM" for a time
+      // nobody chose. With the row already present the sweep no-ops; when
+      // staff later set a real window, the reminder DB sync trigger re-arms
+      // from the real start. Best-effort like the neighboring actions — a
+      // registration failure is logged (registerAppointment also
+      // self-alerts) but never fails the already-committed insert.
+      try {
+        const AppointmentReminders = require('./appointment-reminders');
+        await AppointmentReminders.registerAppointment(
+          compVisit?.id || compVisit, customer.id,
+          `${compDate}T08:00`,
+          compServiceType, 'health_alert_comp',
+          { sendConfirmation: false, closeReminderWindows: true },
+        );
+      } catch (regErr) {
+        logger.error(`[health-alerts] Complimentary-visit reminder registration failed for alert ${alertId}: ${regErr.message}`);
+      }
       result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };
     } catch (err) {
       logger.error(`[health-alerts] Complimentary service insert failed for alert ${alertId}: ${err.message}`);
