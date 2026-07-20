@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
-const { etDateString, addETDays, validScheduleDate } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 
 const SCHEDULE_TOOLS = [
@@ -416,12 +416,29 @@ async function moveStopsToDay(input) {
 
   // Terminal rows are one-way — refuse to move them, and report them so the
   // operator sees exactly what stays behind.
-  const movable = services.filter((s) => !TERMINAL_MOVE_STATUSES.has(String(s.status)));
+  const nonTerminal = services.filter((s) => !TERMINAL_MOVE_STATUSES.has(String(s.status)));
   const skippedTerminal = services
     .filter((s) => TERMINAL_MOVE_STATUSES.has(String(s.status)))
     .map((s) => ({ id: s.id, status: s.status }));
-  if (!movable.length) {
+  if (!nonTerminal.length) {
     return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to move' };
+  }
+
+  // A move TO today whose stop window already elapsed in ET would land the
+  // stop in a past window no route can serve — reject those per-stop with the
+  // rebooker's shared cutoff logic (window_end preferred, else window_start),
+  // and report them so the operator sees what stayed behind. A stop with a
+  // still-future window today, or any move to a future date, is unaffected.
+  const movable = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
+  const skippedElapsed = nonTerminal
+    .filter((s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start))
+    .map((s) => ({ id: s.id, status: s.status }));
+  if (!movable.length) {
+    return {
+      error: 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    };
   }
 
   const stops = movable.map(s => ({
@@ -440,6 +457,7 @@ async function moveStopsToDay(input) {
       stop_count: stops.length,
       reason: reason || null,
       stops,
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
       note: `Would move ${stops.length} stop(s) to ${dateStr}. Re-call with confirmed:true to apply.`,
     };
@@ -525,6 +543,7 @@ async function moveStopsToDay(input) {
     return {
       error: 'No stops were moved — every selected stop changed status (completed/cancelled/started) while the move was pending',
       ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     };
   }
@@ -537,6 +556,7 @@ async function moveStopsToDay(input) {
     new_date: dateStr,
     stops: movedStops,
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
   };
 }

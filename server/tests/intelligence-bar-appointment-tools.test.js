@@ -29,12 +29,23 @@ jest.mock('../sockets', () => ({
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue({ id: 'rem-1' }),
 }));
+// Partial mock: real ET helpers throughout, but sameDayWindowElapsed is a spy
+// so the same-day elapsed-window guard is deterministic regardless of the wall
+// clock (existing future-date tests still resolve to false via the real impl).
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
+});
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const AppointmentReminders = require('../services/appointment-reminders');
+const datetimeEt = require('../utils/datetime-et');
 const { executeTool } = require('../services/intelligence-bar/tools');
+
+// Real ET "today" — the date a same-day move targets.
+const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
 function chain(overrides = {}) {
   const builder = {};
@@ -206,6 +217,41 @@ describe('create_appointment', () => {
       status: 'pending', window_start: null, window_end: null,
     });
   });
+
+  test('a today target whose window already elapsed in ET is rejected before the insert', async () => {
+    // validScheduleDate accepts today, but a window already past in ET lands
+    // the visit where no route can serve it — rejected with a clear tool error,
+    // no scheduled_services insert.
+    datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(true);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
+      // No scheduled_services queue — an insert would throw Unexpected db().
+    });
+
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: TODAY_ET, service_type: 'Pest Control',
+      time_window: '9:00 AM',
+    });
+
+    expect(result.error).toMatch(/already passed today/);
+  });
+
+  test('a today target with a still-future window is created normally', async () => {
+    datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) })],
+      scheduled_services: [insertChain],
+    });
+
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: TODAY_ET, service_type: 'Pest Control',
+      time_window: '9:00 AM',
+    });
+
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ scheduled_date: TODAY_ET, window_start: '09:00' });
+  });
 });
 
 describe('reschedule_appointment', () => {
@@ -335,7 +381,11 @@ describe('reschedule_appointment', () => {
     }));
   });
 
-  test('a live-move side-effect failure never fails the already-committed move', async () => {
+  test('a history-append failure never fails the move AND the post-commit cleanup still runs', async () => {
+    // P1-3: the audit-history insert is best-effort for the (non-transactional)
+    // IB mover — a failure there must NOT skip the operational cleanup
+    // (tech_status release + tracker refresh), or the tech stays pinned to the
+    // moved job while the tool reports success.
     const historyChain = chain({ insert: jest.fn().mockRejectedValue(new Error('history table down')) });
     wireDb({
       scheduled_services: [
@@ -351,7 +401,53 @@ describe('reschedule_appointment', () => {
       appointment_id: 'svc-1', new_date: '2099-01-15',
     });
     expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('live-move side effects failed'));
+    // Audit failure logged, but the cleanup survived it.
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('live-move history append failed'));
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({
+      tech_id: 'tech-1', current_job_id: 'svc-1', status: 'idle',
+    });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1', status: 'confirmed',
+    }));
+  });
+
+  test('a today target whose window already elapsed in ET is rejected before the move', async () => {
+    datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(true);
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: TODAY_ET, new_time_window: '9:00 AM',
+    });
+
+    expect(result.error).toMatch(/already passed today/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a today target with a still-future window moves normally', async () => {
+    datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
+        updateChain,
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'L' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: TODAY_ET, new_time_window: '9:00 AM',
+    });
+
+    expect(result).toMatchObject({ success: true, new_date: TODAY_ET });
+    expect(updateChain.update).toHaveBeenCalled();
   });
 
   test('a start-only move keeps the original stored window_end when no new time is given', async () => {

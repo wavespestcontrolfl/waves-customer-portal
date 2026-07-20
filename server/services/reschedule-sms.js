@@ -244,6 +244,16 @@ class RescheduleSMS {
         { date: displayDate, time: selectedOption.window.display },
         { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
       )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}\n\nReply STOP to opt out.`;
+      // Snapshot the reminder row's covered state (appointment_time +
+      // updated_at) BEFORE the confirmation SMS — either coverDueWindows above
+      // (a fresh move) or the rain-out route's earlier sync (confirm-in-place)
+      // set it. Guarding the no-send re-arm below on this snapshot means a
+      // NEWER reschedule that lands while this (slow) send is in flight — one
+      // that re-stamped appointment_time or bumped updated_at via its own
+      // markRescheduleNoticeSent — is not clobbered back into the send set.
+      const reminderGuard = await db('appointment_reminders')
+        .where({ scheduled_service_id: pending.scheduled_service_id })
+        .first('id', 'appointment_time', 'updated_at');
       try {
         await sendAppointmentSms({
           to: customer.phone,
@@ -259,21 +269,33 @@ class RescheduleSMS {
         // 15-min cron still reminds the customer of the new time; a possible
         // duplicate was the risk covering guards against, silence is worse.
         try {
-          await db('appointment_reminders')
-            .where({ scheduled_service_id: pending.scheduled_service_id })
-            // A sibling-suppressed row is suppressed BY SETTING both sent
-            // flags — clearing them would put it back in the cron's send set
-            // alongside the slot's owner (duplicate reminders). Same carve-out
-            // markRescheduleNoticeSent takes on the success path.
-            .where('suppressed_by_sibling', false)
-            .where('cancelled', false)
-            .update({
-              reminder_72h_sent: false,
-              reminder_72h_sent_at: null,
-              reminder_24h_sent: false,
-              reminder_24h_sent_at: null,
-              updated_at: db.fn.now(),
-            });
+          // Guard the re-arm on the appointment_time + updated_at captured
+          // before this SMS (reminderGuard). A newer reschedule of this visit
+          // that committed while the confirmation was in flight re-stamped the
+          // row (new appointment_time, or a bumped updated_at from its own
+          // markRescheduleNoticeSent) — clearing the flags here would undo its
+          // covered/sent state and double-text the customer. Zero rows matched
+          // = the row moved on underneath; skip, the newer reschedule owns it.
+          // Same guard shape as handleReschedule's own failed-notice re-arm.
+          if (reminderGuard) {
+            await db('appointment_reminders')
+              .where({ id: reminderGuard.id })
+              // A sibling-suppressed row is suppressed BY SETTING both sent
+              // flags — clearing them would put it back in the cron's send set
+              // alongside the slot's owner (duplicate reminders). Same carve-out
+              // markRescheduleNoticeSent takes on the success path.
+              .where('suppressed_by_sibling', false)
+              .where('cancelled', false)
+              .where('appointment_time', reminderGuard.appointment_time)
+              .where('updated_at', reminderGuard.updated_at)
+              .update({
+                reminder_72h_sent: false,
+                reminder_72h_sent_at: null,
+                reminder_24h_sent: false,
+                reminder_24h_sent_at: null,
+                updated_at: db.fn.now(),
+              });
+          }
         } catch (rearmErr) {
           logger.error(`[reschedule-sms] reminder re-arm after failed confirmation failed for ${pending.scheduled_service_id}: ${rearmErr.message}`);
         }

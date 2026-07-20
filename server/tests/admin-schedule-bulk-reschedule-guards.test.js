@@ -57,11 +57,22 @@ const mockIoEmit = jest.fn();
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
 }));
+// Partial mock: real ET helpers (the route uses many), but sameDayWindowElapsed
+// is a spy so the same-day elapsed-window guard is deterministic regardless of
+// the wall clock. Existing future-date tests resolve to false via the real impl.
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
+});
 
 const db = require('../models/db');
 const { clearTechCurrentJob } = require('../services/tech-status');
+const datetimeEt = require('../utils/datetime-et');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
+
+// Real ET "today" — the date a same-day move targets.
+const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
 function chain(overrides = {}) {
   const builder = {};
@@ -363,6 +374,49 @@ test('a rollback leaves NO tech_status write and NO socket emit', async () => {
   // The externally-visible half never fired for a move that was rolled back.
   expect(clearTechCurrentJob).not.toHaveBeenCalled();
   expect(mockIoEmit).not.toHaveBeenCalled();
+});
+
+test('a move to today whose window already elapsed lands in failed[] per-row (never moved)', async () => {
+  // validScheduleDate accepts today, but a window already past in ET is as
+  // unreachable as a past date — per-row failure, no UPDATE, no audit row.
+  datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(true);
+  wireTrx({
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+  });
+
+  const { status, body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: TODAY_ET },
+  });
+
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{
+    id: 'svc-1',
+    reason: 'that window has already passed today (pick a later window or a future date)',
+  }]);
+});
+
+test('a move to today with a still-future window still moves (guard passes)', async () => {
+  datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      updateChain,
+    ],
+    reschedule_log: [chain()],
+  });
+
+  const { body } = await bulk({
+    action: 'reschedule',
+    serviceIds: ['svc-1'],
+    payload: { scheduledDate: TODAY_ET },
+  });
+
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ scheduled_date: TODAY_ET });
 });
 
 test('a malformed window time is rejected rather than persisted raw', async () => {

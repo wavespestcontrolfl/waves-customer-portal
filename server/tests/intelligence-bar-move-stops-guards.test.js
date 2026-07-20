@@ -22,10 +22,20 @@ const mockIoEmit = jest.fn();
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
 }));
+// Partial mock: real ET helpers, but sameDayWindowElapsed is a spy so the
+// same-day elapsed-window bucketing is deterministic regardless of the clock.
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
+});
 
 const db = require('../models/db');
 const { clearTechCurrentJob } = require('../services/tech-status');
+const datetimeEt = require('../utils/datetime-et');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
+
+const actualElapsed = jest.requireActual('../utils/datetime-et').sameDayWindowElapsed;
+const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
 function chain(overrides = {}) {
   const builder = {};
@@ -63,6 +73,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
+  // Default to the real ET comparison so future-date tests resolve to false;
+  // the same-day test overrides this with a deterministic keyed impl.
+  datetimeEt.sameDayWindowElapsed.mockImplementation(actualElapsed);
 });
 
 test('refuses a garbage target date before touching the DB', async () => {
@@ -186,6 +199,58 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
     scheduled_service_id: 'svc-ok',
     initiated_by: 'admin_ib',
   });
+});
+
+test('a same-day move buckets stops whose window already elapsed (skipped_elapsed) and moves only the rest', async () => {
+  // Move TO today: a stop whose window already passed in ET can't be served —
+  // it goes to skipped_elapsed, per-stop, while a still-future-window stop
+  // moves. Keyed impl: the 08:00 stop is elapsed, the 10:00 stop is not.
+  datetimeEt.sameDayWindowElapsed.mockImplementation((dateStr, cutoff) => cutoff === '08:00:00');
+
+  const listChain = chain({
+    select: jest.fn().mockResolvedValue([
+      stop('svc-late', 'confirmed', { window_end: '08:00:00' }),
+      stop('svc-ok', 'confirmed', { window_end: '10:00:00' }),
+    ]),
+  });
+  const updateChain = chain();
+  const logChain = chain();
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      if (listChain.select.mock.calls.length === 0) return listChain;
+      return updateChain;
+    }
+    if (table === 'reschedule_log') return logChain;
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-late', 'svc-ok'],
+    new_date: TODAY_ET,
+    confirmed: true,
+  });
+
+  expect(result).toMatchObject({ success: true, moved_count: 1, new_date: TODAY_ET });
+  expect(result.stops.map((s) => s.id)).toEqual(['svc-ok']);
+  expect(result.skipped_elapsed).toEqual([{ id: 'svc-late', status: 'confirmed' }]);
+  // Only the still-serviceable stop was written.
+  expect(updateChain.update).toHaveBeenCalledTimes(1);
+});
+
+test('a same-day move whose every stop has already elapsed errors and reports them', async () => {
+  datetimeEt.sameDayWindowElapsed.mockImplementation((dateStr, cutoff) => cutoff === '08:00:00');
+  db.mockImplementation(() => chain({
+    select: jest.fn().mockResolvedValue([
+      stop('svc-late', 'confirmed', { window_end: '08:00:00' }),
+    ]),
+  }));
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-late'], new_date: TODAY_ET, confirmed: true,
+  });
+
+  expect(result.error).toMatch(/already passed today/);
+  expect(result.skipped_elapsed).toEqual([{ id: 'svc-late', status: 'confirmed' }]);
 });
 
 test('proposal (unconfirmed) lists only movable stops and flags the terminal ones', async () => {

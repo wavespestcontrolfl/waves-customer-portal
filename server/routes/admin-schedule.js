@@ -16,7 +16,7 @@ const {
 } = require('../utils/service-normalizer');
 const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
-  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate,
+  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -3455,6 +3455,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const we = normalizeHHMM(payload.windowEnd);
                 if (!we) throw Object.assign(new Error('windowEnd must be HH:MM'), { isValidation: true });
                 updates.window_end = we;
+              }
+              // validScheduleDate accepts TODAY, but a move to today whose
+              // effective window already elapsed in ET lands the visit in a
+              // past window no route can serve — unreachable, just like a past
+              // date. Same cutoff logic the rebooker uses (window_end preferred,
+              // else window_start; new value over the stored one). Per-row throw
+              // so the batch result carries the reason instead of failing
+              // wholesale; a today move with a still-future window still passes.
+              if (sameDayWindowElapsed(
+                bulkTargetDate,
+                updates.window_end || svc.window_end || updates.window_start || svc.window_start,
+              )) {
+                throw Object.assign(
+                  new Error('that window has already passed today (pick a later window or a future date)'),
+                  { isValidation: true },
+                );
               }
               // A live (en_route/on_site) row being moved rewinds its tracker
               // lifecycle like the rebooker's live override — stale arrival

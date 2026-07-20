@@ -7,7 +7,7 @@ const { shiftCallFollowUpsForParentMove } = require('./call-booking-catalog');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
-  addETMonthsByWeekday, etNthWeekdayOfMonth,
+  addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
 } = require('../utils/datetime-et');
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -252,20 +252,14 @@ class SmartRebooker {
 
     // Same-day target whose window already elapsed in ET is just as
     // unreachable as yesterday — a stale morning option accepted in the
-    // afternoon would move the job into a past window.
-    if (newDateStr === etDateString()) {
-      const cutoff = windowEnd || win.start || service.window_start;
-      if (cutoff) {
-        const nowEt = etParts(new Date());
-        const [ch, cm] = String(cutoff).split(':').map(Number);
-        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
-          throw Object.assign(new Error('That window has already passed today'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
-      }
+    // afternoon would move the job into a past window. Shared cutoff logic
+    // (datetime-et.sameDayWindowElapsed) so every mover rejects identically.
+    if (sameDayWindowElapsed(newDateStr, windowEnd || win.start || service.window_start)) {
+      throw Object.assign(new Error('That window has already passed today'), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'SLOT_TAKEN',
+      });
     }
     const updates = {
       scheduled_date: newDate,
@@ -492,19 +486,12 @@ class SmartRebooker {
         });
       }
     }
-    if (seriesDateStr === etDateString()) {
-      const cutoff = win.end || service.window_end || win.start || service.window_start;
-      if (cutoff) {
-        const nowEt = etParts(new Date());
-        const [ch, cm] = String(cutoff).split(':').map(Number);
-        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
-          throw Object.assign(new Error('That window has already passed today'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
-      }
+    if (sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
+      throw Object.assign(new Error('That window has already passed today'), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'SLOT_TAKEN',
+      });
     }
     const pattern = parent.recurring_pattern;
     const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
@@ -947,7 +934,18 @@ async function applyLiveMovePostCommitEffects(svc) {
 // two halves separately: applyLiveMoveHistory on the trx, then
 // applyLiveMovePostCommitEffects after the commit.
 async function applyLiveMoveSideEffects(conn, svc, opts = {}) {
-  await applyLiveMoveHistory(conn, svc, opts);
+  // The two halves are INDEPENDENT for non-transactional callers: the move has
+  // already committed, so the audit-history append is best-effort, but the
+  // operational cleanup (tech_status release + tracker refresh) is not — a
+  // failed history insert must NOT skip it, or the tech stays pinned to the
+  // moved job and the customer sees a stale live tracker while the caller still
+  // reports success. Catch (not await-through) the history append so cleanup
+  // always runs; a history failure is still logged.
+  try {
+    await applyLiveMoveHistory(conn, svc, opts);
+  } catch (err) {
+    logger.error(`[rebooker] live-move history append failed for ${svc.id}: ${err.message}`);
+  }
   await applyLiveMovePostCommitEffects(svc);
 }
 

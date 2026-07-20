@@ -56,6 +56,13 @@ function wireDb(queues) {
 const OPTION1 = { date: '2026-07-04', window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' } };
 const OPTION2 = { date: '2026-07-06', window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' } };
 
+// The reminder-row snapshot captured before the confirmation SMS — the re-arm
+// is guarded on exactly these, so a newer reschedule that re-stamps the row
+// during the send is not clobbered.
+const APPT = new Date('2026-07-04T17:00:00Z');
+const UPD = new Date('2026-07-04T16:59:00Z');
+const guardRow = () => ({ id: 'rem-1', appointment_time: APPT, updated_at: UPD });
+
 function pendingRow() {
   return {
     id: 'log-1',
@@ -70,11 +77,14 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-test('a blocked confirmation re-arms both reminder windows and still propagates the error', async () => {
+test('a blocked confirmation re-arms both reminder windows (guarded on the snapshot) and still propagates the error', async () => {
   // Confirm-in-place path: the visit already sits on option 1's slot, so the
   // windows were covered by the rain-out route's earlier sync — the failed
-  // confirmation is the only remaining customer notice.
+  // confirmation is the only remaining customer notice. The snapshot is read
+  // before the send; the re-arm is scoped by its id + appointment_time +
+  // updated_at.
   sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(guardRow()) });
   const rearmChain = chain();
   wireDb({
     reschedule_log: [
@@ -83,13 +93,17 @@ test('a blocked confirmation re-arms both reminder windows and still propagates 
     ],
     scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
     customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
-    appointment_reminders: [rearmChain],
+    appointment_reminders: [snapshotChain, rearmChain],
   });
 
   await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
     .rejects.toThrow(/appointment SMS blocked/);
 
-  expect(rearmChain.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
+  // Guarded on the pre-send snapshot: row id + the exact appointment_time and
+  // updated_at captured, so a newer reschedule during the send is not stomped.
+  expect(rearmChain.where).toHaveBeenCalledWith({ id: 'rem-1' });
+  expect(rearmChain.where).toHaveBeenCalledWith('appointment_time', APPT);
+  expect(rearmChain.where).toHaveBeenCalledWith('updated_at', UPD);
   expect(rearmChain.update).toHaveBeenCalledWith(expect.objectContaining({
     reminder_72h_sent: false,
     reminder_72h_sent_at: null,
@@ -98,7 +112,8 @@ test('a blocked confirmation re-arms both reminder windows and still propagates 
   }));
 });
 
-test('a successful confirmation never touches the covered windows', async () => {
+test('a successful confirmation reads the snapshot but never re-arms the covered windows', async () => {
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(guardRow()) });
   wireDb({
     reschedule_log: [
       chain({ rows: [pendingRow()] }),
@@ -107,11 +122,13 @@ test('a successful confirmation never touches the covered windows', async () => 
     ],
     scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
     customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
-    // NO appointment_reminders queue: any re-arm call would throw Unexpected db().
+    // Only the pre-send snapshot read — a re-arm UPDATE would throw here.
+    appointment_reminders: [snapshotChain],
   });
 
   const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
   expect(result).toMatchObject({ handled: true, action: 'rescheduled' });
+  expect(snapshotChain.update).not.toHaveBeenCalled();
 });
 
 test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled rows', async () => {
@@ -119,6 +136,7 @@ test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled row
   // sibling-suppressed row would return it to the cron's send set alongside
   // the slot's owner (two texts for one window).
   sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(guardRow()) });
   const rearmChain = chain();
   wireDb({
     reschedule_log: [
@@ -127,7 +145,7 @@ test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled row
     ],
     scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
     customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
-    appointment_reminders: [rearmChain],
+    appointment_reminders: [snapshotChain, rearmChain],
   });
 
   await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
@@ -135,4 +153,26 @@ test('the blocked-confirmation re-arm skips sibling-suppressed and cancelled row
 
   expect(rearmChain.where).toHaveBeenCalledWith('suppressed_by_sibling', false);
   expect(rearmChain.where).toHaveBeenCalledWith('cancelled', false);
+});
+
+test('when the reminder row vanished before the send (no snapshot), the blocked path re-arms nothing and still throws', async () => {
+  // The pre-send snapshot read returns no row (reminder deleted / never
+  // existed). With nothing to guard, the re-arm is skipped entirely — the
+  // original blocked-send error still propagates.
+  sendCustomerMessage.mockResolvedValueOnce({ blocked: true, code: 'blocked_number' });
+  const snapshotChain = chain({ first: jest.fn().mockResolvedValue(undefined) });
+  wireDb({
+    reschedule_log: [
+      chain({ rows: [pendingRow()] }),
+      chain(), // mark responded
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' }) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    // Only the snapshot read; no re-arm UPDATE queue — one would throw.
+    appointment_reminders: [snapshotChain],
+  });
+
+  await expect(RescheduleSMS.handleRescheduleReply('cust-1', '1'))
+    .rejects.toThrow(/appointment SMS blocked/);
+  expect(snapshotChain.update).not.toHaveBeenCalled();
 });

@@ -9,7 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays, validScheduleDate } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1329,6 +1329,14 @@ async function createAppointment(input) {
   // minutes) so overlap checks see a real block, not an open-ended start.
   const windowEnd = win.start ? addMinutesToHHMM(win.start, 60) : null;
 
+  // A today target whose window already elapsed in ET is unreachable — the
+  // visit lands in a past window no route can serve. Same cutoff logic the
+  // rebooker uses (datetime-et.sameDayWindowElapsed); a today target with no
+  // specific time, or a still-future window, is still allowed.
+  if (sameDayWindowElapsed(dateStr, windowEnd || win.start)) {
+    return { error: 'That time has already passed today — pick a later window or a future date.' };
+  }
+
   // status 'pending', matching the column default and every other writer —
   // 'scheduled' is not in the scheduled_services status CHECK set and threw
   // on every insert. track_token_expires_at is stamped by the INSERT trigger
@@ -1410,6 +1418,14 @@ async function rescheduleAppointment(input) {
   const newWindowEnd = win.start
     ? addMinutesToHHMM(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
     : appt.window_end;
+
+  // A today target whose effective window already elapsed in ET is unreachable
+  // — moving into a past window strands the visit. Same cutoff logic as the
+  // rebooker (window_end preferred, else start); a still-future today window
+  // is allowed.
+  if (sameDayWindowElapsed(dateStr, newWindowEnd || newStart)) {
+    return { error: 'That window has already passed today — pick a later window or a future date.' };
+  }
 
   // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
   // same way the rebooker does, so stale arrival timestamps can't poison

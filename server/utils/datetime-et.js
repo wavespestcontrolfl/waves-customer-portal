@@ -173,8 +173,29 @@ function validScheduleDate(value) {
   return dateStr;
 }
 
+// Same-day elapsed-window guard, extracted from SmartRebooker.reschedule so
+// every mover (bulk admin reschedule, IB create/reschedule/move) rejects a
+// move into an already-past window with the identical ET cutoff logic.
+// Returns true when `dateStr` (YYYY-MM-DD, or an ISO string we split on 'T')
+// is TODAY in ET AND `cutoff` — the effective window time, HH:MM[:SS], the
+// caller resolves as window_end || window_start (new value preferred, else the
+// stored one) — is at or before the current ET wall-clock minute. A missing
+// cutoff or a non-today date returns false (still movable), matching the
+// rebooker's `if (cutoff)` guard: a same-day target with a still-future window
+// (or no window at all) is not elapsed.
+function sameDayWindowElapsed(dateStr, cutoff) {
+  const day = String(dateStr == null ? '' : dateStr).split('T')[0];
+  if (day !== etDateString()) return false;
+  if (!cutoff) return false;
+  const [ch, cm] = String(cutoff).split(':').map(Number);
+  if (Number.isNaN(ch)) return false;
+  const nowEt = etParts(new Date());
+  return ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute;
+}
+
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
+  sameDayWindowElapsed,
 };
