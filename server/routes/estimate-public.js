@@ -10291,22 +10291,109 @@ function isAdminIp(ip) {
 // Derive engine inputs from stored estimate_data. Admin-UI estimates
 // carry { inputs, result, ... } (v1 client-engine shape). IB-sourced
 // estimates carry { engineInputs, engineResult }. Either works.
-function extractEngineInputs(estData) {
+// Raw stored inputs, no replay injection — the signal readers
+// (estimateLawnFloorArmed) use this to avoid recursing through the
+// injection below, which itself consults those readers.
+function rawEngineInputs(estData) {
   if (!estData || typeof estData !== 'object') return null;
-  const base = (estData.engineInputs && typeof estData.engineInputs === 'object')
+  return (estData.engineInputs && typeof estData.engineInputs === 'object')
     ? estData.engineInputs
     : (estData.inputs && typeof estData.inputs === 'object')
       ? estData.inputs
       : null;
+}
+
+function extractEngineInputs(estData) {
+  const base = rawEngineInputs(estData);
   if (!base) return null;
+  // Saved floor-state replay (pre-push codex P0, round 9 on #2827): every
+  // caller re-runs generateEstimate under the CURRENT mutable globals, so
+  // the estimate's saved floor state (pricingMetadata stamps, or legacy row
+  // evidence) is threaded back in as input-level overrides — a global
+  // re-arm/disarm between save and view must not re-price the replay.
+  // Injected at the INPUT level only: explicit services.* signals stored in
+  // the inputs still win inside the engine's own resolution, and a silent
+  // estimate (no stamp, no evidence) injects nothing and replays live.
+  const out = { ...base, ...savedFloorReplayOverrides(estData) };
   // Existing-customer reprice: replay the prior qualifying services persisted at
   // save so any public recompute (bundle CTA, frequency slider) keeps the
   // COMBINED WaveGuard tier instead of reverting to this estimate's services
   // alone. Shallow copy so the stored object isn't mutated.
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
-    return { ...base, priorQualifyingServices: estData.priorQualifyingServices };
+    out.priorQualifyingServices = estData.priorQualifyingServices;
   }
-  return base;
+  return out;
+}
+
+// Input-level floor overrides for an engine replay of this stored estimate.
+// Only keys with an actual saved signal are set (absence = replay live).
+function savedFloorReplayOverrides(estData) {
+  const overrides = {};
+  const lawnArm = estimateLawnFloorArmed(estData);
+  if (typeof lawnArm === 'boolean') overrides.useLawnCostFloor = lawnArm;
+  const minSignal = require('../services/estimate-converter').estimateLawnProgramMinimumSignal(estData);
+  if (minSignal != null) overrides.lawnProgramMinimumMonthly = minSignal;
+  const pest = estimatePestFloorSignal(estData);
+  if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
+  if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  return overrides;
+}
+
+// Saved pest post-discount floor state: pricingMetadata stamps first, then
+// legacy row evidence — armed-era rows carry the floor metadata itself
+// (server tiers: programFloorPerVisit/programFloorAnnual; client-fallback
+// rows: floorPa/floorAnn, per-visit derived through the cadence discount).
+// armed stays null (inject nothing) when the estimate is silent.
+const CLIENT_PEST_CADENCE_DISC = { 4: 1.0, 6: 0.85, 12: 0.7 };
+function estimatePestFloorSignal(estData = {}) {
+  const armStamp = estData?.result?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.pricingMetadata?.pestProgramFloorArmed
+    ?? estData?.result?.routingMetadata?.pestProgramFloorArmed;
+  const perVisitStamp = estData?.result?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.pricingMetadata?.pestProgramFloorPerVisit
+    ?? estData?.result?.routingMetadata?.pestProgramFloorPerVisit;
+  if (typeof armStamp === 'boolean') {
+    const stampedPerVisit = Number(perVisitStamp);
+    return {
+      armed: armStamp,
+      perVisit: Number.isFinite(stampedPerVisit) && stampedPerVisit > 0 ? stampedPerVisit : null,
+    };
+  }
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const rows = [];
+  if (Array.isArray(result?.results?.pestTiers)) rows.push(...result.results.pestTiers);
+  if (result?.results?.pest && typeof result.results.pest === 'object') rows.push(result.results.pest);
+  const lineItemSources = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+  ];
+  for (const li of lineItemSources) {
+    if ((li?.service || '') !== 'pest_control') continue;
+    rows.push(li);
+    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
+  }
+  let armed = null;
+  let perVisit = null;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const direct = Number(row.programFloorPerVisit);
+    if (Number.isFinite(direct) && direct > 0) {
+      armed = true;
+      perVisit = Math.max(perVisit ?? 0, direct);
+      continue;
+    }
+    const floorPa = Number(row.floorPa);
+    if (Number.isFinite(floorPa) && floorPa > 0) {
+      armed = true;
+      const disc = CLIENT_PEST_CADENCE_DISC[Number(row.apps)] ?? null;
+      if (disc) perVisit = Math.max(perVisit ?? 0, Math.round((floorPa / disc) * 100) / 100);
+    } else if (Number(row.programFloorAnnual) > 0 || Number(row.floorAnn) > 0) {
+      armed = true;
+    }
+  }
+  return { armed, perVisit };
 }
 
 function canVaryPestFrequency(engineInputs) {
@@ -11141,7 +11228,7 @@ function retiredTreeShrubRequoteNeeded(estData = null) {
 // accept path actually bills. Those links go to the requote state on the SSR
 // page instead; the React flow is unaffected (it renders the clamped ladder).
 function storedLawnRowBelowProgramFloor(estData = null) {
-  const minMonthly = lawnProgramMinimumMonthly();
+  const minMonthly = lawnProgramMinimumMonthlyFor(estData);
   if (!(minMonthly > 0) || !estData || typeof estData !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estData);
   return (recurringSvcList || []).some((svc) => {
@@ -12885,8 +12972,105 @@ function lawnProgramMinimumMonthly() {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+// Per-estimate program-minimum SNAPSHOT (pre-push codex P0, round 9 on
+// #2827): the engine (and the client fallback engine) stamp the RESOLVED
+// programMinimumMonthly into pricingMetadata on every pricing run, so
+// view/accept re-clamps a saved quote at the minimum it was actually priced
+// with — a later global re-arm/disarm must never make the saved, displayed,
+// and accepted totals disagree (a quote saved under a re-armed $50 minimum
+// keeps its clamp after the global returns to 0, and a quote saved disarmed
+// is never clamped UP by a later re-arm). Estimates without a stamp
+// (pre-stamp saves) fall back to the live global — their existing behavior.
+// Delegates to the converter's shared resolver (stamp → legacy row
+// evidence → live global) so billing and render can never disagree about
+// which minimum a stored quote carries — see
+// resolveLawnProgramMinimumMonthlyForEstimate in estimate-converter.js for
+// the full resolution rules (pre-push codex P0s, round 9 on #2827).
+function lawnProgramMinimumMonthlyFor(estData) {
+  return require('../services/estimate-converter').resolveLawnProgramMinimumMonthlyForEstimate(estData);
+}
+
+// Normalize an explicitly threaded per-estimate minimum; callers that were
+// not handed one keep the live global (legacy behavior).
+function threadedProgramMinMonthly(value) {
+  const n = Number(value);
+  return value != null && Number.isFinite(n) && n >= 0 ? n : lawnProgramMinimumMonthly();
+}
+
 function isRetiredLawnTierKey(tierKey) {
   return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
+}
+
+// Per-estimate cost-floor arm state: an estimate generated with an explicit
+// useLawnCostFloor input (the adapter forwards options.useLawnCostFloor into
+// the lawn service) was floor-priced/floor-capped — or deliberately NOT — by
+// the engine regardless of the global switch. View/accept must clamp the
+// same rows the same way (save == accept), so the ladder reads the estimate's
+// own signal first. TRI-STATE: true / false when the estimate carries an
+// explicit signal (either one BEATS the global switch — generateEstimate
+// resolves the flag with ??, so an explicit false disarmed the save and a
+// later global re-arm must not re-clamp it); null when the estimate is
+// silent and the caller falls back to the global switch / legacy evidence
+// (codex P2s, rounds 5-7 on the #2827 main-merge).
+function estimateLawnFloorArmed(estData = {}) {
+  // Highest priority: the engine stamps its RESOLVED arm state into
+  // pricingMetadata on every post-#2827 pricing run — the authoritative
+  // record of what actually priced the saved result, covering estimates the
+  // GLOBAL switch armed without any explicit per-request flag (a later
+  // global flip must not change how a sent quote replays).
+  const stamped = estData?.result?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.engineResult?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.result?.routingMetadata?.lawnCostFloorArmed;
+  if (typeof stamped === 'boolean') return stamped;
+  // Admin V2 saves persist the exact /calculate-estimate payload under
+  // engineRequest ({ profile, selectedServices, options }); the adapter maps
+  // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
+  // so the raw option is that shape's arm signal.
+  const reqOptions = estData?.engineRequest?.options;
+  if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
+    return !!reqOptions.useLawnCostFloor;
+  }
+  const engineInputs = rawEngineInputs(estData) || {};
+  const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
+  if (stored != null) return !!stored;
+  // Legacy engine-backed saves ({ engineInputs, engineResult }, pre-stamp,
+  // no explicit flag): the stored engine rows are the only evidence the
+  // quote was cost-floor priced — same enforcement-stamp rule as the v1
+  // ladder path (lawnRowsShowFloorEnforcement: reporting fields are NOT
+  // evidence). Without this, extractEngineInputs replays an already-sent
+  // floor-priced estimate under the current disarmed default and lowers
+  // view/accept (codex P2 round 11 on #2827). Evidence only arms — its
+  // absence stays null (tri-state preserved; caller falls to the global).
+  const engineRows = [];
+  for (const li of [
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+    ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
+  ]) {
+    if ((li?.service || '') !== 'lawn_care') continue;
+    engineRows.push(li);
+    if (Array.isArray(li.tiers)) engineRows.push(...li.tiers);
+  }
+  if (engineRows.length && lawnRowsShowFloorEnforcement(engineRows)) return true;
+  return null;
+}
+
+// Legacy pre-disarm estimates (engine armed the cost floor by default, so
+// builder payloads never needed to persist the flag): the floor evidence
+// lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
+// machinery writes count — costFloorApplied, marginFloorGuardApplied, a
+// COST_FLOOR pricing source. The reporting fields
+// (minimumCollectedAnnualPrice / costFloorAnnual) ride every post-disarm
+// quote too and are deliberately NOT evidence, or every new estimate would
+// silently re-arm (the exact trap this branch closes).
+function lawnRowsShowFloorEnforcement(rows) {
+  return (Array.isArray(rows) ? rows : []).some((row) => (
+    row?.costFloorApplied === true
+    || row?.marginFloorGuardApplied === true
+    || row?.pricingSource === 'COST_FLOOR'
+    || row?.prov?.costFloorApplied === true
+    || row?.prov?.pricingSource === 'COST_FLOOR'
+  ));
 }
 
 // Clamp a customer-facing lawn ladder entry to the program minimum AFTER
@@ -12894,22 +13078,35 @@ function isRetiredLawnTierKey(tierKey) {
 // per-app never disagree, the pre-discount anchor never drops below the net
 // price, and the reported manual discount shrinks to what the floor actually
 // let through (never display savings the price doesn't reflect).
-function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual }) {
-  const programMinMonthly = lawnProgramMinimumMonthly();
-  // Each cadence carries its OWN 35% collected-margin floor from the engine
-  // (minimumCollectedAnnualPrice). The program minimum alone would let a
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual, marginFloorArmed, programMinMonthly: programMinMonthlyIn }) {
+  const programMinMonthly = threadedProgramMinMonthly(programMinMonthlyIn);
+  // Margin-floor leg armed only with the cost-floor machinery (owner ruling
+  // 2026-07-17: floors report, never enforce). Stored and engine rows carry
+  // minimumCollectedAnnualPrice/costFloorAnnual on EVERY quote for margin
+  // REPORTING, so the field's presence alone must never clamp the ladder.
+  // Armed by the live global switch (lawn_pricing_v2.useLawnCostFloor —
+  // live db-bridge reference, same as the program minimum) or an explicit
+  // caller override (per-estimate re-arm via stored engine inputs — see
+  // estimateLawnFloorArmed). When armed, each cadence re-clamps at its
+  // OWN 35% collected-margin floor: the program minimum alone would let a
   // discounted alternate cadence render/bill below the margin its own cost
   // basis requires.
   // CEIL to cents: nearest-cent rounding of floor/12 can reconstruct an
   // annual a cent BELOW the floor (630.85 → 52.57/mo → 630.84/yr), quietly
   // defeating the 35% post-discount guard.
-  const marginFloorMonthly = Number.isFinite(Number(marginFloorAnnual)) && Number(marginFloorAnnual) > 0
-    ? Math.ceil((Number(marginFloorAnnual) / 12) * 100) / 100
+  const armed = marginFloorArmed === undefined
+    ? LAWN_PRICING_V2?.useLawnCostFloor === true
+    : marginFloorArmed === true;
+  const armedMarginFloorAnnual = armed
+    ? Number(marginFloorAnnual)
+    : NaN;
+  const marginFloorMonthly = Number.isFinite(armedMarginFloorAnnual) && armedMarginFloorAnnual > 0
+    ? Math.ceil((armedMarginFloorAnnual / 12) * 100) / 100
     : 0;
   const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
   const minAnnual = Math.max(
     programMinMonthly > 0 ? roundMonthly(programMinMonthly * 12) : 0,
-    Number.isFinite(Number(marginFloorAnnual)) ? Number(marginFloorAnnual) : 0,
+    Number.isFinite(armedMarginFloorAnnual) ? armedMarginFloorAnnual : 0,
   );
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
@@ -12978,24 +13175,24 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
 // selection always stays (it IS the quoted plan — hiding it would silently
 // re-price the customer), and the ladder never empties — if every tier
 // floors, keep the highest-application one (most value at the same price).
-function isFlooredLawnLadderEntry(entry = {}) {
+function isFlooredLawnLadderEntry(entry = {}, programMinMonthly) {
   if (entry.flooredAtMinimum === true) return true;
   // Snapshots/caches frozen before the flag existed carry no flooredAtMinimum —
   // recompute from the price itself: a lawn tier sitting AT (or below) the
   // program minimum is floor-pinned by definition (the floor is a hard lower
   // bound, so an at-floor price is either clamped or coincidentally exact —
   // both read as "the floor is the price" to the customer).
-  const minMonthly = lawnProgramMinimumMonthly();
+  const minMonthly = threadedProgramMinMonthly(programMinMonthly);
   const monthly = Number(entry.monthly);
   return minMonthly > 0 && Number.isFinite(monthly) && monthly > 0 && monthly <= minMonthly;
 }
 
-function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null) {
+function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null, programMinMonthly) {
   const list = Array.isArray(entries) ? entries : [];
   const isProtected = (entry) => entry.recommended === true
     || entry.selected === true
     || (protectedKeys instanceof Set && protectedKeys.has(String(entry.key || '').toLowerCase()));
-  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry) || isProtected(entry));
+  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry, programMinMonthly) || isProtected(entry));
   if (kept.length) return kept;
   if (!list.length) return list;
   const best = list.reduce((a, b) => (
@@ -13038,11 +13235,12 @@ function storedLawnTierKeysForEstimate(estData = {}) {
 function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
   let next = payload;
   const protectedKeys = storedLawnTierKeysForEstimate(estData);
+  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
 
   const topLevel = Array.isArray(payload.frequencies) ? payload.frequencies : [];
   const lawnTopLevel = topLevel.filter((f) => f?.serviceCategory === 'lawn_care');
   if (lawnTopLevel.length) {
-    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys));
+    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys, programMinMonthly));
     const hidden = lawnTopLevel.filter((f) => !kept.has(f));
     if (hidden.length) {
       next = {
@@ -13073,7 +13271,7 @@ function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
         if (!isLawnTierLadder(section)) {
           return section;
         }
-        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys);
+        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys, programMinMonthly);
         if (kept.length === section.frequencies.length) return section;
         return {
           ...section,
@@ -13111,6 +13309,18 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   const rawManualDiscount = manualDiscountOverride !== undefined
     ? manualDiscountOverride
     : normalizeManualDiscountSummary(estData);
+  // Arm resolution, once per estimate so every cadence row clamps under the
+  // same state: the estimate's own explicit signal wins in BOTH directions;
+  // a silent estimate falls back to the global live switch, or to legacy
+  // enforcement stamps on the stored rows (pre-disarm snapshots keep their
+  // floor re-clamp even though they never persisted the flag).
+  const perEstimateFloorArmed = estimateLawnFloorArmed(estData);
+  const marginFloorArmed = perEstimateFloorArmed != null
+    ? perEstimateFloorArmed
+    : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
+  // Program minimum resolved once per estimate for the same reason: every
+  // cadence row clamps at the minimum THIS quote was priced with.
+  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -13138,6 +13348,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
       const rawPerTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
+      // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
+      // stored rows persist the same cadence floor under prov.costFloorAnnual
+      // (v1-legacy-mapper) — both paths must clamp at it when armed.
+      const rowMarginFloorAnnual = finiteNumberOrNull(
+        row.marginFloorAnnual
+        ?? row.prov?.minimumCollectedAnnualPrice
+        ?? row.prov?.costFloorAnnual
+        ?? row.costFloorAnnual,
+      );
       const {
         monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed, flooredAtMinimum,
       } = clampLawnLadderEntry({
@@ -13147,15 +13366,9 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment: rawPerTreatment,
         visits,
         manualDiscount: rawManualDiscountForTier,
-        // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
-        // stored rows persist the same cadence floor under prov.costFloorAnnual
-        // (v1-legacy-mapper) — both paths must clamp at it.
-        marginFloorAnnual: finiteNumberOrNull(
-          row.marginFloorAnnual
-          ?? row.prov?.minimumCollectedAnnualPrice
-          ?? row.prov?.costFloorAnnual
-          ?? row.costFloorAnnual,
-        ),
+        marginFloorAnnual: rowMarginFloorAnnual,
+        marginFloorArmed,
+        programMinMonthly,
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -13176,6 +13389,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         billingFrequencyKey: 'monthly',
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
+        // Armed margin floor rides the entry so downstream repricers (the
+        // split-section ladder) clamp the same way this ladder does — a
+        // section card must never offer a cadence below the floor the
+        // combo/accept path collects (codex P2 round 11 on #2827). CEILED
+        // to the cent, matching clampLawnLadderEntry's own rule, so
+        // 12 × monthly never lands under the annual floor (round 12).
+        ...(marginFloorArmed && rowMarginFloorAnnual > 0
+          ? { marginFloorMonthly: Math.ceil((rowMarginFloorAnnual / 12) * 100) / 100 }
+          : {}),
         flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14358,7 +14580,7 @@ const NON_PEST_RESULT_ROWS = {
 // serviceKey -> { tierKey -> { mo, ann, pa, v, recommended, selected } } from the
 // stored tier rows. These are PRE-discount per-tier prices; shapeFromV1 applies
 // the discounts when it recomputes the bundle total for a given combination.
-function nonPestTierBaseMap(resultStats = {}) {
+function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloorArmed } = {}) {
   const out = {};
   for (const [serviceKey, [rowsKey, tierKeyFn]] of Object.entries(NON_PEST_RESULT_ROWS)) {
     const rows = Array.isArray(resultStats?.[rowsKey]) ? resultStats[rowsKey] : [];
@@ -14377,16 +14599,27 @@ function nonPestTierBaseMap(resultStats = {}) {
       // Stored lawn rows on old estimates predate the program minimum —
       // clamp the combo base so shapeFromV1 never sums a below-floor lawn
       // component (its per-service discount hook re-clamps post-WaveGuard).
+      // With the cost floor ARMED, the base also lifts to the row's own
+      // floor — the same armed selection lift clampLawnLadderEntry applies
+      // to the section ladder, so the combo total a customer accepts equals
+      // the floor-clamped card they selected (codex P2 round 12 on #2827).
       if (serviceKey === 'lawn_care') {
-        const minMonthly = lawnProgramMinimumMonthly();
-        if (minMonthly > 0 && mo != null && mo < minMonthly) {
-          mo = minMonthly;
+        const minMonthly = threadedProgramMinMonthly(programMinMonthly);
+        const armedFloorMonthly = lawnCostFloorArmed === true
+          ? (lawnRowFloorMonthly(row) ?? 0)
+          : 0;
+        const liftTo = Math.max(minMonthly > 0 ? minMonthly : 0, armedFloorMonthly);
+        if (liftTo > 0 && mo != null && mo < liftTo) {
+          mo = liftTo;
           ann = roundMonthly(mo * 12);
           pa = v ? roundMonthly(ann / v) : pa;
         }
       }
       tiers[tierKey] = {
         mo, ann, pa, v,
+        ...(serviceKey === 'lawn_care' && lawnRowFloorMonthly(row) != null
+          ? { floorMonthly: lawnRowFloorMonthly(row) }
+          : {}),
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
       };
@@ -14406,7 +14639,29 @@ function applySelectedTierToServiceRow(svc, tier) {
   if (tier.ann != null) { next.ann = tier.ann; next.annual = tier.ann; }
   if (tier.pa != null) { next.perTreatment = tier.pa; next.perApp = tier.pa; next.perVisit = tier.pa; }
   if (tier.v != null) { next.visitsPerYear = tier.v; next.visits = tier.v; next.frequency = tier.v; }
+  // Per-tier cost floor rides the combo selection so shapeFromV1's lawn
+  // clamps hold the SELECTED cadence at its own floor while re-armed
+  // (pre-push codex P0, round 9 on #2827).
+  if (tier.floorMonthly != null) next.lawnFloorMonthly = tier.floorMonthly;
   return next;
+}
+
+// Monthly cost floor a stored lawn row carries (reporting fields ride every
+// quote; arming is decided by the caller — value extraction only). CEILED
+// to the cent — nearest-cent rounding could put 12 × monthly a cent under
+// the annual floor and let a discounted tier accept below it, defeating
+// clampLawnLadderEntry's own ceil rule (codex P2 round 12 on #2827).
+function lawnRowFloorMonthly(row) {
+  const floorAnnual = Number(
+    row?.marginFloorAnnual
+    ?? row?.prov?.minimumCollectedAnnualPrice
+    ?? row?.prov?.costFloorAnnual
+    ?? row?.minimumCollectedAnnualPrice
+    ?? row?.costFloorAnnual,
+  );
+  return Number.isFinite(floorAnnual) && floorAnnual > 0
+    ? Math.ceil((floorAnnual / 12) * 100) / 100
+    : null;
 }
 
 // Authoritative shapeFromV1 entry for one cadence combination. `selection` maps
@@ -14437,11 +14692,11 @@ function serviceCadenceComboKey(selection = {}) {
 // covers it. Per-service combos require a pest axis: the billing cadence /
 // interval is driven by the pest cadence, so a no-pest bundle must NOT inherit a
 // placeholder pest cadence (it would mis-resolve billing to quarterly/per-app).
-function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } = {}) {
+function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false, programMinMonthly, lawnCostFloorArmed, lawnFloorMonthly } = {}) {
   if (!v1 || !Array.isArray(v1.services)) return null;
   const hasPest = Array.isArray(v1.pestTiers) && v1.pestTiers.length > 0;
   if (!hasPest) return null;
-  const tierBaseMap = nonPestTierBaseMap(resultStats);
+  const tierBaseMap = nonPestTierBaseMap(resultStats, programMinMonthly, { lawnCostFloorArmed });
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
   const selectableNonPest = recurringKeys.filter(
     (k) => tierBaseMap[k] && Object.keys(tierBaseMap[k]).length > 1,
@@ -14468,7 +14723,12 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
   }
 
   return combos.map(({ pest, selection }) => {
-    const entry = comboPricingEntry(v1, pest.ladder, pest.pestTier, prefs, tierBaseMap, selection, { pestOnly });
+    const entry = comboPricingEntry(v1, pest.ladder, pest.pestTier, prefs, tierBaseMap, selection, {
+      pestOnly,
+      programMinMonthly,
+      lawnCostFloorArmed,
+      ...(lawnFloorMonthly != null ? { lawnFloorMonthly } : {}),
+    });
     return {
       key: serviceCadenceComboKey(selection),
       selection,
@@ -14498,12 +14758,21 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   const d = recurringServiceReceivesTierDiscount(recurringService) ? (Number(recurringDiscount) || 0) : 0;
   // Lawn program minimum re-clamps AFTER the WaveGuard % — a Platinum 20% on
   // a floor-priced lawn section must not sell below the floor.
-  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthly() : 0;
+  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthlyFor(estData) : 0;
   const repriced = entries.map((e) => {
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
     const discounted = roundMonthly(base * (1 - d));
-    const monthly = Math.max(discounted, sectionMinMonthly);
+    // Armed margin floor rides the entry (lawnFrequenciesFromRows) — clamp
+    // the section card the same way the combo/accept path does, capped at
+    // the authored base (never re-prices, only undiscounts) — codex P2
+    // round 11 on #2827.
+    const entryMarginFloor = Number(e.marginFloorMonthly) || 0;
+    const entryFloor = Math.max(
+      sectionMinMonthly,
+      entryMarginFloor > 0 ? Math.min(base, entryMarginFloor) : 0,
+    );
+    const monthly = Math.max(discounted, entryFloor);
     const visits = Number(e.visitsPerYear) || null;
     const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
     return {
@@ -14514,7 +14783,7 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
       manualDiscount: null,
       // Floor-pinned either upstream (engine/program-minimum on the stored
       // row) or here, where the WaveGuard % dropped the tier below the floor.
-      flooredAtMinimum: e.flooredAtMinimum === true || (sectionMinMonthly > 0 && discounted < sectionMinMonthly),
+      flooredAtMinimum: e.flooredAtMinimum === true || (entryFloor > 0 && discounted < entryFloor),
       perServiceTreatments: Array.isArray(e.perServiceTreatments)
         ? e.perServiceTreatments.map((r) => ({ ...r, perTreatment, displayPrice: perTreatment }))
         : [],
@@ -15103,6 +15372,36 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
 }
 
 function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
+  // Per-estimate program minimum threaded via options (pre-push codex P0,
+  // round 9); an unthreaded caller keeps the live global.
+  const programMinMonthly = threadedProgramMinMonthly(options.programMinMonthly);
+  // Re-armed cost floor (pre-push codex P0, round 9): when the estimate's
+  // arm resolution says armed, each lawn row's own cost floor joins the
+  // program minimum in every post-discount clamp — mirroring
+  // generateEstimate's WaveGuard/manual guards so a mixed-bundle combo can
+  // never be displayed or accepted below the floor the save was held at.
+  // Per-tier floors ride combo selections (svc.lawnFloorMonthly via
+  // applySelectedTierToServiceRow); options.lawnFloorMonthly carries the
+  // selected/default row's floor for the untouched v1.services rows.
+  const lawnCostFloorArmed = options.lawnCostFloorArmed === true;
+  // Effective monthly floor for a lawn row. Two legs, two semantics
+  // (mirroring generateEstimate's guards): the program minimum lifts even
+  // above the authored base (it IS the billed minimum); the armed margin
+  // floor is capped at the row's own pre-discount monthly — a floor above
+  // the authored price makes the line undiscountable, never re-prices it
+  // (that cap applies to the per-treatment display too, which drives the
+  // first-application invoice — codex P2 round 10 on #2827).
+  const lawnFloorMonthlyFor = (svc) => {
+    const baseMonthly = Number(svc?.mo ?? svc?.monthly) || 0;
+    let marginFloorMonthly = 0;
+    if (lawnCostFloorArmed) {
+      marginFloorMonthly = Number(svc?.lawnFloorMonthly ?? lawnRowFloorMonthly(svc) ?? options.lawnFloorMonthly) || 0;
+      if (marginFloorMonthly > 0 && baseMonthly > 0) {
+        marginFloorMonthly = Math.min(baseMonthly, marginFloorMonthly);
+      }
+    }
+    return Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
+  };
   // pestTier may be null if pest isn't in this estimate. In that case
   // the frequency entry shows the recurring total regardless of freq key
   // (lawn-only / mosquito-only estimates — slider position doesn't
@@ -15144,8 +15443,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     // must not pull the lawn component below the floor. Guard on n > 0 so a
     // missing/zero lawn row is never inflated to the minimum.
     if (n > 0 && recurringServiceKey(svc) === 'lawn_care') {
-      const minMonthly = lawnProgramMinimumMonthly();
-      if (minMonthly > 0 && after < minMonthly) return minMonthly;
+      const floorMonthly = lawnFloorMonthlyFor(svc);
+      if (floorMonthly > 0 && after < floorMonthly) return floorMonthly;
     }
     return after;
   };
@@ -15173,10 +15472,10 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   let manualDiscountSuppressed = false;
   const lawnFloorProtectedMonthly = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
     if (recurringServiceKey(svc) !== 'lawn_care') return sum;
-    const minMonthly = lawnProgramMinimumMonthly();
-    if (!(minMonthly > 0)) return sum;
+    const floorMonthly = lawnFloorMonthlyFor(svc);
+    if (!(floorMonthly > 0)) return sum;
     const after = discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
-    return after > 0 ? sum + Math.min(after, minMonthly) : sum;
+    return after > 0 ? sum + Math.min(after, floorMonthly) : sum;
   }, 0);
   if (manualDiscountMonthly > 0 && lawnFloorProtectedMonthly > 0) {
     const manualHeadroomMonthly = Math.max(0, roundMonthly(pestMoAfter + nonPestMoAfter - monthlyOff - lawnFloorProtectedMonthly));
@@ -15274,9 +15573,9 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       // the plan itself charges.
       if (displayPrice != null && recurringServiceKey(svc) === 'lawn_care'
         && Number.isFinite(visits) && visits > 0) {
-        const minMonthly = lawnProgramMinimumMonthly();
-        if (minMonthly > 0) {
-          displayPrice = Math.max(displayPrice, roundMonthly((minMonthly * 12) / visits));
+        const floorMonthly = lawnFloorMonthlyFor(svc);
+        if (floorMonthly > 0) {
+          displayPrice = Math.max(displayPrice, roundMonthly((floorMonthly * 12) / visits));
         }
       }
       // Monthly figures ride along on every row so flat-monthly services
@@ -15383,8 +15682,8 @@ function pricingBundleHasStaleTermiteRow(bundle = {}) {
   return combos.some((c) => rowStale(c?.perServiceTreatments));
 }
 
-function pricingBundleViolatesLawnPolicy(bundle = {}) {
-  const minMonthly = lawnProgramMinimumMonthly();
+function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
+  const minMonthly = threadedProgramMinMonthly(programMinMonthly);
   const belowFloor = (monthly) => minMonthly > 0
     && Number.isFinite(monthly) && monthly > 0 && monthly < minMonthly - 0.005;
   // A lawn row at a retired visit cadence violates the policy even when its
@@ -15545,7 +15844,7 @@ async function buildPricingBundle(estimate) {
     // lawn-identifiable element at all can't be policy-checked — those
     // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
     // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle)
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
     && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
     // Pre-split termite snapshots (no monthly on the flat-monthly row) and
     // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
@@ -15575,10 +15874,28 @@ async function buildPricingBundle(estimate) {
   const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
+    const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
+    // Cost-floor arm resolution for this estimate — same rules as the
+    // ladder (per-estimate signal beats the global; legacy enforcement
+    // stamps on the stored rows arm silent pre-disarm saves). The
+    // selected/default row's floor covers the untouched v1.services rows;
+    // combo selections carry their own tier's floor.
+    const v1LawnRows = Array.isArray(estData?.result?.results?.lawn) ? estData.result.results.lawn : [];
+    const perEstimateArm = estimateLawnFloorArmed(estData);
+    const lawnCostFloorArmed = perEstimateArm != null
+      ? perEstimateArm
+      : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows));
+    const selectedLawnRow = v1LawnRows.find((r) => r?.recommended === true || r?.selected === true) || v1LawnRows[0] || null;
+    const lawnFloorMonthly = selectedLawnRow ? lawnRowFloorMonthly(selectedLawnRow) : null;
+    const v1FloorOptions = {
+      programMinMonthly,
+      lawnCostFloorArmed,
+      ...(lawnFloorMonthly != null ? { lawnFloorMonthly } : {}),
+    };
     const frequencies = [];
     for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
       const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
-      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice }));
+      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice, ...v1FloorOptions }));
     }
 
     // If no pest at all, drop the pest-cadence entries. Service-specific
@@ -15668,7 +15985,7 @@ async function buildPricingBundle(estimate) {
     // buildPricingServices only exposes own-cadence section ladders when the
     // backing combo pricing is present — the two never desync across snapshot /
     // engine / recompute paths.
-    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice });
+    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice, ...v1FloorOptions });
     const payload = finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',

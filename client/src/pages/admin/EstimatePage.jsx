@@ -9,7 +9,10 @@ import React, {
   Component,
 } from "react";
 import {
+  applyServerLawnPricingConfig,
+  applyServerPestPricingConfig,
   calculateEstimate,
+  collectMarginReviewNotes,
   fmt,
   fmtInt,
   isCommercialEstimateInput,
@@ -1216,6 +1219,62 @@ function EstimateToolView() {
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
 
+  /* ── Live lawn pricing config → client fallback engine ────── */
+  // The fallback engine (calculateEstimate, used when there is no enriched
+  // property) mirrors the server's DISARMED program minimum (0) statically.
+  // A live DB re-arm of lawn_pricing_v2.programMinimumMonthly must reach it
+  // too, or fallback estimates preview/save below-minimum rows the public
+  // route then refuses to accept. Fetch failure leaves the disarmed default.
+  // Refreshed on mount AND before every fallback calculation (codex P1: a
+  // re-arm while an estimator tab stays open must reach the next fallback
+  // quote — these saves have no replayable engine input, so a stale
+  // disarmed module state would persist a below-floor client price). The
+  // fallback generate path awaits the tracked promise; 5s abort keeps that
+  // bounded. There is NO fail-open: every fallback quote requires the
+  // refresh it just ran to succeed, because the pricingMetadata stamp makes
+  // whatever state priced the quote authoritative at view/accept and these
+  // saves have no replayable engine input — pricing on stale module state
+  // (fresh-session defaults OR a pre-re-arm load) would permanently persist
+  // a floor bypass (pre-push codex P0+P1 rounds on #2827). A failed refresh
+  // blocks the quote with a retry alert instead. A 404 is AUTHORITATIVE,
+  // not a failure: an absent pricing_config row means the disarmed in-code
+  // defaults BY DESIGN (db-bridge's kill-value pattern) — it resets to
+  // them and counts as a successful load.
+  const pricingConfigReadyRef = useRef(Promise.resolve(false));
+  const refreshPricingConfig = useCallback(() => {
+    const run = (async () => {
+      const fetchConfigRow = async (key) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
+        try {
+          const r = await fetch(`/api/admin/pricing-config/${key}`, {
+            headers: authHeaders,
+            signal: ctrl.signal,
+          });
+          if (r.status === 404) return { ok: true, data: null };
+          if (!r.ok) return { ok: false, data: null };
+          return { ok: true, data: (await r.json())?.data ?? null };
+        } catch {
+          return { ok: false, data: null }; /* last applied state stands */
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const [lawnRow, pestRow] = await Promise.all([
+        fetchConfigRow("lawn_pricing_v2"),
+        fetchConfigRow("pest_base"),
+      ]);
+      if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
+      if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
+      return lawnRow.ok && pestRow.ok;
+    })();
+    pricingConfigReadyRef.current = run;
+    return run;
+  }, []);
+  useEffect(() => {
+    refreshPricingConfig();
+  }, [refreshPricingConfig]);
+
   /* ── Manual discount presets (pulled from /admin/discounts) ── */
   const [discountPresets, setDiscountPresets] = useState([]);
   const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
@@ -1279,7 +1338,9 @@ function EstimateToolView() {
   function toggleServiceSpecificDiscount(key) {
     setEstimate(null);
     setSavedId(null);
-    setSavedViewUrl(null);
+    // NOTE: no setSavedViewUrl here — unlike EstimateToolViewV2, this legacy
+    // page has no savedViewUrl state; the call (copied from V2) was a
+    // guaranteed ReferenceError on every service-specific discount toggle.
     setForm((f) => {
       const current = new Set(Array.isArray(f.serviceSpecificDiscountKeys) ? f.serviceSpecificDiscountKeys : []);
       if (current.has(key)) current.delete(key);
@@ -1992,6 +2053,17 @@ function EstimateToolView() {
     }
 
     // Fallback: use v1 client-side calculation
+    // Refresh the live pricing config for THIS quote (bounded — 5s abort +
+    // fail-open to the last applied state) so a re-arm after mount, or an
+    // early generate racing the initial load, can't price on stale floor
+    // switches. A failed refresh BLOCKS the quote — no fail-open, ever:
+    // stale module state would be stamped as the quote's authoritative
+    // pricing config (pre-push codex P0 — see refreshPricingConfig).
+    const pricingConfigOk = await refreshPricingConfig();
+    if (!pricingConfigOk) {
+      alert("Live pricing configuration could not be loaded — retry in a moment. (Quotes are blocked rather than priced on possibly-stale floor settings.)");
+      return;
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -5305,10 +5377,20 @@ function EstimateToolView() {
                         </div>{" "}
                       </>
                     )}
-                    {E.pricingMetadata && (
-                      (E.pricingMetadata.skippedServices?.length > 0 ||
-                        E.pricingMetadata.warnings?.length > 0 ||
-                        E.pricingMetadata.manualReviewReasons?.length > 0) && (
+                    {(() => {
+                      // Report-only low-margin signals (owner ruling
+                      // 2026-07-17: margins are surfaced, never enforced) —
+                      // rendered alongside the engine's pricing metadata so
+                      // the owner sees "this looks low" before sending.
+                      const marginNotes = collectMarginReviewNotes(E);
+                      const pm = E.pricingMetadata || {};
+                      const hasNotes =
+                        pm.skippedServices?.length > 0 ||
+                        pm.warnings?.length > 0 ||
+                        pm.manualReviewReasons?.length > 0 ||
+                        marginNotes.length > 0;
+                      if (!hasNotes) return null;
+                      return (
                         <div
                           style={{
                             marginBottom: 24,
@@ -5321,26 +5403,31 @@ function EstimateToolView() {
                           }}
                         >
                           <div style={{ fontWeight: 700, marginBottom: 4 }}>Pricing Review Notes</div>
-                          {(E.pricingMetadata.skippedServices || []).map((item, i) => (
+                          {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} style={{ color: C.muted }}>
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
                                 ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
                                 : item.skippedReason}
                             </div>
                           ))}
-                          {(E.pricingMetadata.warnings || []).map((warning, i) => (
+                          {(pm.warnings || []).map((warning, i) => (
                             <div key={`warning-${i}`} style={{ color: C.muted }}>
                               {warning}
                             </div>
                           ))}
-                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                          {(pm.manualReviewReasons || []).map((reason, i) => (
                             <div key={`manual-review-${i}`} style={{ color: C.muted }}>
                               {humanizeQuoteReason(reason)}
                             </div>
                           ))}
+                          {marginNotes.map((note, i) => (
+                            <div key={`margin-${i}`} style={{ color: C.ink, fontWeight: 600 }}>
+                              {note}
+                            </div>
+                          ))}
                         </div>
-                      )
-                    )}
+                      );
+                    })()}
 
                     {/* ── WaveGuard + Totals ───────────────── */}
                     {(E.recurring.serviceCount > 0 ||

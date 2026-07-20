@@ -43,11 +43,14 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $67 / $603 / $50.25 (program minimum)', () => {
+  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $64 / $576 / $48 (market table; floors disarmed 2026-07-17)', () => {
     const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced' });
-    expect(r.perApp).toBe(67);
-    expect(r.annual).toBe(603);
-    expect(r.monthly).toBe(50.25);
+    // Pre-ruling this case rode the $50/mo program minimum to $603/yr;
+    // with all floors disarmed it prices straight off the market table.
+    expect(r.perApp).toBe(64);
+    expect(r.annual).toBe(576);
+    expect(r.monthly).toBe(48);
+    expect(r.pricingSource).toBe('MARKET_TABLE');
     expect(r.pricingVersion).toBe('LAWN_PRICING_V2_SPOT_RESERVE');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
@@ -63,14 +66,17 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('program minimum: no sold plan below $50/mo (owner directive 2026-07-09, raised from $45 same day)', () => {
+  it('program minimum disarmed (owner ruling 2026-07-17): small plans price off the market table', () => {
+    // No case clamps to a floor or program minimum anymore.
     for (const c of cases) {
-      expect(c.out.monthly).toBeGreaterThanOrEqual(50);
+      expect(c.out.programMinimumApplied).not.toBe(true);
+      expect(c.out.costFloorApplied).not.toBe(true);
     }
-    // The old worst case — small Bahia — now floors at exactly $50/$600.
+    // The old worst case — small Bahia — collects its market-table price
+    // ($34/mo); the owner raises anything that looks low in the estimator.
     const r = priceLawnCare({ turfSf: 3000 }, { track: 'bahia', tier: 'standard' });
-    expect(r.monthly).toBe(50);
-    expect(r.annual).toBe(600);
-    expect(r.pricingSource).toBe('PROGRAM_MINIMUM');
+    expect(r.monthly).toBe(34);
+    expect(r.annual).toBe(408);
+    expect(r.pricingSource).toBe('MARKET_TABLE');
   });
 });

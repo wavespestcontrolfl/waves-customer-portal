@@ -11,6 +11,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const { renderPage, buildPricingBundle, clampLawnLadderEntry } = require('../routes/estimate-public');
 const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
 const { publicMembershipView } = require('../services/estimate-membership-context');
+const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 
 function lawnEstimate(overrides = {}) {
   return {
@@ -71,6 +72,20 @@ function donMembership(overrides = {}) {
   };
 }
 
+// The ladder's margin-floor clamp is enforcement-gated on the cost-floor arm
+// switch (owner ruling 2026-07-17: floors report, never enforce) — these pins
+// re-arm lawn_pricing_v2.useLawnCostFloor to prove the #2795 clamp machinery
+// stays intact; the disarmed pin below proves the field alone never clamps.
+describe('re-armed margin-floor ladder clamp', () => {
+  let priorUseFloor;
+  beforeAll(() => {
+    priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+  });
+  afterAll(() => {
+    LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
+  });
+
 test('a monthly lawn floor re-anchors annual billing to the rounded monthly charge', () => {
   const result = clampLawnLadderEntry({
     monthlyBase: 50,
@@ -121,6 +136,25 @@ test('a manual lawn discount cannot lower the accepted price below its cost-deri
     capped: true,
     capReason: 'lawn_margin_floor',
   }));
+});
+});
+
+test('marginFloorAnnual alone never clamps the ladder while disarmed (owner 2026-07-17)', () => {
+  // Every stored/engine row carries the floor fields for margin REPORTING —
+  // with useLawnCostFloor false (the default) the clamp must pass prices
+  // through untouched.
+  const result = clampLawnLadderEntry({
+    monthlyBase: 50,
+    monthly: 50,
+    annual: 600,
+    perTreatment: 66.67,
+    visits: 9,
+    manualDiscount: null,
+    marginFloorAnnual: 640,
+  });
+
+  expect(result.monthly).toBe(50);
+  expect(result.annual).toBe(600);
 });
 
 describe('existing-customer public estimate page', () => {
@@ -258,16 +292,18 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('Add Seasonal Mosquito and save more');
   });
 
-  test('leads on a lawn estimate: no setup fee, 5% prepay discount, pest-control cross-sell', () => {
+  test('leads on a lawn estimate: no setup fee, full 5% prepay discount, pest-control cross-sell', () => {
     const html = renderPage('lead-token', lawnEstimate(), lawnEstimateData(), null);
 
     // New customers still get the annual prepay option — now a prepay
     // discount in place of the setup waiver, since lawn carries no $99.00
-    // setup. The $50.00/mo lawn program minimum protects $600.00 of the $753.36
-    // base, so the effective rate is ~1%, not the configured 5%.
+    // setup. Owner ruling 2026-07-17 ("forget all pricing floors") set the
+    // lawn program minimum to 0, so no slice of the base is floor-protected —
+    // the full configured 5% applies to the whole $753.36 base.
     expect(html).toContain('<h3>Pay the 12-month plan in full</h3>');
     expect(html).toContain('data-payment-setup="prepay_annual"');
-    expect(html).toContain('Prepay discount (1%)');
+    expect(html).toContain('Prepay discount (5%)');
+    expect(html).toContain('data-prepay-protected-floor="0" data-prepay-configured-rate="0.05">$715.69');
     expect(html).not.toContain('<span>WaveGuard Membership Setup</span><strong>$99.00</strong>');
     expect(html).not.toContain("you're already a Waves customer");
     expect(html).toContain('Add Pest Control for bundled pricing');

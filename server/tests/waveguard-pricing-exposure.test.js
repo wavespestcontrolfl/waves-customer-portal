@@ -1,9 +1,12 @@
 const { priceLawnCare } = require('../services/pricing-engine');
 const protocols = require('../config/protocols.json');
 
-// Collected-margin policy floor for recurring lawn (lowered 45% → 35% on
-// 2026-06-17 per owner directive; the protocol-material basis here runs a hair
-// above the engine's cost-floor basis, min observed 0.3515).
+// Collected-margin reference target for recurring lawn (35% since 2026-06-17).
+// Owner ruling 2026-07-17 ("forget all pricing floors"): the engine's 35% cost
+// floor is DISARMED — every quote prices straight off the market bracket table
+// and costFloorApplied is always false. This suite no longer enforces the
+// target; it pins the disarmed behavior plus a ledger of the known, accepted
+// below-target exposure (min observed collected margin 0.2731).
 const TARGET_COLLECTED_MARGIN = 0.35;
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 const TIERS = ['standard', 'enhanced', 'premium'];
@@ -81,9 +84,31 @@ function annualCostWithProtocolMaterial(track, tier, turfSqft) {
     + independentNonMaterialAnnualCost(tier, turfSqft);
 }
 
+// Known, accepted below-target exposure with the cost floor disarmed (owner
+// ruling 2026-07-17), on the #2812 reserve-folded protocol cost data. The
+// fold's sold-cadence normalization moved the exposure: enhanced tiers now
+// clear 35%, while STANDARD (6-app) st_augustine and zoysia at 8,000+ sqft
+// dip under — zoysia standard runs ~27-29% (min 0.2731 at 20k). Values are
+// the engine's actual bracket prices against this suite's independent cost
+// model; the engine's own folded cost view agrees within a few dollars.
+const KNOWN_BELOW_TARGET_EXPOSURE = [
+  { track: 'st_augustine', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 371.41, protocolMaterial: 178.91, margin: 0.3415 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 433.64, protocolMaterial: 223.64, margin: 0.3308 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 12000, annual: 744, annualCost: 495.86, protocolMaterial: 268.36, margin: 0.3335 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 589.2, protocolMaterial: 335.45, margin: 0.3274 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 744.77, protocolMaterial: 447.27, margin: 0.318 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 404.95, protocolMaterial: 212.45, margin: 0.282 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 10000, annual: 672, annualCost: 475.56, protocolMaterial: 265.56, margin: 0.2923 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 12000, annual: 756, annualCost: 546.18, protocolMaterial: 318.68, margin: 0.2775 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 15000, annual: 900, annualCost: 652.1, protocolMaterial: 398.35, margin: 0.2754 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 20000, annual: 1140, annualCost: 828.63, protocolMaterial: 531.13, margin: 0.2731 },
+];
+
 describe('WaveGuard lawn pricing exposure', () => {
-  it('keeps every sold grass/cadence/size combination at or above the collected margin target', () => {
-    const failures = [];
+  it('prices every combination off the market bracket with the cost floor disarmed; below-target margins match the known-exposure ledger (owner 2026-07-17)', () => {
+    const floorApplications = [];
+    const bracketMismatches = [];
+    const belowTarget = [];
 
     for (const track of TRACKS) {
       for (const tier of TIERS) {
@@ -93,13 +118,23 @@ describe('WaveGuard lawn pricing exposure', () => {
             { track, tier, includeHiddenTiers: true }
           );
           const selectedTier = priced.tiers.find((row) => row.tier === tier);
+
+          // Disarmed-floor pins: the cost floor never lifts a price, and every
+          // quote is the market bracket price verbatim.
+          if (selectedTier.costFloorApplied !== false) {
+            floorApplications.push({ track, tier, turfSqft, costFloorApplied: selectedTier.costFloorApplied });
+          }
+          if (selectedTier.annual !== selectedTier.marketAnnual) {
+            bracketMismatches.push({ track, tier, turfSqft, annual: selectedTier.annual, marketAnnual: selectedTier.marketAnnual });
+          }
+
           const annualCost = annualCostWithProtocolMaterial(track, tier, turfSqft);
           const margin = selectedTier.annual > 0
             ? (selectedTier.annual - annualCost) / selectedTier.annual
             : 0;
 
           if (margin + 0.0001 < TARGET_COLLECTED_MARGIN) {
-            failures.push({
+            belowTarget.push({
               track,
               tier,
               turfSqft,
@@ -113,14 +148,19 @@ describe('WaveGuard lawn pricing exposure', () => {
       }
     }
 
-    expect(failures).toEqual([]);
+    expect(floorApplications).toEqual([]);
+    expect(bracketMismatches).toEqual([]);
+    // Exposure ledger: any NEW combo dropping below target (or an existing one
+    // getting worse) fails here and needs an owner-acknowledged ledger update.
+    expect(belowTarget).toEqual(KNOWN_BELOW_TARGET_EXPOSURE);
   });
 
   it("engine's declared non-material cost components match the independent cost model", () => {
     // Guards the other direction: if the engine starts understating its own
     // labor/drive/reserve costs (which inflates its internal margin view and
-    // lowers its cost-derived floors), this diverges from the independent
-    // restatement even while the margin test above still clears.
+    // its now report-only cost-basis figures — floors disarmed per owner
+    // 2026-07-17), this diverges from the independent restatement even while
+    // the exposure ledger above still matches.
     const failures = [];
 
     for (const track of TRACKS) {

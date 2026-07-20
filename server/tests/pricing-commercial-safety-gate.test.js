@@ -265,29 +265,43 @@ describe('commercial helper PR1 safety behavior', () => {
 });
 
 describe('commercial safety gate in generateEstimate', () => {
-  test('residential pest and lawn stay pinned to the collected-margin floor', () => {
+  test('residential golden master pins floors-disarmed pricing for pest and lawn (owner 2026-07-17)', () => {
     const estimate = generateEstimate(baseInput());
     const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
     expect(pest).toMatchObject({ monthly: 39, annual: 468, perApp: 117 });
-    // Lawn 621 → 648: spot reserves folded into the 35% cost floor
-    // (owner 2026-07-16, LAWN_PRICING_V2_SPOT_RESERVE).
-    expect(lawn).toMatchObject({ monthly: 54, annual: 648, perApp: 72 });
+    // Lawn prices off the market bracket ($600/yr here) with the 35% cost
+    // floor disarmed (owner 2026-07-17 "forget all pricing floors"; the floor
+    // basis would have lifted this quote to $621).
+    expect(lawn).toMatchObject({
+      monthly: 50,
+      annual: 600,
+      perApp: 66.67,
+      costFloorApplied: false,
+      programMinimumApplied: false,
+    });
+    // Silver 10% applies IN FULL on both lines — no post-discount caps since
+    // the 2026-07-17 owner ruling (the $600/yr lawn program minimum and the
+    // pest per-visit program floor are both disarmed).
+    expect(pest).toMatchObject({
+      annualAfterDiscount: 421.2,
+      discountCapped: false,
+      marginGuardApplied: false,
+      programFloorApplied: false,
+    });
+    expect(lawn).toMatchObject({ annualAfterDiscount: 540, monthlyAfterDiscount: 45 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1116,
-      // Silver 10% on lawn (648 → 583.20) is capped at the GREATER of the
-      // $600 program minimum (owner 2026-07-09) and the 35% collected-margin
-      // floor (owner 2026-07-16). With spot reserves folded into the cost
-      // basis the collected floor is 642.76 > 600, so the margin guard
-      // binds: pest 421.20 + lawn 642.76 = 1063.96. Floor-bound monthly
-      // CEILs (1063.96/12 → 88.67); year2Monthly stays plain-rounded
-      // (display-only, documented in the lawn-margin baseline note).
-      recurringAnnualAfterDiscount: 1063.96,
-      recurringMonthlyAfterDiscount: 88.67,
-      year1Total: 1064,
-      year2Annual: 1064,
-      year2Monthly: 88.66,
+      recurringAnnualBeforeDiscount: 1068,
+      // Silver 10% applies in full: pest 468 → 421.20, lawn 600 → 540;
+      // 421.20 + 540 = 961.20. (Re-armed — useLawnCostFloor — the margin
+      // guard binds at the 642.76 reserve-folded floor and the monthly
+      // CEILs; pinned in lawn-pricing-followup.test.js.)
+      recurringAnnualAfterDiscount: 961.2,
+      recurringMonthlyAfterDiscount: 80.1,
+      year1Total: 961,
+      year2Annual: 961,
+      year2Monthly: 80.1,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',
