@@ -316,6 +316,13 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(q).toMatchObject({ floorPa: 95, floorAnn: 380 });
     expect(b).toMatchObject({ floorPa: 80.75, floorAnn: 484.50 });
     expect(estData.result.results.pest).toMatchObject({ floorPa: 95, floorAnn: 380 });
+    // The replay stamps sync ATOMICALLY with the restamped rows — a save
+    // normalized to the live $95 floor must not keep a $79 stamp, or the
+    // persisted rows and the replay state disagree (pre-push P0 round 13).
+    expect(estData.result.pricingMetadata).toMatchObject({
+      pestProgramFloorArmed: true,
+      pestProgramFloorPerVisit: 95,
+    });
   });
 
   test('kill switch off strips the client-stamped floors entirely', () => {

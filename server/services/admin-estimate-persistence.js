@@ -174,6 +174,25 @@ function normalizeClientPestFloorMetadata(estimateData) {
 
   // Replace the client-baked lift with the server-correct one in the totals.
   if (!isClientEngineResult) return;
+  // The rows/totals above were normalized to the LIVE config — the replay
+  // stamps must record the SAME source atomically, or a floor change
+  // between calculation and save leaves pricingMetadata claiming one floor
+  // while the persisted rows/totals collect another (pre-push P0, round 13
+  // on #2827). Client-priced payloads only; server engine stamps are
+  // authoritative snapshots and never pass through here.
+  const syncStamps = (meta) => {
+    if (!meta || typeof meta !== 'object') return;
+    meta.pestProgramFloorArmed = PEST.enforceFloorPostDiscount === true;
+    const liveFloor = Number(PEST.floor);
+    if (Number.isFinite(liveFloor) && liveFloor > 0) {
+      meta.pestProgramFloorPerVisit = liveFloor;
+    } else {
+      delete meta.pestProgramFloorPerVisit;
+    }
+  };
+  if (!root.pricingMetadata || typeof root.pricingMetadata !== 'object') root.pricingMetadata = {};
+  syncStamps(root.pricingMetadata);
+  syncStamps(root.routingMetadata);
   const serverLift = pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn));
   const delta = roundMoney(serverLift - clientLift);
   recurring.pestProgramFloorApplied = serverLift > 0;
