@@ -268,6 +268,10 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
+        // When mobile + closed the sidebar is translated offscreen but still
+        // rendered; `inert` pulls it (and its links) out of the tab order and
+        // AT tree so a keyboard user can't Tab into the invisible menu.
+        {...(!sidebarVisible ? { inert: "" } : {})}
         style={{
           width: 220,
           background: "var(--surface-primary)",
