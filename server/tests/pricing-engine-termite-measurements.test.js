@@ -791,3 +791,36 @@ describe('termite measurement overrides and safeguards', () => {
     }));
   });
 });
+
+describe('termite bait per-application cadence (owner 2026-07-20)', () => {
+  test('pricer emits visitsPerYear + perApp, exact against the annual', () => {
+    const basic = priceTermiteBait(
+      { footprint: 2000, features: { complexity: 'standard' } },
+      { system: 'advance', monitoringTier: 'basic' }
+    );
+    expect(basic.visitsPerYear).toBe(4);
+    // 35 x 12 / 4 — agrees to the cent with intervalPriceFromAnnual(420).
+    expect(basic.perApp).toBe(105);
+
+    const premier = priceTermiteBait(
+      { footprint: 2000, features: { complexity: 'standard' } },
+      { system: 'advance', monitoringTier: 'premier' }
+    );
+    expect(premier.visitsPerYear).toBe(4);
+    expect(premier.perApp).toBe(195);
+  });
+
+  test('mapper forwards perApp/visitsPerYear onto the persisted recurring row', () => {
+    const input = translateV2CallToV1Input(
+      { homeSqFt: 2000, stories: 1, lotSqFt: 8000 },
+      ['TERMITE_BAIT'],
+      { termiteBaitSystem: 'advance' }
+    );
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+    const row = mapped.recurring.services.find((svc) => svc.service === 'termite_bait');
+    expect(row).toBeTruthy();
+    expect(row.perTreatment).toBe(105);
+    expect(row.visitsPerYear).toBe(4);
+    expect(row.mo).toBe(35);
+  });
+});

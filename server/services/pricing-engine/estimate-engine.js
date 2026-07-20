@@ -953,6 +953,13 @@ function generateEstimate(input) {
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      // perApp re-derives from the FINAL rounded annual so the displayed
+      // per-application figure and the billing-cadence interval charge
+      // (intervalPriceFromAnnual) agree to the cent even when a DB-tuned
+      // monitoring monthly rounds at the annual step.
+      if (Number(result.visitsPerYear) > 0) {
+        result.perApp = Math.round((result.annual / result.visitsPerYear) * 100) / 100;
+      }
       lineItems.push(result);
       if (!result.quoteRequired && !result.requiresMeasurement) {
         activeServiceKeys.push('termite_bait');

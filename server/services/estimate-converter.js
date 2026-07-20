@@ -1208,6 +1208,18 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // old combined row keyed as pest_control and seeded; a standalone row
   // keying rodent_bait must not stop after the first check (Codex P1).
   if (key === 'rodent_bait') return pattern === 'quarterly';
+  // Standalone termite bait (owner 2026-07-20, billed per application):
+  // new estimates persist visitsPerYear=4, so the line infers quarterly and
+  // must seed its series — per-application billing on one lone visit would
+  // collect a quarter of the accepted annual. The explicit-visits check is
+  // the legacy gate (codex P2): a legacy row can still reach here with
+  // pattern 'quarterly' inherited from the accept flow's selected/inferred
+  // frequency (not from the row), and seeding those would break the
+  // legacy-preservation contract — no visitsPerYear, no series; office
+  // schedules follow-ups and the flat-monthly-derived fee stands.
+  if (key === 'termite_bait') {
+    return pattern === 'quarterly' && visitsPerYearForRecurringService(svc) === 4;
+  }
   // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
   // a sold program produced ONE visit and no series). The 6x Standard accept
   // restamps to the bi-monthly catalog row and the 4x Light downsell to
@@ -1260,10 +1272,25 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
 // warranted at all — running the guard for a row that would never seed a
 // series would write misleading "series skipped" notes (and take a lock) for
 // nothing.
+// Termite bait rows carry their cadence ONLY as explicit visitsPerYear (no
+// frequency text), and inferRecurringPattern checks text candidates —
+// including the plan-level fallback — BEFORE it reads visits. A monthly or
+// bimonthly plan cadence would therefore win over the row's own quarterly
+// visits, and the billed-per-application termite program would seed nothing
+// (codex #2911 r3 P1). Suppress the fallback when the row's own visits
+// speak; every other service keeps the fallback semantics unchanged.
+function cadenceFallbackForSeeding(svc = {}, fallbackFrequency) {
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'termite_bait'
+    && visitsPerYearForRecurringService(svc)) {
+    return null;
+  }
+  return fallbackFrequency;
+}
+
 function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency) {
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
-    fallbackFrequency,
+    fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
   });
   if (!pattern || !supportsConverterFollowUpSeeding(svc, parentRow, pattern)) return null;
   return pattern;
@@ -1777,18 +1804,39 @@ const EstimateConverter = {
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
-        const { combos, standalone: reservedStandalone } = combinedScheduling;
+        const { combos, standalone: reservedStandalone, remaining } = combinedScheduling;
         // Standalone units (sold rodent bait) must schedule in reserved
         // accepts too (Codex P1): before the pest+rodent route removal the
         // combo REWRITE covered the bait on the reserved row; now the bait
         // is its own visit, so insert it (anchored to the reserved date —
         // same-trip check) and seed its quarterly series. This preserves
         // the coverage the rewrite used to provide; it does NOT auto-
-        // schedule other `remaining` lines (adjudicated semantic intact).
-        for (const unit of (reservedStandalone || [])) {
+        // schedule other `remaining` lines (adjudicated semantic intact) —
+        // EXCEPT promoted termite below.
+        //
+        // Termite promotion (codex #2911 r3 P1): a quarterly termite line
+        // beside a monthly/bimonthly plan can't combine, and per the owner
+        // 2026-07-20 directive it is a billed-per-application program — an
+        // accept that billed it while scheduling nothing would sell a
+        // program that silently doesn't exist. Same remedy shape as the
+        // rodent promotion above; all other remaining lines keep the
+        // adjudicated 2026-06-12 semantic (owner decision).
+        const promotedTermiteUnits = (remaining || [])
+          .filter((line) => recurringServiceKey(line) === 'termite_bait'
+            && visitsPerYearForRecurringService(line) === 4)
+          .map((line) => ({
+            service: {
+              name: line.name || line.serviceName || line.service_name || 'Termite Bait',
+              frequency: 'quarterly',
+              visitsPerYear: 4,
+            },
+            catalogServiceKey: 'termite_bait',
+          }));
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
-          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === 'rodent_bait');
+          const unitKey = recurringServiceKey({ name: unit.service.name });
+          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey);
           if (alreadyReserved) continue;
           try {
             // Copy the customer's picked slot onto the bait row (Codex r2):
@@ -2036,7 +2084,10 @@ const EstimateConverter = {
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
         const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
           service: svc,
-          fallbackFrequency: inferredFrequencyKey,
+          // Same explicit-visits override as the seeding path: a termite row
+          // beside a monthly/bimonthly plan must schedule quarterly, not at
+          // the plan cadence (codex #2911 r3 P1).
+          fallbackFrequency: cadenceFallbackForSeeding(svc, inferredFrequencyKey),
         });
         const frequency = svc.frequency || pattern || 'monthly';
         // recurringUnitCount, not raw line count (Codex P1): with a
@@ -2793,3 +2844,4 @@ module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTi
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
+module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
