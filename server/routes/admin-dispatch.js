@@ -6717,6 +6717,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // for "no-bill completion", redundant with the !!invoice/suppress checks)
     // would strand that invoice with neither a pay link nor an in-person prompt.
     const invoicePaymentActionRequired = !!invoice
+      // Backfill closeouts leave the invoice for office review by contract —
+      // the mobile client opens the in-person payment sheet on this flag, and
+      // a backdated cleanup must not prompt anyone to collect on the spot.
+      && !isBackfillCompletion
       && !paymentCollectionSuppressed
       // Collectible statuses only — 'processing' (an in-flight ACH autopay
       // debit, incl. the per-application completion charge and the orphaned-

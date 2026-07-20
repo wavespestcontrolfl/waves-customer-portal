@@ -170,6 +170,14 @@ describe('completion route wiring (source contracts)', () => {
     expect(referralBlock[1]).toContain('creditReferralOnFirstService');
   });
 
+  test('backfill never opens the mobile in-person payment sheet', () => {
+    // invoicePaymentActionRequired drives DispatchPageV2's in-person payment
+    // handoff. A backfilled closeout leaves its invoice for office review by
+    // contract, so the flag must be forced false before any other condition
+    // can turn it on.
+    expect(source).toMatch(/const invoicePaymentActionRequired = !!invoice\s*\n(\s*\/\/[^\n]*\n)*\s*&& !isBackfillCompletion/);
+  });
+
   test('lead conversion still runs on a backfill — pure data write, and there is no later completion', () => {
     // convertLeadFromEvent only resolves the originating lead and calls
     // leadAttribution.markConverted — no SMS/email/money anywhere in that
