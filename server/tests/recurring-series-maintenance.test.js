@@ -197,6 +197,73 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(inserted).toHaveLength(0);
   });
 
+  test('P1: a cancelled FUTURE visit never anchors the next extension date — the cancelled slot is refilled', async () => {
+    const parent = {
+      id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_ongoing: true, scheduled_date: '2026-01-15',
+      window_start: '08:00', window_end: '10:00',
+      service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
+      estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
+      create_invoice_on_complete: false,
+    };
+    const rows = [
+      { scheduled_date: '2026-01-15', status: 'completed' },
+      { scheduled_date: '2026-04-15', status: 'completed' },
+      { scheduled_date: '2026-07-15', status: 'completed' },
+      // Cancelled FUTURE visit. Before the fix, the latest-row query had no
+      // status filter, so this row became latestStr and the extension landed
+      // a full cadence past it (2027-01-15) — a quarter-long service gap.
+      { scheduled_date: '2026-10-15', status: 'cancelled' },
+    ];
+    const inserted = [];
+    const handler = ({ table, calls, op, data }) => {
+      if (table === 'scheduled_services') {
+        if (op === 'columnInfo') return COLS;
+        if (op === 'first') {
+          const firstCall = calls.find((c) => c[0] === 'first');
+          if (calls.some((c) => c[0] === 'count')) return { c: '1' };
+          if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: true };
+          if (firstCall[1] === 'create_invoice_on_complete') return undefined;
+          if (calls.some((c) => c[0] === 'orderBy')) {
+            // Emulate the DB honestly: honor a whereNotIn('status', ...)
+            // filter when the query carries one, then take the latest date —
+            // so this test fails if the status filter is dropped again.
+            const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
+            const visible = notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+            const sorted = visible.map((r) => r.scheduled_date).sort();
+            return { scheduled_date: sorted[sorted.length - 1] };
+          }
+          return parent;
+        }
+        if (op === 'await') {
+          if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+            // The existing-dates preload already excludes cancelled rows.
+            return rows
+              .filter((r) => !['cancelled', 'rescheduled'].includes(r.status))
+              .map((r) => ({ scheduled_date: r.scheduled_date }));
+          }
+          return [];
+        }
+        if (op === 'insertReturning') { inserted.push(data); return [{ id: 902, ...data }]; }
+        if (op === 'insert') { inserted.push(data); return [1]; }
+      }
+      if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
+      return null;
+    };
+    await runRecurringSeriesMaintenance(makeConn(handler), { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });
+    expect(inserted).toHaveLength(1);
+    // Anchored to the last LIVE visit (2026-07-15): one quarter forward
+    // refills the cancelled 2026-10-15 slot instead of skipping past it.
+    expect(inserted[0].scheduled_date).toBe('2026-10-15');
+  });
+
+  test('the latest-anchor query pins the cancelled/rescheduled exclusion (source guard)', () => {
+    expect(src).toContain(
+      ".whereNotIn('status', ['cancelled', 'rescheduled'])\n        .orderBy('scheduled_date', 'desc').first();",
+    );
+  });
+
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
     const { conn, inserted } = ongoingScenario({ upcomingCount: 1, sibling: undefined, stillOngoing: false });
     await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' });

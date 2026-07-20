@@ -2283,6 +2283,22 @@ router.get('/month', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Shared 409 payload for the duplicate-series guard: the route-entry
+// preflight and the in-transaction locked backstop below must present the
+// conflict identically to the client (same code, same existingSeries shape).
+function duplicateSeriesConflictBody(existingSeries) {
+  return {
+    error: `This customer already has an active recurring series for this service: ${existingSeries.map((s) => `${s.service_type} (series #${s.id}${s.next_upcoming_date ? `, next visit ${s.next_upcoming_date}` : ', ongoing'})`).join('; ')}. Extend or edit the existing series instead — or pass allowDuplicateSeries to intentionally run a second program.`,
+    code: 'duplicate_recurring_series',
+    existingSeries: existingSeries.map((s) => ({
+      id: s.id,
+      serviceType: s.service_type,
+      pattern: s.recurring_pattern,
+      nextUpcomingDate: s.next_upcoming_date || null,
+    })),
+  };
+}
+
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
@@ -2311,6 +2327,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // programs (e.g. different scopes of the same family) by passing
     // allowDuplicateSeries: true — an explicit, logged escape hatch.
     // Fail-open on guard errors: protective, not load-bearing.
+    //
+    // This route-entry check is a fast PREFLIGHT (rejects the common case
+    // before any pricing/tech work); it runs outside the series-creating
+    // transaction, so it cannot stop two concurrent creates on its own. The
+    // race-safe backstop is the locked re-check inside the transaction below.
     if (isRecurring) {
       try {
         const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
@@ -2323,16 +2344,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (req.body.allowDuplicateSeries === true) {
             logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
           } else {
-            return res.status(409).json({
-              error: `This customer already has an active recurring series for this service: ${existingSeries.map((s) => `${s.service_type} (series #${s.id}${s.next_upcoming_date ? `, next visit ${s.next_upcoming_date}` : ', ongoing'})`).join('; ')}. Extend or edit the existing series instead — or pass allowDuplicateSeries to intentionally run a second program.`,
-              code: 'duplicate_recurring_series',
-              existingSeries: existingSeries.map((s) => ({
-                id: s.id,
-                serviceType: s.service_type,
-                pattern: s.recurring_pattern,
-                nextUpcomingDate: s.next_upcoming_date || null,
-              })),
-            });
+            return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
           }
         }
       } catch (guardErr) {
@@ -2737,6 +2749,32 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Race-safe duplicate-series backstop (P0: check-then-insert race).
+      // The preflight above ran OUTSIDE this transaction, so two concurrent
+      // recurring creates for the same customer + service family could both
+      // see "no series" and both commit one. Re-run the guard here — inside
+      // the transaction that creates the series — under the shared
+      // per-customer/family advisory lock: the loser waits on the winner's
+      // commit and then sees its series. The explicit allowDuplicateSeries
+      // escape hatch bypasses it exactly as it bypasses the preflight, and
+      // guard ERRORS stay fail-open (checkActiveSeriesLocked never throws;
+      // its savepoint keeps a failed guard query from aborting this
+      // transaction). A hit throws a tagged error the route catch maps to
+      // the same 409 the preflight returns.
+      if (isRecurring && req.body.allowDuplicateSeries !== true) {
+        const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+        const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+          customerId,
+          serviceId: serviceId || null,
+          serviceType,
+        });
+        if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
+        if (matches.length > 0) {
+          const dupErr = new Error('duplicate_recurring_series');
+          dupErr.duplicateRecurringSeries = matches;
+          throw dupErr;
+        }
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -3298,7 +3336,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         logger.error(`[schedule] post-commit side-effects failed (non-blocking): ${e.message}`);
       }
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // The in-transaction duplicate-series backstop rolled the create back —
+    // present the SAME 409 the preflight would have returned.
+    if (Array.isArray(err.duplicateRecurringSeries)) {
+      return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/schedule/list — paginated list view with filters
@@ -5853,10 +5898,17 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
     const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
 
     if (isOngoing && upcomingCount < 2) {
-      // Find latest visit (pending or completed) to calculate next date
+      // Find the latest LIVE visit (pending/confirmed or completed) to
+      // calculate the next date. Cancelled/rescheduled rows don't occupy a
+      // slot (the existing-dates preload below already excludes them for
+      // exactly that reason) — without the same filter here, a cancelled
+      // FUTURE visit becomes latestStr and pushes the extension a full
+      // cadence past the real last visit, leaving a service gap instead of
+      // refilling the cancelled slot.
       const latest = await conn('scheduled_services')
         .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
         .where('is_recurring', true)
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
         .orderBy('scheduled_date', 'desc').first();
       if (latest) {
         const latestStr = dateOnly(latest.scheduled_date);

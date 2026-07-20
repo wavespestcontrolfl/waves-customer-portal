@@ -1990,18 +1990,45 @@ async function createSelfBooking(payload = {}) {
     // but the 3 seeded follow-ups are what mint a duplicate quarterly series
     // when the customer already has one running. Office sees the skip in the
     // activity log. Fail-open: a guard failure must not change seeding.
+    //
+    // Guard re-check + seeding share ONE transaction (P0: check-then-insert
+    // race): running findActiveRecurringSeries detached from the seeding let
+    // two concurrent bookings both see "no series" and both seed. The
+    // booking itself committed above, so only the follow-up seeding rides
+    // this transaction; checkActiveSeriesLocked serializes creators per
+    // customer + service family, and the loser's re-check (under the lock)
+    // sees the winner's committed series. A guard ERROR never rolls anything
+    // back (the helper's savepoint absorbs it) — seeding proceeds as before.
     let duplicateSeriesKept = null;
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
-        const existingSeriesMatches = await RecurringAppointmentSeeder.findActiveRecurringSeries(db, {
-          customerId: custId,
-          serviceId: serviceRow.service_id || null,
-          serviceType: serviceRow.service_type || resolvedServiceType,
-          excludeParentId: serviceRow.id,
+        const outcome = await db.transaction(async (trx) => {
+          const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+            customerId: custId,
+            serviceId: serviceRow.service_id || null,
+            serviceType: serviceRow.service_type || resolvedServiceType,
+            excludeParentId: serviceRow.id,
+          });
+          if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
+          if (matches.length > 0) return { kept: matches[0] };
+          const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, serviceRow, {
+            pattern: 'quarterly',
+            plannedCount: 4,
+            skipWeekends: true,
+            weekendShift: 'forward',
+            durationMinutes: duration,
+            source: source || 'self_booked',
+            // Follow-ups bill the even quotient — the parent already absorbed
+            // the remainder cents — instead of inheriting the parent's price
+            // (which would re-introduce the ±cents/year drift on the series).
+            ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
+          });
+          return { seedResult };
         });
-        if (existingSeriesMatches.length > 0) duplicateSeriesKept = existingSeriesMatches[0];
-      } catch (guardErr) {
-        logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardErr.message}`);
+        if (outcome.kept) duplicateSeriesKept = outcome.kept;
+        else followUpRows = outcome.seedResult.insertedRows || [];
+      } catch (err) {
+        logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
       }
     }
     if (duplicateSeriesKept) {
@@ -2014,24 +2041,6 @@ async function createSelfBooking(payload = {}) {
         });
       } catch (noteErr) {
         logger.warn(`[booking:confirm] duplicate-series skip note failed: ${noteErr.message}`);
-      }
-    } else if (shouldSeedQuarterlyPestFollowUps) {
-      try {
-        const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(db, serviceRow, {
-          pattern: 'quarterly',
-          plannedCount: 4,
-          skipWeekends: true,
-          weekendShift: 'forward',
-          durationMinutes: duration,
-          source: source || 'self_booked',
-          // Follow-ups bill the even quotient — the parent already absorbed
-          // the remainder cents — instead of inheriting the parent's price
-          // (which would re-introduce the ±cents/year drift on the series).
-          ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
-        });
-        followUpRows = seedResult.insertedRows || [];
-      } catch (err) {
-        logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
       }
     }
 

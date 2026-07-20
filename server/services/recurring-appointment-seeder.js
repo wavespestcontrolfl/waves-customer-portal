@@ -450,6 +450,44 @@ async function findActiveRecurringSeries(conn, {
   return matches;
 }
 
+// Race-safe wrapper around findActiveRecurringSeries (P0: check-then-insert
+// race). Running the guard OUTSIDE the seeding transaction let two concurrent
+// creators both see "no series" and both seed. Callers invoke this INSIDE the
+// transaction that inserts the parent/follow-ups: it serializes series
+// creation per customer + service family on a pg advisory xact lock (the
+// hashed-key pattern shared with booking's self-booking-confirm/slot-reserve
+// locks and the per-parent maintenance lock in admin-schedule) and re-runs
+// the guard under the lock — the loser blocks until the winner's transaction
+// commits, then sees the fresh series and skips.
+//
+// The lock + guard query run in a SAVEPOINT (knex nested transaction) so a
+// guard failure can never abort the caller's outer transaction; the advisory
+// xact lock itself survives savepoint release and holds until top-level
+// commit. Fail-open BY DESIGN (the guard is protective, not load-bearing):
+// errors are returned — never thrown — as { matches: [], guardError } so the
+// caller logs and proceeds with seeding.
+async function checkActiveSeriesLocked(trx, opts = {}) {
+  try {
+    const matches = await trx.transaction(async (guardTrx) => {
+      // Family key mirrors the guard's own matching: the serviceKeyFor
+      // normalization buckets the different labels the creators stamp for
+      // one program. serviceType is present at every call site; the
+      // service_id fallback only keys the (defensive) label-less case.
+      const familyKey = opts.serviceType
+        ? serviceKeyFor({ service_type: opts.serviceType })
+        : `service-id:${opts.serviceId}`;
+      await guardTrx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['recurring-series-create', `${opts.customerId}:${familyKey}`],
+      );
+      return findActiveRecurringSeries(guardTrx, opts);
+    });
+    return { matches: matches || [], guardError: null };
+  } catch (guardError) {
+    return { matches: [], guardError };
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -502,6 +540,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 
 module.exports = {
   buildRecurringFollowUpRows,
+  checkActiveSeriesLocked,
   findActiveRecurringSeries,
   inferRecurringPattern,
   markParentRecurring,
