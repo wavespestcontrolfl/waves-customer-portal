@@ -103,10 +103,18 @@ async function lastBell() {
   return { signature: meta?.summary_signature || null, createdAt: prior.created_at };
 }
 
+function etDayNumber(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const [y, m, d] = etDateString(date).split('-').map(Number);
+  return Date.UTC(y, m - 1, d) / 86400000;
+}
+
 function priorBellCovers(prior, signature, now = new Date()) {
   if (!prior || prior.signature !== signature) return false;
-  const age = now.getTime() - new Date(prior.createdAt).getTime();
-  return age < REMIND_DAYS * 24 * 3600e3;
+  // ET calendar days, not elapsed hours — the cron fires at a fixed ET
+  // wall-clock time, and a DST transition would otherwise stretch the
+  // seven-night window to an eighth night.
+  return etDayNumber(now) - etDayNumber(prior.createdAt) < REMIND_DAYS;
 }
 
 async function runStaleVisitSweep({ now = new Date() } = {}) {

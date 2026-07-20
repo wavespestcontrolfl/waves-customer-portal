@@ -4200,7 +4200,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // IDs were intentionally cleared to null — don't let the protocol
             // completion re-derive the stale assigned system from the plan.
             calibrationCleared: waveguardCalibrationCleared,
-            serviceDate: completionEndedAt,
+            // Backfilled closeouts recheck from the recorded application day,
+            // not the office-entry day (recheck_due_date derives from this).
+            serviceDate: isBackfillCompletion
+              ? toETNoonServiceDate(completionServiceDate)
+              : completionEndedAt,
           });
           if (protocolCompletion) {
             record.structured_notes = {
