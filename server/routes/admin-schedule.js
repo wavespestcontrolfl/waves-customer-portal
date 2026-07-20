@@ -600,6 +600,44 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   }
 }
 
+// Post-registration cancellation re-check for spawned/extension visits —
+// the reminder leg of the cancellation race. registerSpawnedVisitReminder
+// runs AFTER the visit's insert committed (deliberately: the reminder
+// writer works on its own connection, and the label must include the
+// mirrored add-ons), so a series cancel can land BETWEEN that commit and
+// the registration finishing. Nothing else covers that window:
+// handleSeriesCancellation marks only reminder rows that exist when it
+// runs, and the scheduled_services sync trigger cancels reminders on the
+// visit's status UPDATE — an update that fired BEFORE the registration
+// inserted the row, so it matched nothing and never re-fires. In-trx
+// registration (registerVisitReminderInTx) would close the window
+// structurally but records the reminder label before the add-on mirror
+// exists, permanently degrading multi-service labels — so instead: re-read
+// the visit once registration is done. Losing the race has exactly one
+// signature — the cancel's status flip commits before its reminder sweep
+// runs, so a terminal status here means the fresh reminder escaped that
+// sweep; cancel it. Every interleaving is covered: reminder inserted
+// before the sweep → the sweep marks it; inserted after → the terminal
+// status is already committed and visible here. Terminal set mirrors the
+// reminder cron's SELF_HEAL_TERMINAL_STATUSES (keep in sync);
+// 'rescheduled' stays armed for the rebook, same as the cron's live-status
+// guard. Best-effort: never fails the caller.
+async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, logContext) {
+  if (!scheduledServiceId) return;
+  try {
+    const visitNow = await conn('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('status');
+    const statusNow = String(visitNow?.status || '').toLowerCase();
+    if (!visitNow || ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'].includes(statusNow)) {
+      await conn('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+        .update({ cancelled: true, updated_at: new Date() });
+      logger.info(`[${logContext}] Spawned-visit reminder cancelled — visit ${scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
+    }
+  } catch (e) { logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`); }
+}
+
 // Void any still-open invoices minted for a now-cancelled scheduled service
 // so dunning doesn't chase a cancelled job. The money-state rules (skip
 // applied payments / live PaymentIntents, atomic row-locked void) live in
@@ -647,6 +685,45 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
   if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
   if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
+}
+
+// Third-party Bill-To stamp (payer / PO / self-pay override): a spawned
+// series row must resolve billing exactly like the rest of the series at
+// completion. The PARENT is the canonical source — Bill-To edits propagate
+// parent → children (the PUT payer-propagation and update-details child
+// spawn both treat it that way), so the parent is never staler than a
+// sibling. Without this, a payer-billed series (or an explicit self-pay
+// override on a customer with a default payer) refills a visit whose
+// completion-time COALESCE(visit payer, customer payer) resolves to the
+// WRONG party — invoicing the homeowner instead of the payer, or vice versa.
+function copyBillToFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  if (cols.payer_id) target.payer_id = source.payer_id ?? null;
+  if (cols.po_number) target.po_number = source.po_number ?? null;
+  if (cols.self_pay_override) target.self_pay_override = source.self_pay_override === true;
+}
+
+// Stamped service address (property linkage): a series booked for a
+// secondary/rental property carries a visit-level service_address_* stamp
+// plus property_id and stamped coords. A spawned row must inherit the stamp
+// or every reader's COALESCE(scheduled_services.service_address_*,
+// customers.address_*) falls back to the customer's PRIMARY address and the
+// visit is scheduled/dispatched to the wrong property. Parent-sourced, same
+// as the recurring seeder's follow-up rows. (scheduled_services has no
+// plain address/city/state/zip columns — the seeder's legacy names there
+// are inert; these are the live stamp columns from the property-linkage
+// migration, plus lat/lng.)
+function copyStampedServiceAddressFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  const stampFields = [
+    'property_id',
+    'service_address_line1', 'service_address_line2',
+    'service_address_city', 'service_address_state', 'service_address_zip',
+    'lat', 'lng',
+  ];
+  for (const f of stampFields) {
+    if (cols[f] && source[f] !== undefined) target[f] = source[f];
+  }
 }
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
@@ -1221,6 +1298,18 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   // billing a free callback — and drop it from callback reporting — once the
   // seeded visits are exhausted.
   if (cols.is_callback && parent?.is_callback) target.is_callback = true;
+  // Keep invoice-on-complete stamping on cloned visits: completion
+  // auto-invoicing gates off the ROW's create_invoice_on_complete
+  // (admin-dispatch shouldAutoInvoiceCompletion), so dropping the flag on an
+  // extension/clone silently un-invoices a pay-per-visit customer's next
+  // visit. The extend paths overwrite this with the sibling-resolved value
+  // (resolveSeriesCreateInvoiceOnComplete); this parent copy is the floor so
+  // no caller mints a silently-uninvoiceable row.
+  if (cols.create_invoice_on_complete
+    && target.create_invoice_on_complete === undefined
+    && parent?.create_invoice_on_complete != null) {
+    target.create_invoice_on_complete = parent.create_invoice_on_complete;
+  }
 }
 
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
@@ -1248,6 +1337,32 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
     serviceCategoryFilter,
     servicesById,
   };
+}
+
+// The freshest statement of a series' billing intent for extension rows.
+// Extension inserts must carry create_invoice_on_complete or completion
+// auto-invoicing (which gates off the ROW flag — see admin-dispatch
+// shouldAutoInvoiceCompletion) silently skips the invoice: a pay-per-visit
+// customer's year-2 extension visit would complete UNINVOICED. The latest
+// non-cancelled sibling wins (the office toggles billing on upcoming
+// visits, not the year-old series parent); the parent template is the
+// fallback when no sibling carries a value. Returns undefined when nothing
+// carries a value so the insert keeps the column default.
+async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
+  try {
+    const sibling = await conn('scheduled_services')
+      .where({ recurring_parent_id: parentId })
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .whereNotNull('create_invoice_on_complete')
+      .orderBy('scheduled_date', 'desc')
+      .first('create_invoice_on_complete');
+    if (sibling && sibling.create_invoice_on_complete != null) {
+      return !!sibling.create_invoice_on_complete;
+    }
+  } catch { /* pre-migration column / query failure — fall through to the parent template */ }
+  return parent?.create_invoice_on_complete != null
+    ? !!parent.create_invoice_on_complete
+    : undefined;
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -2255,6 +2370,22 @@ router.get('/month', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Shared 409 payload for the duplicate-series guard: the route-entry
+// preflight and the in-transaction locked backstop below must present the
+// conflict identically to the client (same code, same existingSeries shape).
+function duplicateSeriesConflictBody(existingSeries) {
+  return {
+    error: `This customer already has an active recurring series for this service: ${existingSeries.map((s) => `${s.service_type} (series #${s.id}${s.next_upcoming_date ? `, next visit ${s.next_upcoming_date}` : ', ongoing'})`).join('; ')}. Extend or edit the existing series instead — or pass allowDuplicateSeries to intentionally run a second program.`,
+    code: 'duplicate_recurring_series',
+    existingSeries: existingSeries.map((s) => ({
+      id: s.id,
+      serviceType: s.service_type,
+      pattern: s.recurring_pattern,
+      nextUpcomingDate: s.next_upcoming_date || null,
+    })),
+  };
+}
+
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
@@ -2275,6 +2406,39 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Duplicate-series guard: a second ACTIVE recurring series of the same
+    // service family for one customer is almost always a booking mistake —
+    // the verified cause of customers holding two live quarterly series
+    // (double visits, double billing). Admins CAN intentionally run two
+    // programs (e.g. different scopes of the same family) by passing
+    // allowDuplicateSeries: true — an explicit, logged escape hatch.
+    // Fail-open on guard errors: protective, not load-bearing.
+    //
+    // This route-entry check is a fast PREFLIGHT (rejects the common case
+    // before any pricing/tech work); it runs outside the series-creating
+    // transaction, so it cannot stop two concurrent creates on its own. The
+    // race-safe backstop is the locked re-check inside the transaction below.
+    if (isRecurring) {
+      try {
+        const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+        const existingSeries = await RecurringAppointmentSeeder.findActiveRecurringSeries(db, {
+          customerId,
+          serviceId: serviceId || null,
+          serviceType,
+        });
+        if (existingSeries.length > 0) {
+          if (req.body.allowDuplicateSeries === true) {
+            logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
+          } else {
+            return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
+          }
+        }
+      } catch (guardErr) {
+        logger.warn(`[schedule] duplicate-series guard failed (booking proceeds): ${guardErr.message}`);
+      }
+    }
+
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     // Optional: accept the linked open quote as annual prepay on book (creates
     // the pending prepay invoice + renewal term in the same step as the
@@ -2672,6 +2836,32 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Race-safe duplicate-series backstop (P0: check-then-insert race).
+      // The preflight above ran OUTSIDE this transaction, so two concurrent
+      // recurring creates for the same customer + service family could both
+      // see "no series" and both commit one. Re-run the guard here — inside
+      // the transaction that creates the series — under the shared
+      // per-customer/family advisory lock: the loser waits on the winner's
+      // commit and then sees its series. The explicit allowDuplicateSeries
+      // escape hatch bypasses it exactly as it bypasses the preflight, and
+      // guard ERRORS stay fail-open (checkActiveSeriesLocked never throws;
+      // its savepoint keeps a failed guard query from aborting this
+      // transaction). A hit throws a tagged error the route catch maps to
+      // the same 409 the preflight returns.
+      if (isRecurring && req.body.allowDuplicateSeries !== true) {
+        const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+        const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+          customerId,
+          serviceId: serviceId || null,
+          serviceType,
+        });
+        if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
+        if (matches.length > 0) {
+          const dupErr = new Error('duplicate_recurring_series');
+          dupErr.duplicateRecurringSeries = matches;
+          throw dupErr;
+        }
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -3235,7 +3425,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         logger.error(`[schedule] post-commit side-effects failed (non-blocking): ${e.message}`);
       }
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // The in-transaction duplicate-series backstop rolled the create back —
+    // present the SAME 409 the preflight would have returned.
+    if (Array.isArray(err.duplicateRecurringSeries)) {
+      return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/schedule/list — paginated list view with filters
@@ -4518,6 +4715,69 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (isRecurring && recurringPattern && spawnCount > 1) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
         if (parent) {
+          // Spawn hardening: "make recurring" must not manufacture visits
+          // from a row that can't anchor a live series.
+          //  - A CHILD row (recurring_parent_id set) already belongs to a
+          //    series — spawning from it creates grandchildren under a second
+          //    parent inside one family. The shipped UI can't send this, but
+          //    the API accepted it.
+          //  - A completed/cancelled/terminal or past-dated row anchors the
+          //    children to a stale date, back-filling phantom visits.
+          // Throwing here rolls the whole edit back (still inside the trx):
+          // better a clean 400 than a committed edit plus a refused spawn.
+          if (parent.recurring_parent_id) {
+            throw httpError(400, 'This visit is part of an existing recurring series — edit the series parent to change the schedule instead of spawning a new series from a child visit.');
+          }
+          const spawnAnchorDate = dateOnly(parent.scheduled_date);
+          if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
+            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
+          }
+          // Race-safe duplicate-series backstop (P0), mirroring the POST
+          // creator's in-trx guard: the child-date preload above only dedupes
+          // rows already attached to THIS parent — it never sees a DIFFERENT
+          // active same-family series for the customer, nor does it serialize
+          // against concurrent POST/booking/converter creators. Run the shared
+          // per-customer/family advisory-locked guard HERE, inside the spawn
+          // trx that inserts the children, so the loser waits on the winner's
+          // commit and sees its series. excludeParentId: parent.id keeps the
+          // row being made recurring from matching itself. The explicit
+          // allowDuplicateSeries escape hatch bypasses it (logged), exactly as
+          // it does on the POST create path; guard ERRORS stay fail-open
+          // (checkActiveSeriesLocked never throws — its savepoint isolates a
+          // failed query from this trx). A hit throws the same tagged error the
+          // route catch maps to the same 409 the POST creator returns.
+          if (req.body.allowDuplicateSeries === true) {
+            logger.warn(`[schedule/update-details] allowDuplicateSeries override: making a second active "${parent.service_type}" series recurring for customer ${parent.customer_id} from row ${parent.id}`);
+          } else {
+            const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+            const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+              customerId: parent.customer_id,
+              serviceId: parent.service_id || null,
+              serviceType: parent.service_type,
+              excludeParentId: parent.id,
+            });
+            if (guardError) logger.warn(`[schedule/update-details] locked duplicate-series guard failed (spawn proceeds): ${guardError.message}`);
+            if (matches.length > 0) {
+              const dupErr = new Error('duplicate_recurring_series');
+              dupErr.duplicateRecurringSeries = matches;
+              throw dupErr;
+            }
+          }
+          // Member-covered series (mirrors POST's createInvoiceStamp
+          // stripping): a monthly-membership customer's recurring children
+          // are covered by dues — per-visit price stamps + the create-invoice
+          // flag on them are exactly how members got double-billed.
+          // Prepay-annual series and payer-billed rows keep their stamps
+          // (pending-prepay billing and AP invoicing depend on them).
+          let memberSeriesCovered = false;
+          try {
+            if (!parent.payer_id && !parent.annual_prepay_term_id) {
+              const memberCustomer = await trx('customers').where({ id: parent.customer_id }).first();
+              memberSeriesCovered = !!memberCustomer
+                && !memberCustomer.payer_id
+                && resolveBillingLane(memberCustomer).mode === 'monthly_membership';
+            }
+          } catch { memberSeriesCovered = false; }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const rOpts = {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
@@ -4537,16 +4797,45 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
           // Dedupe shifted child dates — same rationale as the POST spawn:
           // skip-weekends can collapse consecutive recurrences onto the
-          // same weekday.
+          // same weekday. Seed from the DB (parent + children + boosters;
+          // cancelled/rescheduled rows don't occupy a slot — mirrors the
+          // auto-extend/alert-extend date preloads), not just the base date:
+          // seeded with the base date alone, a double-submit or re-edit
+          // spawned duplicate children on the same dates.
           const seenChildDates = new Set();
           seenChildDates.add(dateOnly(baseDateStr) || '');
+          try {
+            const existingSeriesRows = await trx('scheduled_services')
+              .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+              .whereNotIn('status', ['cancelled', 'rescheduled'])
+              .select('scheduled_date');
+            for (const r of existingSeriesRows) {
+              const d = dateOnly(r.scheduled_date);
+              if (d) seenChildDates.add(d);
+            }
+          } catch { /* preload is protective; the base-date seed still guards */ }
+          // A re-submit must top the series UP to the requested count, not
+          // append spawnCount-1 more rows past the existing children — count
+          // the still-upcoming children against the target (same semantics
+          // as the seeder's plannedCount − existingDates.size).
+          let existingUpcomingChildren = 0;
+          try {
+            const upRow = await trx('scheduled_services')
+              .where({ recurring_parent_id: parent.id, is_recurring: true })
+              .whereIn('status', ['pending', 'confirmed'])
+              .where('scheduled_date', '>=', etDateString())
+              .count('* as c')
+              .first();
+            existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
+          } catch { existingUpcomingChildren = 0; }
+          const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
           // Iterate by inserts (matches POST spawn): skip-weekends can
           // collapse multiple raw recurrences onto the same shifted weekday,
-          // and a fixed-count plan still owes spawnCount-1 children.
+          // and a fixed-count plan still owes spawnTarget children.
           const maxAttempts = (spawnCount - 1) * 4 + 30;
           let attempt = 1;
           let inserted = 0;
-          while (inserted < spawnCount - 1 && attempt < maxAttempts) {
+          while (inserted < spawnTarget && attempt < maxAttempts) {
             const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
             attempt++;
             const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
@@ -4586,14 +4875,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
+              if (memberSeriesCovered && cols.estimated_price) {
+                // Dues cover the base visit — keep an ADD-ON-ONLY stamp when
+                // priced extras ride the visit (so Charge Now surfaces the
+                // billable amount), never the base+add-on subtotal. Mirrors
+                // the POST route's member stamp.
+                const addonStamp = dueAddons.reduce((sum, a) => {
+                  const n = Number(a.estimated_price);
+                  return Number.isFinite(n) && n > 0 ? sum + n : sum;
+                }, 0);
+                if (addonStamp > 0) childData.estimated_price = Math.round(addonStamp * 100) / 100;
+                else delete childData.estimated_price;
+              }
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
-              if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
+              if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = memberSeriesCovered ? false : inv;
               // Inherit the (freshly-updated) parent's third-party Bill-To so
               // future visits in the series route to the same payer/PO instead
               // of silently falling back to the customer default / self-pay.
               if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
               if (cols.po_number) childData.po_number = parent.po_number ?? null;
               if (cols.self_pay_override) childData.self_pay_override = parent.self_pay_override === true;
+              // Stamped service address rides the spawn too — a series
+              // anchored on a secondary/rental-property visit must not spawn
+              // children that fall back to the customer's primary address.
+              copyStampedServiceAddressFields(childData, parent, cols);
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
@@ -4696,6 +5001,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
     });
   } catch (err) {
+    // The in-transaction duplicate-series backstop rolled the spawn back —
+    // present the SAME 409 the POST creator returns.
+    if (Array.isArray(err.duplicateRecurringSeries)) {
+      return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
+    }
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
@@ -5617,6 +5927,315 @@ router.post('/:id/invoice', async (req, res, next) => {
   }
 });
 
+// The per-parent recurring-series maintenance advisory lock — the ONE
+// serialization point for everything that reads-then-writes a recurring
+// series: the post-completion auto-extend below, the dispatch series-scope
+// cancel (admin-dispatch keeps a byte-identical inline copy — route files
+// don't import each other), and the recurring-alert action route. Key
+// derivation must stay byte-identical across all of them or they silently
+// stop contending.
+async function acquireRecurringSeriesMaintenanceLock(conn, parentId) {
+  await conn.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['recurring-series-maintenance', String(parentId)],
+  );
+}
+
+// Latest LIVE visit of the BASE recurring series — the anchor every extension
+// writer computes the next date from. Cancelled/rescheduled rows don't occupy
+// a slot: without the status filter a cancelled FUTURE visit becomes the
+// anchor and pushes the extension a full cadence past the real last visit,
+// leaving a service gap instead of refilling the cancelled slot. Boosters
+// share recurring_parent_id but have is_recurring=false; excluded so the
+// next-date math keys off the true cadence. Shared by the maintenance
+// auto-extend and the recurring-alert extend/convert actions so the two
+// anchors can never drift apart again.
+function latestLiveSeriesVisit(conn, parentId) {
+  return conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .where('is_recurring', true)
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .orderBy('scheduled_date', 'desc')
+    .first();
+}
+
+// Every date currently OCCUPYING a slot on the series (base + boosters,
+// pending or completed — cancelled/rescheduled rows don't occupy a slot), as
+// a Set of ET date strings. Extension writers dedupe their inserts against
+// this so a next date computed forward from the anchor can't double-book a
+// future booster row that shares recurring_parent_id — e.g. a Jan-anchored
+// quarterly series with a January booster has a booster row at Jan 15 next
+// year, and an extension computed from latest=Oct 15 lands on the same
+// Jan 15. Shared by the maintenance auto-extend and the alert actions.
+async function loadActiveSeriesDates(conn, parentId) {
+  const rows = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .select('scheduled_date');
+  return new Set(rows
+    .map((r) => dateOnly(r.scheduled_date) || '')
+    .filter(Boolean));
+}
+
+// Post-completion recurring-series maintenance: auto-extend an Ongoing plan
+// that has fewer than 2 upcoming visits, or queue a plan_ending alert when a
+// Fixed plan just finished. Extracted verbatim from the PUT /:id/status
+// completion chain (step 4b) so the dispatch completion routes — the paths
+// field completions actually flow through (POST /dispatch/:serviceId/complete
+// and PUT /dispatch/:serviceId/status) — can run it too, via
+// services/recurring-series-extend.js. Inline-only, it was dead code in
+// practice: no production completion path calls the schedule status route
+// with 'completed', so exhausted ongoing plans got no refill and no alert.
+//
+// `svc` is the just-completed scheduled_services row (parent or child).
+// Callers MUST wrap in try/catch — a failed extend never fails a completion.
+//
+// Concurrency: the date preload, candidate selection, and insert are separate
+// statements — and with the hook now firing from three completion routes, two
+// concurrent completions (or a retry racing the original) on the same series
+// could both pick the same next date and insert duplicate billable visits.
+// The maintenance therefore serializes per parent with a pg advisory xact
+// lock (hashed-key pattern shared with booking's self-booking-confirm /
+// slot-reserve locks), and EVERY read runs after the lock inside the same
+// transaction — the second runner sees the first's committed insert and
+// no-ops via the upcoming-count / existing-dates checks. The add-on mirror
+// and reminder registration run post-commit (their writers tolerate their
+// own failures and, for reminders, use a separate connection that must only
+// see a committed visit row) — same ordering the pre-lock code had.
+async function runRecurringSeriesMaintenance(conn, svc) {
+  const parentId = svc.recurring_parent_id || svc.id;
+  const runLocked = async (trx) => {
+    await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+    return runRecurringSeriesMaintenanceLocked(trx, svc, parentId);
+  };
+  // Callers normally pass the plain db instance (all three completion routes
+  // fire post-commit) — open a transaction scoped to this pass. A caller
+  // already inside a transaction is reused as-is; the advisory lock then
+  // holds until THEIR commit.
+  const spawnedVisit = conn.isTransaction
+    ? await runLocked(conn)
+    : await conn.transaction(runLocked);
+  if (spawnedVisit) {
+    // Post-commit: mirror the parent's add-on lines onto the auto-extended
+    // visit so a multi-service ongoing series keeps its full scope (and
+    // billing) past the seeded window. Best-effort — an add-on failure must
+    // not void the already-committed visit (pre-lock semantics).
+    try {
+      if (spawnedVisit.dueAddons.length > 0) {
+        const addonCols = await conn('scheduled_service_addons').columnInfo();
+        for (const addon of spawnedVisit.dueAddons) {
+          const addonData = {
+            scheduled_service_id: spawnedVisit.scheduledServiceId,
+            service_id: addon.service_id || null,
+            service_name: addon.service_name,
+            estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+          };
+          if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
+          if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
+          if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
+          if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
+          if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
+          if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
+          if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
+          copyAddonDiscountFields(addonData, addon, addonCols);
+          await conn('scheduled_service_addons').insert(addonData);
+        }
+      }
+    } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
+    // Register the reminder row — without it the auto-extended visit never
+    // enters appointment_reminders, so the customer gets no 72h/24h texts
+    // for it (the cron reads only that table). No confirmation SMS,
+    // matching spawned children.
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: spawnedVisit.scheduledServiceId,
+      customerId: spawnedVisit.customerId,
+      scheduledDate: spawnedVisit.scheduledDate,
+      windowStart: spawnedVisit.windowStart,
+      serviceType: spawnedVisit.serviceType,
+      source: 'recurring_auto_extend',
+    });
+    // A series cancel can take the per-parent advisory lock right after our
+    // commit and land before the registration above finished — the shared
+    // re-check cancels the fresh reminder if the visit went terminal in
+    // that window (full rationale + trigger/interleaving analysis on the
+    // helper).
+    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');
+    logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+  }
+}
+
+// The lock-held body: returns the spawned-visit payload (for the wrapper's
+// post-commit add-on mirror + reminder registration) when an auto-extend row
+// landed and survived the cancellation re-check, else null.
+async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
+  let spawnedVisit = null;
+  const cols = await conn('scheduled_services').columnInfo();
+  const parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (parent && parent.is_recurring && parent.recurring_pattern) {
+    // upcomingCount + latest must reflect the BASE recurring series
+    // only — see countUpcomingSeriesVisits for the booster and
+    // pending-vs-confirmed rationale.
+    const upcomingCount = await countUpcomingSeriesVisits(conn, parentId);
+
+    const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+
+    if (isOngoing && upcomingCount < 2) {
+      // Find the latest LIVE visit (pending/confirmed or completed) to
+      // calculate the next date — shared anchor query (cancelled/rescheduled
+      // exclusion + booster exclusion rationale on the helper).
+      const latest = await latestLiveSeriesVisit(conn, parentId);
+      if (latest) {
+        const latestStr = dateOnly(latest.scheduled_date);
+        const rOpts = {
+          ...recurrenceOrdinalOptions(parent.scheduled_date, {
+            nth: parent.recurring_nth,
+            weekday: parent.recurring_weekday,
+          }),
+          intervalDays: parent.recurring_interval_days,
+        };
+        const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+        const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+        // Pre-load every active date on this series so the auto-extend
+        // insert dedupes against future booster rows — shared preload
+        // (booster double-book rationale on the helper).
+        const existingDates = await loadActiveSeriesDates(conn, parentId);
+        // Advance until we find an open date or give up. Each step
+        // moves one cadence interval forward from latestStr; capped to
+        // avoid runaway loops on degenerate patterns.
+        let attempt = 1;
+        let nextStr = null;
+        while (attempt <= 12) {
+          const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+          const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
+          if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+            attempt++;
+            continue;
+          }
+          if (!existingDates.has(candidate)) { nextStr = candidate; break; }
+          attempt++;
+        }
+        // Re-check the ongoing flag immediately before inserting: it was
+        // read once at the top of this block, and a cancellation (the
+        // portal auto-processor or an admin churn) can stop the series
+        // while the slower candidate/add-on math above runs. Without
+        // this, the insert would put a fresh visit — with
+        // recurring_ongoing=true, so it keeps regenerating — on a
+        // customer who just cancelled.
+        let stillOngoing = true;
+        if (nextStr && cols.recurring_ongoing) {
+          const freshParent = await conn('scheduled_services')
+            .where({ id: parentId })
+            .first('recurring_ongoing');
+          stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
+        }
+        if (!nextStr) {
+          logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
+        } else if (!stillOngoing) {
+          logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
+        } else {
+          const nextData = {
+            customer_id: parent.customer_id,
+            technician_id: recurringTemplateTechnicianId(parent),
+            scheduled_date: nextStr,
+            window_start: parent.window_start, window_end: parent.window_end,
+            service_type: parent.service_type, status: 'pending',
+            time_window: parent.time_window, zone: parent.zone,
+            estimated_duration_minutes: parent.estimated_duration_minutes,
+            is_recurring: true, recurring_pattern: parent.recurring_pattern,
+            recurring_parent_id: parentId,
+          };
+          if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+          if (cols.skip_weekends) nextData.skip_weekends = skipParent;
+          if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
+          if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
+          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
+          copyLineDiscountFields(nextData, parent, cols);
+          copyAppointmentDiscountFields(nextData, parent, cols);
+          copyBillToFields(nextData, parent, cols);
+          copyStampedServiceAddressFields(nextData, parent, cols);
+          let parentAddons = [];
+          try {
+            // Nested transaction = savepoint: a missing
+            // scheduled_service_addons table (pre-migration env) must not
+            // abort the outer locked transaction — the extend proceeds
+            // addon-less, matching the pre-lock tolerance.
+            parentAddons = await conn.transaction((sp) =>
+              sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
+          } catch { parentAddons = []; }
+          const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
+          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
+          applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+          // Extension rows keep invoice-on-complete stamping — sibling-
+          // resolved so the freshest office billing intent wins (see
+          // resolveSeriesCreateInvoiceOnComplete). Without it a
+          // pay-per-visit customer's extension visit completes UNINVOICED.
+          if (cols.create_invoice_on_complete) {
+            const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
+            if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
+          }
+          const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
+          // Post-insert re-check closes the remaining race: a
+          // cancellation can stop the series between the pre-insert
+          // read above and this insert. The row hasn't been mirrored,
+          // broadcast, or given a reminder yet, so compensating is a
+          // plain delete — guarded on status='pending' so if the
+          // cancellation sweep already flipped it, the cancelled row
+          // (and its history) is left intact. Either way the add-on
+          // mirror + reminder registration below are skipped, so a
+          // stale reminder can't be minted after the sweep's
+          // reminder-cancel step already ran.
+          let autoExtLive = true;
+          if (cols.recurring_ongoing && autoExtRow?.id) {
+            const parentNow = await conn('scheduled_services')
+              .where({ id: parentId })
+              .first('recurring_ongoing');
+            if (!parentNow || !parentNow.recurring_ongoing) {
+              autoExtLive = false;
+              const removed = await conn('scheduled_services')
+                .where({ id: autoExtRow.id, status: 'pending' })
+                .del();
+              logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
+            }
+          }
+          // Hand the surviving insert back to the wrapper — the add-on
+          // mirror and reminder registration run post-commit there, so an
+          // add-on failure can't void the visit and the reminder writer
+          // (separate connection) only ever sees a committed row.
+          if (autoExtLive && autoExtRow?.id) {
+            spawnedVisit = {
+              scheduledServiceId: autoExtRow.id,
+              customerId: parent.customer_id,
+              scheduledDate: nextStr,
+              windowStart: parent.window_start,
+              serviceType: parent.service_type,
+              dueAddons: parentAddons.length > 0 ? dueAddons : [],
+            };
+          }
+        }
+      }
+    } else if (!isOngoing && upcomingCount === 0) {
+      // Fixed plan just finished — queue an alert if table exists and not already open
+      try {
+        const existing = await conn('recurring_plan_alerts')
+          .where({ recurring_parent_id: parentId }).whereNull('resolved_at').first();
+        if (!existing) {
+          await conn('recurring_plan_alerts').insert({
+            recurring_parent_id: parentId,
+            customer_id: parent.customer_id,
+            alert_type: 'plan_ending',
+            last_visit_date: dateOnly(svc.scheduled_date),
+            recurring_pattern: parent.recurring_pattern,
+            remaining_visits: 0,
+          });
+          logger.info(`[recurring] Flagged end-of-plan alert for parent=${parentId}`);
+        }
+      } catch (e) { logger.warn(`[recurring] Alert insert skipped: ${e.message}`); }
+    }
+  }
+  return spawnedVisit;
+}
+
 // PUT /api/admin/schedule/:id/status — change status with automations.
 //
 // Second call site to migrate to services/job-status.js#transitionJobStatus
@@ -6059,197 +6678,14 @@ router.put('/:id/status', async (req, res, next) => {
       // 4. (Removed 2026-07-06) Post-service WaveGuard upsell evaluation —
       // the upsell-trigger workflow and its waveguard_upsell SMS are retired.
 
-      // 4b. Recurring plan: auto-extend (Ongoing) or flag end-of-plan (Fixed)
+      // 4b. Recurring plan: auto-extend (Ongoing) or flag end-of-plan (Fixed).
+      // The maintenance logic lives in runRecurringSeriesMaintenance (shared
+      // with the dispatch completion routes via
+      // services/recurring-series-extend.js) — it was previously inline here,
+      // which made it dead code in practice: production completions flow
+      // through the dispatch routes, never this one.
       try {
-        const parentId = svc.recurring_parent_id || svc.id;
-        const cols = await db('scheduled_services').columnInfo();
-        const parent = await db('scheduled_services').where({ id: parentId }).first();
-        if (parent && parent.is_recurring && parent.recurring_pattern) {
-          // upcomingCount + latest must reflect the BASE recurring series
-          // only — see countUpcomingSeriesVisits for the booster and
-          // pending-vs-confirmed rationale.
-          const upcomingCount = await countUpcomingSeriesVisits(db, parentId);
-
-          const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
-
-          if (isOngoing && upcomingCount < 2) {
-            // Find latest visit (pending or completed) to calculate next date
-            const latest = await db('scheduled_services')
-              .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-              .where('is_recurring', true)
-              .orderBy('scheduled_date', 'desc').first();
-            if (latest) {
-              const latestStr = dateOnly(latest.scheduled_date);
-              const rOpts = {
-                ...recurrenceOrdinalOptions(parent.scheduled_date, {
-                  nth: parent.recurring_nth,
-                  weekday: parent.recurring_weekday,
-                }),
-                intervalDays: parent.recurring_interval_days,
-              };
-              const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
-              const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
-              // Pre-load every active date on this series (base + boosters,
-              // pending or completed — cancelled/rescheduled rows don't
-              // occupy a slot) so we can dedupe the auto-extend insert
-              // against future booster rows that share recurring_parent_id.
-              // Without this, ongoing+booster combos can double-book — e.g.
-              // a Jan-anchored quarterly series with a January booster has a
-              // booster row at Jan 15 next year, and the auto-extend computed
-              // from latest=Oct 15 lands on the same Jan 15.
-              const existingRows = await db('scheduled_services')
-                .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-                .whereNotIn('status', ['cancelled', 'rescheduled'])
-                .select('scheduled_date');
-              const existingDates = new Set(existingRows
-                .map((r) => dateOnly(r.scheduled_date) || '')
-                .filter(Boolean));
-              // Advance until we find an open date or give up. Each step
-              // moves one cadence interval forward from latestStr; capped to
-              // avoid runaway loops on degenerate patterns.
-              let attempt = 1;
-              let nextStr = null;
-              while (attempt <= 12) {
-                const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-                const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
-                if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
-                  attempt++;
-                  continue;
-                }
-                if (!existingDates.has(candidate)) { nextStr = candidate; break; }
-                attempt++;
-              }
-              // Re-check the ongoing flag immediately before inserting: it was
-              // read once at the top of this block, and a cancellation (the
-              // portal auto-processor or an admin churn) can stop the series
-              // while the slower candidate/add-on math above runs. Without
-              // this, the insert would put a fresh visit — with
-              // recurring_ongoing=true, so it keeps regenerating — on a
-              // customer who just cancelled.
-              let stillOngoing = true;
-              if (nextStr && cols.recurring_ongoing) {
-                const freshParent = await db('scheduled_services')
-                  .where({ id: parentId })
-                  .first('recurring_ongoing');
-                stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
-              }
-              if (!nextStr) {
-                logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
-              } else if (!stillOngoing) {
-                logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
-              } else {
-                const nextData = {
-                  customer_id: parent.customer_id,
-                  technician_id: recurringTemplateTechnicianId(parent),
-                  scheduled_date: nextStr,
-                  window_start: parent.window_start, window_end: parent.window_end,
-                  service_type: parent.service_type, status: 'pending',
-                  time_window: parent.time_window, zone: parent.zone,
-                  estimated_duration_minutes: parent.estimated_duration_minutes,
-                  is_recurring: true, recurring_pattern: parent.recurring_pattern,
-                  recurring_parent_id: parentId,
-                };
-                if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-                if (cols.skip_weekends) nextData.skip_weekends = skipParent;
-                if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-                if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
-                if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
-                copyLineDiscountFields(nextData, parent, cols);
-                copyAppointmentDiscountFields(nextData, parent, cols);
-                let parentAddons = [];
-                try {
-                  parentAddons = await db('scheduled_service_addons')
-                    .where({ scheduled_service_id: parentId });
-                } catch { parentAddons = []; }
-                const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
-                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
-                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
-                const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
-                // Post-insert re-check closes the remaining race: a
-                // cancellation can stop the series between the pre-insert
-                // read above and this insert. The row hasn't been mirrored,
-                // broadcast, or given a reminder yet, so compensating is a
-                // plain delete — guarded on status='pending' so if the
-                // cancellation sweep already flipped it, the cancelled row
-                // (and its history) is left intact. Either way the add-on
-                // mirror + reminder registration below are skipped, so a
-                // stale reminder can't be minted after the sweep's
-                // reminder-cancel step already ran.
-                let autoExtLive = true;
-                if (cols.recurring_ongoing && autoExtRow?.id) {
-                  const parentNow = await db('scheduled_services')
-                    .where({ id: parentId })
-                    .first('recurring_ongoing');
-                  if (!parentNow || !parentNow.recurring_ongoing) {
-                    autoExtLive = false;
-                    const removed = await db('scheduled_services')
-                      .where({ id: autoExtRow.id, status: 'pending' })
-                      .del();
-                    logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
-                  }
-                }
-                // Mirror parent's add-on lines onto the auto-extended visit
-                // so a multi-service ongoing series keeps its full scope
-                // (and billing) past the seeded 4-visit window.
-                try {
-                  if (autoExtLive && parentAddons.length > 0 && autoExtRow?.id) {
-                    const addonCols = await db('scheduled_service_addons').columnInfo();
-                    for (const addon of dueAddons) {
-                      const addonData = {
-                        scheduled_service_id: autoExtRow.id,
-                        service_id: addon.service_id || null,
-                        service_name: addon.service_name,
-                        estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                      };
-                      if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-                      if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
-                      if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
-                      if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
-                      if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
-                      if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
-                      if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
-                      if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
-                      copyAddonDiscountFields(addonData, addon, addonCols);
-                      await db('scheduled_service_addons').insert(addonData);
-                    }
-                  }
-                } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
-                // Register the reminder row — without it the auto-extended
-                // visit never enters appointment_reminders, so the customer
-                // gets no 72h/24h texts for it (the cron reads only that
-                // table). No confirmation SMS, matching spawned children.
-                if (autoExtLive) {
-                  await registerSpawnedVisitReminder({
-                    scheduledServiceId: autoExtRow?.id,
-                    customerId: parent.customer_id,
-                    scheduledDate: nextStr,
-                    windowStart: parent.window_start,
-                    serviceType: parent.service_type,
-                    source: 'recurring_auto_extend',
-                  });
-                  logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
-                }
-              }
-            }
-          } else if (!isOngoing && upcomingCount === 0) {
-            // Fixed plan just finished — queue an alert if table exists and not already open
-            try {
-              const existing = await db('recurring_plan_alerts')
-                .where({ recurring_parent_id: parentId }).whereNull('resolved_at').first();
-              if (!existing) {
-                await db('recurring_plan_alerts').insert({
-                  recurring_parent_id: parentId,
-                  customer_id: parent.customer_id,
-                  alert_type: 'plan_ending',
-                  last_visit_date: dateOnly(svc.scheduled_date),
-                  recurring_pattern: parent.recurring_pattern,
-                  remaining_visits: 0,
-                });
-                logger.info(`[recurring] Flagged end-of-plan alert for parent=${parentId}`);
-              }
-            } catch (e) { logger.warn(`[recurring] Alert insert skipped: ${e.message}`); }
-          }
-        }
+        await runRecurringSeriesMaintenance(db, svc);
       } catch (e) { logger.error(`[recurring] Auto-extend/flag failed: ${e.message}`); }
 
       // 5. Check for WaveGuard conversion opportunity (2+ one-time services, no WaveGuard tier)
@@ -7531,6 +7967,63 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
             createdAt: null,
           });
         }
+
+        // 2b. Derived: ONGOING plans whose series is EXHAUSTED (zero upcoming
+        // pending/confirmed visits). The completion-time auto-extend only
+        // fires when a visit completes, so a series that already ran dry has
+        // no future completion left to trigger a refill — and these plans
+        // were invisible here: the fixed-plan scan above excludes
+        // recurring_ongoing parents by design, and its latestPending guard
+        // skips zero-upcoming series anyway. Surfacing them as
+        // plan_ending-style alerts lets the office one-click extend.
+        const exhausted = await db('scheduled_services as s')
+          .leftJoin('customers as c', 's.customer_id', 'c.id')
+          .where('s.is_recurring', true)
+          .where('s.recurring_ongoing', true)
+          .whereNull('s.recurring_parent_id')
+          .whereNotIn('s.status', ['cancelled', 'rescheduled'])
+          .whereNotExists(function () {
+            this.select(db.raw('1'))
+              .from('scheduled_services as u')
+              .whereRaw('(u.recurring_parent_id = s.id OR u.id = s.id)')
+              .where('u.is_recurring', true)
+              .whereIn('u.status', ['pending', 'confirmed'])
+              .where('u.scheduled_date', '>=', today);
+          })
+          .select(
+            's.id', 's.customer_id', 's.service_type', 's.recurring_pattern', 's.scheduled_date',
+            'c.first_name', 'c.last_name', 'c.phone', 'c.email',
+          );
+        for (const plan of exhausted) {
+          // Re-confirm with the shared counter (single source of truth for
+          // what counts as "upcoming") before alerting.
+          const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
+          if (pendingCount > 0) continue;
+          // Skip if already queued
+          const q = await db('recurring_plan_alerts')
+            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+          if (q) continue;
+          // Last date that actually occupied a slot = the plan's last activity.
+          const lastRow = await db('scheduled_services')
+            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
+            .whereNotIn('status', ['cancelled', 'rescheduled'])
+            .orderBy('scheduled_date', 'desc')
+            .first('scheduled_date');
+          alerts.push({
+            id: `derived-${plan.id}`,
+            source: 'derived',
+            parentId: plan.id,
+            customerId: plan.customer_id,
+            customerName: `${plan.first_name || ''} ${plan.last_name || ''}`.trim(),
+            phone: plan.phone, email: plan.email,
+            serviceType: plan.service_type,
+            alertType: 'ongoing_plan_exhausted',
+            lastVisitDate: dateOnly(lastRow?.scheduled_date || plan.scheduled_date),
+            pattern: plan.recurring_pattern,
+            remainingVisits: 0,
+            createdAt: null,
+          });
+        }
       }
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
@@ -7564,6 +8057,371 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
     res.json({ alerts, total: alerts.length });
   } catch (err) { next(err); }
 });
+
+// The recurring-alert action core (extend / convert_ongoing / let_lapse),
+// extracted from the route handler so the lane tests can drive it with a
+// scripted connection (house pattern: runRecurringSeriesMaintenance).
+//
+// Concurrency (P0): the actions used to run entirely UNLOCKED on plain db —
+// the anchor/date preload and the inserts were separate unserialized
+// statements, so two concurrent clicks on the same alert card both read the
+// same anchor and both inserted a full set of billable visits, and a series
+// cancellation committing between the preload and an insert never saw the
+// new row (which then kept an armed reminder). The whole action now runs
+// inside ONE transaction holding the SAME per-parent advisory lock as the
+// maintenance auto-extend and the dispatch series cancel
+// (acquireRecurringSeriesMaintenanceLock — byte-identical key derivation),
+// and EVERY read the writes depend on re-runs inside that lock, mirroring
+// runRecurringSeriesMaintenanceLocked's read-under-lock structure:
+//   - the alert row is re-read: a resolved_at stamped by a concurrent click
+//     means the work is already claimed → idempotent no-op (created: 0);
+//   - the parent is re-read: gone → 404, status 'cancelled' (a series cancel
+//     committed first) → 409, and recurring_ongoing is taken from the fresh
+//     row;
+//   - derived ids have no alert row to claim, so the derived-scan condition
+//     is recomputed under the lock (ongoing plans derive only at zero
+//     upcoming visits; fixed plans only at ≤1) — a concurrent click that
+//     already refilled/converted/stopped the plan makes the condition
+//     vanish and the loser no-ops instead of double-inserting;
+//   - the anchor + existing-dates preload use the SAME shared helpers as the
+//     maintenance function (latestLiveSeriesVisit / loadActiveSeriesDates),
+//     which is also what excludes cancelled/rescheduled rows from the anchor
+//     (P1: a cancelled FUTURE visit used to anchor the manual extension a
+//     full cadence too far).
+// A series cancel that instead commits AFTER us selects its cancel set under
+// this same lock, so it sees and cancels the rows we just inserted; the
+// reminder leg of that window is covered post-commit by
+// cancelSpawnedReminderIfVisitTerminal, exactly like the auto-extend path.
+//
+// let_lapse (P0): resolving the alert alone left recurring_ongoing=true, so
+// the derived scan resurrected the alert every day and — worse — a later
+// completion of a stale retained visit auto-extended and RE-BILLED the plan
+// the office had just let lapse. For ongoing plans (whatever the alert
+// type), let_lapse now clears recurring_ongoing series-wide in the SAME
+// locked transaction as the alert resolution, mirroring the dispatch
+// series-scope cancel (flag clear under the lock + trx; post-commit
+// activity_log line records the stop). Fixed plans are left untouched BY
+// DESIGN: with recurring_ongoing already false/absent there is no state to
+// clear and no auto-extend exposure — runRecurringSeriesMaintenanceLocked
+// only spawns visits on the isOngoing branch; the fixed-plan branch can only
+// insert an ALERT row, never a billable visit.
+//
+// Add-on mirroring + reminder registration run POST-COMMIT (maintenance
+// pattern): an add-on failure must not void committed visits, and the
+// reminder writer uses a separate connection that can only see committed
+// rows.
+async function runRecurringAlertAction(conn, { idParam, action, count, adminUserId }) {
+  // Resolve alert row (may be derived id) — unlocked peek for fast 404s;
+  // everything the writes depend on is re-read inside the lock below.
+  let alert = null;
+  let parentId = null;
+  if (idParam.startsWith('derived-')) {
+    parentId = parseInt(idParam.replace('derived-', ''));
+  } else {
+    alert = await conn('recurring_plan_alerts').where({ id: parseInt(idParam) }).first();
+    if (!alert) return { status: 404, body: { error: 'alert not found' } };
+    parentId = alert.recurring_parent_id;
+  }
+
+  const parentPeek = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parentPeek) return { status: 404, body: { error: 'parent service not found' } };
+
+  const cols = await conn('scheduled_services').columnInfo();
+
+  let outcome = null;
+  let parent = null;
+  let parentAddons = [];
+  let ongoingStopped = 0;
+  const spawned = []; // committed inserts → post-commit addon/reminder steps
+
+  const runLocked = async (trx) => {
+    await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+
+    // ——— In-lock re-checks (see the block comment above) ———
+    if (alert) {
+      const alertNow = await trx('recurring_plan_alerts')
+        .where({ id: alert.id })
+        .first('id', 'resolved_at');
+      if (!alertNow) {
+        outcome = { status: 404, body: { error: 'alert not found' } };
+        return;
+      }
+      if (alertNow.resolved_at) {
+        outcome = { status: 200, body: { success: true, action, created: 0, alreadyResolved: true } };
+        return;
+      }
+    }
+    parent = await trx('scheduled_services').where({ id: parentId }).first();
+    if (!parent) {
+      outcome = { status: 404, body: { error: 'parent service not found' } };
+      return;
+    }
+    if (parent.status === 'cancelled') {
+      outcome = { status: 409, body: { error: 'series has been cancelled' } };
+      return;
+    }
+    const parentOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+    if (!alert) {
+      // Derived alerts have no row to claim, so recompute the derived-scan
+      // condition under the lock: ongoing plans derive (ongoing_plan_
+      // exhausted) only at zero upcoming visits; fixed plans derive
+      // (plan_ending_soon) only at ≤1. A vanished condition means a
+      // concurrent click (or the auto-extend) already handled this plan.
+      const upcoming = await countUpcomingSeriesVisits(trx, parentId);
+      const stillDerivable = parentOngoing ? upcoming === 0 : upcoming <= 1;
+      if (!stillDerivable) {
+        outcome = { status: 200, body: { success: true, action, created: 0, alreadyResolved: true } };
+        return;
+      }
+    }
+
+    const rOpts = {
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
+      intervalDays: parent.recurring_interval_days,
+    };
+
+    // Honor skip-weekends preference set on the parent (POST + PUT + auto-
+    // extend already do; the alert action endpoint must too or weekend
+    // visits reappear on plans configured to skip them).
+    const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+    const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
+
+    // Pull parent's add-on lines once so we can mirror them onto each new
+    // row spawned by extend / convert_ongoing — multi-service recurring
+    // appointments would otherwise lose their secondary services here.
+    // Savepoint (nested transaction), NOT a bare try/catch: a missing
+    // scheduled_service_addons table (pre-migration env) must not abort the
+    // outer locked transaction — same tolerance as the auto-extend path.
+    try {
+      parentAddons = await trx.transaction((sp) =>
+        sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
+    } catch { parentAddons = []; }
+    const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
+    // Extension rows keep invoice-on-complete stamping (fix: extended visits
+    // of a pay-per-visit plan completed uninvoiced) — resolved once here,
+    // applied in both the extend and convert_ongoing insert loops below.
+    const seriesCioc = cols.create_invoice_on_complete
+      ? await resolveSeriesCreateInvoiceOnComplete(trx, parentId, parent)
+      : undefined;
+
+    // Shared anchor + occupied-dates preload (cancelled/rescheduled rows
+    // excluded from BOTH — rationale on the helpers).
+    const latest = await latestLiveSeriesVisit(trx, parentId);
+    const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
+    const seriesDateSeed = await loadActiveSeriesDates(trx, parentId);
+    seriesDateSeed.add(baseDateStr);
+
+    let created = 0;
+    if (action === 'extend') {
+      const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
+      const seen = new Set(seriesDateSeed);
+      const maxAttempts = n * 4 + 30;
+      let attempt = 1;
+      let inserted = 0;
+      while (inserted < n && attempt < maxAttempts) {
+        const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
+        attempt++;
+        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
+        if (seen.has(nd)) continue;
+        seen.add(nd);
+        const data = {
+          customer_id: parent.customer_id,
+          technician_id: recurringTemplateTechnicianId(parent),
+          scheduled_date: nd,
+          window_start: parent.window_start, window_end: parent.window_end,
+          service_type: parent.service_type, status: 'pending',
+          time_window: parent.time_window, zone: parent.zone,
+          estimated_duration_minutes: parent.estimated_duration_minutes,
+          is_recurring: true, recurring_pattern: parent.recurring_pattern,
+          recurring_parent_id: parentId,
+        };
+        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        copyLineDiscountFields(data, parent, cols);
+        copyAppointmentDiscountFields(data, parent, cols);
+        copyBillToFields(data, parent, cols);
+        copyStampedServiceAddressFields(data, parent, cols);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
+        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        const [row] = await trx('scheduled_services').insert(data).returning('*');
+        spawned.push({ id: row?.id, date: nd });
+        inserted++;
+        created++;
+      }
+    } else if (action === 'convert_ongoing') {
+      if (cols.recurring_ongoing) {
+        // Only flip the base series rows to ongoing; boosters
+        // (is_recurring=false) shouldn't carry the recurring_ongoing flag.
+        await trx('scheduled_services')
+          .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+          .where('is_recurring', true)
+          .update({ recurring_ongoing: true });
+      }
+      // Also ensure at least 3 upcoming visits scheduled ahead. Confirmed
+      // visits count — otherwise a series whose future visits the customer
+      // confirmed gets topped up with extra (billable) duplicates.
+      const pendingCount = await countUpcomingSeriesVisits(trx, parentId);
+      const need = Math.max(0, 3 - pendingCount);
+      const seen = new Set(seriesDateSeed);
+      const maxAttempts = need * 4 + 30;
+      let attempt = 1;
+      let inserted = 0;
+      while (inserted < need && attempt < maxAttempts) {
+        const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
+        attempt++;
+        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
+        if (seen.has(nd)) continue;
+        seen.add(nd);
+        const data = {
+          customer_id: parent.customer_id,
+          technician_id: recurringTemplateTechnicianId(parent),
+          scheduled_date: nd,
+          window_start: parent.window_start, window_end: parent.window_end,
+          service_type: parent.service_type, status: 'pending',
+          time_window: parent.time_window, zone: parent.zone,
+          estimated_duration_minutes: parent.estimated_duration_minutes,
+          is_recurring: true, recurring_pattern: parent.recurring_pattern,
+          recurring_parent_id: parentId,
+        };
+        if (cols.recurring_ongoing) data.recurring_ongoing = true;
+        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        copyLineDiscountFields(data, parent, cols);
+        copyAppointmentDiscountFields(data, parent, cols);
+        copyBillToFields(data, parent, cols);
+        copyStampedServiceAddressFields(data, parent, cols);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
+        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        const [row] = await trx('scheduled_services').insert(data).returning('*');
+        spawned.push({ id: row?.id, date: nd });
+        inserted++;
+        created++;
+      }
+    } else if (action === 'let_lapse') {
+      // Stop the plan ATOMICALLY with the alert resolution (P0): resolving
+      // alone left recurring_ongoing=true, so the derived scan re-raised the
+      // alert and a stale retained visit's later completion auto-extended —
+      // and re-billed — the lapsed plan. Cleared series-wide (parent +
+      // children carry the flag) under the maintenance lock, mirroring the
+      // dispatch series-scope cancel. On a fixed plan this matches zero rows
+      // and the action stays a pure alert-resolve (no auto-extend exposure
+      // to disarm — see the block comment above).
+      if (cols.recurring_ongoing) {
+        ongoingStopped = await trx('scheduled_services')
+          .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+          .where('recurring_ongoing', true)
+          .update({ recurring_ongoing: false, updated_at: new Date() });
+      }
+    }
+
+    // Resolve/insert the alert row in the SAME transaction — the resolution
+    // IS the idempotency claim a concurrent click's in-lock re-read checks.
+    if (alert) {
+      await trx('recurring_plan_alerts').where({ id: alert.id }).update({
+        resolved_at: trx.fn.now(),
+        resolved_action: action,
+        resolved_by: adminUserId,
+      });
+    } else {
+      // Derived — insert a resolved record for audit. Savepoint, not bare
+      // try/catch: an insert failure must not abort the locked transaction.
+      try {
+        await trx.transaction((sp) => sp('recurring_plan_alerts').insert({
+          recurring_parent_id: parentId,
+          customer_id: parent.customer_id,
+          alert_type: 'plan_ending_soon',
+          recurring_pattern: parent.recurring_pattern,
+          resolved_at: sp.fn.now(),
+          resolved_action: action,
+          resolved_by: adminUserId,
+        }));
+      } catch {}
+    }
+    outcome = { status: 200, body: { success: true, action, created } };
+  };
+  // Route callers pass the plain db instance — open a transaction scoped to
+  // this action. A caller already inside a transaction is reused as-is; the
+  // advisory lock then holds until THEIR commit (maintenance-wrapper
+  // semantics).
+  if (conn.isTransaction) await runLocked(conn);
+  else await conn.transaction(runLocked);
+
+  if (!outcome) return { status: 500, body: { error: 'alert action did not resolve' } };
+  if (outcome.status !== 200 || outcome.body.alreadyResolved) return outcome;
+
+  // ——— Post-commit side effects (maintenance pattern) ———
+  // Mirror parent's addon rows onto each freshly-committed child. Best-effort
+  // — if it fails the child still exists and dispatch can re-add.
+  const mirrorAddons = async (childId, childDate) => {
+    if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
+    try {
+      const addonCols = await conn('scheduled_service_addons').columnInfo();
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate);
+      for (const addon of dueAddons) {
+        const addonData = {
+          scheduled_service_id: childId,
+          service_id: addon.service_id || null,
+          service_name: addon.service_name,
+          estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+        };
+        if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+        if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
+        if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
+        if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
+        if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
+        if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
+        if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
+        if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
+        copyAddonDiscountFields(addonData, addon, addonCols);
+        await conn('scheduled_service_addons').insert(addonData);
+      }
+    } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
+  };
+  for (const row of spawned) {
+    await mirrorAddons(row.id, row.date);
+    // Register the reminder row — without it the extended visit never
+    // enters appointment_reminders, so the 72h/24h cron skips it. Runs
+    // post-commit: the reminder writer (separate connection) must only
+    // ever see a committed visit row.
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: row.id,
+      customerId: parent.customer_id,
+      scheduledDate: row.date,
+      windowStart: parent.window_start,
+      serviceType: parent.service_type,
+      source: 'recurring_alert_action',
+    });
+    // A series cancel can take the per-parent lock right after our commit
+    // and land before the registration above finished — the shared re-check
+    // cancels the fresh reminder if the visit went terminal in that window
+    // (full interleaving analysis on the helper).
+    await cancelSpawnedReminderIfVisitTerminal(conn, row.id, 'recurring-alerts');
+  }
+  if (ongoingStopped > 0) {
+    // Post-commit audit line, mirroring the dispatch series-cancel stamp —
+    // the alert row's resolved_action carries the machine-readable reason.
+    try {
+      await conn('activity_log').insert({
+        admin_user_id: adminUserId,
+        customer_id: parent.customer_id,
+        action: 'recurring_plan_stopped',
+        description: `Ongoing ${parent.service_type} plan let lapse from the recurring alert — ${ongoingStopped} series row(s) unflagged, auto-extend disarmed`,
+      });
+    } catch (e) { logger.warn(`[recurring-alerts] let-lapse audit line failed (non-blocking): ${e.message}`); }
+  }
+  return { ...outcome, refreshCustomerId: parent.customer_id };
+}
 
 // POST /api/admin/schedule/recurring-alerts/:id/action
 // body: { action: 'extend' | 'convert_ongoing' | 'let_lapse', count?: number }
@@ -7605,237 +8463,14 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
       return res.status(400).json({ error: 'invalid action' });
     }
 
-    // Resolve alert row (may be derived id)
-    let alert = null;
-    let parentId = null;
-    if (idParam.startsWith('derived-')) {
-      parentId = parseInt(idParam.replace('derived-', ''));
-    } else {
-      alert = await db('recurring_plan_alerts').where({ id: parseInt(idParam) }).first();
-      if (!alert) return res.status(404).json({ error: 'alert not found' });
-      parentId = alert.recurring_parent_id;
-    }
-
-    const parent = await db('scheduled_services').where({ id: parentId }).first();
-    if (!parent) return res.status(404).json({ error: 'parent service not found' });
-
-    const cols = await db('scheduled_services').columnInfo();
-    const rOpts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
-      intervalDays: parent.recurring_interval_days,
-    };
-
-    // Honor skip-weekends preference set on the parent (POST + PUT + auto-
-    // extend already do; the alert action endpoint must too or weekend
-    // visits reappear on plans configured to skip them).
-    const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
-    const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
-
-    // Pull parent's add-on lines once so we can mirror them onto each new
-    // row spawned by extend / convert_ongoing — multi-service recurring
-    // appointments would otherwise lose their secondary services here.
-    let parentAddons = [];
-    try {
-      parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
-    } catch (e) { /* table may not exist pre-migration — non-blocking */ }
-    const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
-
-    // Boosters share recurring_parent_id but have is_recurring=false;
-    // exclude them so the next-date math keys off the true cadence.
-    const latest = await db('scheduled_services')
-      .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-      .where('is_recurring', true)
-      .orderBy('scheduled_date', 'desc').first();
-    const baseDateStr = dateOnly(latest?.scheduled_date) || etDateString();
-
-    // Mirror parent's addon rows onto a freshly-inserted child. Non-blocking
-    // — if it fails the child still exists and dispatch can re-add.
-    const mirrorAddons = async (childId, childDate) => {
-      if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
-      try {
-        const addonCols = await db('scheduled_service_addons').columnInfo();
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate);
-        for (const addon of dueAddons) {
-          const addonData = {
-            scheduled_service_id: childId,
-            service_id: addon.service_id || null,
-            service_name: addon.service_name,
-            estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-          };
-          if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
-          if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
-          if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
-          if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
-          if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
-          if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
-          if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
-          copyAddonDiscountFields(addonData, addon, addonCols);
-          await db('scheduled_service_addons').insert(addonData);
-        }
-      } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
-    };
-
-    // Pre-load every active date already on this series (base recurring +
-    // boosters, pending or completed — cancelled/rescheduled rows don't
-    // occupy a slot, so leaving them out lets the operator re-fill a gap
-    // created by a cancellation). Both extend and convert_ongoing dedupe
-    // against this so an extend computed forward from baseDateStr can't
-    // double-book a future booster — e.g. a Jan-anchored quarterly + January
-    // booster has a Jan 15 next-year row that would otherwise collide with
-    // the first extended visit.
-    let seriesDateSeed;
-    try {
-      const allRows = await db('scheduled_services')
-        .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
-        .select('scheduled_date');
-      seriesDateSeed = new Set(allRows
-        .map((r) => dateOnly(r.scheduled_date) || '')
-        .filter(Boolean));
-    } catch {
-      seriesDateSeed = new Set([baseDateStr]);
-    }
-    seriesDateSeed.add(baseDateStr);
-
-    let created = 0;
-    if (action === 'extend') {
-      const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
-      const seen = new Set(seriesDateSeed);
-      const maxAttempts = n * 4 + 30;
-      let attempt = 1;
-      let inserted = 0;
-      while (inserted < n && attempt < maxAttempts) {
-        const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
-        attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
-        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
-        if (seen.has(nd)) continue;
-        seen.add(nd);
-        const data = {
-          customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
-          scheduled_date: nd,
-          window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
-          time_window: parent.time_window, zone: parent.zone,
-          estimated_duration_minutes: parent.estimated_duration_minutes,
-          is_recurring: true, recurring_pattern: parent.recurring_pattern,
-          recurring_parent_id: parentId,
-        };
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
-        copyLineDiscountFields(data, parent, cols);
-        copyAppointmentDiscountFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
-        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
-        const [row] = await db('scheduled_services').insert(data).returning('*');
-        await mirrorAddons(row?.id, nd);
-        // Register the reminder row — without it the extended visit never
-        // enters appointment_reminders, so the 72h/24h cron skips it.
-        await registerSpawnedVisitReminder({
-          scheduledServiceId: row?.id,
-          customerId: parent.customer_id,
-          scheduledDate: nd,
-          windowStart: parent.window_start,
-          serviceType: parent.service_type,
-          source: 'recurring_alert_action',
-        });
-        inserted++;
-        created++;
-      }
-    } else if (action === 'convert_ongoing') {
-      if (cols.recurring_ongoing) {
-        // Only flip the base series rows to ongoing; boosters
-        // (is_recurring=false) shouldn't carry the recurring_ongoing flag.
-        await db('scheduled_services')
-          .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-          .where('is_recurring', true)
-          .update({ recurring_ongoing: true });
-      }
-      // Also ensure at least 3 upcoming visits scheduled ahead. Confirmed
-      // visits count — otherwise a series whose future visits the customer
-      // confirmed gets topped up with extra (billable) duplicates.
-      const pendingCount = await countUpcomingSeriesVisits(db, parentId);
-      const need = Math.max(0, 3 - pendingCount);
-      const seen = new Set(seriesDateSeed);
-      const maxAttempts = need * 4 + 30;
-      let attempt = 1;
-      let inserted = 0;
-      while (inserted < need && attempt < maxAttempts) {
-        const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
-        attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
-        if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
-        if (seen.has(nd)) continue;
-        seen.add(nd);
-        const data = {
-          customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
-          scheduled_date: nd,
-          window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
-          time_window: parent.time_window, zone: parent.zone,
-          estimated_duration_minutes: parent.estimated_duration_minutes,
-          is_recurring: true, recurring_pattern: parent.recurring_pattern,
-          recurring_parent_id: parentId,
-        };
-        if (cols.recurring_ongoing) data.recurring_ongoing = true;
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
-        copyLineDiscountFields(data, parent, cols);
-        copyAppointmentDiscountFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
-        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
-        const [row] = await db('scheduled_services').insert(data).returning('*');
-        await mirrorAddons(row?.id, nd);
-        // Register the reminder row — same rationale as the extend branch.
-        await registerSpawnedVisitReminder({
-          scheduledServiceId: row?.id,
-          customerId: parent.customer_id,
-          scheduledDate: nd,
-          windowStart: parent.window_start,
-          serviceType: parent.service_type,
-          source: 'recurring_alert_action',
-        });
-        inserted++;
-        created++;
-      }
-    }
-    // 'let_lapse' just resolves the alert — no spawn
-
-    // Resolve/insert alert row
-    if (alert) {
-      await db('recurring_plan_alerts').where({ id: alert.id }).update({
-        resolved_at: db.fn.now(),
-        resolved_action: action,
-        resolved_by: req.adminUserId || null,
-      });
-    } else {
-      // Derived — insert a resolved record for audit
-      try {
-        await db('recurring_plan_alerts').insert({
-          recurring_parent_id: parentId,
-          customer_id: parent.customer_id,
-          alert_type: 'plan_ending_soon',
-          recurring_pattern: parent.recurring_pattern,
-          resolved_at: db.fn.now(),
-          resolved_action: action,
-          resolved_by: req.adminUserId || null,
-        });
-      } catch {}
-    }
-
-    await refreshAnnualPrepayTermsForCustomer(parent.customer_id);
-
-    res.json({ success: true, action, created });
+    const outcome = await runRecurringAlertAction(db, {
+      idParam,
+      action,
+      count,
+      adminUserId: req.adminUserId || null,
+    });
+    if (outcome.refreshCustomerId) await refreshAnnualPrepayTermsForCustomer(outcome.refreshCustomerId);
+    res.status(outcome.status).json(outcome.body);
   } catch (err) { next(err); }
 });
 
@@ -7953,6 +8588,7 @@ router._test = {
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
+  applyStoredVisitFinancials,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
@@ -7961,6 +8597,13 @@ router._test = {
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
   mintScheduledServiceInvoiceWithDeposit,
+  runRecurringSeriesMaintenance,
+  runRecurringAlertAction,
+  resolveSeriesCreateInvoiceOnComplete,
 };
 
 module.exports = router;
+// Shared post-completion series maintenance — consumed (lazily, to avoid a
+// route-load cycle) by services/recurring-series-extend.js so the dispatch
+// completion routes run the same refill/alert logic as this route's step 4b.
+module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
