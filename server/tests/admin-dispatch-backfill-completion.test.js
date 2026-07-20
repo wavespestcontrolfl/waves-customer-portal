@@ -28,7 +28,14 @@
  * the tracker-completion leg — both post-commit markComplete calls flag the
  * span untrusted so the tracker's own lifecycle rebuild cannot re-stamp
  * what the policy stripped, and the resume re-derivation sits before the
- * first of them.
+ * first of them. Fix round 5 (Codex P1 + P2 ×2): the resume re-derivation
+ * freezes the mode in BOTH directions AND the typed duration (the retry
+ * body — hash-excluded on `backfill`/`timeOnSite` — has no vote; a flagged
+ * retry of a committed normal completion stays LOUD, and a committed
+ * backfill's duration never comes from the retry's auto-elapsed timer), via
+ * the exported frozenResumeCompletionState; and the backfill mint opts out
+ * of payer-statement accrual (skipAccrual) so a NET-terms review invoice
+ * never lands on the payer's open consolidated statement before review.
  */
 const fs = require('fs');
 const path = require('path');
@@ -38,6 +45,7 @@ const {
   applyBackfillRecordTimingPolicy,
   backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
+  frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
   BACKFILL_LIFECYCLE_END_FIELDS,
@@ -708,6 +716,66 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
   });
 });
 
+describe('frozenResumeCompletionState — resume derives mode AND duration from the frozen record (Codex P2 ×2, fix round 5)', () => {
+  // The hash exclusions above mean a resumed retry can legally disagree with
+  // the committed record on `backfill` and `timeOnSite`. This helper is the
+  // single answer the route reads on the side-effect resume path: the frozen
+  // structured_notes decide BOTH, the retry body has no vote — its signature
+  // cannot even receive a request duration.
+
+  test('flagless retry of a committed backfill stays QUIET, with the frozen typed duration', () => {
+    const out = frozenResumeCompletionState(
+      { backfill: true, timeOnSite: 45 },
+      { requestBackfill: false },
+    );
+    expect(out.isBackfillCompletion).toBe(true);   // quiet path holds
+    expect(out.effectiveTimeOnSite).toBe(45);      // committed typed duration
+    expect(out.bodyDisagreed).toBe(true);          // route logs the mismatch
+  });
+
+  test('flagged retry of a committed NORMAL completion stays LOUD — the checkbox cannot quiet a committed completion', () => {
+    // The committed record froze no backfill flag: the transaction ran the
+    // normal contract, so the resumed sends/charges must run loud too.
+    const out = frozenResumeCompletionState(
+      { timeOnSite: 30 },
+      { requestBackfill: true },
+    );
+    expect(out.isBackfillCompletion).toBe(false);
+    expect(out.bodyDisagreed).toBe(true);
+    // Entirely empty notes (legacy record) downgrade the same way.
+    expect(frozenResumeCompletionState({}, { requestBackfill: true }).isBackfillCompletion).toBe(false);
+    expect(frozenResumeCompletionState(null, { requestBackfill: true }).isBackfillCompletion).toBe(false);
+  });
+
+  test('frozen duration wins over the retry timer — the helper has no request-duration input at all', () => {
+    // A flagless retry carries the panel's auto-elapsed value in its body;
+    // the helper's shape makes it unforwardable: duration comes ONLY from the
+    // frozen stamp, and an absent stamp is the unknown-duration shape (null),
+    // never any elapsed math.
+    expect(frozenResumeCompletionState({ backfill: true }, { requestBackfill: false }).effectiveTimeOnSite).toBeNull();
+    expect(frozenResumeCompletionState({ backfill: true, timeOnSite: null }, { requestBackfill: true }).effectiveTimeOnSite).toBeNull();
+    expect(frozenResumeCompletionState({ backfill: true, timeOnSite: 90 }, { requestBackfill: true }).effectiveTimeOnSite).toBe(90);
+    // Even smuggling an elapsed value through the request options changes
+    // nothing — the mode flag is the only request input the helper reads.
+    expect(
+      frozenResumeCompletionState(
+        { backfill: true },
+        { requestBackfill: false, timeOnSite: 20160, effectiveTimeOnSite: 20160 },
+      ).effectiveTimeOnSite,
+    ).toBeNull();
+  });
+
+  test('agreement in either direction reports no disagreement', () => {
+    expect(frozenResumeCompletionState({ backfill: true }, { requestBackfill: true }).bodyDisagreed).toBe(false);
+    expect(frozenResumeCompletionState({}, { requestBackfill: false }).bodyDisagreed).toBe(false);
+  });
+
+  test('only boolean true quiets — a truthy-string frozen flag is not a backfill (mirrors backfillCompletionPlan)', () => {
+    const out = frozenResumeCompletionState({ backfill: 'true', timeOnSite: 45 }, { requestBackfill: false });
+    expect(out.isBackfillCompletion).toBe(false);
+  });
+});
+
 describe('backfillTimeOnSiteMinutes — the shared workday-cap sanitizer (Codex P1, PR #2897)', () => {
   // One function feeds BOTH the persisted duration (applyBackfillDurationPolicy)
   // and the job-costing explicitLaborMinutes forward — so "rejected" here IS
@@ -905,8 +973,28 @@ describe('completion route wiring (source contracts)', () => {
   test('backfill freezes review-request OFF and its own flag in structured_notes', () => {
     expect(source).toMatch(/requestReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| isBackfillCompletion\) \? false : requestReview !== false/);
     expect(source).toMatch(/\.\.\.\(isBackfillCompletion \? \{ backfill: true \} : \{\}\)/);
-    // And the resume path recovers the frozen flag.
-    expect(source).toMatch(/parseJsonObject\(record\.structured_notes\)\?\.backfill === true/);
+    // And the resume path recovers the frozen flag — through the shared
+    // helper (behavioral coverage above), gated to the resume claim, with
+    // BOTH mode and duration assigned from its answer (fix round 5).
+    expect(source).toMatch(/if \(resumingCommittedCompletion\) \{\s*\n\s*const frozenResume = frozenResumeCompletionState\(\s*\n\s*parseJsonObject\(record\.structured_notes\),\s*\n\s*\{ requestBackfill: isBackfillCompletion \},\s*\n\s*\);/);
+    expect(source).toMatch(/isBackfillCompletion = frozenResume\.isBackfillCompletion;\s*\n\s*effectiveTimeOnSite = frozenResume\.effectiveTimeOnSite;\s*\n\s*\}/);
+  });
+
+  test('a disagreeing resume body is logged, and a downgraded (committed-normal) resume restores the LOUD posture (fix round 5)', () => {
+    // The mismatch log names both sides…
+    expect(source).toMatch(/frozenResume\.bodyDisagreed\) \{\s*\n\s*logger\.warn\(`\[completion\] resume of service \$\{svc\.id\}: retry body says backfill=\$\{isBackfillCompletion\} but the committed record froze backfill=\$\{frozenResume\.isBackfillCompletion\} — the frozen mode wins`\);/);
+    // …and the stray body flag's intake suppression is undone from the SAME
+    // posture source the intake used, only when the frozen record says the
+    // completion was normal.
+    expect(source).toMatch(/if \(!frozenResume\.isBackfillCompletion\) \{[\s\S]{0,700}suppressTypedCustomerComms = deliveryPosture\.suppressCustomerComms;\s*\n\s*effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;\s*\n\s*\}/);
+    // Ordering: the restore happens before the frozen-delivery re-derivation
+    // and the backfill re-force — i.e. before ANY read of the comms flags —
+    // so the two later corrections still own the final posture. (Anchor on
+    // the downgrade guard: it exists only inside the resume block.)
+    const restoreAt = source.indexOf('if (!frozenResume.isBackfillCompletion) {');
+    const frozenDeliveryAt = source.indexOf('const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;');
+    expect(restoreAt).toBeGreaterThan(-1);
+    expect(frozenDeliveryAt).toBeGreaterThan(restoreAt);
   });
 
   test('backfill invoices stay due near-term instead of minting instantly overdue', () => {
@@ -977,7 +1065,7 @@ describe('completion route wiring (source contracts)', () => {
     // And the structured_notes resume re-derivation sits BEFORE the invoice
     // decision, so a crash-resumed retry (body flag absent) reaches the same
     // override instead of silently re-suppressing the invoice.
-    const rederivation = source.indexOf("parseJsonObject(record.structured_notes)?.backfill === true");
+    const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
     const invoiceDecision = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion({');
     expect(rederivation).toBeGreaterThan(-1);
     expect(invoiceDecision).toBeGreaterThan(rederivation);
@@ -1051,7 +1139,10 @@ describe('completion route wiring (source contracts)', () => {
   test('timeOnSite is sanitized ONCE at intake — every consumer reads the same value or absence', () => {
     // Under backfill the raw body value is replaced by the workday-capped
     // minutes (or null); non-backfill completions pass through untouched.
-    expect(source).toMatch(/const effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: timeOnSite;/);
+    // `let` (fix round 5): the crash-resume block overwrites it with the
+    // FROZEN structured_notes stamp — the only later assignment (contract
+    // above) — so a retry's auto-elapsed timer can never reach a consumer.
+    expect(source).toMatch(/let effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: timeOnSite;/);
     // A rejected value logs a note — the closeout still succeeds (no 400
     // path exists between the sanitation and the log).
     expect(source).toMatch(/if \(isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== ''\) \{\s*\n\s*logger\.warn\([\s\S]{0,300}recorded as unknown/);
@@ -1061,7 +1152,7 @@ describe('completion route wiring (source contracts)', () => {
     // And no other consumer still reads the raw body value: `timeOnSite`
     // appears only in the destructure, the sanitation, and the helpers'
     // definitions/comments — never as a bare argument past the intake.
-    const afterIntake = source.slice(source.indexOf('const effectiveTimeOnSite = isBackfillCompletion'));
+    const afterIntake = source.slice(source.indexOf('let effectiveTimeOnSite = isBackfillCompletion'));
     expect(afterIntake).not.toMatch(/\{ elapsed: timeOnSite \}/);
     expect(afterIntake).not.toMatch(/applyBackfillDurationPolicy\(lifecycleUpdates, timeOnSite\)/);
     expect(afterIntake).not.toMatch(/minutesFromElapsed\(timeOnSite\)/);
@@ -1104,7 +1195,7 @@ describe('completion route wiring (source contracts)', () => {
     // The crash-resume re-derivation sits BEFORE the first flagged call, so
     // a flagless resumed retry that still owes the tracker flip reads the
     // healed flag, not the body's stale `false`.
-    const rederivation = source.indexOf('parseJsonObject(record.structured_notes)?.backfill === true');
+    const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
     const firstFlagged = source.indexOf('untrustedLifecycleSpan: isBackfillCompletion,');
     expect(rederivation).toBeGreaterThan(-1);
     expect(firstFlagged).toBeGreaterThan(rederivation);
@@ -1118,12 +1209,14 @@ describe('completion route wiring (source contracts)', () => {
   test('tracker completed_at rides the same backdated end-instant rule — or stays NULL for the unknown-end shape (fix round 4)', () => {
     // The route derives the stamp ONCE, from the same helper the
     // transaction used — svc's row-backed starts + scheduled_date + the
-    // typed duration (falling back to the FROZEN structured_notes value on
-    // a flagless crash-resume, whose body omits timeOnSite).
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite \?\? parseJsonObject\(record\?\.structured_notes\)\?\.timeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n\s*: null;/);
+    // typed duration. No body fallback chain anymore (fix round 5): on
+    // resume effectiveTimeOnSite already IS the frozen structured_notes
+    // value, so the stamp reads the single sanitized source directly.
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n\s*: null;/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
-    // flag), BEFORE the first markComplete that consumes it.
-    const rederivation = source.indexOf('parseJsonObject(record.structured_notes)?.backfill === true');
+    // flag AND the frozen duration), BEFORE the first markComplete that
+    // consumes it.
+    const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
     const stampAt = source.indexOf('const backfillTrackerCompletedAt = isBackfillCompletion');
     const firstCall = source.indexOf('completedAt: backfillTrackerCompletedAt,');
     expect(stampAt).toBeGreaterThan(rederivation);
@@ -1187,7 +1280,7 @@ describe('completion route wiring (source contracts)', () => {
     // crash-resumed retry (which may arrive without the body flag) stays
     // quiet. Any post-commit gate placed above that line would read a stale
     // `false` on resume and leak. Pin the ordering, not just the presence.
-    const rederivation = source.indexOf("parseJsonObject(record.structured_notes)?.backfill === true");
+    const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
     expect(rederivation).toBeGreaterThan(-1);
     const postCommitGates = [
       // account-credit auto-apply
@@ -1210,6 +1303,9 @@ describe('completion route wiring (source contracts)', () => {
       // estimate-deposit roll-forward skip + reviewer breadcrumb (fix round 2)
       'skipDepositCredit: isBackfillCompletion,',
       'estimate deposit NOT auto-applied',
+      // payer-statement accrual skip + reviewer breadcrumb (fix round 5)
+      'skipAccrual: isBackfillCompletion,',
+      'payer-statement accrual SKIPPED',
       // job-costing labor guard
       'untrustedLifecycleSpan: true',
     ];
@@ -1258,7 +1354,7 @@ describe('completion route wiring (source contracts)', () => {
 
   test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
     // The route passes the opt-out on the completion mint…
-    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,1200}skipDepositCredit: isBackfillCompletion,\s*\n\s*\}\);/);
+    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,1600}skipDepositCredit: isBackfillCompletion,/);
     // …and logs the unapplied balance for review, like the prepaid skip.
     expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
     // The service honors the opt-out BEFORE any ledger read: the
@@ -1269,5 +1365,31 @@ describe('completion route wiring (source contracts)', () => {
     expect(invoiceSource).toMatch(/if \(!skipDepositCredit && sr\.scheduled_service_id\) \{/);
     // Behavioral coverage lives in invoice-deposit-credit-tax.test.js
     // (ledger untouched, full-value invoice, no reconcile alert).
+  });
+
+  test('the backfill mint opts out of payer-statement accrual and leaves the reviewer a breadcrumb (fix round 5)', () => {
+    // The route passes BOTH opt-outs on the completion mint — the same
+    // options object, so the accrual skip rides the deposit skip's gate.
+    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,2400}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\}\);/);
+    // …and logs the skipped accrual for the reviewer — only when an accrual
+    // WOULD have happened (payer-billed + gate + NET terms) — including the
+    // operator's re-attach path (attachment exists only at create, so:
+    // void + re-create to consolidate, or send individually to the AP).
+    expect(source).toMatch(/if \(isBackfillCompletion && invoice\?\.payer_id && !invoice\.payer_statement_id\) \{[\s\S]{0,400}isEnabled\('payerStatements'\)[\s\S]{0,400}\['net15', 'net30'\]\.includes\(payerRow\?\.payment_terms\)[\s\S]{0,600}payer-statement accrual SKIPPED[\s\S]{0,400}void \+ re-create/);
+
+    // createFromService threads the option through to create() untouched.
+    const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    expect(invoiceSource).toMatch(/skipAccrual = false,\s*\n\s*\},\s*\n\s*\) \{/);
+    expect(invoiceSource).toMatch(/trustedStoredDiscountSources: scheduledInvoice\s*\n\s*\? \["scheduled_service"\]\s*\n\s*: \[\],\s*\n\s*skipAccrual,\s*\n\s*\};/);
+    // And create() honors it at BOTH accrual sites: the NET-terms preflight
+    // transaction wrap and the statement get-or-create/attach itself.
+    expect(invoiceSource).toMatch(/if \(!skipAccrual && database === db && require\("\.\.\/config\/feature-gates"\)\.isEnabled\("payerStatements"\)\) \{/);
+    expect(invoiceSource).toMatch(/if \(!skipAccrual\s*\n\s*&& resolvedPayerId\s*\n\s*&& \['net15', 'net30'\]\.includes\(resolvedPaymentTerms\)/);
+    // Attachment is create-only — payer_statement_id is stamped exclusively
+    // from the accrual result on the insert, so skipping accrual IS staying
+    // off every statement (nothing later attaches an existing invoice).
+    expect(invoiceSource).toMatch(/\.\.\.\(accruedStatementId \? \{ payer_statement_id: accruedStatementId \} : \{\}\),/);
+    // Behavioral coverage (attach skipped, rollup untouched, default
+    // unchanged) lives in invoice-deposit-credit-tax.test.js.
   });
 });

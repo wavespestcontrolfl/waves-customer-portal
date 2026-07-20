@@ -1577,6 +1577,17 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
+      // create(), which owns the option (see its comment). The backdated
+      // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
+      // payer visit under the payerStatements gate, create() would otherwise
+      // attach it to the payer's OPEN monthly statement and roll the
+      // statement total up, i.e. the unreviewed invoice lands on a
+      // consolidated bill before anyone looks at it. With the opt-out the
+      // invoice stays a plain payer invoice (payer_id / PO / snapshot
+      // intact, individually sendable). Attachment happens only at create,
+      // so a reviewer who wants it consolidated voids + re-creates it.
+      skipAccrual = false,
     },
   ) {
     const sr = await db("service_records")
@@ -1616,6 +1627,7 @@ const InvoiceService = {
       trustedStoredDiscountSources: scheduledInvoice
         ? ["scheduled_service"]
         : [],
+      skipAccrual,
     };
 
     // Estimate-deposit roll-forward: when this service traces back to an

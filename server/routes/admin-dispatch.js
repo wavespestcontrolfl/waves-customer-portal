@@ -737,6 +737,37 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
   return toETNoonServiceDate(serviceDate);
 }
 
+// Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
+// completion transaction commits, the record's structured_notes freeze IS the
+// completion — and hashCompletionRequest deliberately excludes `backfill` and
+// `timeOnSite`, so a resumed retry's body may legally disagree with what was
+// committed (a flagless retry of a backfill, a still-checked checkbox against
+// a normal completion, the panel's auto-elapsed timer instead of the typed
+// duration). On the side-effect resume path the body therefore has NO vote:
+//  - MODE re-derives from the frozen flag in BOTH directions. A flagless
+//    retry of a committed backfill stays QUIET (the original hazard), and a
+//    flagged retry of a committed NORMAL completion stays LOUD — the
+//    transaction committed a normal completion, so going quiet on resume
+//    would silently skip the remaining sends/charges of a visit that was
+//    never backfilled.
+//  - DURATION is the frozen structured_notes.timeOnSite (`?? null` keeps the
+//    unknown-duration shape) — never recomputed from the retry body, which
+//    typically carries the panel's running elapsed, i.e. the stale span the
+//    workday cap exists to reject. The frozen value was sanitized at commit
+//    for a backfill; downstream consumers (backfillCompletionEndInstant,
+//    job-costing's explicitLaborMinutes) re-run the cap regardless.
+// bodyDisagreed reports a mismatch for the route to log. Pure for
+// testability (_test).
+function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = false } = {}) {
+  const frozen = frozenStructuredNotes || {};
+  const isBackfillCompletion = frozen.backfill === true;
+  return {
+    isBackfillCompletion,
+    effectiveTimeOnSite: frozen.timeOnSite ?? null,
+    bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
+  };
+}
+
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
@@ -2778,12 +2809,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     // Backdated quiet completion — validated against the row's own
-    // scheduled_date (past days only). `let`: a crash-resumed completion may
-    // retry without the body flag; the frozen structured_notes recover it
-    // below, before any send/invoice decision reads it. That flagless retry
-    // only reaches the resume claim because hashCompletionRequest excludes
-    // `backfill` from the request hash (Codex P2, PR #2897 fix round) —
-    // hashed, the missing flag 409'd completion_resume_payload_mismatch in
+    // scheduled_date (past days only). `let`: on a crash-resumed retry the
+    // body flag has no vote — the frozen structured_notes decide the mode in
+    // BOTH directions below (frozenResumeCompletionState), before any
+    // send/invoice decision reads it. A disagreeing retry only reaches the
+    // resume claim because hashCompletionRequest excludes `backfill` from
+    // the request hash (Codex P2, PR #2897 fix round) — hashed, the
+    // mismatch 409'd completion_resume_payload_mismatch in
     // claimCompletionAttempt and stranded the committed completion before
     // the re-derivation could run.
     const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });
@@ -2797,8 +2829,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // every consumer — the duration policy, the structured_notes stamp
     // (which feeds the report's on-site metric), and the job-costing labor
     // forward — reads the same value or the same absence. Out-of-range
-    // degrades to unknown with a log line, never a 400.
-    const effectiveTimeOnSite = isBackfillCompletion
+    // degrades to unknown with a log line, never a 400. `let`: on a
+    // crash-resumed retry the body value has no vote either — the frozen
+    // structured_notes stamp wins (frozenResumeCompletionState below; the
+    // hash excludes timeOnSite, so a retry can legally carry the panel's
+    // auto-elapsed instead of the committed typed duration).
+    let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
       : timeOnSite;
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
@@ -4681,22 +4717,46 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
-    // Backfill survives resume via its own structured_notes freeze (the body
-    // flag may be absent on a crash-resumed retry). Re-derived HERE — the
-    // first post-commit step — so the tracker completion below (whose
-    // markComplete must honor the duration policy via untrustedLifecycleSpan,
-    // Codex P1, PR #2897 fix round 3), the backfill review-invoice override
-    // in shouldAutoInvoiceCompletion, and every later backfill money/comms
-    // gate read the same truth on a resumed retry; the customer-comms
-    // re-force stays below, after the frozen-delivery re-derivation it must
-    // override. Reachable for a FLAGLESS retry only because
-    // hashCompletionRequest excludes `backfill` (Codex P2, PR #2897 fix
-    // round): the resume claim in claimCompletionAttempt compares request
-    // hashes first, and hashing the flag made the flagless retry 409
-    // (completion_resume_payload_mismatch) before this line — the recovery
-    // this comment promises was unreachable.
-    if (record?.structured_notes && parseJsonObject(record.structured_notes)?.backfill === true) {
-      isBackfillCompletion = true;
+    // Backfill survives resume via its own structured_notes freeze — and the
+    // freeze decides in BOTH directions (Codex P2 ×2, PR #2897 fix round 5):
+    // on the side-effect resume path the committed record alone sets the
+    // completion MODE (a flagless retry of a committed backfill stays quiet;
+    // a flagged retry of a committed NORMAL completion stays loud) and the
+    // typed DURATION (the retry body typically carries the panel's
+    // auto-elapsed timer, never the committed typed value). Re-derived HERE —
+    // the first post-commit step — so the tracker end-instant + markComplete
+    // below (whose markComplete must honor the duration policy via
+    // untrustedLifecycleSpan, Codex P1, PR #2897 fix round 3), the backfill
+    // review-invoice override in shouldAutoInvoiceCompletion, and every later
+    // backfill money/comms gate read the same committed truth on a resumed
+    // retry; the customer-comms re-force stays below, after the
+    // frozen-delivery re-derivation it must override. A disagreeing retry
+    // reaches this line only because hashCompletionRequest excludes
+    // `backfill` and `timeOnSite` (Codex P2, PR #2897 fix round): the resume
+    // claim in claimCompletionAttempt compares request hashes first, and
+    // hashing either field made the retry 409
+    // (completion_resume_payload_mismatch) before this line. First-run keeps
+    // the request-derived values — the freeze is written FROM them inside the
+    // transaction above.
+    if (resumingCommittedCompletion) {
+      const frozenResume = frozenResumeCompletionState(
+        parseJsonObject(record.structured_notes),
+        { requestBackfill: isBackfillCompletion },
+      );
+      if (frozenResume.bodyDisagreed) {
+        logger.warn(`[completion] resume of service ${svc.id}: retry body says backfill=${isBackfillCompletion} but the committed record froze backfill=${frozenResume.isBackfillCompletion} — the frozen mode wins`);
+        if (!frozenResume.isBackfillCompletion) {
+          // The stray body flag quieted the comms posture at intake; the
+          // committed completion is NORMAL, so restore the posture it ran
+          // under. The frozen-delivery re-derivation below still applies on
+          // top (typed completions), and the backfill re-force after it no
+          // longer fires — every read of these flags sits below both.
+          suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
+          effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+        }
+      }
+      isBackfillCompletion = frozenResume.isBackfillCompletion;
+      effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
 
     // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
@@ -4707,15 +4767,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // COALESCE + minutesBetween(arrived_at, completed_at) fallback, the
     // termite-bond sync's third preference, billing recovery's aging).
     // Deterministic across crash-resume: svc's row-backed starts and
-    // scheduled_date are stable, and the typed duration falls back to the
-    // FROZEN structured_notes.timeOnSite when the retry body omits it. Null
-    // for the unknown-end shape (real stale check-in, blank duration) — the
-    // tracker then leaves completed_at NULL, a state legacy pre-tracking
-    // rows already occupy and every reader COALESCEs past.
+    // scheduled_date are stable, and on resume effectiveTimeOnSite IS the
+    // frozen typed duration (block above) — never the retry's elapsed timer
+    // (Codex P2, fix round 5). Null for the unknown-end shape (real stale
+    // check-in, blank duration) — the tracker then leaves completed_at NULL,
+    // a state legacy pre-tracking rows already occupy and every reader
+    // COALESCEs past.
     const backfillTrackerCompletedAt = isBackfillCompletion
       ? backfillCompletionEndInstant(
         serviceDateOnly(svc.scheduled_date),
-        effectiveTimeOnSite ?? parseJsonObject(record?.structured_notes)?.timeOnSite,
+        effectiveTimeOnSite,
         svc,
       )
       : null;
@@ -5700,6 +5761,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // fix round). The invoice mints at face value; the deposit stays
           // on the estimate's ledger for the reviewer to apply.
           skipDepositCredit: isBackfillCompletion,
+          // Statement accrual is a billing side effect too (Codex P1, PR
+          // #2897 fix round 5): for a payer-billed NET15/NET30 visit under
+          // GATE_PAYER_STATEMENTS, create() otherwise attaches this invoice
+          // to the payer's OPEN monthly statement and recomputes the
+          // statement total — landing the quiet review-only closeout on a
+          // consolidated bill before anyone has looked at it. Mint it
+          // UNATTACHED instead (still payer-billed: payer_id / PO /
+          // snapshot all stamp normally, so it stays individually sendable);
+          // where it bills is the reviewer's call (breadcrumb below).
+          skipAccrual: isBackfillCompletion,
         });
         // Point the reviewer at the money the skip left behind — the same
         // breadcrumb the prepaid skip logs (applyPrepaidCreditToInvoice).
@@ -5711,6 +5782,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               logger.info(`[dispatch] backfill completion: estimate deposit NOT auto-applied for visit ${svc.id} — $${Number(unappliedDeposit.amount).toFixed(2)} unapplied deposit credit on estimate ${svc.source_estimate_id}; invoice ${invoice.invoice_number || invoice.id} left open for review`);
             }
           } catch (e) { logger.warn(`[dispatch] backfill deposit-credit review log failed: ${e.message}`); }
+        }
+        // Statement-accrual breadcrumb — same reviewer contract as the
+        // deposit/prepaid skips above. Attachment happens ONLY at create
+        // (invoice.js stamps payer_statement_id on the insert; no
+        // attach-existing-invoice path exists anywhere), so the operator's
+        // route to consolidate this invoice after review is void + re-create
+        // (the fresh mint accrues to the open statement), or send it
+        // individually to the AP — an unattached payer invoice is the
+        // supported individual shape.
+        if (isBackfillCompletion && invoice?.payer_id && !invoice.payer_statement_id) {
+          try {
+            const { isEnabled } = require('../config/feature-gates');
+            if (isEnabled('payerStatements')) {
+              const payerRow = await db('payers').where({ id: invoice.payer_id }).first('payment_terms');
+              if (['net15', 'net30'].includes(payerRow?.payment_terms)) {
+                logger.info(`[dispatch] backfill completion: payer-statement accrual SKIPPED for visit ${svc.id} — ${payerRow.payment_terms} invoice ${invoice.invoice_number || invoice.id} minted OFF the payer's open statement for review; to bill it on the monthly statement, void + re-create it (attach happens only at create), or send it individually to the AP`);
+              }
+            }
+          } catch (e) { logger.warn(`[dispatch] backfill accrual-skip review log failed: ${e.message}`); }
         }
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
@@ -9177,6 +9267,7 @@ module.exports._test = {
   applyBackfillRecordTimingPolicy,
   backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
+  frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,
   BACKFILL_LIFECYCLE_END_FIELDS,
