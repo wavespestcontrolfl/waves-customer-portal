@@ -45,6 +45,25 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+// service_records.structured_notes is jsonb (object from pg) but historic
+// writers and test fixtures also store serialized strings — parse it with the
+// same resilient shape the completion route's parseJsonObject uses
+// (admin-dispatch.js): object passes through, string parses, anything else
+// (arrays, garbage, null) collapses to {}.
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 async function getFinancials(db) {
   try {
     const row = await db('company_financials').orderBy('effective_date', 'desc').first();
@@ -329,7 +348,10 @@ async function resolveServiceRecord(db, svc, srCols) {
  * opts.untrustedLifecycleSpan (backdated quiet closeouts) blocks the labor
  * fallbacks that derive from the row's actual_start/actual_end bounds — see
  * calcLaborCost; opts.explicitLaborMinutes supplies the operator-entered
- * duration to use instead.
+ * duration to use instead. Both are ALSO re-derived automatically from the
+ * record's persisted structured_notes.backfill marker (and the persisted
+ * scheduled_services.service_time_minutes), so recalculations that pass no
+ * opts can never resurrect the fabricated span.
  */
 async function calculateJobCost(scheduledServiceId, db, {
   recomputeRevenue = false,
@@ -345,6 +367,32 @@ async function calculateJobCost(scheduledServiceId, db, {
   const srCols = await db('service_records').columnInfo().catch(() => ({}));
   const { record, ambiguous } = await resolveServiceRecord(db, svc, srCols);
   const customer = await db('customers').where({ id: svc.customer_id }).first();
+
+  // Durable untrusted-span policy: the backfill closeout route passes
+  // untrustedLifecycleSpan for its completion-time calc, but every LATER
+  // recalculation — admin-job-costs manual recalc, admin-job-expenses CRUD
+  // refresh, admin-billing-recovery recompute, admin-projects costing,
+  // backfillServiceRecordFinancials — calls with no opts and would fall back
+  // to the record's actual_start→closeout span (a stale check-in weeks back
+  // against the office checkout, booked at the labor rate) and overwrite the
+  // completion-time financials. The completion freezes `backfill: true` into
+  // the record's structured_notes (its crash-resume marker), so re-derive the
+  // policy from that persisted marker here — the one layer every caller flows
+  // through. Labor then comes only from direct job time entries, else the
+  // persisted operator-entered duration (scheduled_services.service_time_minutes,
+  // which applyBackfillDurationPolicy writes from the explicit timeOnSite or
+  // not at all under backfill), else 0. The caller option remains honored for
+  // any calc made before the completion's record row is committed/visible
+  // (belt and braces); caller-supplied explicit minutes win over the column.
+  if (parseJsonObject(record?.structured_notes).backfill === true) {
+    untrustedLifecycleSpan = true;
+  }
+  if (untrustedLifecycleSpan && explicitLaborMinutes == null) {
+    const persistedMinutes = Number(svc.service_time_minutes);
+    if (Number.isFinite(persistedMinutes) && persistedMinutes > 0) {
+      explicitLaborMinutes = persistedMinutes;
+    }
+  }
 
   // An operator can dispose a completed visit as intentionally_free in the
   // Billing Recovery workbench (visit_billing_dispositions). That decision is
