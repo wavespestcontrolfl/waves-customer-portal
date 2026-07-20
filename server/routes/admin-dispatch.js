@@ -4729,6 +4729,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     if (isIncompleteVisit) {
+      // Recurring plan refill / end-of-plan flag — an incomplete-outcome
+      // completion still flips the scheduled_services row to 'completed'
+      // (only the service_record carries 'incomplete'), so the visit consumed
+      // its series slot and the refill check is due here too. This early
+      // return sits ABOVE the main maintenance hook below, so without this the
+      // series would never top up on incomplete completions. Same failure-
+      // isolated contract: never fails the committed completion.
+      try {
+        const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
+        await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete_incomplete' });
+      } catch (seriesErr) {
+        logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
+      }
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,

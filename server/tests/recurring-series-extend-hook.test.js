@@ -51,9 +51,12 @@ describe('runPostCompletionSeriesMaintenance bridge', () => {
 });
 
 describe('dispatch routes wire the hook (source guards)', () => {
-  test('both completion paths require the bridge service', () => {
+  test('all three completion outcomes require the bridge service', () => {
+    // PUT /:serviceId/status completed branch, POST /:serviceId/complete
+    // full-completion branch, and POST /:serviceId/complete incomplete-outcome
+    // early return — an incomplete visit still consumes the series slot.
     const requires = dispatchSrc.match(/require\('\.\.\/services\/recurring-series-extend'\)/g) || [];
-    expect(requires.length).toBe(2);
+    expect(requires.length).toBe(3);
   });
 
   test('PUT /:serviceId/status completed branch fires the hook', () => {
@@ -75,9 +78,23 @@ describe('dispatch routes wire the hook (source guards)', () => {
     expect(payloadAfterHook).toBeGreaterThan(hook);
   });
 
-  test('both call sites are try/caught (failure isolation at the route too)', () => {
+  test('POST /:serviceId/complete fires the hook on the incomplete-outcome early return', () => {
+    // The incomplete branch returns before the main hook below it, so it needs
+    // its own invocation or ongoing series never refill on incomplete visits.
+    const incompleteHook = dispatchSrc.indexOf("source: 'dispatch_complete_incomplete'");
+    expect(incompleteHook).toBeGreaterThan(-1);
+    // It sits inside the `if (isIncompleteVisit)` early-return block, before
+    // that block's response payload / success return.
+    const incompleteGuard = dispatchSrc.indexOf('if (isIncompleteVisit) {');
+    expect(incompleteGuard).toBeGreaterThan(-1);
+    expect(incompleteHook).toBeGreaterThan(incompleteGuard);
+    const returnAfterHook = dispatchSrc.indexOf('return res.json(responsePayload);', incompleteHook);
+    expect(returnAfterHook).toBeGreaterThan(incompleteHook);
+  });
+
+  test('all three call sites are try/caught (failure isolation at the route too)', () => {
     const pattern = /try\s*\{\s*const \{ runPostCompletionSeriesMaintenance \} = require\('\.\.\/services\/recurring-series-extend'\);/g;
     const guarded = dispatchSrc.match(pattern) || [];
-    expect(guarded.length).toBe(2);
+    expect(guarded.length).toBe(3);
   });
 });

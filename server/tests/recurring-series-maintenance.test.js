@@ -33,8 +33,19 @@ const COLS = {
 
 // Scriptable fake knex connection: records the chained calls and resolves
 // terminal ops through the scenario handler.
-function makeConn(handler) {
-  const conn = (table) => {
+//
+// runRecurringSeriesMaintenance now serializes per parent with a
+// pg_advisory_xact_lock inside a transaction (P0 concurrency fix): it opens a
+// transaction (unless the caller already passed one), takes the lock on that
+// trx, and re-reads the upcoming-count / existing-dates inside it. So the fake
+// connection is also callable AS a transaction — `.transaction(cb)` invokes cb
+// with a trx-shaped conn (same handler), `.raw` no-ops the advisory lock, and
+// `.isTransaction` flags whether we're already inside one. An optional shared
+// `mutex` serializes overlapping transactions the way the real per-parent
+// advisory lock does, so the concurrency test can prove the loser re-reads and
+// no-ops instead of double-inserting.
+function makeConn(handler, opts = {}) {
+  const buildTable = (table) => {
     const calls = [];
     const b = {};
     const record = (name) => (...args) => {
@@ -69,7 +80,27 @@ function makeConn(handler) {
     b.then = (res, rej) => Promise.resolve(handler({ table, calls, op: 'await' })).then(res, rej);
     return b;
   };
-  return conn;
+  const build = (isTransaction) => {
+    const fn = (table) => buildTable(table);
+    fn.isTransaction = isTransaction;
+    // Advisory lock (SELECT pg_advisory_xact_lock(...)) — nothing to assert on
+    // the result; the real lock's serialization is modelled by opts.mutex.
+    fn.raw = () => Promise.resolve();
+    fn.transaction = (cb) => {
+      const exec = () => Promise.resolve().then(() => cb(build(true)));
+      // Only top-level transactions serialize on the mutex (= the per-parent
+      // advisory lock). A nested `.transaction` from inside the locked block
+      // is a SAVEPOINT (the add-on preload's abort-tolerance) — it runs inline
+      // under the already-held lock, so it must NOT try to re-acquire it.
+      if (!opts.mutex || isTransaction) return exec();
+      const prev = opts.mutex.tail || Promise.resolve();
+      let release;
+      opts.mutex.tail = new Promise((r) => { release = r; });
+      return prev.then(exec).finally(() => release());
+    };
+    return fn;
+  };
+  return build(false);
 }
 
 function ongoingScenario({ upcomingCount, sibling, parentOverrides = {}, stillOngoing = true }) {
@@ -172,6 +203,82 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // Pre-insert re-check reads recurring_ongoing=false → no insert at all.
     expect(inserted).toHaveLength(0);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+});
+
+// Stateful scenario for the concurrency test: the upcoming count and the
+// existing-dates set both reflect rows inserted so far, so a run that reads
+// AFTER a prior run committed sees the fresh visit and no-ops. Starts one
+// visit ahead (upcoming = 1) so the first run extends and the second must not.
+function concurrentScenario() {
+  const parent = {
+    id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
+    recurring_ongoing: true, scheduled_date: '2026-01-15',
+    window_start: '08:00', window_end: '10:00',
+    service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
+    estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
+    create_invoice_on_complete: false,
+  };
+  const inserted = [];
+  const baseDates = ['2026-01-15', '2026-04-15', '2026-07-15'];
+  const allDates = () => [...baseDates, ...inserted.map((d) => d.scheduled_date)];
+  const handler = ({ table, calls, op, data }) => {
+    if (table === 'scheduled_services') {
+      if (op === 'columnInfo') return COLS;
+      if (op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        // upcoming count reflects the visits inserted so far.
+        if (calls.some((c) => c[0] === 'count')) return { c: String(1 + inserted.length) };
+        if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: true };
+        if (firstCall[1] === 'create_invoice_on_complete') return undefined;
+        if (calls.some((c) => c[0] === 'orderBy')) {
+          const sorted = allDates().slice().sort();
+          return { scheduled_date: sorted[sorted.length - 1] };
+        }
+        return parent;
+      }
+      if (op === 'await') {
+        if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+          return allDates().map((scheduled_date) => ({ scheduled_date }));
+        }
+        return [];
+      }
+      if (op === 'insertReturning') { const row = { id: 900 + inserted.length, ...data }; inserted.push(data); return [row]; }
+      if (op === 'insert') { inserted.push(data); return [1]; }
+    }
+    if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+    if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
+    return null;
+  };
+  return { handler, inserted };
+}
+
+describe('runRecurringSeriesMaintenance — concurrency (P0: no duplicate billable visits)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('two concurrent maintenance runs on the same parent insert exactly one visit', async () => {
+    const { handler, inserted } = concurrentScenario();
+    // Shared mutex = the per-parent pg_advisory_xact_lock: overlapping
+    // transactions run one at a time, so the loser re-reads the winner's
+    // committed insert (upcoming now 2) and no-ops.
+    const mutex = { tail: Promise.resolve() };
+    const conn = makeConn(handler, { mutex });
+    await Promise.all([
+      runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' }),
+      runRecurringSeriesMaintenance(conn, { id: 23, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2026-07-15' }),
+    ]);
+    expect(inserted).toHaveLength(1);
+  });
+
+  test('serialization + re-read is load-bearing: the maintenance opens a transaction and locks per parent', () => {
+    // The upcoming-count / existing-dates reads must run INSIDE the locked
+    // transaction, else two runs both read upcoming=1 and both insert.
+    expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
+    expect(src).toContain("'recurring-series-maintenance'");
+    // Plain-db callers get a transaction opened for the maintenance block;
+    // a caller already inside a transaction is reused as-is.
+    expect(src).toContain('conn.isTransaction');
+    expect(src).toContain('await conn.transaction(runLocked)');
   });
 });
 

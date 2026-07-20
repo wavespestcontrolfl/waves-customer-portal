@@ -5764,8 +5764,84 @@ router.post('/:id/invoice', async (req, res, next) => {
 //
 // `svc` is the just-completed scheduled_services row (parent or child).
 // Callers MUST wrap in try/catch — a failed extend never fails a completion.
+//
+// Concurrency: the date preload, candidate selection, and insert are separate
+// statements — and with the hook now firing from three completion routes, two
+// concurrent completions (or a retry racing the original) on the same series
+// could both pick the same next date and insert duplicate billable visits.
+// The maintenance therefore serializes per parent with a pg advisory xact
+// lock (hashed-key pattern shared with booking's self-booking-confirm /
+// slot-reserve locks), and EVERY read runs after the lock inside the same
+// transaction — the second runner sees the first's committed insert and
+// no-ops via the upcoming-count / existing-dates checks. The add-on mirror
+// and reminder registration run post-commit (their writers tolerate their
+// own failures and, for reminders, use a separate connection that must only
+// see a committed visit row) — same ordering the pre-lock code had.
 async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
+  const runLocked = async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-maintenance', String(parentId)],
+    );
+    return runRecurringSeriesMaintenanceLocked(trx, svc, parentId);
+  };
+  // Callers normally pass the plain db instance (all three completion routes
+  // fire post-commit) — open a transaction scoped to this pass. A caller
+  // already inside a transaction is reused as-is; the advisory lock then
+  // holds until THEIR commit.
+  const spawnedVisit = conn.isTransaction
+    ? await runLocked(conn)
+    : await conn.transaction(runLocked);
+  if (spawnedVisit) {
+    // Post-commit: mirror the parent's add-on lines onto the auto-extended
+    // visit so a multi-service ongoing series keeps its full scope (and
+    // billing) past the seeded window. Best-effort — an add-on failure must
+    // not void the already-committed visit (pre-lock semantics).
+    try {
+      if (spawnedVisit.dueAddons.length > 0) {
+        const addonCols = await conn('scheduled_service_addons').columnInfo();
+        for (const addon of spawnedVisit.dueAddons) {
+          const addonData = {
+            scheduled_service_id: spawnedVisit.scheduledServiceId,
+            service_id: addon.service_id || null,
+            service_name: addon.service_name,
+            estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+          };
+          if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
+          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
+          if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
+          if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
+          if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
+          if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
+          if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
+          if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
+          copyAddonDiscountFields(addonData, addon, addonCols);
+          await conn('scheduled_service_addons').insert(addonData);
+        }
+      }
+    } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
+    // Register the reminder row — without it the auto-extended visit never
+    // enters appointment_reminders, so the customer gets no 72h/24h texts
+    // for it (the cron reads only that table). No confirmation SMS,
+    // matching spawned children.
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: spawnedVisit.scheduledServiceId,
+      customerId: spawnedVisit.customerId,
+      scheduledDate: spawnedVisit.scheduledDate,
+      windowStart: spawnedVisit.windowStart,
+      serviceType: spawnedVisit.serviceType,
+      source: 'recurring_auto_extend',
+    });
+    logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+  }
+}
+
+// The lock-held body: returns the spawned-visit payload (for the wrapper's
+// post-commit add-on mirror + reminder registration) when an auto-extend row
+// landed and survived the cancellation re-check, else null.
+async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
+  let spawnedVisit = null;
   const cols = await conn('scheduled_services').columnInfo();
   const parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (parent && parent.is_recurring && parent.recurring_pattern) {
@@ -5861,8 +5937,12 @@ async function runRecurringSeriesMaintenance(conn, svc) {
           copyAppointmentDiscountFields(nextData, parent, cols);
           let parentAddons = [];
           try {
-            parentAddons = await conn('scheduled_service_addons')
-              .where({ scheduled_service_id: parentId });
+            // Nested transaction = savepoint: a missing
+            // scheduled_service_addons table (pre-migration env) must not
+            // abort the outer locked transaction — the extend proceeds
+            // addon-less, matching the pre-lock tolerance.
+            parentAddons = await conn.transaction((sp) =>
+              sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
           } catch { parentAddons = []; }
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
           const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
@@ -5899,46 +5979,19 @@ async function runRecurringSeriesMaintenance(conn, svc) {
               logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
             }
           }
-          // Mirror parent's add-on lines onto the auto-extended visit
-          // so a multi-service ongoing series keeps its full scope
-          // (and billing) past the seeded 4-visit window.
-          try {
-            if (autoExtLive && parentAddons.length > 0 && autoExtRow?.id) {
-              const addonCols = await conn('scheduled_service_addons').columnInfo();
-              for (const addon of dueAddons) {
-                const addonData = {
-                  scheduled_service_id: autoExtRow.id,
-                  service_id: addon.service_id || null,
-                  service_name: addon.service_name,
-                  estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                };
-                if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-                if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
-                if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
-                if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
-                if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
-                if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
-                if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
-                if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
-                copyAddonDiscountFields(addonData, addon, addonCols);
-                await conn('scheduled_service_addons').insert(addonData);
-              }
-            }
-          } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
-          // Register the reminder row — without it the auto-extended
-          // visit never enters appointment_reminders, so the customer
-          // gets no 72h/24h texts for it (the cron reads only that
-          // table). No confirmation SMS, matching spawned children.
-          if (autoExtLive) {
-            await registerSpawnedVisitReminder({
-              scheduledServiceId: autoExtRow?.id,
+          // Hand the surviving insert back to the wrapper — the add-on
+          // mirror and reminder registration run post-commit there, so an
+          // add-on failure can't void the visit and the reminder writer
+          // (separate connection) only ever sees a committed row.
+          if (autoExtLive && autoExtRow?.id) {
+            spawnedVisit = {
+              scheduledServiceId: autoExtRow.id,
               customerId: parent.customer_id,
               scheduledDate: nextStr,
               windowStart: parent.window_start,
               serviceType: parent.service_type,
-              source: 'recurring_auto_extend',
-            });
-            logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+              dueAddons: parentAddons.length > 0 ? dueAddons : [],
+            };
           }
         }
       }
@@ -5961,6 +6014,7 @@ async function runRecurringSeriesMaintenance(conn, svc) {
       } catch (e) { logger.warn(`[recurring] Alert insert skipped: ${e.message}`); }
     }
   }
+  return spawnedVisit;
 }
 
 // PUT /api/admin/schedule/:id/status — change status with automations.
