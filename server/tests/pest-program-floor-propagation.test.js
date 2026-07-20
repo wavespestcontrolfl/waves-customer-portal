@@ -352,6 +352,43 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(() => normalizeClientPestFloorMetadata(estData)).not.toThrow();
     expect(() => normalizeClientPestFloorMetadata(null)).not.toThrow();
   });
+
+  test('ARMED + client rows priced BELOW the live floor → 409 regenerate, nothing mutated (pre-push P0, main-merge)', () => {
+    // The 89-literal rows were priced with the floor BINDING at $89. A live
+    // floor of $95 cannot be fixed by restamping — pa/ann would persist
+    // below the configured floor and the accept-path lift caps at the old
+    // annual. The save must refuse and require regeneration.
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95;
+    const estData = clientStampedEstData();
+    expect(() => normalizeClientPestFloorMetadata(estData))
+      .toThrow(/regenerate the estimate/i);
+    // Reject happened before any mutation: the client stamps are intact.
+    expect(estData.result.results.pestTiers[0]).toMatchObject({ pa: 89, floorPa: 89, floorAnn: 356 });
+  });
+
+  test('client-priced payload with UNVERIFIED live config → 503, nothing persisted-normalized (pre-push P0, main-merge)', () => {
+    constants.PEST.enforceFloorPostDiscount = false;
+    const estData = {
+      result: {
+        pricingMetadata: { pestProgramFloorArmed: true, pestProgramFloorPerVisit: 79 },
+        recurring: { pestProgramFloorApplied: false, discount: 0 },
+        results: {
+          pestTiers: [{ pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 }],
+        },
+      },
+    };
+    expect(() => normalizeClientPestFloorMetadata(estData, { liveConfigVerified: false }))
+      .toThrow(/could not be verified/i);
+  });
+
+  test('non-client legacy payload with unverified config keeps the last-synced behavior (no throw)', () => {
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 79;
+    const estData = clientStampedEstData(); // no recurring block → not a client-engine result
+    expect(() => normalizeClientPestFloorMetadata(estData, { liveConfigVerified: false })).not.toThrow();
+    expect(estData.result.results.pestTiers[0]).toMatchObject({ floorPa: 79 });
+  });
 });
 
 describe('recurringServiceFirstVisitPrice — legacy first-application preview holds the floor', () => {
