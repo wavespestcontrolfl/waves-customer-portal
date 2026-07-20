@@ -1024,6 +1024,16 @@ const SCARCE_FIRST_DAY_MAX = 2;
 // route-fit threshold is the existing 20-minute proximity bound — no new
 // tunables. Input must already be sorted by compareCustomerFacingSlots
 // (same contract as diversifyByDay).
+// Promotion requires a REAL neighboring stop, not just a low detour:
+// classifySlot sets routeOptimal from detour minutes alone, which is also
+// true for an empty day whose only anchors are HQ (near-HQ addresses) —
+// nearbyJob is the signal that a technician actually has a calendar stop
+// adjacent to this slot (pickNearbyAnchor returns null for HQ-only
+// insertions). Codex 2026-07-20.
+function isRouteFitSlot(s) {
+  return !!(s?.routeOptimal && s?.nearbyJob);
+}
+
 function routeFirstOrder(sorted) {
   if (!Array.isArray(sorted) || sorted.length <= 1) return sorted;
   const soonest = sorted[0];
@@ -1033,9 +1043,9 @@ function routeFirstOrder(sorted) {
   // remainder spread — so a pool with no route-fit slots would order
   // differently from the ungated spread instead of degrading to it
   // (Codex 2026-07-20).
-  const routeFit = diversifyByDay(sorted.filter((s) => s?.routeOptimal))
+  const routeFit = diversifyByDay(sorted.filter(isRouteFitSlot))
     .filter((s) => s !== soonest);
-  const rest = diversifyByDay(sorted.filter((s) => !s?.routeOptimal))
+  const rest = diversifyByDay(sorted.filter((s) => !isRouteFitSlot(s)))
     .filter((s) => s !== soonest);
   return [soonest, ...routeFit, ...rest];
 }

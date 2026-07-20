@@ -87,6 +87,31 @@ describe('route-first customer-facing slot ordering', () => {
     ]);
   });
 
+  test('routeOptimal without a real nearby stop (HQ-only day) is NOT promoted', () => {
+    // classifySlot sets routeOptimal from detour alone — an empty day near
+    // HQ qualifies with nearbyJob null. Promotion requires a real neighbor.
+    const hqOnly = {
+      ...slot('2026-07-24', '10:00'),
+      routeOptimal: true,
+      nearbyJob: null,
+    };
+    const pool2 = [
+      slot('2026-07-22', '09:00'),
+      slot('2026-07-23', '09:00'),
+      hqOnly,
+      slot('2026-07-25', '11:00', { routeOptimal: true, detour: 6 }),
+    ];
+    const picks = _internals
+      .selectCustomerFacingSlots(pool2, 4, { routeFirst: true })
+      .map((s) => s.slotId);
+    expect(picks).toEqual([
+      '2026-07-22_09-00_tech-1',  // soonest
+      '2026-07-25_11-00_tech-1',  // real route-fit (has nearbyJob)
+      '2026-07-23_09-00_tech-1',  // HQ-only day ranks with capacity days
+      '2026-07-24_10-00_tech-1',
+    ]);
+  });
+
   test('scarce first day (2 openings) pins both cards, route-fit days follow', () => {
     const scarce = [
       slot('2026-07-22', '13:00'),
