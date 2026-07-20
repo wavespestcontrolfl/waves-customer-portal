@@ -1408,6 +1408,22 @@ function pricePestControl(property, options = {}) {
     modifiers = {},
   } = options;
 
+  // Post-discount floor arm + per-visit floor VALUE: caller overrides first
+  // (saved-estimate replays — pre-push codex P0s, round 9/13 on #2827),
+  // then the live DB-synced constants. The resolved value feeds BOTH the
+  // list-price bottom (basePrice below) and the post-discount floor
+  // metadata — a live pest_base.floor change must never re-price a saved
+  // quote's replay in either place.
+  const pestFloorArmedResolved = typeof options.pestProgramFloorArmed === 'boolean'
+    ? options.pestProgramFloorArmed
+    : PEST.enforceFloorPostDiscount === true;
+  const pestFloorPerVisitResolved = (() => {
+    const override = Number(options.pestProgramFloorPerVisit);
+    if (Number.isFinite(override) && override > 0) return override;
+    const live = Number(PEST.floor);
+    return Number.isFinite(live) && live > 0 ? live : 0;
+  })();
+
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
   const frequencyMeta = normalizePestFrequency(requestedFrequencyInput);
@@ -1455,7 +1471,7 @@ function pricePestControl(property, options = {}) {
 
   const propAdj = PROPERTY_TYPE_ADJ[propertyTypeMeta.propertyType] || 0;
   const ageAdj = pestAgeMeta.pestAgeAdj;
-  let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
+  let basePrice = Math.max(pestFloorPerVisitResolved, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
 
   const roachMod = PEST.roachModifier[roachMeta.roachType] || 0;
   // Session 11a Step 2b-3: 2-decimal rounding matches v2 (pricing-engine-v2.js:743).
@@ -1496,8 +1512,12 @@ function pricePestControl(property, options = {}) {
     // Post-discount program floor for this cadence. Emitted only while
     // enforcement is on: estimates generated with the floor keep it for the
     // life of the stored payload (snapshot semantics); flipping the DB kill
-    // switch stops NEW estimates from carrying it.
-    const floorAnn = PEST.enforceFloorPostDiscount ? pestProgramFloorAnnual(fm, v) : null;
+    // switch stops NEW estimates from carrying it. Arm state and floor value
+    // resolve caller-first (saved-estimate replays — pre-push codex P0,
+    // round 9 on #2827), then the live constants.
+    const floorAnn = pestFloorArmedResolved
+      ? pestProgramFloorAnnual(fm, v, pestFloorPerVisitResolved)
+      : null;
     return {
       frequency: freqKey,
       freq: v,
@@ -1505,7 +1525,7 @@ function pricePestControl(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       ...(floorAnn !== null ? {
-        programFloorPerVisit: pestProgramFloorPerVisit(fm),
+        programFloorPerVisit: pestProgramFloorPerVisit(fm, pestFloorPerVisitResolved),
         programFloorAnnual: floorAnn,
         programFloorMonthly: Math.round(floorAnn / 12 * 100) / 100,
       } : {}),
@@ -1862,7 +1882,16 @@ function priceLawnCare(property, options = {}) {
     track = 'st_augustine',
     tier = 'enhanced',
     lawnFreq,
-    useLawnCostFloor = true,
+    // Cost-floor pricing DISARMED by default (owner ruling 2026-07-17:
+    // "forget all floors" — the market table prices every quote; the floor
+    // math still runs for margin REPORTING: minimumCollectedAnnualPrice and
+    // margin stay on every quote for the owner/estimator to judge).
+    // The default reads the live re-arm switch (lawn_pricing_v2.
+    // useLawnCostFloor via db-bridge, in-code false) so direct callers —
+    // weekly invariant sweep, public lawn assessment, pricing snapshots —
+    // track the same arm state as generateEstimate; an explicit option
+    // still overrides either way (codex P2 on the #2827 main-merge).
+    useLawnCostFloor = LAWN_PRICING_V2.useLawnCostFloor === true,
     includeHiddenTiers = false,
     // Internal-only escape hatch for callers that need the raw market
     // baseline (one-time lawn derives its base from recurring perApp and
@@ -1905,7 +1934,14 @@ function priceLawnCare(property, options = {}) {
   // at least this per month regardless of track/size/cadence. Annual is the
   // source of truth; ceil to a whole-dollar-per-app multiple like the cost
   // floor so perApp stays clean.
-  const programMinimumMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  // Caller override first (saved-estimate replays thread the minimum the
+  // quote was priced with — pre-push codex P0, round 9 on #2827; 0 = an
+  // explicit disarmed save), then the live DB-synced constant.
+  const programMinimumMonthly = options.programMinimumMonthly != null
+    && Number.isFinite(Number(options.programMinimumMonthly))
+    && Number(options.programMinimumMonthly) >= 0
+    ? Number(options.programMinimumMonthly)
+    : Number(LAWN_PRICING_V2.programMinimumMonthly);
   const programMinimumAnnual = applyProgramMinimum
     && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
     ? Math.round(programMinimumMonthly * 12 * 100) / 100

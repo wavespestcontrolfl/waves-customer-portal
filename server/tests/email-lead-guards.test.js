@@ -281,6 +281,34 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(state.firstTables).toHaveLength(0);
   });
 
+  test('marketplace solicitor (Bark) never creates a lead even when its own contact details were extracted', async () => {
+    const state = setupDb();
+
+    // Real incident 2026-07-20: Bark's mail embeds Bark's OWN phone and a
+    // second bark.com address, so the extraction looks like a "real contact"
+    // (email differs from from_address, phone present) and the
+    // automated-sender heuristic alone would mint the lead.
+    const result = await handleLeadInquiry(
+      makeEmail({ from_address: 'lucy.thompson@bark.com', from_name: 'Bark' }),
+      makeClassification({
+        extracted: {
+          person_name: 'Boris',
+          email: 'team@bark.com',
+          phone: '(424) 227-5323',
+          service_interest: 'Pest control for bugs or insects',
+        },
+      })
+    );
+
+    expect(result).toEqual({ action: 'skipped_automated_sender' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(insertsFor(state, 'notifications')).toHaveLength(0);
+    expect(emailUpdates(state)).toContainEqual(
+      expect.objectContaining({ auto_action: 'lead_skipped_automated_sender' })
+    );
+    expect(state.firstTables).toHaveLength(0);
+  });
+
   test('automated sender with a real extracted contact creates the lead WITHOUT storing the automated address', async () => {
     const state = setupDb();
 
@@ -431,9 +459,15 @@ describe('lead-guard helpers', () => {
   test('isHardSkippedLeadSender matches the machine-noise list', () => {
     expect(isHardSkippedLeadSender('voicemail@twimlets.com')).toBe(true);
     expect(isHardSkippedLeadSender('anything@twimlets.com')).toBe(true);
-    // The list is live-infrastructure only; one-off junk senders (retired
-    // processor bots etc.) go in the blocked_email_senders denylist, which
-    // email-sync enforces before classification.
+    // Marketplace-solicitor domains match by registrable domain, any local
+    // part, subdomains included.
+    expect(isHardSkippedLeadSender('team@bark.com')).toBe(true);
+    expect(isHardSkippedLeadSender('lucy.thompson@bark.com')).toBe(true);
+    expect(isHardSkippedLeadSender('notifications@mail.bark.com')).toBe(true);
+    // The lists cover live infrastructure + marketplace solicitors; one-off
+    // junk senders (retired processor bots etc.) go in the
+    // blocked_email_senders denylist, which email-sync enforces before
+    // classification.
     expect(isHardSkippedLeadSender('jane.prospect@example.com')).toBe(false);
     expect(isHardSkippedLeadSender(null)).toBe(false);
   });

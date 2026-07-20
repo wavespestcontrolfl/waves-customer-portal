@@ -869,7 +869,18 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   }
 }
 
-async function processDueRuns({ limit = 50, now = new Date() } = {}) {
+async function processDueRuns({ limit = 50, now = new Date(), preview = false, runIds = undefined } = {}) {
+  // runIds binds a confirmed send to the exact runs the operator previewed:
+  // the due/status conditions below still re-apply, so a previewed run the
+  // scheduler already claimed is dropped and runs that became due after the
+  // preview (not in runIds) are never sent unpreviewed. `undefined` = the
+  // scheduler/cron path (full unscoped due batch). An ARRAY scopes to exactly
+  // those ids — and an empty array is fail-closed: it sends nothing rather than
+  // falling through to the whole batch.
+  const scopeToIds = Array.isArray(runIds);
+  if (scopeToIds && runIds.length === 0) {
+    return preview ? { preview: true, dueCount: 0, runs: [] } : { processed: 0, results: [] };
+  }
   let due;
   try {
     const staleBefore = staleRunningCutoff(now);
@@ -880,13 +891,36 @@ async function processDueRuns({ limit = 50, now = new Date() } = {}) {
           .where((runnable) => runnable.whereIn('status', RUNNABLE_STATUSES).where('run_after', '<=', now))
           .orWhere((stale) => stale.where({ status: 'running' }).where('updated_at', '<=', staleBefore));
       })
+      .modify((q) => {
+        if (scopeToIds) q.whereIn('id', runIds);
+      })
       .orderBy('run_after', 'asc')
       .limit(Math.min(Number(limit) || 50, 200));
   } catch (err) {
     if (/relation .*email_template_automation_runs.* does not exist/i.test(err.message || '')) {
-      return { processed: 0, reason: 'automation run table missing' };
+      return preview
+        ? { preview: true, dueCount: 0, runs: [], reason: 'automation run table missing' }
+        : { processed: 0, reason: 'automation run table missing' };
     }
     throw err;
+  }
+
+  // Dry run: report exactly which runs the same query would send, so the
+  // operator can confirm before firing up to 200 customer emails. No side
+  // effects — nothing is executed or mutated.
+  if (preview) {
+    return {
+      preview: true,
+      dueCount: due.length,
+      runs: due.map((run) => ({
+        id: run.id,
+        recipient_email: run.recipient_email,
+        automation_key: run.automation_key,
+        template_key: run.template_key,
+        status: run.status,
+        run_after: run.run_after,
+      })),
+    };
   }
 
   let processed = 0;

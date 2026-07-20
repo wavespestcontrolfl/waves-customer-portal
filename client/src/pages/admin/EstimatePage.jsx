@@ -9,7 +9,10 @@ import React, {
   Component,
 } from "react";
 import {
+  applyServerLawnPricingConfig,
+  applyServerPestPricingConfig,
   calculateEstimate,
+  collectMarginReviewNotes,
   fmt,
   fmtInt,
   isCommercialEstimateInput,
@@ -1073,11 +1076,51 @@ function EstimateToolView() {
     };
   }, [form]);
 
-  const [estimate, setEstimate] = useState(null);
+  const [estimate, setEstimateState] = useState(null);
+  // Invalidation version for in-flight generates (mirrors EstimateToolViewV2):
+  // bumped whenever the preview clears, so a calculate that was running when
+  // an edit landed discards its result instead of re-mounting stale pricing
+  // that Save would then persist.
+  const estimateVersionRef = useRef(0);
+  const setEstimate = useCallback((value) => {
+    if (value === null) estimateVersionRef.current += 1;
+    setEstimateState(value);
+  }, []);
+  // Address-lookup guards (same seq+abort pattern as V2's send-phone lookup):
+  // a slow property/customer response for a PREVIOUS address must never
+  // autofill — or stamp its customer match and loyalty discount onto — a
+  // newer one.
+  const lookupSeqRef = useRef(0);
+  const lookupAbortRef = useRef(null);
+  // Live mirror of form.address for the in-flight lookup's apply gate: the
+  // seq only advances when ANOTHER lookup starts, so an address EDIT during
+  // a lookup needs its own invalidation — the response is compared against
+  // the address the form holds NOW before anything applies.
+  const formAddressRef = useRef("");
   const [savedId, setSavedId] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
+  const [generating, setGenerating] = useState(false);
+  // Synchronous in-flight truth for the guard (state lags a tick) + the
+  // queued request: a generate asked for WHILE one is running must not be
+  // dropped — the running one discards itself on the version check, and the
+  // old preview would stay mounted for Save to persist against the newer
+  // form. The queue replays the LATEST request from an effect, so it reads
+  // fresh form state, never a stale closure.
+  const generatingRef = useRef(false);
+  const [pendingGenerate, setPendingGenerate] = useState(null);
+  useEffect(() => {
+    if (!generating && pendingGenerate) {
+      setPendingGenerate(null);
+      void doGenerate(pendingGenerate.overrides);
+    }
+    // doGenerate is re-created each render — the effect deliberately uses
+    // the newest one so the queued run prices the CURRENT form.
+  }, [generating, pendingGenerate]);
+  useEffect(() => {
+    formAddressRef.current = String(form.address || "");
+  }, [form.address]);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [showSendForm, setShowSendForm] = useState(false);
@@ -1132,6 +1175,11 @@ function EstimateToolView() {
         setEstimate(null);
         setSavedId(null);
       }
+      // EVERY pricing-input edit invalidates an in-flight generate — most
+      // setters (lawnFreq, pestFreq, sqft, …) deliberately keep the mounted
+      // preview, but a calculate still in flight was priced from pre-edit
+      // inputs and must not mount over the newer form.
+      estimateVersionRef.current += 1;
     },
     [],
   );
@@ -1148,6 +1196,8 @@ function EstimateToolView() {
       setEstimate(null);
       setSavedId(null);
     }
+    // See set(): every pricing-input change invalidates in-flight generates.
+    estimateVersionRef.current += 1;
   }, []);
 
   /* ── termite footprint prefill ─────────────────────────────── */
@@ -1216,6 +1266,62 @@ function EstimateToolView() {
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
 
+  /* ── Live lawn pricing config → client fallback engine ────── */
+  // The fallback engine (calculateEstimate, used when there is no enriched
+  // property) mirrors the server's DISARMED program minimum (0) statically.
+  // A live DB re-arm of lawn_pricing_v2.programMinimumMonthly must reach it
+  // too, or fallback estimates preview/save below-minimum rows the public
+  // route then refuses to accept. Fetch failure leaves the disarmed default.
+  // Refreshed on mount AND before every fallback calculation (codex P1: a
+  // re-arm while an estimator tab stays open must reach the next fallback
+  // quote — these saves have no replayable engine input, so a stale
+  // disarmed module state would persist a below-floor client price). The
+  // fallback generate path awaits the tracked promise; 5s abort keeps that
+  // bounded. There is NO fail-open: every fallback quote requires the
+  // refresh it just ran to succeed, because the pricingMetadata stamp makes
+  // whatever state priced the quote authoritative at view/accept and these
+  // saves have no replayable engine input — pricing on stale module state
+  // (fresh-session defaults OR a pre-re-arm load) would permanently persist
+  // a floor bypass (pre-push codex P0+P1 rounds on #2827). A failed refresh
+  // blocks the quote with a retry alert instead. A 404 is AUTHORITATIVE,
+  // not a failure: an absent pricing_config row means the disarmed in-code
+  // defaults BY DESIGN (db-bridge's kill-value pattern) — it resets to
+  // them and counts as a successful load.
+  const pricingConfigReadyRef = useRef(Promise.resolve(false));
+  const refreshPricingConfig = useCallback(() => {
+    const run = (async () => {
+      const fetchConfigRow = async (key) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
+        try {
+          const r = await fetch(`/api/admin/pricing-config/${key}`, {
+            headers: authHeaders,
+            signal: ctrl.signal,
+          });
+          if (r.status === 404) return { ok: true, data: null };
+          if (!r.ok) return { ok: false, data: null };
+          return { ok: true, data: (await r.json())?.data ?? null };
+        } catch {
+          return { ok: false, data: null }; /* last applied state stands */
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const [lawnRow, pestRow] = await Promise.all([
+        fetchConfigRow("lawn_pricing_v2"),
+        fetchConfigRow("pest_base"),
+      ]);
+      if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
+      if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
+      return lawnRow.ok && pestRow.ok;
+    })();
+    pricingConfigReadyRef.current = run;
+    return run;
+  }, []);
+  useEffect(() => {
+    refreshPricingConfig();
+  }, [refreshPricingConfig]);
+
   /* ── Manual discount presets (pulled from /admin/discounts) ── */
   const [discountPresets, setDiscountPresets] = useState([]);
   const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
@@ -1279,7 +1385,9 @@ function EstimateToolView() {
   function toggleServiceSpecificDiscount(key) {
     setEstimate(null);
     setSavedId(null);
-    setSavedViewUrl(null);
+    // NOTE: no setSavedViewUrl here — unlike EstimateToolViewV2, this legacy
+    // page has no savedViewUrl state; the call (copied from V2) was a
+    // guaranteed ReferenceError on every service-specific discount toggle.
     setForm((f) => {
       const current = new Set(Array.isArray(f.serviceSpecificDiscountKeys) ? f.serviceSpecificDiscountKeys : []);
       if (current.has(key)) current.delete(key);
@@ -1302,14 +1410,36 @@ function EstimateToolView() {
       type: "loading",
       msg: "Running AI satellite analysis...",
     });
+    // Every lookup supersedes any in-flight one: bump the sequence and abort
+    // the old fetch so a slow response for a previous address can never
+    // autofill this one.
+    const lookupSeq = ++lookupSeqRef.current;
+    if (lookupAbortRef.current) lookupAbortRef.current.abort();
+    const lookupController = new AbortController();
+    lookupAbortRef.current = lookupController;
+    // Supersession gate for everything this lookup applies. A NEWER lookup
+    // owns the status UI (plain return); an address edit with NO new lookup
+    // leaves nobody to clear the "loading" status this lookup set — clear it
+    // here or the page shows the AI/property lookup running forever.
+    const lookupSuperseded = () => {
+      if (lookupSeq !== lookupSeqRef.current) return true;
+      if (formAddressRef.current.trim() !== address) {
+        setLookupStatus({ type: "", msg: "" });
+        setSatelliteStatus({ type: "", msg: "" });
+        return true;
+      }
+      return false;
+    };
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ address }),
+        signal: lookupController.signal,
       });
       if (!r.ok) throw new Error("API " + r.status);
       const data = await r.json();
+      if (lookupSuperseded()) return;
 
       if (data.errors?.length > 0 && !data.enriched) {
         setLookupStatus({
@@ -1346,6 +1476,7 @@ function EstimateToolView() {
       if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
+      estimateVersionRef.current += 1;
       setForm((f) => {
         const next = {
           ...f,
@@ -1366,10 +1497,11 @@ function EstimateToolView() {
         const addrSearch = address.split(",")[0].trim();
         const custR = await fetch(
           `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`,
-          { headers: authHeaders },
+          { headers: authHeaders, signal: lookupController.signal },
         );
         if (custR.ok) {
           const custData = await custR.json();
+          if (lookupSuperseded()) return;
           const custs = custData.customers || custData || [];
           const match = custs.find(
             (c) =>
@@ -1380,6 +1512,10 @@ function EstimateToolView() {
           );
           if (match) {
             setExistingCustomerMatch(match);
+            // The match flips isRecurringCustomer (loyalty pricing) below —
+            // a generate started between the property autofill and this
+            // point must not mount a result priced without it.
+            estimateVersionRef.current += 1;
             // Only apply loyalty discount if they have an active WaveGuard tier.
             // 'Commercial' is a flat non-member tier — exclude it so a commercial
             // customer doesn't unlock recurring-customer loyalty discounts.
@@ -1400,6 +1536,11 @@ function EstimateToolView() {
       } catch {
         /* ignore customer lookup errors */
       }
+
+      // The inner catch above deliberately swallows customer-lookup errors —
+      // including the AbortError a NEWER lookup raises by aborting this one —
+      // so re-gate before the satellite/status writes below.
+      if (lookupSuperseded()) return;
 
       // Satellite images
       if (data.satellite) {
@@ -1464,6 +1605,9 @@ function EstimateToolView() {
         console.warn("[estimate] Partial errors:", data.errors);
       }
     } catch (e) {
+      // A superseded lookup aborts deliberately — its error must not paint
+      // over the newer lookup's status.
+      if (e?.name === "AbortError" || lookupSeq !== lookupSeqRef.current) return;
       setLookupStatus({ type: "err", msg: e.message });
       setSatelliteStatus({ type: "", msg: "" });
     }
@@ -1567,6 +1711,21 @@ function EstimateToolView() {
 
   /* ── generate estimate ────────────────────────────────────── */
   async function doGenerate(overrides = {}) {
+    // Mirrors EstimateToolViewV2's doGenerate guards: no overlapping
+    // generates (double-click / two frequency tiles), and a result priced
+    // from pre-edit inputs — the invalidation version moved while the
+    // calculate was in flight — is discarded instead of re-mounting stale
+    // pricing that Save would persist.
+    if (generatingRef.current) {
+      // Queue the LATEST request instead of dropping it (codex: a dropped
+      // regenerate leaves the old preview mounted for Save).
+      setPendingGenerate({ overrides });
+      return;
+    }
+    const versionAtStart = estimateVersionRef.current;
+    generatingRef.current = true;
+    setGenerating(true);
+    try {
     const formIsCommercial = isCommercialEstimateInput(form);
     const serviceFlagValues = [
       form.svcLawn,
@@ -1982,6 +2141,7 @@ function EstimateToolView() {
           result.modifiers = mods;
         }
 
+        if (estimateVersionRef.current !== versionAtStart) return;
         setEstimate(result);
         setSavedId(null);
         setLookupStatus((s) => ({ ...s, type: "ok" }));
@@ -1992,6 +2152,17 @@ function EstimateToolView() {
     }
 
     // Fallback: use v1 client-side calculation
+    // Refresh the live pricing config for THIS quote (bounded — 5s abort +
+    // fail-open to the last applied state) so a re-arm after mount, or an
+    // early generate racing the initial load, can't price on stale floor
+    // switches. A failed refresh BLOCKS the quote — no fail-open, ever:
+    // stale module state would be stamped as the quote's authoritative
+    // pricing config (pre-push codex P0 — see refreshPricingConfig).
+    const pricingConfigOk = await refreshPricingConfig();
+    if (!pricingConfigOk) {
+      alert("Live pricing configuration could not be loaded — retry in a moment. (Quotes are blocked rather than priced on possibly-stale floor settings.)");
+      return;
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -2047,13 +2218,21 @@ function EstimateToolView() {
       alert(result.error);
       return;
     }
+    if (estimateVersionRef.current !== versionAtStart) return;
     setEstimate(result);
     setSavedId(null);
+    } finally {
+      generatingRef.current = false;
+      setGenerating(false);
+    }
   }
 
   /* ── save estimate ────────────────────────────────────────── */
   async function doSave() {
-    if (!estimate) return null;
+    // saving guard: the button's disabled prop lags a re-render — a double
+    // fire before it lands would POST two estimate rows (no idempotency key
+    // on this route).
+    if (saving || !estimate) return null;
     setSaving(true);
     try {
       const E = estimate;
@@ -2096,6 +2275,7 @@ function EstimateToolView() {
 
   /* ── send estimate ────────────────────────────────────────── */
   async function doSend(id, method) {
+    if (sending) return;
     const useId = id || savedId;
     if (!useId) {
       alert("Save the estimate first.");
@@ -5305,10 +5485,20 @@ function EstimateToolView() {
                         </div>{" "}
                       </>
                     )}
-                    {E.pricingMetadata && (
-                      (E.pricingMetadata.skippedServices?.length > 0 ||
-                        E.pricingMetadata.warnings?.length > 0 ||
-                        E.pricingMetadata.manualReviewReasons?.length > 0) && (
+                    {(() => {
+                      // Report-only low-margin signals (owner ruling
+                      // 2026-07-17: margins are surfaced, never enforced) —
+                      // rendered alongside the engine's pricing metadata so
+                      // the owner sees "this looks low" before sending.
+                      const marginNotes = collectMarginReviewNotes(E);
+                      const pm = E.pricingMetadata || {};
+                      const hasNotes =
+                        pm.skippedServices?.length > 0 ||
+                        pm.warnings?.length > 0 ||
+                        pm.manualReviewReasons?.length > 0 ||
+                        marginNotes.length > 0;
+                      if (!hasNotes) return null;
+                      return (
                         <div
                           style={{
                             marginBottom: 24,
@@ -5321,26 +5511,31 @@ function EstimateToolView() {
                           }}
                         >
                           <div style={{ fontWeight: 700, marginBottom: 4 }}>Pricing Review Notes</div>
-                          {(E.pricingMetadata.skippedServices || []).map((item, i) => (
+                          {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} style={{ color: C.muted }}>
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
                                 ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
                                 : item.skippedReason}
                             </div>
                           ))}
-                          {(E.pricingMetadata.warnings || []).map((warning, i) => (
+                          {(pm.warnings || []).map((warning, i) => (
                             <div key={`warning-${i}`} style={{ color: C.muted }}>
                               {warning}
                             </div>
                           ))}
-                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                          {(pm.manualReviewReasons || []).map((reason, i) => (
                             <div key={`manual-review-${i}`} style={{ color: C.muted }}>
                               {humanizeQuoteReason(reason)}
                             </div>
                           ))}
+                          {marginNotes.map((note, i) => (
+                            <div key={`margin-${i}`} style={{ color: C.ink, fontWeight: 600 }}>
+                              {note}
+                            </div>
+                          ))}
                         </div>
-                      )
-                    )}
+                      );
+                    })()}
 
                     {/* ── WaveGuard + Totals ───────────────── */}
                     {(E.recurring.serviceCount > 0 ||

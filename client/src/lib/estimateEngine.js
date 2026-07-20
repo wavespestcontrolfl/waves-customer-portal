@@ -340,10 +340,17 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
-  // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly (owner
-  // directive 2026-07-09): no recurring lawn plan below $50/mo. Server is
-  // authoritative on save; this keeps the preview from under-quoting.
-  programMinimumMonthly: 50,
+  // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly.
+  // DISARMED (owner ruling 2026-07-17: "forget all floors") — 0 is the
+  // designed disable value; every reader below guards on > 0. Server is
+  // authoritative on save.
+  programMinimumMonthly: 0,
+  // Mirrors server constants.LAWN_PRICING_V2.useLawnCostFloor (cost-floor
+  // enforcement arm switch, in-code false). A live DB re-arm reaches this
+  // fallback engine via applyServerLawnPricingConfig, so the preview's
+  // floor SELECTION matches the server-recomputed save (codex P2 on the
+  // #2827 main-merge).
+  useLawnCostFloor: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
@@ -358,6 +365,164 @@ const LAWN_PRICING_V2 = {
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
 };
+// Live server override for the lawn program minimum. The static 0 above is
+// only the DISARMED default — a live DB re-arm (pricing_config
+// lawn_pricing_v2.programMinimumMonthly, the documented no-deploy path) must
+// reach this fallback engine too, or estimates without an enriched property
+// would preview/save below-minimum rows the public route then refuses to
+// accept (codex P1 on #2827). EstimatePage fetches the row on mount and
+// applies it here; on any fetch failure the disarmed default (0) stands.
+export function applyServerLawnPricingConfig(config) {
+  const n = Number(config?.programMinimumMonthly);
+  LAWN_PRICING_V2.programMinimumMonthly = Number.isFinite(n) && n > 0 ? n : 0;
+  // Cost-floor enforcement arm switch rides the same row — absent/non-true
+  // resolves to the disarmed default, exactly like db-bridge on the server.
+  LAWN_PRICING_V2.useLawnCostFloor = config?.useLawnCostFloor === true;
+  return LAWN_PRICING_V2.programMinimumMonthly;
+}
+
+// Mirrors server constants PEST enforceFloorPostDiscount (the pest_base
+// enforce_floor_post_discount DB key, in-code false). While armed, the
+// fallback engine stamps floorPa/floorAnn/floorMo on pest tiers and applies
+// the WaveGuard give-back — matching the server's applyMarginGuard lift —
+// so a no-enriched-profile pest estimate can't be saved/accepted below the
+// re-armed floor (codex P2 round 8 on #2827).
+const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };
+
+export function applyServerPestPricingConfig(config) {
+  PEST_BASE.enforceFloorPostDiscount = (
+    config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
+  ) === true;
+  // Live-configurable per-visit floor (pest_base.floor) — the same value the
+  // server's pestProgramFloorPerVisit reads (PEST.floor, db-bridge synced),
+  // so a re-arm at a floor other than $89 stamps/gives back the SAME floor
+  // the server normalizes and view/accept clamps at (pre-push codex P0,
+  // round 9 on #2827). Absent/invalid resets the in-code default — the
+  // kill-value pattern. ROUNDING MUST MIRROR THE BRIDGE: db-bridge applies
+  // r() (whole-dollar round; PROCESSING_ADJUSTMENT is 1.00) to
+  // pest_base.floor, so a fractional configured floor like $89.50 becomes
+  // $90 server-side — a cents-keeping client would price the bound tier
+  // BELOW the server floor and the save gate would 409 every fallback save.
+  const floor = Number(config?.floor);
+  PEST_BASE.floorPerVisit = Number.isFinite(floor) && floor > 0
+    ? Math.round(floor)
+    : 89;
+  return PEST_BASE.enforceFloorPostDiscount;
+}
+
+// Admin-facing low-margin review notes (owner ruling 2026-07-17: margins are
+// surfaced, never enforced). Reads the engine's report-only signals off a
+// mapped estimate result — the marginWarnings array plus the per-line
+// belowMarginFloor / belowProgramFloor / finalMargin flags on results.pest
+// and results.tsMeta — and returns plain strings for the estimator's
+// Pricing Review Notes panel. Nothing here moves a price; the owner adjusts
+// the line in the estimator if it reads too thin.
+export function collectMarginReviewNotes(E) {
+  if (!E || typeof E !== "object") return [];
+  const notes = [];
+  const pct = (ratio) => {
+    const n = Number(ratio);
+    return Number.isFinite(n) ? `${(Math.round(n * 1000) / 10).toFixed(1)}%` : null;
+  };
+  const money = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? `$${(Math.round(n * 100) / 100).toFixed(2)}` : null;
+  };
+  const SERVICE_LABELS = {
+    pest_control: "Pest Control",
+    lawn_care: "Lawn Care",
+    tree_shrub: "Tree & Shrub",
+    mosquito: "Mosquito Control",
+    termite_bait: "Termite Bait",
+  };
+  const label = (service) => SERVICE_LABELS[service] || service || "Service";
+
+  const warnings = Array.isArray(E.marginWarnings)
+    ? E.marginWarnings
+    : Array.isArray(E.recurring?.marginWarnings)
+      ? E.recurring.marginWarnings
+      : [];
+  for (const w of warnings) {
+    if (!w) continue;
+    if (w.type === "manual_discount_below_margin_floor") {
+      const m = pct(w.margin);
+      const floor = pct(w.marginFloor);
+      notes.push(
+        `${label(w.service)}: manual discount drops the post-discount margin to ${m || "below target"}${floor ? ` (review floor ${floor})` : ""}. Nothing was capped — raise the line if it reads too thin.`,
+      );
+    } else if (w.type === "manual_discount_below_pest_program_floor") {
+      const finalAnn = money(w.finalAnnual);
+      const floorAnn = money(w.programFloorAnnual);
+      notes.push(
+        `${label(w.service)}: manual discount takes the collected annual to ${finalAnn || "below the program-floor reference"}${floorAnn ? ` — under the ${floorAnn} program-floor reference` : ""}.`,
+      );
+    } else if (w.type === "waveguard_discount_below_margin_floor") {
+      // Normalized like the manual branch — server-emitted messages start
+      // with the raw service key ("lawn_care …"), which would slip past the
+      // standing-lawn dedupe below and double-note a thin WaveGuard lawn
+      // line (codex P3 round 13 on #2827).
+      const m = pct(w.margin);
+      const floorRatio = Number(w.marginFloor);
+      const floorLabel = Number.isFinite(floorRatio) ? `${Math.round(floorRatio * 100)}%` : null;
+      notes.push(
+        `${label(w.service)}: WaveGuard discount drops collected margin to ${m || "below target"}${floorLabel ? ` (below the ${floorLabel} review floor)` : ""} — price stands as discounted.`,
+      );
+    } else if (w.message) {
+      notes.push(String(w.message));
+    }
+  }
+
+  const lineSignals = [
+    { row: E.results?.pest, name: "Pest Control", floorAnn: E.results?.pest?.floorAnn },
+    { row: E.results?.tsMeta, name: "Tree & Shrub", floorAnn: null },
+  ];
+  for (const { row, name, floorAnn } of lineSignals) {
+    if (!row || typeof row !== "object") continue;
+    if (row.belowMarginFloor === true) {
+      const m = pct(row.finalMargin);
+      notes.push(
+        `${name}: post-discount margin${m ? ` ${m}` : ""} is below the margin review floor. Price stands as discounted — adjust the line if needed.`,
+      );
+    }
+    if (row.belowProgramFloor === true) {
+      const floor = money(floorAnn);
+      notes.push(
+        `${name}: discounted annual is below the program-floor reference for its cadence${floor ? ` (${floor}/yr)` : ""}.`,
+      );
+    }
+  }
+
+  // Standing lawn margin — no discount involved: a market-priced lawn line
+  // already under the 35% review margin gets a report-only note too, since
+  // enforcement is disarmed and this visibility IS the policy (codex P2
+  // round 12 on #2827). Reads the fallback rows (costs.total vs annual) and
+  // the mapped shapes (prov.margin / lawnMeta.margin). Skipped when a
+  // discount warning above already covers the lawn line.
+  if (!notes.some((n) => n.startsWith("Lawn Care"))) {
+    const lawnRows = Array.isArray(E.results?.lawn) ? E.results.lawn : [];
+    const selectedLawn = lawnRows.find((t) => t?.recommended === true) || null;
+    let lawnMargin = null;
+    if (selectedLawn) {
+      const ann = Number(selectedLawn.ann ?? selectedLawn.annual);
+      const cost = Number(selectedLawn.costs?.total);
+      if (Number.isFinite(ann) && ann > 0 && Number.isFinite(cost)) {
+        lawnMargin = (ann - cost) / ann;
+      } else {
+        const provMargin = Number(selectedLawn.prov?.margin ?? E.results?.lawnMeta?.margin);
+        if (Number.isFinite(provMargin)) lawnMargin = provMargin;
+      }
+    } else if (Number.isFinite(Number(E.results?.lawnMeta?.margin))) {
+      lawnMargin = Number(E.results.lawnMeta.margin);
+    }
+    if (lawnMargin != null && lawnMargin < 0.35 - 1e-4) {
+      notes.push(
+        `Lawn Care: collected margin ${pct(lawnMargin) || "below target"} is under the 35% review floor at the quoted price. Nothing was capped — adjust the line if it reads too thin.`,
+      );
+    }
+  }
+  return notes;
+}
+
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {
@@ -1322,6 +1487,27 @@ export function calculateEstimate(inputs) {
     warnings: [],
     manualReviewReasons: [],
     skippedServices: [],
+    // Resolved floor arm state for THIS fallback pricing run. The save path
+    // persists the result at estimate_data.result, so estimate-public's
+    // estimateLawnFloorArmed reads the stamp and view/accept clamps exactly
+    // as the quote was priced even if the global switch flips later —
+    // matching the server engine's pricingMetadata stamp (codex P2 round 9
+    // on #2827).
+    lawnCostFloorArmed: LAWN_PRICING_V2.useLawnCostFloor === true,
+    // Resolved program minimum for THIS run (0 = disarmed) — same replay
+    // rule: estimate-public and the converter clamp/protect a saved fallback
+    // quote at the minimum it was priced with, never the live global at
+    // render time (pre-push codex P0, round 9). This also makes the
+    // config-refresh fail-open self-consistent: whatever value priced the
+    // quote is the value view/accept replays.
+    lawnProgramMinimumMonthly: (() => {
+      const n = Number(LAWN_PRICING_V2.programMinimumMonthly);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    })(),
+    // Pest floor state mirrors the server engine's stamps so replay
+    // resolution reads one shape everywhere.
+    pestProgramFloorArmed: PEST_BASE.enforceFloorPostDiscount === true,
+    pestProgramFloorPerVisit: PEST_BASE.floorPerVisit,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {
@@ -1625,7 +1811,15 @@ export function calculateEstimate(inputs) {
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
-      const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
+      // Cost-floor SELECTION disarmed by default (owner ruling 2026-07-17:
+      // "forget all floors") — mirrors the server's useLawnCostFloor default
+      // so the preview matches the server-recomputed save. A live DB re-arm
+      // (lawn_pricing_v2.useLawnCostFloor, applied on mount via
+      // applyServerLawnPricingConfig) restores the pre-ruling floor
+      // selection here too. costFloorAnnual is still computed and emitted
+      // below for margin visibility either way.
+      const floorApplied = LAWN_PRICING_V2.useLawnCostFloor === true
+        && floorPrice.costFloorAnnual > marketAnnual;
       let ann = floorApplied ? floorPrice.ann : marketAnnual;
       const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
       if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
@@ -1695,23 +1889,36 @@ export function calculateEstimate(inputs) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     const adj = pestBaseAdjustment(fpEff);
-    const pp = Math.max(89, 117 + adj);
+    // List-price bottom follows the LIVE configured floor — the server's
+    // basePrice is Math.max(PEST.floor, PEST.base + adj) with PEST.floor
+    // db-bridge-synced from pest_base.floor, so a tuned floor must move the
+    // fallback's bottom cell too or preview/persisted totals drift from the
+    // server recompute (codex P2 round 10 on #2827). Default 89 unchanged.
+    const pp = Math.max(PEST_BASE.floorPerVisit, 117 + adj);
     const roachAddOn = 0;
     R.pestTiers = [];
     pestFrequencyTiers.forEach(ft => {
       const perApp = Math.round((pp * ft.disc + roachAddOn) * 100) / 100;
       const ann = Math.round(perApp * ft.f * 100) / 100;
       const mo = Math.round(ann / 12 * 100) / 100;
-      // Post-discount program floor mirror (server constants.PEST.floor = 89,
-      // per-visit basis rounded before annualizing — see server discount-engine
-      // pestProgramFloorAnnual). Rides on the stored tier rows so the public
-      // estimator holds the WaveGuard-discounted pest price at the floor.
-      const floorPa = Math.round(89 * ft.disc * 100) / 100;
-      const floorAnn = Math.round(floorPa * ft.f * 100) / 100;
-      const floorMo = Math.round(floorAnn / 12 * 100) / 100;
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, floorPa, floorAnn, floorMo });
+      // Post-discount program floor metadata (floorPa/floorAnn/floorMo) is
+      // stamped only while the pest floor is re-armed (live pest_base
+      // enforce_floor_post_discount via applyServerPestPricingConfig) —
+      // mirroring the server's snapshot semantics (service-pricing stamps
+      // floor metadata only while PEST.enforceFloorPostDiscount is on;
+      // normalizeClientPestFloorMetadata strips it from fallback saves
+      // while off). Disarmed default (owner ruling 2026-07-17): no stamp.
+      const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true
+        ? (() => {
+            const floorPa = Math.round(PEST_BASE.floorPerVisit * ft.disc * 100) / 100;
+            const floorAnn = Math.round(floorPa * ft.f * 100) / 100;
+            const floorMo = Math.round(floorAnn / 12 * 100) / 100;
+            return { floorPa, floorAnn, floorMo };
+          })()
+        : {};
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, ...pestFloorMeta });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, floorPa, floorAnn, floorMo };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, ...pestFloorMeta };
       }
     });
     R.pestRoachMod = roachMod;
@@ -1951,7 +2158,7 @@ export function calculateEstimate(inputs) {
     // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
     // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
     // (+1, whole-dollar prices), matching the server engine.
-    const quarterlyBase = Math.max(89, 117 + pestBaseAdjustment(fpEff));
+    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));
     let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({
@@ -2687,10 +2894,22 @@ export function calculateEstimate(inputs) {
   // WaveGuard % gives back whatever would cut the lawn slice below the
   // floor, and the manual discount below is capped at the non-lawn room
   // plus lawn's above-floor headroom.
-  const lawnFloorAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
+  const lawnProgramMinAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
     && Number(LAWN_PRICING_V2.programMinimumMonthly) > 0
     ? Math.round(Number(LAWN_PRICING_V2.programMinimumMonthly) * 12 * 100) / 100
     : 0;
+  // Re-armed cost floor guards POST-DISCOUNT too (codex P2 round 9 on
+  // #2827): selection only lifts a row whose floor exceeds market, but a
+  // market-priced row still may not DISCOUNT below its own 35% cost floor
+  // while the switch is armed — mirroring the server's WaveGuard/manual
+  // caps so this fallback save matches what estimate-public re-clamps at
+  // view/accept. Disarmed default: 0, guard falls back to the program
+  // minimum alone.
+  const lawnCostFloorAnnualGuard = LAWN_PRICING_V2.useLawnCostFloor === true
+    && Number.isFinite(Number(selectedRecurringLawn?.costFloorAnnual))
+    ? Math.round(Number(selectedRecurringLawn.costFloorAnnual) * 100) / 100
+    : 0;
+  const lawnFloorAnnualGuard = Math.max(lawnProgramMinAnnualGuard, lawnCostFloorAnnualGuard);
   let lawnFloorProtectedAfterWg = 0;
   if (lawnFloorAnnualGuard > 0) {
     let wgGiveBack = 0;
@@ -2704,17 +2923,16 @@ export function calculateEstimate(inputs) {
     }
     da = Math.round((da - wgGiveBack) * 100) / 100;
   }
-  // Pest post-discount program floor mirror (server discount-engine
-  // applyMarginGuard): the WaveGuard percent may not take pest's collected
-  // annual below floorAnn for the selected cadence. Give back the overshoot
-  // on the pest line — other services keep their full percent, matching the
-  // server's per-line clamp. Manual discounts stay uncapped for pest
-  // (warn-only, owner loss-leader override); the lawn floor's manual-
-  // discount cap below is lawn-specific and unaffected. The two floors
-  // clamp DIFFERENT lines (pest vs lawn_care), so their give-backs on the
-  // shared discount accumulator are independent and order-free.
+  // Pest post-discount program floor give-back: DISARMED by default (owner
+  // ruling 2026-07-17: "forget all floors" — the WaveGuard percent applies
+  // in full, matching the server's report-only applyMarginGuard) but
+  // restored while the live pest_base enforce_floor_post_discount key is
+  // re-armed, mirroring the server's re-armed lift so the fallback save
+  // can't undercut the floor (codex P2 round 8 on #2827). The floorAnn
+  // metadata only exists on R.pest while armed (stamped above).
   let pestProgramFloorApplied = false;
-  if (R.pest && Number.isFinite(Number(R.pest.floorAnn)) && wd > 0) {
+  if (PEST_BASE.enforceFloorPostDiscount === true
+    && R.pest && Number.isFinite(Number(R.pest.floorAnn)) && wd > 0) {
     const pestFloorAnn = Math.min(Number(R.pest.floorAnn), R.pest.ann);
     const pestOvershoot = Math.round((R.pest.ann * wd - (R.pest.ann - pestFloorAnn)) * 100) / 100;
     if (pestOvershoot > 0) {
@@ -2763,6 +2981,56 @@ export function calculateEstimate(inputs) {
   // Discounts are reported as commercial terms only. They do not block or warn
   // estimates based on a hypothetical after-discount margin.
   const marginWarnings = [];
+  // …except the report-only lawn "looks low" signal (owner ruling
+  // 2026-07-17: margins surfaced, never enforced). Mirrors the server's
+  // WaveGuard below-margin warning so fallback (no-enriched-profile) lawn
+  // quotes still light up the Pricing Review Notes panel when the WaveGuard
+  // percent drops collected margin under the 35% review floor (codex P2
+  // round 8 on #2827). Same 1e-4 at-floor tolerance as the server.
+  if (selectedRecurringLawn) {
+    const lawnAnn = Number(selectedRecurringLawn.ann);
+    const lawnCostTotal = Number(selectedRecurringLawn.costs?.total);
+    if (Number.isFinite(lawnAnn) && lawnAnn > 0 && Number.isFinite(lawnCostTotal)) {
+      let lawnAfterWg = lawnAnn * (1 - wd);
+      if (lawnFloorAnnualGuard > 0) {
+        lawnAfterWg = Math.max(lawnAfterWg, Math.min(lawnAnn, lawnFloorAnnualGuard));
+      }
+      lawnAfterWg = Math.round(lawnAfterWg * 100) / 100;
+      const wgMargin = lawnAfterWg > 0 ? (lawnAfterWg - lawnCostTotal) / lawnAfterWg : -1;
+      if (wd > 0 && wgMargin < 0.35 - 1e-4) {
+        marginWarnings.push({
+          service: 'lawn_care',
+          type: 'waveguard_discount_below_margin_floor',
+          margin: Math.round(wgMargin * 1000) / 1000,
+          marginFloor: 0.35,
+          finalAnnual: lawnAfterWg,
+          message: `Lawn Care: WaveGuard discount drops collected margin to ${(wgMargin * 100).toFixed(1)}% (below the 35% review floor) — price stands as discounted.`,
+        });
+      }
+      // Manual discounts too (codex P2 round 9): the aggregate manual cut is
+      // unattributed, so lawn's share is proportional over the discountable
+      // recurring base — a lawn-only quote takes the full cut. Mirrors the
+      // server's warn-only manual_discount_below_margin_floor entries; the
+      // review-notes collector already renders this type.
+      if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
+        const lawnManualCut = manualDiscountAmount
+          * (Math.min(lawnAfterWg, manualDiscountableRecurringAnnual) / manualDiscountableRecurringAnnual);
+        const lawnFinalAnnual = Math.round((lawnAfterWg - lawnManualCut) * 100) / 100;
+        const manualMargin = lawnFinalAnnual > 0 ? (lawnFinalAnnual - lawnCostTotal) / lawnFinalAnnual : -1;
+        if (manualMargin < 0.35 - 1e-4) {
+          marginWarnings.push({
+            service: 'lawn_care',
+            type: 'manual_discount_below_margin_floor',
+            margin: Math.round(manualMargin * 1000) / 1000,
+            marginFloor: 0.35,
+            finalAnnual: lawnFinalAnnual,
+            manualDiscountShare: Math.round(lawnManualCut * 100) / 100,
+            message: `Lawn Care: manual discount drops collected margin to ${(manualMargin * 100).toFixed(1)}% (below the 35% review floor). Nothing was capped — raise the line if it reads too thin.`,
+          });
+        }
+      }
+    }
+  }
 
   let ot = 0;
   otItems.forEach(i => ot += i.price);

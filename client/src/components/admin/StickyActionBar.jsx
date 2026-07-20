@@ -111,15 +111,18 @@ export function CustomerActionBar({ customer, standalone }) {
   const phone = customer?.phone;
   const customerId = customer?.id || customer?.customerId;
 
+  // Hoisted so both the Estimate prefill URL and the Call action can use it
+  // (the Call onClick below references fullName).
+  const fullName =
+    `${customer?.firstName || ""} ${customer?.lastName || ""}`.trim() ||
+    customer?.name ||
+    "";
+
   // Build the Estimate prefill URL from whatever customer fields we have.
   // Falls back to /admin/estimates with no params (lands on Leads tab) when
   // the caller didn't pass enriched customer data.
   const estimateHref = (() => {
     const params = new URLSearchParams();
-    const fullName =
-      `${customer?.firstName || ""} ${customer?.lastName || ""}`.trim() ||
-      customer?.name ||
-      "";
     if (customer?.address) params.set("address", customer.address);
     if (fullName) params.set("customerName", fullName);
     if (phone) params.set("customerPhone", phone);

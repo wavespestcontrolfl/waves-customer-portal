@@ -120,6 +120,29 @@ describe("agent draft review modal", () => {
     expect(screen.getByText(/Margin could not be verified on 2 priced lines/)).toBeInTheDocument();
   });
 
+  it("renders engine marginWarnings as a report-only margin section and flags the badge (P1-3)", () => {
+    render(
+      <EngineReviewModal
+        estimate={{
+          ...ESTIMATE,
+          agentDraftReview: null,
+          estimatorEngine: {
+            lane: "green",
+            laneReasons: [],
+            reviewNotes: null,
+            marginWarnings: ["waveguard_discount_below_margin_floor"],
+          },
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Margin review \(report-only/)).toBeInTheDocument();
+    expect(screen.getByText("waveguard discount below margin floor")).toBeInTheDocument();
+    // A green lane with margin warnings still reads as flagged.
+    expect(screen.getByText("Flagged for review")).toBeInTheDocument();
+  });
+
   it("still renders the estimator-engine material unchanged", () => {
     render(
       <EngineReviewModal

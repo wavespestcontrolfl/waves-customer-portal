@@ -197,6 +197,8 @@ export default function TechHomePage() {
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
+  // Today's NWS rain chance (0-100|null) — rides the schedule payload.
+  const [rainChance, setRainChance] = useState(null);
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
@@ -220,6 +222,7 @@ export default function TechHomePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
       setSchedule(scheduleRowsFromResponse(data));
+      setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
       setScheduleError(err.message || 'Your route could not be loaded.');
@@ -437,8 +440,20 @@ export default function TechHomePage() {
       }}>
         {getGreeting()}, {firstName}
       </h1>
-      <p style={{ fontSize: 13, color: DARK.muted, margin: '0 0 20px' }}>
+      <p style={{ fontSize: 13, color: DARK.muted, margin: '0 0 20px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+        {/* Exception-based rain chip: renders only at ≥40% (amber), ≥50 red.
+            Same 🌧 badge language as the RainOutSheet's per-option badges. */}
+        {rainChance != null && rainChance >= 40 && (
+          <span style={{
+            fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 12,
+            color: rainChance >= 50 ? '#ef4444' : '#f59e0b',
+            border: `1px solid ${rainChance >= 50 ? '#ef4444' : '#f59e0b'}`,
+            background: rainChance >= 50 ? '#ef44441a' : '#f59e0b1a',
+          }}>
+            🌧 {rainChance}% rain today
+          </span>
+        )}
       </p>
 
       {/* Today's Stats */}

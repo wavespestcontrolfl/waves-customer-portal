@@ -56,8 +56,20 @@ const UI_GATED_WRITE_TOOL_NAMES = new Set([
   ...LEGACY_BARE_WRITE_TOOL_NAMES,
 ]);
 
+// Writes blocked in the /query tool loop entirely and executable only via
+// /execute with server-checked confirmed:true + idempotency key. The route's
+// CONFIRMED_ACTION_TOOL_NAMES is built from this set; the contract test
+// asserts all three stay equal.
+const CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES = new Set([
+  'run_seo_pipeline',
+  'approve_seo_action',
+  'request_instant_payout',
+  'request_standard_payout',
+]);
+
 module.exports = {
   WRITE_TWO_STEP_TOOL_NAMES,
   LEGACY_BARE_WRITE_TOOL_NAMES,
   UI_GATED_WRITE_TOOL_NAMES,
+  CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
 };

@@ -35,6 +35,11 @@ const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+// Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
+// scheduling/occupancy.js for why both write paths here take it first, and
+// why each also runs the tech-blind global probe (findConflictingVisits)
+// under it before committing.
+const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -313,13 +318,30 @@ async function reserveSlot({
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
 
   try {
-    return await db.transaction(async (trx) => {
+    const reserved = await db.transaction(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST, before ANY row lock this
+      // txn takes (ORDERING CONTRACT, scheduling/occupancy.js — the
+      // row-lock rule). The key is the requested slot's date, straight from
+      // the slotId — available before any row is read, so nothing forces a
+      // read-then-lock detour here. Taking the estimate FOR UPDATE first
+      // (the old order) deadlocked against createSelfBooking: that writer
+      // holds rung 1 while its insert's source_estimate_id FK takes KEY
+      // SHARE on this same estimate row — blocked by our FOR UPDATE —
+      // while this txn sat waiting on its rung 1. The hold row inserted
+      // below is customer-NULL but findConflictingVisits COUNTS live
+      // holds, so this path is a real occupancy writer and owes the date
+      // lock regardless.
+      await acquireOccupancyLock(trx, date);
+
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
       // status/expiry checks could be made against committed state that
       // changes by the time we INSERT below. The `_expired` derived flag
       // does the expiry comparison in Postgres so server clock skew across
-      // app instances can't bypass the gate.
+      // app instances can't bypass the gate. Safe AFTER rung 1 (row locks
+      // never precede it), and rungs 3+4 below are safe after this row
+      // lock: same-date rungs are only ever taken while holding rung 1, so
+      // no other txn can hold them while we do — they can't block.
       const estimate = await trx('estimates')
         .where({ id: estimateId })
         .select('*', trx.raw('(expires_at IS NOT NULL AND expires_at < NOW()) AS _expired'))
@@ -413,11 +435,15 @@ async function reserveSlot({
         }
       }
 
-      // The FOR UPDATE above only serializes THIS estimate — two different
-      // customers' estimates reserving the same tech/date can both pass the
-      // conflict check below concurrently and both insert. Serialize all
-      // reserves per tech+day (coarse but reserves are quick), released on
-      // commit/rollback.
+      // RUNGS 3 + 4 (tech, then zone) — rung 1 was taken at the top of this
+      // txn. These stay REQUIRED even under the date lock: rung 1 alone only
+      // serializes writers that take it, while the narrow tech/zone conflict
+      // checks below also arbitrate hold-vs-hold coexistence, which the
+      // global probe deliberately leaves to them (includeHolds:false). The
+      // estimate FOR UPDATE above only serializes THIS estimate — two
+      // different customers' estimates reserving the same tech/date meet
+      // HERE. Serialize all reserves per tech+day (coarse but reserves are
+      // quick), released on commit/rollback.
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', `${techId || 'unassigned'}:${date}`],
@@ -426,7 +452,7 @@ async function reserveSlot({
       // (availability.confirmBooking, /api/booking/confirm) use — without
       // it, a self-book confirm and an estimate hold for the same window
       // each miss the other's uncommitted row. Fixed order everywhere:
-      // tech lock first, zone lock second.
+      // date lock first, then tech, then zone.
       let reserveZone = null;
       try {
         // Shared with the slot generator's colliding-slot filter (slot-zone.js)
@@ -451,10 +477,12 @@ async function reserveSlot({
       // self-exclusion, so this estimate's OWN live hold would 409 the
       // customer's retry (the client re-POSTs /reserve with the same slotId
       // after "go back"). Re-reserving the SAME slot refreshes the existing
-      // hold's expiry and returns it; a live hold for a DIFFERENT slot is
-      // superseded — released inside this txn with the same narrow predicate
-      // releaseReservation uses (still-uncommitted rows only), which also
-      // removes it from both the tech- and zone-conflict queries below.
+      // hold's expiry and returns it — but only after the same committed-
+      // visit probe the fresh path runs (see the refresh branch below); a
+      // live hold for a DIFFERENT slot is superseded — released inside this
+      // txn with the same narrow predicate releaseReservation uses
+      // (still-uncommitted rows only), which also removes it from both the
+      // tech- and zone-conflict queries below.
       const liveHolds = await trx('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNull('customer_id')
@@ -470,6 +498,47 @@ async function reserveSlot({
         const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
         if (staleIds.length) {
           await trx('scheduled_services').whereIn('id', staleIds).del();
+        }
+        // Committed-visit probe BEFORE the expiry is extended — the same
+        // rung-1 date lock the fresh path takes is already held (acquired
+        // above, ahead of this branch), so the ordering contract covers
+        // this leg too. The call-booking writer commits without blocking on
+        // live holds, so a committed visit can occupy this window AFTER the
+        // hold was created; refreshing then hands the customer a hold
+        // commitReservation is guaranteed to reject — the offer→reserve→409
+        // dead-end loop again, merely moved to the accept click.
+        // includeHolds:false + excluding the held row itself: committed
+        // visits only — hold-vs-hold semantics stay with the narrow checks,
+        // and this idempotent retry keeps its designed no-409 behavior when
+        // the window is still genuinely free.
+        const refreshClash = await findConflictingVisits({
+          db: trx,
+          date,
+          windowStart,
+          windowEnd,
+          excludeServiceIds: [sameSlotHold.id],
+          includeHolds: false,
+        });
+        if (refreshClash.length) {
+          // Do NOT refresh a doomed hold — supersede it (same narrow
+          // still-uncommitted predicate releaseReservation uses) so the
+          // window frees beyond the committed visit's own footprint. The
+          // release must SURVIVE while the reserve itself fails, so the 409
+          // is thrown after commit via the sentinel below — a plain throw
+          // here would roll the delete back and leave the phantom hold
+          // occupying route time until expiry.
+          await trx('scheduled_services')
+            .where({ id: sameSlotHold.id })
+            .whereNull('customer_id')
+            .whereNotNull('reservation_expires_at')
+            .del();
+          logger.warn('[slot-reservation] superseded hold over committed visit on same-slot refresh', {
+            estimateId,
+            slotId,
+            scheduledServiceId: sameSlotHold.id,
+            conflictIds: refreshClash.map((r) => r.id),
+          });
+          return { staleHoldSuperseded: true };
         }
         // Refresh expiry only — commitReservation recomputes service_type /
         // notes / window_end from the accept-time profile, so the hold's
@@ -555,6 +624,34 @@ async function reserveSlot({
         }
       }
 
+      // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1
+      // holder runs the global predicate under the date lock before
+      // committing). The two checks above stay as fast paths but are
+      // NARROW: the first sees only THIS slot's tech, the second only
+      // technician-NULL rows in a RESOLVED zone — a committed visit for a
+      // different tech, or any visit at all when zone resolution failed,
+      // matches neither, and a hold created over a committed visit is a
+      // guaranteed dead end (the graduation 409s and the customer loops on
+      // offer->reserve->409). includeHolds:false on purpose: COMMITTED
+      // visits only. Hold-vs-hold coexistence stays governed by the
+      // tech/zone checks above — of two live holds those checks permit,
+      // whichever GRADUATES second is stopped by commitReservation's own
+      // probe. This estimate's stale holds were refreshed or deleted
+      // above, inside this txn, so no self-exclusion is needed.
+      const committedClash = await findConflictingVisits({
+        db: trx,
+        date,
+        windowStart,
+        windowEnd,
+        includeHolds: false,
+      });
+      if (committedClash.length) {
+        const err = new Error('slot no longer available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+
       // service_type stays canonical for protocol/default lookups; notes
       // carry the full accepted service mix for dispatch and tech execution.
       const [row] = await trx('scheduled_services').insert({
@@ -596,6 +693,17 @@ async function reserveSlot({
 
       return { scheduledServiceId, expiresAt };
     });
+    if (reserved && reserved.staleHoldSuperseded) {
+      // Post-commit throw so the supersede above sticks (the finally still
+      // invalidates the availability cache). Same error shape as the
+      // fresh-reserve conflict path: the client re-fetches availability,
+      // which now excludes the occupied window.
+      const err = new Error('slot no longer available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+    return reserved;
   } finally {
     // Invalidate the slot-availability wrapper cache for this estimate so
     // subsequent /available-slots calls reflect the new occupancy. Cheap
@@ -610,7 +718,17 @@ async function reserveSlot({
  * Intended to run inside the accept
  * handler's existing transaction — pass trx explicitly when doing so.
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, trx? }
+ * When the caller's transaction pre-acquired this hold's rung-1 date lock at
+ * its own start (the estimate-accept txn does — see the ORDERING CONTRACT in
+ * scheduling/occupancy.js), it passes the key it locked as `preLockedDate`.
+ * The unlocked pre-read below is then RE-CHECKED against it: a hold that
+ * moved dates in between fails into RESERVATION_EXPIRED instead of this
+ * function acquiring the new date's key mid-txn (an unsorted second date
+ * key — the exact inversion shape the contract bans). When the dates match,
+ * the acquisition below is a reentrant no-op (pg advisory xact locks are
+ * re-acquirable by the owning transaction).
+ *
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -622,6 +740,7 @@ async function commitReservation({
   serviceMode = 'recurring',
   selectedFrequency = '',
   durationMinutes,
+  preLockedDate = null,
   trx,
 }) {
   // Body is shared between the "caller already has a txn" path (use it) and
@@ -630,6 +749,55 @@ async function commitReservation({
   // with us, and the expiry comparison runs in Postgres (NOW()) so server
   // clock skew can't let an expired reservation slip through.
   const run = async (client) => {
+    // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT in
+    // scheduling/occupancy.js). Committing a hold is a real occupancy write:
+    // it graduates the row to a live booking and can WIDEN window_end, since
+    // the commit-time duration is resolved from the accepted service profile
+    // and may exceed the held one. The conflict check below is tech-scoped
+    // ONLY when the row carries a technician — an unassigned hold makes it
+    // date-wide/tech-blind outright — and this path takes no tech or zone
+    // lock at all, so rung 1 is the only thing serializing it against the
+    // rebooker and the self-booking confirms.
+    //
+    // Taken BEFORE the FOR UPDATE row lock on purpose: a writer already
+    // holding the date lock may need this row, so grabbing the row first and
+    // then waiting on the date lock would invert the order. scheduled_date is
+    // read without a lock to key it; if the row moved dates in between, the
+    // date lock we hold is the wrong one — fail into the same
+    // RESERVATION_EXPIRED recovery the accept flow already handles (the
+    // customer re-picks a time) rather than taking a second date lock and
+    // opening a two-key inversion.
+    //
+    // When handed the estimate-accept transaction, that txn ALREADY holds
+    // this key: it pre-acquires rung 1 as its first statements — before its
+    // estimates UPDATE / customers insert take row locks — and passes the
+    // locked key down as preLockedDate (checked against the pre-read below).
+    const preRow = await client('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('scheduled_date');
+    if (!preRow) {
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    const lockedDate = dateOnly(preRow.scheduled_date);
+    // Caller pre-locked rung 1 (the accept txn, at its start, before its
+    // estimate/customer row locks): if the hold moved dates between the
+    // caller's unlocked read and now, the caller holds the WRONG key —
+    // and acquiring the moved-to date's key here, mid-txn and unsorted,
+    // would open the two-key inversion the contract's read→lock→re-check
+    // pattern exists to prevent. Fail into the same RESERVATION_EXPIRED
+    // recovery the accept flow already handles (the customer re-picks a
+    // time) WITHOUT taking any lock.
+    if (preLockedDate && lockedDate !== dateOnly(preLockedDate)) {
+      const err = new Error('reservation moved off the pre-locked date');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    // Reentrant no-op when the caller pre-locked this same key; kept
+    // unconditional so the standalone path still takes rung 1 first.
+    if (lockedDate) await acquireOccupancyLock(client, lockedDate);
+
     const row = await client('scheduled_services')
       .where({ id: scheduledServiceId })
       .select('*', client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW()) AS _expired'))
@@ -638,6 +806,11 @@ async function commitReservation({
     if (!row) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    if (dateOnly(row.scheduled_date) !== lockedDate) {
+      const err = new Error('reservation moved to another date');
+      err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
     if (!row.reservation_expires_at) {
@@ -693,6 +866,42 @@ async function commitReservation({
         .first('id');
 
       if (conflict) {
+        const err = new Error('slot no longer available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
+        throw err;
+      }
+    }
+
+    // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1 holder
+    // runs the global predicate under the date lock before committing).
+    // Graduating the hold commits real occupancy, and the narrow check
+    // above is tech-scoped when the row carries a technician — and SKIPPED
+    // ENTIRELY when no accept-time duration resolved, though the row
+    // occupies its held window either way (probe end falls back to the
+    // held window_end, then to the module's duration-or-60 convention).
+    // includeHolds:false + excluding this hold's own row: the probe
+    // arbitrates against COMMITTED visits — of two overlapping live holds
+    // the reserve-time checks permitted, first-to-graduate wins and this
+    // stops the second. Same RESERVATION_EXPIRED-style recovery as every
+    // other commit failure: the customer re-picks a time.
+    const probeWindowEnd = windowEnd
+      || row.window_end
+      || (windowStart
+        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
+          ? Number(row.estimated_duration_minutes)
+          : DEFAULT_DURATION_MINUTES)
+        : null);
+    if (scheduledDate && windowStart && probeWindowEnd) {
+      const committedClash = await findConflictingVisits({
+        db: client,
+        date: scheduledDate,
+        windowStart,
+        windowEnd: probeWindowEnd,
+        excludeServiceIds: [scheduledServiceId],
+        includeHolds: false,
+      });
+      if (committedClash.length) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;

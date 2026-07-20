@@ -2293,9 +2293,35 @@ export default function EmailTemplatesPanelV2() {
     setBusy(true);
     setToast("");
     try {
+      // Preview first: this button sends real customer emails, so confirm the
+      // recipient list before firing the batch.
+      const preview = await adminFetch("/admin/email-templates/automations/runs/process-due", {
+        method: "POST",
+        body: JSON.stringify({ limit: 50, preview: true }),
+      });
+      const dueCount = preview.dueCount || 0;
+      if (dueCount === 0) {
+        setToast("No automation runs are due");
+        return;
+      }
+      const runIds = (preview.runs || []).map((r) => r.id).filter(Boolean);
+      const recipients = (preview.runs || [])
+        .map((r) => r.recipient_email)
+        .filter(Boolean);
+      const shown = recipients.slice(0, 10).join("\n");
+      const more = recipients.length > 10 ? `\n…and ${recipients.length - 10} more` : "";
+      if (
+        !window.confirm(
+          `Send ${dueCount} due automation email${dueCount === 1 ? "" : "s"} now?\n\n${shown}${more}`,
+        )
+      ) {
+        setToast("Cancelled — nothing sent");
+        return;
+      }
+      // Send only the runs just previewed (server re-validates each is still due).
       const d = await adminFetch("/admin/email-templates/automations/runs/process-due", {
         method: "POST",
-        body: JSON.stringify({ limit: 50 }),
+        body: JSON.stringify({ limit: 50, runIds }),
       });
       if (selectedRunsKey) await loadAutomationRuns(selectedRunsKey);
       setToast(`Processed ${d.processed || 0} automation run${d.processed === 1 ? "" : "s"}`);
@@ -2680,6 +2706,11 @@ export default function EmailTemplatesPanelV2() {
                   <iframe
                     title="Email preview"
                     srcDoc={preview.html}
+                    // sandbox with no allow-scripts / allow-same-origin: the
+                    // preview renders HTML/CSS but can't run scripts or navigate
+                    // in the admin origin, so a javascript: CTA in the template
+                    // can't execute when clicked.
+                    sandbox=""
                     className="w-full h-[520px] rounded-sm border-hairline border-zinc-200 bg-white"
                   />
                 </div>

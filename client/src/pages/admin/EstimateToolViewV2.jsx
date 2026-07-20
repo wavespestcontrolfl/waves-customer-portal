@@ -36,6 +36,7 @@ import React, {
   Component,
 } from "react";
 import {
+  collectMarginReviewNotes,
   fmt,
   fmtInt,
   isCommercialEstimateInput,
@@ -2441,8 +2442,22 @@ export default function EstimateToolViewV2({
     if (value === null) estimateVersionRef.current += 1;
     setEstimateState(value);
   }, []);
+  // Address-lookup guards (same seq+abort pattern as the send-phone lookup
+  // below): a slow property/customer response for a PREVIOUS address must
+  // never autofill — or stamp its customer match onto — a newer one.
+  const lookupSeqRef = useRef(0);
+  const lookupAbortRef = useRef(null);
+  // Live mirror of form.address for the in-flight lookup's apply gate: the
+  // seq only advances when ANOTHER lookup starts, so an address
+  // edit/select/clear during a lookup needs its own invalidation — the
+  // response is compared against the address the form holds NOW before
+  // anything (property autofill, customer match) applies.
+  const formAddressRef = useRef("");
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
+  useEffect(() => {
+    formAddressRef.current = String(form.address || "");
+  }, [form.address]);
   // Send-form phone lookup guards (rules in estimateSendPhoneLookup.js):
   // the sequence + abort pair kills stale responses so a slow lookup for a
   // previous number can't land on a newer one, and the auto-fill ref tracks
@@ -3002,14 +3017,36 @@ export default function EstimateToolViewV2({
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
+    // Every lookup supersedes any in-flight one: bump the sequence and abort
+    // the old fetch so a slow response for a previous address can never
+    // autofill this one.
+    const lookupSeq = ++lookupSeqRef.current;
+    if (lookupAbortRef.current) lookupAbortRef.current.abort();
+    const lookupController = new AbortController();
+    lookupAbortRef.current = lookupController;
+    // Supersession gate for everything this lookup applies. A NEWER lookup
+    // owns the status UI (plain return); an address edit with NO new lookup
+    // leaves nobody to clear the "loading" status this lookup set — clear it
+    // here or the page shows the AI/property lookup running forever.
+    const lookupSuperseded = () => {
+      if (lookupSeq !== lookupSeqRef.current) return true;
+      if (formAddressRef.current.trim() !== address) {
+        setLookupStatus({ type: "", msg: "" });
+        setSatelliteStatus({ type: "", msg: "" });
+        return true;
+      }
+      return false;
+    };
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ address }),
+        signal: lookupController.signal,
       });
       if (!r.ok) throw new Error("API " + r.status);
       const data = await r.json();
+      if (lookupSuperseded()) return;
 
       if (data.errors?.length > 0 && !data.enriched) {
         setLookupStatus({
@@ -3114,10 +3151,11 @@ export default function EstimateToolViewV2({
         const addrSearch = address.split(",")[0].trim();
         const custR = await fetch(
           `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`,
-          { headers: authHeaders },
+          { headers: authHeaders, signal: lookupController.signal },
         );
         if (custR.ok) {
           const custData = await custR.json();
+          if (lookupSuperseded()) return;
           const custs = custData.customers || custData || [];
           const match = custs.find(
             (c) =>
@@ -3155,6 +3193,11 @@ export default function EstimateToolViewV2({
       } catch {
         /* ignore customer lookup errors */
       }
+
+      // The inner catch above deliberately swallows customer-lookup errors —
+      // including the AbortError a NEWER lookup raises by aborting this one —
+      // so re-gate before the satellite/status writes below.
+      if (lookupSuperseded()) return;
 
       if (data.satellite) {
         const aiSources = normalizeAiSources(
@@ -3217,6 +3260,9 @@ export default function EstimateToolViewV2({
         console.warn("[estimate] Partial errors:", data.errors);
       }
     } catch (e) {
+      // A superseded lookup aborts deliberately — its error must not paint
+      // over the newer lookup's status.
+      if (e?.name === "AbortError" || lookupSeq !== lookupSeqRef.current) return;
       setLookupStatus({ type: "err", msg: e.message });
       setSatelliteStatus({ type: "", msg: "" });
     }
@@ -8125,32 +8171,47 @@ export default function EstimateToolViewV2({
                         </div>{" "}
                       </>
                     )}
-                    {E.pricingMetadata && (
-                      (E.pricingMetadata.skippedServices?.length > 0 ||
-                        E.pricingMetadata.warnings?.length > 0 ||
-                        E.pricingMetadata.manualReviewReasons?.length > 0) && (
+                    {(() => {
+                      // Report-only low-margin signals (owner ruling
+                      // 2026-07-17: margins are surfaced, never enforced) —
+                      // rendered alongside the engine's pricing metadata so
+                      // the owner sees "this looks low" before sending.
+                      const marginNotes = collectMarginReviewNotes(E);
+                      const pm = E.pricingMetadata || {};
+                      const hasNotes =
+                        pm.skippedServices?.length > 0 ||
+                        pm.warnings?.length > 0 ||
+                        pm.manualReviewReasons?.length > 0 ||
+                        marginNotes.length > 0;
+                      if (!hasNotes) return null;
+                      return (
                         <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-12 text-zinc-900">
                           <div className="font-semibold mb-1">Pricing Review Notes</div>
-                          {(E.pricingMetadata.skippedServices || []).map((item, i) => (
+                          {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
                                 ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
                                 : item.skippedReason}
                             </div>
                           ))}
-                          {(E.pricingMetadata.warnings || []).map((warning, i) => (
+                          {(pm.warnings || []).map((warning, i) => (
                             <div key={`warning-${i}`} className="text-ink-secondary">
                               {warning}
                             </div>
                           ))}
-                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                          {(pm.manualReviewReasons || []).map((reason, i) => (
                             <div key={`manual-review-${i}`} className="text-ink-secondary">
                               {humanizeQuoteReason(reason)}
                             </div>
                           ))}
+                          {marginNotes.map((note, i) => (
+                            <div key={`margin-${i}`} className="text-zinc-900 font-medium">
+                              {note}
+                            </div>
+                          ))}
                         </div>
-                      )
-                    )}
+                      );
+                    })()}
 
                     {/* Bundle + Totals */}
                     {(E.recurring.serviceCount > 0 ||

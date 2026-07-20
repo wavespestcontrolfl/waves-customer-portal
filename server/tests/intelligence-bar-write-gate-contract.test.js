@@ -498,4 +498,94 @@ describe('operational write-gates module mirrors this policy snapshot', () => {
     expect([...gates.UI_GATED_WRITE_TOOL_NAMES].sort())
       .toEqual([...WRITE_TWO_STEP, ...LEGACY_BARE_WRITES].sort());
   });
+
+  test('CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES matches', () => {
+    expect([...gates.CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES].sort())
+      .toEqual([...CONFIRMED_ENDPOINT_WRITES].sort());
+  });
+});
+
+// ─── ENDPOINT-WRITE EXECUTOR GUARDS ─────────────────────────────
+// The route blocks CONFIRMED_ENDPOINT writes in the /query loop and gates
+// /execute — but the executors must ALSO refuse on their own, so a future
+// second caller (a new context wiring, an ops script) can't inherit a bare
+// money-mover. context.confirmed is server-derived: /execute attaches it
+// after its own confirmed + idempotency + admin checks.
+
+describe('confirmed-endpoint writes are inert without server-derived context.confirmed', () => {
+  const dbMock = require('../models/db');
+
+  const ENDPOINT_CALLS = [
+    ['banking-tools', 'executeBankingTool', 'request_instant_payout', { amount: 50 }, { isAdmin: true }],
+    ['banking-tools', 'executeBankingTool', 'request_standard_payout', { amount: 50 }, { isAdmin: true }],
+    ['seo-tools', 'executeSeoTool', 'approve_seo_action', { action_id: '00000000-0000-0000-0000-000000000001' }, { isAdmin: true }],
+    ['seo-tools', 'executeSeoTool', 'run_seo_pipeline', {}, { isAdmin: true }],
+  ];
+
+  test('every CONFIRMED_ENDPOINT write is exercised by this guard contract', () => {
+    expect(ENDPOINT_CALLS.map(c => c[2]).sort()).toEqual([...CONFIRMED_ENDPOINT_WRITES].sort());
+  });
+
+  test.each(ENDPOINT_CALLS)('%s %s: %s without context.confirmed refuses and mutates nothing', async (mod, exec, toolName, input, context) => {
+    const { db, mutations } = makeRecordingDb();
+    dbMock.mockImplementation(db);
+    dbMock.raw.mockImplementation(db.raw);
+    dbMock.transaction.mockImplementation(db.transaction);
+    dbMock.schema = db.schema;
+
+    const executor = require(path.join(TOOLS_DIR, mod))[exec];
+    const result = await executor(toolName, input, context);
+
+    expect(String(result?.error || '')).toMatch(/confirmation/i);
+    expect(mutations).toEqual([]);
+  });
+});
+
+// ─── READ-CLASSIFIED TOOLS MUST NOT WRITE ───────────────────────
+// get_integration_token_health is READ_ONLY; its service getAll() used to
+// prune token_credentials on every call (deletes inside a read — the one
+// classification mismatch of the 2026-07-19 audit). Pruning now lives in
+// checkAll()/pruneStaleCredentials(); this pins getAll() pure.
+
+describe('token-health getAll is side-effect free (backs the READ_ONLY classification)', () => {
+  const dbMock = require('../models/db');
+
+  test('getAll returns rows and performs zero mutations', async () => {
+    const { db, mutations } = makeRecordingDb({
+      token_credentials: [{ id: 'tc-1', platform: 'stripe', status: 'healthy', last_verified_at: null }],
+    });
+    dbMock.mockImplementation(db);
+    dbMock.raw.mockImplementation(db.raw);
+
+    const tokenHealth = require('../services/token-health');
+    const rows = await tokenHealth.getAll();
+
+    // A non-empty result proves we exercised the real read path, not the
+    // catch-and-return-[] fallback.
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(mutations).toEqual([]);
+  });
+});
+
+// ─── EXECUTE-SMOKE SAFETY ───────────────────────────────────────
+// The contract-test registry derives sideEffects from write-gates.js, so a
+// bare write can never be smoke-executed by omission (the pre-2026-07-19
+// state: zero IB tools carried the flag and smoke ran them all).
+
+describe('contract-test registry flags gated bare writes as sideEffects', () => {
+  test('legacy + confirmed-endpoint writes are flagged; two-step previews stay smokable', async () => {
+    const { discover } = require('../contract-tests/registry');
+    const records = await discover();
+    const ib = new Map(records.filter(r => r.surface === 'intelligence-bar').map(r => [r.name, r]));
+
+    const wrongly_smokable = [...LEGACY_BARE_WRITES, ...CONFIRMED_ENDPOINT_WRITES]
+      .filter(name => ib.get(name)?.sideEffects !== true);
+    expect(wrongly_smokable).toEqual([]);
+
+    // Two-step executors are contract-tested pure previews without
+    // confirmed — smoke coverage on them is real and safe.
+    const wrongly_skipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
+    expect(wrongly_skipped).toEqual([]);
+  });
 });

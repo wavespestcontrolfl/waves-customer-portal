@@ -9,6 +9,7 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
+const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -287,6 +288,18 @@ class AvailabilityEngine {
     // customer-visible fires before the outer transaction commits.
     const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
     const { booking, scheduled } = await runBookingWork(async (trx) => {
+      // RUNG 1 — date-wide occupancy lock, FIRST and UNCONDITIONAL (see the
+      // ORDERING CONTRACT in scheduling/occupancy.js). This confirm inserts a
+      // scheduled_services row that the GLOBAL tech-blind checks (rebooker
+      // single + series) count, and those checks read committed rows only:
+      // without this lock our uncommitted insert is invisible to them and
+      // both sides commit an overlap. It is taken on the ZONE-RESOLVED branch
+      // too — that branch validates against a zone-scoped occupied set, so it
+      // is precisely the writer whose insert a global checker would miss. The
+      // zone-null branch below additionally relies on it to guard its own
+      // findConflictingVisits call. Hoisted above the zone + day-cap locks so
+      // every writer in the family acquires the shared rungs in one order.
+      await acquireOccupancyLock(trx, dateStr);
       // slot-reserve namespace + zone-key shape match routes/booking.js
       // exactly, so confirms through onboarding/AI and the public
       // /api/booking/confirm serialize against each other for the same
@@ -302,15 +315,31 @@ class AvailabilityEngine {
       // zone lock only serializes same-zone writers; the cap is global by
       // date, so a per-zone count here let cross-zone confirms (this engine
       // vs the public /book confirm) exceed max_self_books_per_day. Lock
-      // order stays fixed — zone THEN day, the same relative order as
-      // createSelfBooking's customer → tech → zone → day — so concurrent
-      // confirms across both writers can never deadlock.
+      // order stays fixed — date → zone → day-cap, the same relative order
+      // as createSelfBooking's date → customer → tech → zone → day-cap — so
+      // concurrent confirms across both writers can never deadlock.
       await acquireSelfBookingDayCapLock(trx, dateStr);
       const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
         excludeSelfBookingId: options.excludeSelfBookingId || null,
       });
       if (dayCount >= maxPerDay) {
         throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+      }
+
+      // Rows the tech-blind probe below must ignore — the onboarding
+      // reschedule books the replacement BEFORE cancelling the original, so
+      // it must not collide with the row(s) it is about to cancel. Resolved
+      // for BOTH branches: the zone-resolved fast path excludes the same
+      // rows via its own options.exclude* modifiers.
+      const occupancyExcludes = [];
+      if (options.excludeServiceId) occupancyExcludes.push(options.excludeServiceId);
+      if (options.excludeSelfBookingId) {
+        // The onboarding reschedule identifies the row it is replacing by
+        // its self-booking id — exclude that booking's dispatch row too.
+        const replacedRow = await trx('scheduled_services')
+          .where({ self_booking_id: options.excludeSelfBookingId })
+          .first('id');
+        if (replacedRow?.id) occupancyExcludes.push(replacedRow.id);
       }
 
       if (zone) {
@@ -370,6 +399,32 @@ class AvailabilityEngine {
         if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
           throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
         }
+      }
+
+      // Shared tech-blind occupancy probe, BOTH branches (ORDERING CONTRACT:
+      // every rung-1 holder runs the global predicate under the date lock
+      // before committing — the lock only serializes writers; it cannot
+      // widen what a check sees). For the zone-NULL branch this is the only
+      // window validation there is (AI-assistant book tool, onboarding
+      // reschedule). For the zone-RESOLVED branch the occupied-set check
+      // above remains the fast path, but it is zone-scoped: an overlapping
+      // visit whose customer city is outside this zone's list — or a
+      // tech-assigned row from the estimate lane — never enters `occupied`,
+      // and with one active tech any overlap is a real clash. Status set
+      // matches the zone path (non-cancelled occupies); live holds count,
+      // expired ones don't. The date-wide occupancy lock this runs under
+      // was taken at the TOP of the transaction (rung 1 of the global
+      // order) — the rebooker takes neither the zone nor the day-cap lock,
+      // so that date lock is the only rung shared with it.
+      const occupancyClash = await findConflictingVisits({
+        db: trx,
+        date: dateStr,
+        windowStart: startTime,
+        windowEnd: endTime,
+        excludeServiceIds: occupancyExcludes,
+      });
+      if (occupancyClash.length) {
+        throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
       }
 
       // Create self_booked_appointment

@@ -13,11 +13,23 @@ describe('intelligence bar banking tools', () => {
     jest.clearAllMocks();
   });
 
+  // The payout executors refuse before anything else unless the caller
+  // carries server-derived context.confirmed (only /execute attaches it).
+  test.each([
+    ['request_instant_payout', 'createInstantPayout'],
+    ['request_standard_payout', 'createStandardPayout'],
+  ])('%s refuses without a confirmed context — guard fires before validation', async (toolName, createMethod) => {
+    const result = await executeBankingTool(toolName, { amount: 50 });
+
+    expect(result.error).toMatch(/confirmation is required/i);
+    expect(StripeBanking[createMethod]).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['request_instant_payout', 'createInstantPayout'],
     ['request_standard_payout', 'createStandardPayout'],
   ])('%s rejects numeric string amounts before creating a payout', async (toolName, createMethod) => {
-    const result = await executeBankingTool(toolName, { amount: '50' });
+    const result = await executeBankingTool(toolName, { amount: '50' }, { confirmed: true });
 
     expect(result).toEqual({ error: 'Amount must be a positive number.' });
     expect(StripeBanking[createMethod]).not.toHaveBeenCalled();
@@ -26,7 +38,7 @@ describe('intelligence bar banking tools', () => {
   test('instant payout accepts a numeric amount and formats the response after creation', async () => {
     StripeBanking.createInstantPayout.mockResolvedValue({ payout_id: 'po_instant', status: 'pending' });
 
-    const result = await executeBankingTool('request_instant_payout', { amount: 50 });
+    const result = await executeBankingTool('request_instant_payout', { amount: 50 }, { confirmed: true });
 
     expect(StripeBanking.createInstantPayout).toHaveBeenCalledWith(50);
     expect(result).toMatchObject({
@@ -40,7 +52,7 @@ describe('intelligence bar banking tools', () => {
   test('standard payout accepts a numeric amount and formats the response after creation', async () => {
     StripeBanking.createStandardPayout.mockResolvedValue({ payout_id: 'po_standard', status: 'pending' });
 
-    const result = await executeBankingTool('request_standard_payout', { amount: 75 });
+    const result = await executeBankingTool('request_standard_payout', { amount: 75 }, { confirmed: true });
 
     expect(StripeBanking.createStandardPayout).toHaveBeenCalledWith(75);
     expect(result).toMatchObject({
@@ -58,7 +70,7 @@ describe('intelligence bar banking tools', () => {
       amount: 75,
       idempotencyKey: 'spo_confirm_123',
       requestedBy: 'admin-1',
-    });
+    }, { confirmed: true });
 
     expect(StripeBanking.createStandardPayout).toHaveBeenCalledWith(75, {
       idempotencyKey: 'spo_confirm_123',

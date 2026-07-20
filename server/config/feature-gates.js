@@ -76,6 +76,16 @@ const gates = {
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
+  // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
+  // funnel's offered slots lead with the guaranteed soonest card, then
+  // route-fit days (detour ≤ the existing 20-min proximity bound to a stop
+  // already on the calendar), then pure-capacity days — instead of pure
+  // soonest-first ordering. Read-only re-ordering of the same bookable
+  // pool; no slot is added or removed. Opt-in in EVERY environment so
+  // offer-ordering tests stay deterministic. Kill switch: unset — ordering
+  // instantly reverts to soonest-first.
+  geoSlotRanking: process.env.GATE_GEO_SLOT_RANKING === 'true',
+
   // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
   // /book funnel entries see zero conversions across a window — the July
   // slot_sig outage signature. Opt-in in EVERY environment (it texts
@@ -814,6 +824,15 @@ const gates = {
   // send (uncompleted inspections, signed-but-unsent drafts, stuck holds).
   // Admin-notification-only; no customer contact.
   wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
+
+  // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
+  // outlook) to the customer portal's visit-tracker payload so the tracker
+  // can show a "42% chance of rain — your tech may adjust timing" caption.
+  // Display-only: no rescheduling, no customer sends. Customer-facing
+  // surface change, so opt-in in EVERY environment. Kill switch: unset (or
+  // any non-'true' value) — the field is omitted from the payload and the
+  // tracker reverts to today's forecast-string behavior.
+  customerRainChip: process.env.GATE_CUSTOMER_RAIN_CHIP === 'true',
 };
 
 function isEnabled(gate) {

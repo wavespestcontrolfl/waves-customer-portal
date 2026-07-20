@@ -38,6 +38,9 @@ function platinumBundle() {
 
 describe('program floor metadata on engine tier rows + legacy mapper', () => {
   test('every pest tier row carries the floor for ITS cadence (v1 curve)', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     const est = generateEstimate(platinumBundle());
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     const byFreq = Object.fromEntries(pest.tiers.map(t => [t.frequency, t]));
@@ -48,6 +51,9 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
   });
 
   test('legacy mapper copies the floor onto pestTiers rows and the selected R.pest', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     const est = generateEstimate(platinumBundle());
     const mapped = mapV1ToLegacyShape(est);
     const quarterly = mapped.results.pestTiers.find(t => t.label === 'Quarterly');
@@ -55,6 +61,45 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
     const bimonthly = mapped.results.pestTiers.find(t => t.label === 'Bi-Monthly');
     expect(bimonthly).toMatchObject({ floorPa: 75.65, floorAnn: 453.90, floorMo: 37.82 });
     expect(mapped.results.pest).toMatchObject({ floorPa: 89, floorAnn: 356, floorMo: 29.67 });
+  });
+
+  test('re-armed end to end: engine save total == public accept clamp (codex P1 #2827)', () => {
+    // The documented no-deploy re-arm (pest_base.enforce_floor_post_discount
+    // = true) must behave identically at estimate save and estimate accept.
+    constants.PEST.base = 89;
+    constants.PEST.enforceFloorPostDiscount = true;
+    const est = generateEstimate(platinumBundle());
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // Save-time enforcement: the engine lifts the Platinum-discounted pest
+    // annual back to the quarterly program floor.
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(356, 2);
+    // The stored payload carries the same floor metadata…
+    const mapped = mapV1ToLegacyShape(est);
+    expect(mapped.results.pest).toMatchObject({ floorAnn: 356 });
+    // …and the public repricer collects exactly the same figure at accept:
+    // discounted monthly + floor lift annualizes to the engine's saved total.
+    const lift = pestFloorMonthlyLift({ result: mapped }, 'Platinum', () => 0.20);
+    const collectedAnnual = (Number(mapped.results.pest.mo) * 0.8 + lift) * 12;
+    expect(collectedAnnual).toBeCloseTo(pest.annualAfterDiscount, 6);
+  });
+
+  test('disarmed default: no metadata, no lift anywhere — save and accept agree report-only', () => {
+    constants.PEST.base = 89;
+    const est = generateEstimate(platinumBundle());
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // Save side: full discount stands, signal reports.
+    expect(pest.programFloorApplied).toBe(false);
+    expect(pest.annualAfterDiscount).toBeCloseTo(284.80, 2);
+    expect(pest.belowProgramFloor).toBe(true);
+    // Accept side: no floor metadata stamped → the repricer applies the full
+    // percent too. Same number both places.
+    const mapped = mapV1ToLegacyShape(est);
+    expect(mapped.results.pest.floorAnn).toBeUndefined();
+    const lift = pestFloorMonthlyLift({ result: mapped }, 'Platinum', () => 0.20);
+    expect(lift).toBe(0);
+    const collectedAnnual = (Number(mapped.results.pest.mo) * 0.8 + lift) * 12;
+    expect(collectedAnnual).toBeCloseTo(pest.annualAfterDiscount, 1);
   });
 
   test('kill switch off → no floor metadata emitted (new estimates reprice as before)', () => {
@@ -231,6 +276,9 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
   }
 
   test('restamps the client 89-literal floors from the live DB-synced floor', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     constants.PEST.floor = 79; // prod-style DB override
     const estData = clientStampedEstData();
     normalizeClientPestFloorMetadata(estData);
@@ -241,6 +289,40 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(m).toMatchObject({ floorPa: 55.30, floorAnn: 663.60 });
     expect(q.floorMo).toBe(Math.round((316 / 12) * 100) / 100);
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
+  });
+
+  test('recognizes CONFIGURED-floor client stamps via the pricingMetadata base (codex P2 round 11 #2827)', () => {
+    // A fallback quote priced under a configured $79 floor stamps
+    // 79/67.15/55.30 + pricingMetadata.pestProgramFloorPerVisit: 79. If the
+    // live floor moves to $95 before save, those rows are still CLIENT
+    // stamps (not server snapshots) and must restamp to the live 95 basis.
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95;
+    const estData = {
+      result: {
+        pricingMetadata: { pestProgramFloorArmed: true, pestProgramFloorPerVisit: 79 },
+        recurring: { pestProgramFloorApplied: false, discount: 0 },
+        results: {
+          pestTiers: [
+            { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
+            { pa: 80.75, apps: 6, ann: 484.50, mo: 40.38, label: 'Bi-Monthly', floorPa: 67.15, floorAnn: 402.90, floorMo: 33.58 },
+          ],
+          pest: { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
+        },
+      },
+    };
+    normalizeClientPestFloorMetadata(estData);
+    const [q, b] = estData.result.results.pestTiers;
+    expect(q).toMatchObject({ floorPa: 95, floorAnn: 380 });
+    expect(b).toMatchObject({ floorPa: 80.75, floorAnn: 484.50 });
+    expect(estData.result.results.pest).toMatchObject({ floorPa: 95, floorAnn: 380 });
+    // The replay stamps sync ATOMICALLY with the restamped rows — a save
+    // normalized to the live $95 floor must not keep a $79 stamp, or the
+    // persisted rows and the replay state disagree (pre-push P0 round 13).
+    expect(estData.result.pricingMetadata).toMatchObject({
+      pestProgramFloorArmed: true,
+      pestProgramFloorPerVisit: 95,
+    });
   });
 
   test('kill switch off strips the client-stamped floors entirely', () => {
@@ -269,6 +351,43 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     const estData = { result: { results: { lawn: [] } } };
     expect(() => normalizeClientPestFloorMetadata(estData)).not.toThrow();
     expect(() => normalizeClientPestFloorMetadata(null)).not.toThrow();
+  });
+
+  test('ARMED + client rows priced BELOW the live floor → 409 regenerate, nothing mutated (pre-push P0, main-merge)', () => {
+    // The 89-literal rows were priced with the floor BINDING at $89. A live
+    // floor of $95 cannot be fixed by restamping — pa/ann would persist
+    // below the configured floor and the accept-path lift caps at the old
+    // annual. The save must refuse and require regeneration.
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95;
+    const estData = clientStampedEstData();
+    expect(() => normalizeClientPestFloorMetadata(estData))
+      .toThrow(/regenerate the estimate/i);
+    // Reject happened before any mutation: the client stamps are intact.
+    expect(estData.result.results.pestTiers[0]).toMatchObject({ pa: 89, floorPa: 89, floorAnn: 356 });
+  });
+
+  test('client-priced payload with UNVERIFIED live config → 503, nothing persisted-normalized (pre-push P0, main-merge)', () => {
+    constants.PEST.enforceFloorPostDiscount = false;
+    const estData = {
+      result: {
+        pricingMetadata: { pestProgramFloorArmed: true, pestProgramFloorPerVisit: 79 },
+        recurring: { pestProgramFloorApplied: false, discount: 0 },
+        results: {
+          pestTiers: [{ pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 }],
+        },
+      },
+    };
+    expect(() => normalizeClientPestFloorMetadata(estData, { liveConfigVerified: false }))
+      .toThrow(/could not be verified/i);
+  });
+
+  test('non-client legacy payload with unverified config keeps the last-synced behavior (no throw)', () => {
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 79;
+    const estData = clientStampedEstData(); // no recurring block → not a client-engine result
+    expect(() => normalizeClientPestFloorMetadata(estData, { liveConfigVerified: false })).not.toThrow();
+    expect(estData.result.results.pestTiers[0]).toMatchObject({ floorPa: 79 });
   });
 });
 
@@ -351,6 +470,9 @@ describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)',
   }
 
   test('DB floor below the client literal: baked 89-lift is replaced by the server lift', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     constants.PEST.floor = 79; // server floorAnn 316 → server lift 31.20, client lift 71.20, delta −40
     const estData = clientEnginePayload();
     normalizeClientPestFloorMetadata(estData);
@@ -378,6 +500,9 @@ describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)',
   });
 
   test('floor at the client literal: totals unchanged (delta 0)', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     // constants default floor 89 — client lift == server lift.
     const estData = clientEnginePayload();
     normalizeClientPestFloorMetadata(estData);
@@ -424,6 +549,9 @@ describe('normalizeClientPestFloorMetadata — legacy no-flag payloads stay unto
   });
 
   test('bare rows WITH the client-engine flag get stamped and the totals lifted', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     // Flagged payload whose metadata was somehow absent: stamping is safe
     // because the totals correction applies the matching server lift.
     const estData = {

@@ -397,8 +397,17 @@ const LARGE_BODY_LIMIT = '50mb';
 // route — the base64 uploads travel there alone, and a prefix-wide mount
 // handed the anonymous /:id/claim and read endpoints 50 MB of JSON parse
 // work per bogus request too (Codex #2853 r2).
-for (const largeBodyPrefix of ['/api/admin', '/api/tech', '/api/public/lawn-assessment/analyze', '/api/public/pest-identifier/analyze']) {
-  app.use(largeBodyPrefix, express.json({ limit: LARGE_BODY_LIMIT }));
+// The staff surfaces require a valid staff token BEFORE the 50 MB parser runs
+// — otherwise an anonymous or forged-token caller can force 50 MB of JSON
+// parsing per request. Only LARGE bodies are challenged (see the middleware),
+// so small unauthenticated requests pass untouched and the public photo-analyze
+// funnels stay intentionally anonymous.
+const { requireStaffTokenForLargeBody } = require('./middleware/large-body-auth');
+for (const staffPrefix of ['/api/admin', '/api/tech']) {
+  app.use(staffPrefix, requireStaffTokenForLargeBody, express.json({ limit: LARGE_BODY_LIMIT }));
+}
+for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/public/pest-identifier/analyze']) {
+  app.use(publicAnalyzePrefix, express.json({ limit: LARGE_BODY_LIMIT }));
 }
 // Customer service requests carry up to 3 base64 photos (validate caps each at
 // 8 MB of encoded chars — see utils/request-photo-validation.js), so a valid
@@ -685,13 +694,20 @@ app.use('/api/admin', require('./routes/admin-billing-health'));
 // not enumerate internal state: the full feature-gate map told anyone which
 // dark lanes exist and which kill switches are live. Staff surfaces read
 // gates through their authenticated APIs, not from here.
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({
-    status: 'ok',
+  // Readiness ping: a hung or broken database must not report healthy (an
+  // uncaughtException is swallowed at startup by design, so /api/health was the
+  // only place an instance with a dead DB still looked fine). Kept fast and
+  // cancel-on-timeout so a slow DB can't stall Railway's probe.
+  const healthy = await require('./utils/db-health').isDatabaseReady(require('./models/db'));
+  const database = healthy ? 'ok' : 'unavailable';
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
     service: 'waves-customer-portal',
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
+    database,
     staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
   });
 });

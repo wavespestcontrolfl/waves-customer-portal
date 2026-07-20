@@ -117,35 +117,79 @@ describe('estimate converter annual prepay amount', () => {
   });
 
   test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {
-    // No-fee mix (lawn): 5% off — but ONLY on the slice above the $50/mo
-    // lawn program minimum (owner directive 2026-07-09: prepay is NOT
-    // exempt from the floor). $660 protects $600 → 5% on $60 → $657.
+    // No-fee mix (lawn): the full 5% applies — the $50/mo lawn program
+    // minimum that used to protect a floor slice is DISARMED (owner ruling
+    // 2026-07-17; programMinimumMonthly = 0). $660 → 5% on all of it → $627.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
       estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }] } },
-    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+    })).toEqual({ amount: 627, discount: 33, rate: 0.05 });
 
-    // A lawn plan AT the floor has zero prepay headroom — no discount at all
-    // (the estimate page hides the prepay incentive when discount = 0).
+    // A $600 plan (the old floor value) gets the full 5% too — no protected
+    // slice remains.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 600,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
       estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 600 }] } },
-    })).toEqual({ amount: 600, discount: 0, rate: 0 });
+    })).toEqual({ amount: 570, discount: 30, rate: 0.05 });
+
+    // Per-estimate snapshot (pre-push codex P0, round 9 on #2827): a quote
+    // whose result carries the re-armed $50 minimum stamp keeps its $600
+    // protected slice even though the GLOBAL minimum is disarmed — the
+    // prepay 5% only spends the above-floor room ($660 - $600 = $60 → $3),
+    // billing exactly what the saved quote promised.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          pricingMetadata: { lawnProgramMinimumMonthly: 50 },
+          lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }],
+        },
+      },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
+    // Legacy V1 saves nest the selected-lawn provenance at results.lawnMeta
+    // — the evidence scan must reach it (codex P2 round 10 on #2827).
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          results: { lawnMeta: { programMinimumApplied: true, programMinimumMonthly: 50 } },
+          lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }],
+        },
+      },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
+    // Legacy pre-stamp quote saved while the minimum was armed: the row's
+    // own evidence (programMinimumApplied) carries the $50 floor, so the
+    // prepay protection holds even though the global is now disarmed and no
+    // metadata stamp exists (pre-push codex P0, round 9 on #2827).
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          lineItems: [{
+            service: 'lawn_care', name: 'Lawn Care', annual: 660, tiers: [{ tier: 'standard', monthly: 50, annual: 600, programMinimumApplied: true }],
+          }],
+        },
+      },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
 
     // A stale pre-floor engine line item must never shrink the protection
-    // below what the ACCEPTED (restamped) recurring row warrants — the
-    // larger of the two sources wins, so the accepted $600 base stays
-    // fully protected even with a $408 line item lingering.
+    // Mixed stored sources (stale $408 line item + accepted $600 recurring
+    // row): with the lawn program minimum DISARMED (owner ruling
+    // 2026-07-17) neither source creates a protected slice — the full 5%
+    // applies regardless of which stored shape the payload carries.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 600,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
       estimateData: {
         result: {
           lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 408 }],
-          // The accept restamp (selectedLawnServiceRow) writes the full field
-          // set — ann/annual/annualAfterDiscount — onto the recurring row.
           recurring: {
             services: [{
               service: 'lawn_care', name: 'Lawn Care',
@@ -154,13 +198,10 @@ describe('estimate converter annual prepay amount', () => {
           },
         },
       },
-    })).toEqual({ amount: 600, discount: 0, rate: 0 });
+    })).toEqual({ amount: 570, discount: 30, rate: 0.05 });
 
-    // Outstanding pre-floor link: BOTH stored sources still carry the old
-    // $408 annual while the public bundle re-clamps the billed base up to
-    // the $600 floor. The protection must cover the FULL floor — not the
-    // stale $408 — so the prepay 5% never discounts the clamped-up slice
-    // and the invoice never lands below the program minimum.
+    // Outstanding pre-ruling link with stale $408 rows in both sources:
+    // no floor protection is derived from them either.
     const staleBothSources = {
       result: {
         lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 408 }],
@@ -171,14 +212,12 @@ describe('estimate converter annual prepay amount', () => {
       baseAnnual: 600,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
       estimateData: staleBothSources,
-    })).toEqual({ amount: 600, discount: 0, rate: 0 });
-    // Same stale rows with above-floor headroom: only the $60 above the
-    // floor earns the 5%.
+    })).toEqual({ amount: 570, discount: 30, rate: 0.05 });
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
       estimateData: staleBothSources,
-    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+    })).toEqual({ amount: 627, discount: 33, rate: 0.05 });
 
     // Pest/mosquito: setup-waiver path, no extra discount.
     expect(resolveAnnualPrepayInvoiceTotal({
@@ -212,7 +251,11 @@ describe('estimate converter annual prepay amount', () => {
       recurringServices: lawnMix, estimateData,
     });
     expect(discountRate).toBe(0.05);
-    expect(protectedFloor).toBe(600); // full lawn floor slice
+    // Lawn program minimum disarmed (owner ruling 2026-07-17): no protected
+    // floor slice. The component shape survives so the SSR refresh formula
+    // (floor + discountable × (1 − rate)) still reassembles correctly for
+    // lines that ARE protected (discountable: false services).
+    expect(protectedFloor).toBe(0);
     // Reassembling with the components reproduces resolveAnnualPrepayInvoiceTotal
     // for ANY base annual — this is exactly the client-side refresh formula.
     for (const base of [600, 660, 1068]) {
@@ -236,14 +279,15 @@ describe('estimate converter annual prepay amount', () => {
     // the effective rate the public page displayed at approval; a nonzero
     // discount that rounds away renders '<0.1%' rather than a false '0%'.
     expect(annualPrepayDiscountPctLabel(0.05)).toBe('5%');
-    // $660 lawn plan: floor protects $600, 5% on $60 → rate 0.0045 → '0.5%'.
+    // $660 lawn plan: no floor slice since the 2026-07-17 ruling — the
+    // effective rate IS the configured 5%.
     expect(annualPrepayDiscountPctLabel(
       resolveAnnualPrepayInvoiceTotal({
         baseAnnual: 660,
         recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
         estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }] } },
       }).rate,
-    )).toBe('0.5%');
+    )).toBe('5%');
     // $603 plan: $0.15 discount on $603 → rate 0.0002 → sub-0.1% sliver.
     expect(annualPrepayDiscountPctLabel(0.0002)).toBe('<0.1%');
     expect(annualPrepayDiscountPctLabel(0)).toBe('0%');
