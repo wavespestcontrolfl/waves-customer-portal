@@ -113,6 +113,7 @@ async function getDailyRainOutlook(lat, lng) {
 // through an outage; a deadline is NOT a failure and never enters the
 // cooldown.
 const _dailyFailCooldown = new Map();
+const _dailyInFlight = new Map();
 const DAILY_FAIL_COOLDOWN_MS = 60 * 1000;
 const DEADLINE = Symbol('deadline');
 
@@ -125,16 +126,30 @@ async function getDailyRainOutlookBounded(lat, lng, { deadlineMs = 1200 } = {}) 
   const failedAt = _dailyFailCooldown.get(key);
   if (failedAt && Date.now() - failedAt < DAILY_FAIL_COOLDOWN_MS) return null;
 
+  // ONE live lookup per key at a time, and the cooldown bookkeeping rides
+  // the lookup's own settlement — not the bounded caller's race result.
+  // Without this, a lookup slower than the deadline settles after every
+  // bounded caller already returned, its failure never reaches the
+  // cooldown, and each 15s tracker poll launches a fresh live NWS fetch
+  // for the same coordinate through the whole outage (Codex 2026-07-20).
+  let lookup = _dailyInFlight.get(key);
+  if (!lookup) {
+    lookup = getDailyRainOutlook(latNum, lngNum).catch(() => null);
+    _dailyInFlight.set(key, lookup);
+    lookup.then((value) => {
+      _dailyInFlight.delete(key);
+      if (value === null) _dailyFailCooldown.set(key, Date.now());
+      else _dailyFailCooldown.delete(key);
+    });
+  }
+
   let timer;
   const result = await Promise.race([
-    getDailyRainOutlook(latNum, lngNum).catch(() => null),
+    lookup,
     new Promise((resolve) => { timer = setTimeout(resolve, deadlineMs, DEADLINE); }),
   ]).finally(() => clearTimeout(timer));
 
-  if (result === DEADLINE) return null;
-  if (result === null) _dailyFailCooldown.set(key, Date.now());
-  else _dailyFailCooldown.delete(key);
-  return result;
+  return result === DEADLINE ? null : result;
 }
 
 // Hourly cache — shorter TTL than the daily one because storm-watch
