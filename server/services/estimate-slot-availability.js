@@ -33,6 +33,7 @@ const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { isEnabled } = require('../config/feature-gates');
+const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -1216,6 +1217,21 @@ function filterPastSlotsForToday(slots, { now = new Date(), minimumLeadMinutes =
   });
 }
 
+// Chance-of-rain decoration (GATE_BOOKING_RAIN_CHIPS): office-point NWS daily
+// outlook — rain is a DAILY value, so every slot on the same date shares it.
+// Stamped onto the customer-facing slots BEFORE signing/caching so the field
+// survives the 5-min wrapper cache. Fail-open: a null outlook (deadline,
+// outage, gate off) stamps nothing and the payload keeps today's exact shape.
+const RAIN_OFFICE_POINT = { lat: 27.4217, lng: -82.4065 };
+
+function stampSlotRainChances(slots, outlook) {
+  if (!outlook) return;
+  for (const slot of (Array.isArray(slots) ? slots : [])) {
+    const chance = outlook[slot.date]?.rainChance;
+    if (Number.isFinite(chance)) slot.rainChance = chance;
+  }
+}
+
 // Sign the final customer-facing slots (booking-audit round 2): the HMAC
 // binds surface + THIS estimate + date/start/tech/duration + expiry, and the
 // sig+exp ride INSIDE the slotId (`base.exp.sig`) so every client — SlotPicker,
@@ -1320,6 +1336,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     wrapperCache.delete(cacheKey);
   }
 
+  // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
+  // outlook now so it overlaps the slot computation below. Bounded + cached +
+  // fail-open inside the service; the extra .catch is belt-and-braces — this
+  // decoration must never break or delay a slot payload.
+  const rainOutlookPromise = isEnabled('bookingRainChips')
+    ? getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng).catch(() => null)
+    : null;
+
   // A caller-supplied explicit window (specific date or AI-parsed range)
   // overrides the rolling windowDays lookahead.
   const { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
@@ -1356,6 +1380,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
+    const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
+    stampSlotRainChances(primary, rainOutlook);
+    stampSlotRainChances(expander, rainOutlook);
     const fallback = {
       primary: signCustomerFacingSlots(primary, estimateId),
       expander: signCustomerFacingSlots(expander, estimateId),
@@ -1429,6 +1456,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     routeFirst: isEnabled('geoSlotRanking'),
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
+
+  // Stamp rain BEFORE signing/caching (see stampSlotRainChances) so the
+  // wrapper cache serves the decorated slots for its whole 5-min TTL.
+  const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
+  stampSlotRainChances(primary, rainOutlook);
+  stampSlotRainChances(expander, rainOutlook);
 
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,

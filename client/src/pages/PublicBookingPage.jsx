@@ -589,7 +589,19 @@ export default function PublicBookingPage() {
 
   const renderDayGroups = (days) => days.map((day) => (
     <div key={day.date} style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate600, marginBottom: 6 }}>{day.fullDate}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate600 }}>{day.fullDate}</span>
+        {/* Rain chip (GATE_BOOKING_RAIN_CHIPS): soft muted amber only, ≥40%
+            days — NEVER red in this funnel. Field absent → nothing renders. */}
+        {Number.isFinite(day.rainChance) && day.rainChance >= 40 && (
+          <span style={{
+            fontSize: 12, fontWeight: 600, color: '#B45309', background: '#FFF7ED',
+            border: '1px solid #FED7AA', borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap',
+          }}>
+            <Icon name="cloudRain" size={12} style={{ verticalAlign: '-2px', marginRight: 3 }} /> {Math.round(day.rainChance)}% rain
+          </span>
+        )}
+      </div>
       <div style={{ display: 'grid', gap: 8 }}>
         {day.slots.map((slot, i) => {
           const sel = isSlotSelected(day.date, slot);
@@ -804,6 +816,17 @@ export default function PublicBookingPage() {
                             border: '1px solid #A7F3D0', borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap',
                           }}>
                             tech nearby
+                          </span>
+                        )}
+                        {/* Rain chip (GATE_BOOKING_RAIN_CHIPS): soft muted amber
+                            only, ≥40% days — NEVER red in this funnel. Field
+                            absent (gate off) → nothing renders. */}
+                        {Number.isFinite(day.rainChance) && day.rainChance >= 40 && (
+                          <span style={{
+                            fontSize: 12, fontWeight: 600, color: '#B45309', background: '#FFF7ED',
+                            border: '1px solid #FED7AA', borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap',
+                          }}>
+                            <Icon name="cloudRain" size={12} style={{ verticalAlign: '-2px', marginRight: 3 }} /> {Math.round(day.rainChance)}% rain
                           </span>
                         )}
                         <span style={{ fontSize: 22, color: COLORS.slate600, lineHeight: 1 }}>›</span>

@@ -833,6 +833,18 @@ const gates = {
   // any non-'true' value) — the field is omitted from the payload and the
   // tracker reverts to today's forecast-string behavior.
   customerRainChip: process.env.GATE_CUSTOMER_RAIN_CHIP === 'true',
+
+  // Booking rain chips — attaches the NWS daily rain chance (office-point
+  // outlook) to the customer booking payloads: the estimate slot picker
+  // (React + legacy server-rendered), the /book funnel, and the public
+  // rescheduler (which shares /book's availability builder). The UIs show a
+  // soft "☔ 42% rain" chip on ≥40% days. Display-only decoration: the
+  // attach is bounded + fail-open, and clients render only when the field
+  // is present — gate off keeps every payload byte-identical to today.
+  // Customer-facing surface change, so opt-in in EVERY environment. Kill
+  // switch: unset (or any non-'true' value) — the field is omitted from
+  // every payload and the chips disappear.
+  bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
 };
 
 function isEnabled(gate) {

@@ -4845,8 +4845,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#475569;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
   .slot-btn .slot-reason{display:block;font-size:14px;color:#475569;line-height:1.35}
+  .slot-btn .slot-chip{display:inline-block;margin-top:6px;font-size:12px;font-weight:600;line-height:1.3;color:#B45309;background:#FFF7ED;border:1px solid #FED7AA;border-radius:999px;padding:2px 8px}
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
+  .slot-btn.selected .slot-chip{color:#FFEDD5;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.35)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
   .pay-pref-grid.options{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
   @media(max-width:560px){.pay-pref-grid,.pay-pref-grid.options{grid-template-columns:1fr}}
@@ -5826,10 +5828,16 @@ ${shellQuestionsBar()}
     const day = fmtSlotDay(s.date);
     const start = fmtSlotTime(s.windowStart);
     const reason = slotReason(s);
+    // Rain chip (GATE_BOOKING_RAIN_CHIPS): soft heads-up only on rainy days
+    // (>= 40%). rainChance is absent when the gate is off — render nothing.
+    const rain = (typeof s.rainChance === 'number' && isFinite(s.rainChance) && s.rainChance >= 40)
+      ? '<span class="slot-chip">\\u2614 ' + Math.round(s.rainChance) + '% rain</span>'
+      : '';
     return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + start + '">'
       + '<span class="slot-day">' + day + '</span>'
       + '<span class="slot-time">' + start + '</span>'
       + '<span class="slot-reason">' + reason + '</span>'
+      + rain
       + '</button>';
   }
 
