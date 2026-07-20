@@ -32,6 +32,7 @@ const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+const { isEnabled } = require('../config/feature-gates');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -1016,7 +1017,22 @@ function firstDayAvailability(bookable) {
 // "Only N openings" for openCount 1–2). Keep the two in sync.
 const SCARCE_FIRST_DAY_MAX = 2;
 
-function selectCustomerFacingSlots(slots, limit) {
+// Route-first ordering (GATE_GEO_SLOT_RANKING): the first card keeps the
+// guaranteed soonest bookable option, then every route-optimal slot (detour
+// ≤ proximityDriveMinutes to an existing stop, per classifySlot) in the
+// day-diversified spread, then the remaining pure-capacity days. The
+// route-fit threshold is the existing 20-minute proximity bound — no new
+// tunables. Input must already be sorted by compareCustomerFacingSlots
+// (same contract as diversifyByDay).
+function routeFirstOrder(sorted) {
+  if (!Array.isArray(sorted) || sorted.length <= 1) return sorted;
+  const [soonest, ...remaining] = sorted;
+  const routeFit = diversifyByDay(remaining.filter((s) => s?.routeOptimal));
+  const rest = diversifyByDay(remaining.filter((s) => !s?.routeOptimal));
+  return [soonest, ...routeFit, ...rest];
+}
+
+function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
 
@@ -1025,7 +1041,7 @@ function selectCustomerFacingSlots(slots, limit) {
     .sort(compareCustomerFacingSlots);
   if (!sorted.length) return [];
 
-  const diversified = diversifyByDay(sorted);
+  const diversified = routeFirst ? routeFirstOrder(sorted) : diversifyByDay(sorted);
 
   // Scarce first day (≤2 bookable windows): pin ALL of that day's slots
   // ahead of the cross-day spread. The scarcity badge counts the full
@@ -1382,7 +1398,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // time) on today's date — covers route-aware and spread-reassigned slots
   // that buildAsapCapacitySlots' own guard never saw.
   const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
-  const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
+  // Route-first ordering only on the coords path — the no-coords fallback
+  // above has no detour data, so its ordering is unchanged either way.
+  const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL, {
+    routeFirst: isEnabled('geoSlotRanking'),
+  });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {

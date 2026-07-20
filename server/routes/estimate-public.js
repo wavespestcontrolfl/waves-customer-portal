@@ -9221,6 +9221,17 @@ router.put('/:token/accept', async (req, res, next) => {
       void AppointmentTagger.onServiceScheduled(appointment.id, { suppressWelcome: true })
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
+    // Geo visibility for future route scoring: the accept path creates the
+    // customer (and their whole visit series) with no coordinates, and
+    // find-time's detour math silently treats coordless stops as zero drive
+    // time — so these visits are invisible as route anchors to every later
+    // offer. Geocode the customer once, post-commit, fail-soft; find-time's
+    // customers.latitude fallback then covers all their visits.
+    if (customerId) {
+      const { ensureCustomerGeocoded } = require('../services/geocoder');
+      void ensureCustomerGeocoded(customerId)
+        .catch((e) => logger.warn(`[estimate-accept] customer geocode failed (non-blocking) for ${customerId}: ${e.message}`));
+    }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows
       : [];
