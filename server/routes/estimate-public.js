@@ -96,6 +96,20 @@ const addServiceRequestLimiter = rateLimit({
   message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
 });
 
+const bondTermSwitchLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Dark-launch contract: while GATE_TERMITE_BOND_OPTION is off the route
+  // answers a uniform 403 — a 429 on the Nth probe would reveal live
+  // infrastructure behind the kill switch, so the limiter engages only when
+  // the feature is on. 30/hr comfortably covers a customer comparing terms.
+  skip: () => !['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase()),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
 const extensionRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
@@ -2599,7 +2613,17 @@ function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
   // WaveGuard setup, all other recurring services take a prepay discount off the
   // recurring annual. Only one-time-only (no recurring) estimates are ineligible.
   const recurringRows = Array.isArray(recurring) ? recurring : [];
-  return recurringRows.length > 0;
+  if (!recurringRows.length) return false;
+  // Termite bond riders can't annual-prepay yet (codex #2915 r1): an
+  // annual_prepay_terms row carries ONE coverage service keyed on the
+  // primary name, the combined "…+ Termite Bond Service" visit can't be
+  // stamped, and the converter fails that conversion closed (422) — so the
+  // prepay CTA and the accept-time validation must never offer it. This
+  // predicate is the shared gate for both (SSR + React flag + accept).
+  if (recurringRows.some((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'))) {
+    return false;
+  }
+  return true;
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -10043,8 +10067,12 @@ function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
 // estimate that rewrites estimate_data + the totals columns server-side,
 // TOCTOU-guarded against a concurrent accept (the accept path freezes
 // whatever rows this wrote — customerSelection alone never bills).
-router.put('/:token/bond', async (req, res, next) => {
+router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
   try {
+    // Kill-switch completeness (codex #2915 r1): the gate must dead-end this
+    // mutation even for estimates whose payloads still carry a bondOptions
+    // snapshot from when the gate was on.
+    if (!termiteBondOptionGateOn()) return res.status(403).json({ error: 'bond_option_disabled' });
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
@@ -15048,6 +15076,16 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   return repriced;
 }
 
+// GATE_TERMITE_BOND_OPTION — mirrored from the engine's emission gate. The
+// kill switch must be total for UNSOLD state (selector render + PUT /bond),
+// even on estimates whose payloads were priced while the gate was on
+// (codex #2915 r1). Already-SELECTED bond rows are sold state and keep
+// displaying, folding, and billing regardless — unset never rewrites a
+// quoted price.
+function termiteBondOptionGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+}
+
 // Termite bond selector payload (owner 2026-07-20): the quote-time option
 // snapshot + current selection ride the TERMITE section — bond lines are
 // section-suppressed riders (see buildPricingServices), and the customer
@@ -15056,22 +15094,26 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
 function attachTermiteBondSelector(services = [], estData = {}) {
   const stats = estData?.result?.results?.tmBait || estData?.results?.tmBait || null;
   const options = Array.isArray(stats?.bondOptions) ? stats.bondOptions : null;
-  if (!options || !options.length) return services;
   const section = (services || []).find((s) => s?.key === 'termite_bait');
   if (!section) return services;
   const rows = recurringServicesWithSupplements(estData?.result || estData || {});
   const selectedRow = rows.find((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond')) || null;
-  section.bondOptions = options.map((opt) => ({
-    key: opt.key,
-    label: opt.label,
-    years: opt.years,
-    perApplicationAdd: Number(opt.perApp ?? opt.quarterly) || 0,
-    monthlyAdd: Number(opt.monthly) || 0,
-    annualAdd: Number(opt.annual) || 0,
-  }));
-  section.selectedBondTerm = selectedRow
-    ? (selectedRow.bondTerm || options.find((o) => o.serviceKey === selectedRow.service)?.key || null)
-    : null;
+  // Selector (unsold state) requires BOTH a persisted snapshot and the live
+  // gate; the solo fold below runs off the selected ROW alone — sold state
+  // must keep pricing correctly even after a kill-switch flip.
+  if (options && options.length && termiteBondOptionGateOn()) {
+    section.bondOptions = options.map((opt) => ({
+      key: opt.key,
+      label: opt.label,
+      years: opt.years,
+      perApplicationAdd: Number(opt.perApp ?? opt.quarterly) || 0,
+      monthlyAdd: Number(opt.monthly) || 0,
+      annualAdd: Number(opt.annual) || 0,
+    }));
+    section.selectedBondTerm = selectedRow
+      ? (selectedRow.bondTerm || options.find((o) => o.serviceKey === selectedRow.service)?.key || null)
+      : null;
+  }
   // SOLO termite estimates: the section frequency IS the plan the accept
   // path freezes (effectiveMonthly/AnnualTotal read selectedFrequency), so a
   // selected bond must ride its figures — monthly 35→50, annual 420→600,

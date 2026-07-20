@@ -658,6 +658,26 @@ function parseStoredEstimateData(estimateData) {
 // delivery options. Returns the estimates-table write fields (everything
 // except the identity/lifecycle columns the caller owns: id, token, status,
 // expires_at, created_by_technician_id).
+// GATE_TERMITE_BOND_OPTION dark: a client-priced save (the legacy builder
+// posts {inputs, result} with no replayable engineRequest, so the server
+// falls back to the client preview) could persist a bond line the server
+// engine would never emit — rendered, acceptable, and billed despite the
+// kill switch (codex #2915 r1). Reject rather than strip: silently deleting
+// a line the operator saw priced would desync the client-computed totals
+// this save path trusts.
+function assertNoDarkTermiteBondPayload(estimateData) {
+  const gateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+  if (gateOn) return;
+  const result = estimateData?.result && typeof estimateData.result === 'object' ? estimateData.result : {};
+  const lists = [result?.recurring?.services, estimateData?.recurring?.services];
+  const hasBondRow = lists.some((list) => Array.isArray(list)
+    && list.some((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
+      || /termite bond/i.test(String(svc?.name || ''))));
+  if (hasBondRow) {
+    throw errorWithStatus('Termite bond option is disabled (GATE_TERMITE_BOND_OPTION) — remove the bond selection and save again.', 422);
+  }
+}
+
 async function resolveEstimateWritePayload({
   database = db,
   body,
@@ -696,6 +716,7 @@ async function resolveEstimateWritePayload({
     logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
+  assertNoDarkTermiteBondPayload(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -1204,6 +1225,7 @@ async function reviseAdminEstimate({
 }
 
 module.exports = {
+  assertNoDarkTermiteBondPayload,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,

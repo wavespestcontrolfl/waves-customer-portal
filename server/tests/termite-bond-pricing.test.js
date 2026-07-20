@@ -285,3 +285,75 @@ describe('GATE_TERMITE_BOND_OPTION (default OFF)', () => {
     }
   });
 });
+
+describe('codex #2915 r1 hardening', () => {
+  const EstimateConverter = require('../services/estimate-converter');
+  const { buildPricingBundle, annualPrepayEligibleForEstimateData } = require('../routes/estimate-public');
+  const { assertNoDarkTermiteBondPayload } = require('../services/admin-estimate-persistence');
+
+  function estimateWith(term) {
+    const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput(term ? { termiteBondTerm: term } : {})));
+    return {
+      id: `estimate-hardening-${term || 'none'}`,
+      status: 'sent',
+      monthly_total: mapped.recurring.monthlyTotal,
+      annual_total: mapped.recurring.annualAfterDiscount,
+      onetime_total: mapped.oneTime.total,
+      waveguard_tier: 'Bronze',
+      estimate_data: { inputs: { svcTermiteBait: true }, result: mapped },
+    };
+  }
+
+  test('standalone bond rows STILL seed their quarterly series (rebuttal evidence — serviceKeyFor collapses termite names)', () => {
+    const bondRow = {
+      name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr',
+      mo: 15, perTreatment: 45, visitsPerYear: 4,
+    };
+    expect(EstimateConverter.supportsConverterFollowUpSeeding(bondRow, {}, 'quarterly')).toBe(true);
+    // Even a monthly plan-level fallback cannot suppress it — the explicit
+    // visits override applies to the whole termite family.
+    expect(EstimateConverter.converterFollowUpSeedingPattern(
+      bondRow, { service_type: 'Termite Bond (10-Year Term)' }, 'monthly',
+    )).toBe('quarterly');
+  });
+
+  test('bond estimates are never annual-prepay eligible (CTA + accept validation share the predicate)', () => {
+    expect(annualPrepayEligibleForEstimateData(estimateWith('10yr').estimate_data)).toBe(false);
+    expect(annualPrepayEligibleForEstimateData(estimateWith(null).estimate_data)).toBe(true);
+  });
+
+  test('kill switch is total for unsold state: gate off strips the selector but sold pricing keeps folding', async () => {
+    const estimate = estimateWith('10yr');
+    const prev = process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    try {
+      const bundle = await buildPricingBundle(estimate);
+      const termite = bundle.services.find((s) => s.key === 'termite_bait');
+      expect(termite.bondOptions).toBeUndefined();
+      expect(termite.selectedBondTerm).toBeUndefined();
+      // Sold state: the selected bond still folds into the solo plan the
+      // accept freezes — a kill-switch flip never rewrites a quoted price.
+      expect(termite.frequencies[0].monthly).toBe(50);
+      expect(termite.frequencies[0].perTreatment).toBe(150);
+    } finally {
+      process.env.GATE_TERMITE_BOND_OPTION = prev;
+    }
+  });
+
+  test('client-priced saves cannot persist a bond while the gate is dark (reject, never strip)', () => {
+    const bondData = estimateWith('10yr').estimate_data;
+    const cleanData = estimateWith(null).estimate_data;
+    const prev = process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    try {
+      expect(() => assertNoDarkTermiteBondPayload(bondData)).toThrow(/GATE_TERMITE_BOND_OPTION/);
+      let status;
+      try { assertNoDarkTermiteBondPayload(bondData); } catch (err) { status = err.statusCode || err.status; }
+      expect(status).toBe(422);
+      expect(() => assertNoDarkTermiteBondPayload(cleanData)).not.toThrow();
+    } finally {
+      process.env.GATE_TERMITE_BOND_OPTION = prev;
+    }
+    expect(() => assertNoDarkTermiteBondPayload(bondData)).not.toThrow();
+  });
+});

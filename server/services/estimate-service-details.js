@@ -275,8 +275,11 @@ const SERVICE_DETAILS_COPY = {
         // Bond option (owner 2026-07-20): terms are program structure and
         // stable; the per-application price for each term lives on the
         // estimate's bond selector, never in this static guide (rates are
-        // DB-tunable and a stale printed price would misquote).
-        ['Bond term options', '1-, 5-, or 10-year warranty bond — pick the term on your estimate, priced per application'],
+        // DB-tunable and a stale printed price would misquote). Row hidden
+        // while GATE_TERMITE_BOND_OPTION is dark — the guide must not point
+        // customers at a selector that is intentionally absent (codex #2915
+        // r1). Env read at request time via the row filter below.
+        ['Bond term options', '1-, 5-, or 10-year warranty bond — pick the term on your estimate, priced per application', { requiresTermiteBondGate: true }],
         ['Repair coverage', 'Up to $1,000,000 for new covered WDO damage'],
         ['Transferable', 'Yes \u2014 to a new homeowner ($250 + transfer inspection)'],
         ['Station ownership', 'Yours \u2014 purchased once with installation'],
@@ -813,7 +816,18 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
         || registryNames.some((n) => n.includes(String(img.product).toLowerCase())));
       return images.length ? { ...copy.productImages, images } : null;
     })(),
-    systemBox: copy.systemBox || null,
+    // Gate-marked rows (a {requiresTermiteBondGate} third tuple element) are
+    // stripped while GATE_TERMITE_BOND_OPTION is dark — the guide must not
+    // point customers at a selector that is intentionally absent. Env read
+    // at request time; the marker element never reaches renderers either way.
+    systemBox: (() => {
+      if (!copy.systemBox) return null;
+      const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+      const rows = (copy.systemBox.rows || [])
+        .filter((row) => bondGateOn || !(Array.isArray(row) && row[2] && row[2].requiresTermiteBondGate))
+        .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
+      return { ...copy.systemBox, rows };
+    })(),
     responsibilities: copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
     // (termite, pest, mosquito) flagged the mid-document CTA as premature.
