@@ -95,6 +95,24 @@ describe("applyServerLawnPricingConfig — live lawn program minimum in the fall
 });
 
 describe("applyServerPestPricingConfig — live pest floor re-arm in the fallback engine", () => {
+  it("a fractional configured floor rounds to whole dollars, mirroring the db-bridge r() rule (codex P1)", () => {
+    // The server bridge stores r(89.50) = 90 into PEST.floor. A cents-keeping
+    // client would price the bound tier at 89.50 — below the server floor —
+    // and the save gate would 409 every freshly generated fallback save.
+    applyServerPestPricingConfig({ enforce_floor_post_discount: true, floor: 89.5 });
+    const est = calculateEstimate(lawnInput({
+      svcPest: true,
+      homeSqFt: 1000,
+      shrubDensity: "LIGHT",
+      landscapeComplexity: "SIMPLE",
+    }));
+    expect(est.error).toBeUndefined();
+    const tier = est.results.pestTiers.find((t) => t.apps === 4);
+    expect(tier.floorPa).toBeCloseTo(90, 2);
+    expect(est.result?.pricingMetadata?.pestProgramFloorPerVisit ?? est.pricingMetadata?.pestProgramFloorPerVisit).toBe(90);
+  });
+
+
   it("defaults disarmed: no floor metadata on pest tiers, WaveGuard applies in full", () => {
     const est = calculateEstimate(lawnInput({ svcPest: true }));
     expect(est.error).toBeUndefined();

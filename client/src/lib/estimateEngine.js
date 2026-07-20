@@ -398,10 +398,14 @@ export function applyServerPestPricingConfig(config) {
   // so a re-arm at a floor other than $89 stamps/gives back the SAME floor
   // the server normalizes and view/accept clamps at (pre-push codex P0,
   // round 9 on #2827). Absent/invalid resets the in-code default — the
-  // kill-value pattern.
+  // kill-value pattern. ROUNDING MUST MIRROR THE BRIDGE: db-bridge applies
+  // r() (whole-dollar round; PROCESSING_ADJUSTMENT is 1.00) to
+  // pest_base.floor, so a fractional configured floor like $89.50 becomes
+  // $90 server-side — a cents-keeping client would price the bound tier
+  // BELOW the server floor and the save gate would 409 every fallback save.
   const floor = Number(config?.floor);
   PEST_BASE.floorPerVisit = Number.isFinite(floor) && floor > 0
-    ? Math.round(floor * 100) / 100
+    ? Math.round(floor)
     : 89;
   return PEST_BASE.enforceFloorPostDiscount;
 }
