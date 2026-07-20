@@ -6,12 +6,19 @@
  * load-bearing lines — backdated completionServiceDate, forced comms/review
  * suppression (initial AND post-resume re-derivation), the structured_notes
  * freeze, the near-term invoice due date, the admin-only authz gate, the
- * quiet card mint, and the account-credit skip — must not be refactored away
- * silently.
+ * quiet card mint, the account-credit skip, the prepaid-credit skip (the
+ * rail mutates the invoice — reduces it, books a payments row, can flip it
+ * paid — so it is GATED like the other money rails, not "safe by nature"),
+ * the no-fabricated-durations policy, and the labor-costing guard — must
+ * not be refactored away silently.
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan } = require('../routes/admin-dispatch')._test;
+const {
+  backfillCompletionPlan,
+  applyBackfillDurationPolicy,
+} = require('../routes/admin-dispatch')._test;
+const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 
 const TODAY = '2026-07-19';
 
@@ -81,6 +88,66 @@ describe('backfillCompletionPlan', () => {
   });
 });
 
+describe('applyBackfillDurationPolicy — no fabricated durations (Codex P1, fix round)', () => {
+  // A stale on_site row: checked in weeks ago, closed out from the office
+  // today. The shared lifecycle helper's timestamp fallback would book the
+  // whole gap as the service duration.
+  const STALE_SVC = {
+    status: 'on_site',
+    actual_start_time: '2026-06-20T14:00:00Z',
+    check_in_time: '2026-06-20T14:00:00Z',
+  };
+  const CLOSEOUT_AT = new Date('2026-07-19T16:00:00Z'); // 29 days later
+
+  test('the hazard is real: without the policy, the helper books the stale gap as duration', () => {
+    const raw = buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT);
+    expect(raw.service_time_minutes).toBeGreaterThan(24 * 60); // weeks, not a visit
+  });
+
+  test('no explicit timeOnSite → duration keys stripped, columns stay unknown (never elapsed math)', () => {
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT),
+      undefined,
+    );
+    expect(updates).not.toHaveProperty('service_time_minutes');
+    expect(updates).not.toHaveProperty('actual_duration_minutes');
+    // The audit timestamps survive — only the derived duration is dropped.
+    expect(updates.actual_end_time).toEqual(CLOSEOUT_AT);
+    expect(updates.check_out_time).toEqual(CLOSEOUT_AT);
+  });
+
+  test('explicit timeOnSite is honored in every shape the completion body sends', () => {
+    for (const [input, expected] of [[45, 45], ['45', 45], ['0:45:00', 45], ['90 min', 90]]) {
+      const updates = applyBackfillDurationPolicy(
+        buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT, { elapsed: input }),
+        input,
+      );
+      expect(updates.service_time_minutes).toBe(expected);
+      expect(updates.actual_duration_minutes).toBe(expected);
+    }
+  });
+
+  test('garbage timeOnSite is not a fabrication license — falls back to unknown, not to the stale span', () => {
+    for (const junk of ['', '  ', 'abc', -5, 0, null]) {
+      const updates = applyBackfillDurationPolicy(
+        buildCompletionLifecycleUpdates(STALE_SVC, CLOSEOUT_AT, { elapsed: junk }),
+        junk,
+      );
+      expect(updates).not.toHaveProperty('service_time_minutes');
+      expect(updates).not.toHaveProperty('actual_duration_minutes');
+    }
+  });
+
+  test('a never-checked-in stale row (pending/confirmed) stays unknown too', () => {
+    const updates = applyBackfillDurationPolicy(
+      buildCompletionLifecycleUpdates({ status: 'pending' }, CLOSEOUT_AT),
+      undefined,
+    );
+    expect(updates).not.toHaveProperty('service_time_minutes');
+    expect(updates).not.toHaveProperty('actual_duration_minutes');
+  });
+});
+
 describe('completion route wiring (source contracts)', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
@@ -144,6 +211,48 @@ describe('completion route wiring (source contracts)', () => {
     // applyAccountCreditToInvoice call, so a backfilled invoice can neither
     // consume existing credit nor flip itself prepaid.
     expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,400}applyAccountCreditToInvoice\(\{ invoiceId: invoice\.id \}\)/);
+  });
+
+  test('backfill never auto-applies the prepaid credit — invoice mutation stays with the reviewer', () => {
+    // applyPrepaidCreditToInvoice reduces the invoice total, inserts a
+    // payments row, and can flip the invoice paid. Recording money the
+    // operator already collected is still invoice mutation on the quiet
+    // path, so the rail is gated INSIDE the helper — covering BOTH call
+    // sites (fresh completion invoice and pre-minted Tap-to-Pay invoice) —
+    // with a log line pointing review at the prepaid_amount on file.
+    const helper = source.match(/const applyPrepaidCreditToInvoice = async \(invoiceRow\) => \{([\s\S]*?)\n {4}\};/);
+    expect(helper).not.toBeNull();
+    const gateAt = helper[1].indexOf('if (isBackfillCompletion) {');
+    expect(gateAt).toBeGreaterThan(-1);
+    // The gate returns the invoice untouched BEFORE the crediting transaction.
+    expect(helper[1].indexOf('db.transaction')).toBeGreaterThan(gateAt);
+    expect(helper[1]).toContain('prepaid credit NOT auto-applied');
+    expect(helper[1]).toContain('prepaid_amount');
+    // Both call sites still route through the gated helper.
+    expect(source).toMatch(/invoice = await applyPrepaidCreditToInvoice\(invoice\);/);
+    expect(source).toMatch(/preMintedInvoice = await applyPrepaidCreditToInvoice\(preMintedInvoice\);/);
+  });
+
+  test('backfill durations come from the policy, not the stale lifecycle timestamps', () => {
+    // The route builds lifecycle updates from the shared helper, then under
+    // backfill immediately re-derives the duration through the policy
+    // (explicit timeOnSite or unknown — behavioral coverage above).
+    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionEndedAt, \{ elapsed: timeOnSite \}\);[\s\S]{0,400}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, timeOnSite\);/);
+  });
+
+  test('backfill job costing never derives labor from the stale span (or the clock-in window over it)', () => {
+    // The completion route flags the span untrusted and forwards the
+    // operator's explicit minutes…
+    expect(source).toMatch(/JobCosting\.calculateJobCost\(svc\.id, undefined, isBackfillCompletion\s*\n\s*\? \{ untrustedLifecycleSpan: true, explicitLaborMinutes: minutesFromElapsed\(timeOnSite\) \}\s*\n\s*: \{\}\)/);
+    // …and calcLaborCost honors it: the technician clock-in-window fallback
+    // and the actual_start/end span fallback are both skipped for untrusted
+    // bounds; only direct job entries or the explicit minutes may count.
+    const costingSource = fs.readFileSync(path.join(__dirname, '../services/job-costing.js'), 'utf8');
+    expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && technicianId && startTime && endTime\) \{/);
+    expect(costingSource).toMatch(/if \(!minutes && untrustedLifecycleSpan\) \{\s*\n\s*const explicit = Number\(explicitLaborMinutes\);\s*\n\s*if \(Number\.isFinite\(explicit\) && explicit > 0\) minutes = Math\.round\(explicit\);\s*\n\s*\}/);
+    expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && startTime && endTime\) \{/);
+    // calculateJobCost threads the options through to calcLaborCost.
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes \},\s*\n\s*\);/);
   });
 
   test('backfill + card hold parks for review instead of charging', () => {
@@ -214,6 +323,11 @@ describe('completion route wiring (source contracts)', () => {
       'invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion',
       // referral credit
       'const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;',
+      // prepaid-credit application (gate lives inside the helper, defined
+      // and called after the re-derivation)
+      'prepaid credit NOT auto-applied',
+      // job-costing labor guard
+      'untrustedLifecycleSpan: true',
     ];
     for (const gate of postCommitGates) {
       const at = source.indexOf(gate);

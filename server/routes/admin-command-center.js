@@ -76,7 +76,11 @@ function invoiceHref(row) {
 }
 
 function dispatchDayHref(date) {
-  return `/admin/dispatch?date=${encodeURIComponent(date)}`;
+  // tab=schedule is load-bearing (Codex P2, fix round): AdminDispatchPage
+  // defaults a bare /admin/dispatch to the Board tab, which ignores ?date=.
+  // Only the Schedule tab mounts DispatchPageV2, whose initializers read the
+  // deep-linked day and open Day view on it.
+  return `/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}`;
 }
 
 function employee(row, role = 'technician') {

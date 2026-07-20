@@ -91,6 +91,7 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const { minutesFromElapsed } = require('../utils/duration-minutes');
 const {
   INVENTORY_UNITS,
   baseQuantityUnit,
@@ -582,6 +583,28 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
     };
   }
   return { active: true, serviceDate };
+}
+
+// Backfill duration policy (Codex P1, fix round): a stale row's lifecycle
+// timestamps are artifacts of the forgotten closeout — a check-in from
+// days/weeks ago against an office checkout stamped today — so the shared
+// helper's elapsed-math fallback would book that whole span as
+// service_time_minutes/actual_duration_minutes and pollute every time
+// metric downstream. Under backfill the ONLY trusted duration is the
+// operator's explicit timeOnSite from the completion body; absent that, the
+// duration keys are stripped so the columns stay unknown (NULL) instead of
+// carrying a fabricated interval. Mutates and returns the updates object
+// built by buildCompletionLifecycleUpdates. Pure for testability (_test).
+function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite) {
+  const explicitMinutes = minutesFromElapsed(timeOnSite);
+  if (explicitMinutes) {
+    lifecycleUpdates.service_time_minutes = explicitMinutes;
+    lifecycleUpdates.actual_duration_minutes = explicitMinutes;
+  } else {
+    delete lifecycleUpdates.service_time_minutes;
+    delete lifecycleUpdates.actual_duration_minutes;
+  }
+  return lifecycleUpdates;
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
@@ -3574,6 +3597,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ? backfillPlan.serviceDate
             : etDateString(completionEndedAt);
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
+          // Backfill: never derive a duration from the stale on-row
+          // timestamps (a weeks-old check-in against today's checkout) —
+          // explicit timeOnSite or unknown. See applyBackfillDurationPolicy.
+          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite);
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -5207,6 +5234,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const prepaidCents = (svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
         && svc.prepaid_amount != null) ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+      // Backfill closeouts leave the completion invoice EXACTLY as minted for
+      // office review (Codex P1, fix round): applying the out-of-band
+      // prepayment here reduces the total, inserts a payments row, and can
+      // flip the invoice paid — invoice mutation the quiet path promises not
+      // to make, even for money the operator already collected. The operator
+      // applies the recorded prepayment while reviewing the open invoice.
+      if (isBackfillCompletion) {
+        logger.info(`[dispatch] backfill completion: prepaid credit NOT auto-applied for visit ${svc.id} — invoice ${invoiceRow.invoice_number || invoiceRow.id} left open for review (prepaid_amount $${Number(svc.prepaid_amount).toFixed(2)}${svc.prepaid_method ? ` via ${svc.prepaid_method}` : ''} on file)`);
+        return invoiceRow;
+      }
       // Third-party Bill-To: never credit the homeowner's prepaid amount against
       // a payer-billed invoice — that money isn't owed by the payer. The invoice
       // row is the source of truth (createFromService auto-resolves a default
@@ -6593,7 +6630,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (!resumingCommittedCompletion) {
       try {
         const JobCosting = require('../services/job-costing');
-        void JobCosting.calculateJobCost(svc.id).catch(e =>
+        // Backfill: the row's actual_start/actual_end pair now spans a stale
+        // check-in (days/weeks back) to today's office closeout, and the
+        // tech-window time_entries fallback would scoop every job clocked in
+        // between — either way weeks of labor booked to one visit. Labor may
+        // only come from entries tied to THIS job or the operator's explicit
+        // timeOnSite — never elapsed math over the stale span (same rule as
+        // service_time_minutes via applyBackfillDurationPolicy).
+        void JobCosting.calculateJobCost(svc.id, undefined, isBackfillCompletion
+          ? { untrustedLifecycleSpan: true, explicitLaborMinutes: minutesFromElapsed(timeOnSite) }
+          : {}).catch(e =>
           logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
         );
       } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
@@ -8701,4 +8747,5 @@ module.exports._test = {
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   backfillCompletionPlan,
+  applyBackfillDurationPolicy,
 };

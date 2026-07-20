@@ -3,7 +3,9 @@
  * Covers the pure helpers (signature, summary copy, prior-bell coverage),
  * the gate short-circuit, the query classification, and the ring/dedupe
  * decision. Detection-only: the sweep must never touch scheduled_services
- * beyond the read.
+ * beyond the read. Also pins the dashboard read surface's deep link
+ * (admin-command-center getStaleVisits): rows must open the dispatch
+ * SCHEDULE tab, since the default Board tab ignores ?date=.
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -221,5 +223,22 @@ describe('runStaleVisitSweep', () => {
       return chain();
     });
     await expect(runStaleVisitSweep()).rejects.toThrow('bell not recorded');
+  });
+});
+
+describe('dashboard stale-card deep links (admin-command-center source contract)', () => {
+  const source = require('fs').readFileSync(
+    require('path').join(__dirname, '../routes/admin-command-center.js'),
+    'utf8',
+  );
+
+  test('day links open the Schedule tab — a bare /admin/dispatch?date= lands on Board, which drops the date (Codex P2)', () => {
+    // AdminDispatchPage defaults an absent ?tab= to the Board tab and only
+    // mounts DispatchPageV2 — the surface whose initializers read ?date= and
+    // open Day view on it — for tab=schedule. Without the tab param the
+    // operator lands on the map board and the deep-linked day is ignored.
+    expect(source).toMatch(/function dispatchDayHref\(date\) \{[\s\S]{0,500}return `\/admin\/dispatch\?tab=schedule&date=\$\{encodeURIComponent\(date\)\}`;\s*\n\}/);
+    // And the stale rows use the day-link builder for their href.
+    expect(source).toMatch(/href: dispatchDayHref\(scheduledDate\),/);
   });
 });

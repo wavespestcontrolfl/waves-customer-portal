@@ -143,7 +143,10 @@ function computeServiceRecordFinancials({
   };
 }
 
-async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, endTime, rate) {
+async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, endTime, rate, {
+  untrustedLifecycleSpan = false,
+  explicitLaborMinutes = null,
+} = {}) {
   let minutes = 0;
   try {
     // Prefer the JOB time entries tied directly to this visit. time_entries.job_id
@@ -159,10 +162,10 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
       minutes = jobEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
     }
     // Else fall back to job entries overlapping the ACTUAL visit window — only
-    // when both real bounds exist. Never a Date.now() window: during the one-time
-    // backfill that would scoop up whatever a tech is clocked into at deploy time
-    // and mis-attribute it to an old visit.
-    if (!minutes && technicianId && startTime && endTime) {
+    // when both real bounds exist AND the bounds are trusted. Never a Date.now()
+    // window: during the one-time backfill that would scoop up whatever a tech
+    // is clocked into at deploy time and mis-attribute it to an old visit.
+    if (!minutes && !untrustedLifecycleSpan && technicianId && startTime && endTime) {
       const entries = await db('time_entries')
         .where({ technician_id: technicianId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -175,8 +178,18 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
     }
   } catch { /* table may be absent */ }
 
+  // Untrusted span (a backdated stale-visit closeout: start = a check-in from
+  // days/weeks ago, end = today's office checkout): both the clock-in-window
+  // query above and the span math below would fabricate that whole gap as
+  // labor, so only the caller's explicit operator-entered minutes count.
+  // Absent them, labor stays 0 — the same "no data" posture a visit with no
+  // recorded bounds gets.
+  if (!minutes && untrustedLifecycleSpan) {
+    const explicit = Number(explicitLaborMinutes);
+    if (Number.isFinite(explicit) && explicit > 0) minutes = Math.round(explicit);
+  }
   // Final fallback: the actual_start/end span on the scheduled_service.
-  if (!minutes && startTime && endTime) {
+  if (!minutes && !untrustedLifecycleSpan && startTime && endTime) {
     minutes = Math.max(0, Math.round((new Date(endTime) - new Date(startTime)) / 60000));
   }
 
@@ -313,8 +326,16 @@ async function resolveServiceRecord(db, svc, srCols) {
  * (e.g. a migration's); omit it to use the app db singleton. opts.recomputeRevenue
  * (backfill-only) re-derives revenue from source instead of preserving any
  * existing — possibly stale-seeded — service_records.revenue.
+ * opts.untrustedLifecycleSpan (backdated quiet closeouts) blocks the labor
+ * fallbacks that derive from the row's actual_start/actual_end bounds — see
+ * calcLaborCost; opts.explicitLaborMinutes supplies the operator-entered
+ * duration to use instead.
  */
-async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = false } = {}) {
+async function calculateJobCost(scheduledServiceId, db, {
+  recomputeRevenue = false,
+  untrustedLifecycleSpan = false,
+  explicitLaborMinutes = null,
+} = {}) {
   db = resolveDb(db);
   if (!scheduledServiceId) throw new Error('scheduledServiceId required');
 
@@ -344,6 +365,7 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
   });
   const { laborCost, laborHours } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
+    { untrustedLifecycleSpan, explicitLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
