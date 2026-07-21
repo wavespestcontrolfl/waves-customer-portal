@@ -875,6 +875,12 @@ router.get('/accounts-receivable', async (req, res, next) => {
         // excluded: draft/scheduled/sending (not yet receivable) and
         // processing (ACH in flight settles on its own).
         .whereIn('invoices.status', ['sent', 'viewed', 'overdue', 'unpaid', 'pending'])
+        // Third-party payer invoices are owed by the PAYER's AP inbox — this
+        // surface joins the service recipient's contact info and its Send
+        // Reminder button texts them, so a payer-billed invoice here would
+        // chase the homeowner for someone else's bill (mirrors the
+        // payments-reconcile payer guard).
+        .whereNull('invoices.payer_id')
         .select(
           'invoices.*',
           'customers.first_name', 'customers.last_name',
@@ -1014,14 +1020,30 @@ router.get('/export/mileage', async (req, res, next) => {
 
 router.get('/export/depreciation', async (req, res, next) => {
   try {
+    // Same shape as the tax-package schedule: the export covers a tax YEAR
+    // (?year=, default current ET year) and computes the per-asset
+    // 'Depreciation (This Period)' column with the same proration the P&L
+    // uses — the generator's header promises that column, so the standalone
+    // export must populate it too. Active-or-disposed matches the package.
+    const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts(new Date()).year);
+    const sd = `${year}-01-01`;
+    const ed = `${year}-12-31`;
     let equipment = [];
     try {
-      equipment = await db('equipment_register').where('active', true).orderBy('name');
-    } catch { /* */ }
+      equipment = await db('equipment_register')
+        .where(function activeOrDisposed() {
+          this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
+        })
+        .orderBy('name');
+      equipment = equipment.map(e => ({
+        ...e,
+        period_depreciation: prorateAssetDepreciation(e, sd, ed),
+      }));
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     const csvStr = csv.depreciationToCSV(equipment);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="waves-depreciation-${new Date().getFullYear()}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="waves-depreciation-${year}.csv"`);
     res.send(csvStr);
   } catch (err) { next(err); }
 });

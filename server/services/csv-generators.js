@@ -174,12 +174,23 @@ function generateReadme(year, pnlData) {
     ``,
     `This ZIP contains the following CSV files for your CPA:`,
     ``,
-    `  1. transactions.csv     — All payment transactions`,
-    `  2. expenses.csv         — Business expenses by Schedule C category`,
-    `  3. mileage.csv          — Business mileage log (IRS format)`,
-    `  4. depreciation.csv     — Equipment depreciation schedule`,
-    `  5. labor.csv            — Labor costs by technician`,
-    `  6. pnl.csv              — Profit & Loss statement`,
+    `  1. transactions.csv     — Every receipt the P&L counts (payments ledger,`,
+    `                            estimate deposits, and Stripe-paid invoices with`,
+    `                            no ledger row, each labeled by type)`,
+    `  2. refunds.csv          — Refund and dispute balance transactions netted`,
+    `                            against revenue, in the period each occurred`,
+    `  3. expenses.csv         — Business expenses by Schedule C category`,
+    `  4. mileage.csv          — Business mileage log (IRS format)`,
+    `  5. depreciation.csv     — Equipment depreciation schedule (the`,
+    `                            'Depreciation (This Period)' column foots to the`,
+    `                            P&L's depreciation line)`,
+    `  6. labor-timetracking-informational.csv`,
+    `                          — Owner time-tracking detail, INFORMATIONAL ONLY.`,
+    `                            The cost column is an internal job-costing`,
+    `                            estimate of the owner-operator's own time, which`,
+    `                            is NOT a deductible payroll expense and is NOT`,
+    `                            included in the P&L.`,
+    `  7. pnl.csv              — Profit & Loss statement`,
     ``,
     `Summary for ${year}:`,
   ];
@@ -190,6 +201,10 @@ function generateReadme(year, pnlData) {
     lines.push(`  Operating Exp:     $${(pnlData.operatingExpenses?.total || 0).toFixed(2)}`);
     lines.push(`  Deductions:        $${(pnlData.deductions?.total || 0).toFixed(2)}`);
     lines.push(`  Net Income:        $${(pnlData.netIncome || 0).toFixed(2)}`);
+    if (pnlData.coverage?.note) {
+      lines.push(``);
+      lines.push(`  COVERAGE NOTE: ${pnlData.coverage.note}`);
+    }
   }
   lines.push(``);
   lines.push(`Prepared for filing purposes. Consult your CPA for tax advice.`);
