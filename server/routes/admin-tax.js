@@ -5,7 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { buildPnlReport, getPeriodRange, paidRevenueForWindow } = require('../services/pnl-report');
+const { buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf } = require('../services/pnl-report');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1081,17 +1081,25 @@ router.get('/export/tax-package', async (req, res, next) => {
     // job minutes at the loaded labor rate (same basis as per-visit costing).
     let laborSummaries = [];
     try {
-      const finRow = await db('company_financials').orderBy('effective_date', 'desc').first().catch(() => null);
-      const laborRate = Number(finRow?.loaded_labor_rate) || 35;
+      // Effective-dated rates: each day costs at the rate in force that day
+      // (rateAsOf) — the same basis as the builder's P&L labor line, so
+      // labor.csv always foots to pnl.csv.
+      const rateRows = await db('company_financials')
+        .where('effective_date', '<=', ed)
+        .orderBy('effective_date', 'asc')
+        .select('effective_date', 'loaded_labor_rate')
+        .catch(() => []);
       const rows = await db('time_entry_daily_summary as s')
         .leftJoin('technicians as t', 's.technician_id', 't.id')
         .whereBetween('s.work_date', [sd, ed])
         .orderBy('s.work_date', 'desc')
         .select('s.*', 't.name as technician_name');
       laborSummaries = rows.map(r => {
+        const day = typeof r.work_date === 'string' ? r.work_date.slice(0, 10) : etDateString(new Date(r.work_date));
         const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
+        const dayRate = rateAsOf(rateRows, day);
         return {
-          date: typeof r.work_date === 'string' ? r.work_date.slice(0, 10) : etDateString(new Date(r.work_date)),
+          date: day,
           technician_name: r.technician_name || '',
           // All job hours reported as regular (overtime_hours 0): the summary's
           // overtime_minutes tracks SHIFT overtime, not job-time OT, and the
@@ -1100,8 +1108,8 @@ router.get('/export/tax-package', async (req, res, next) => {
           total_hours: jobHours.toFixed(2),
           overtime_hours: 0,
           jobs: r.job_count || 0,
-          rate: laborRate,
-          total_cost: (jobHours * laborRate).toFixed(2),
+          rate: dayRate,
+          total_cost: (jobHours * dayRate).toFixed(2),
         };
       });
     } catch { /* table may not exist in dev */ }

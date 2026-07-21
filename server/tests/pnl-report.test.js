@@ -18,8 +18,36 @@ const {
   prorateDepreciation,
   getPeriodRange,
   missingTableOnly,
+  rateAsOf,
+  costLaborByDay,
   DEFAULT_LOADED_LABOR_RATE,
 } = require('../services/pnl-report');
+
+describe('rateAsOf / costLaborByDay', () => {
+  const rates = [
+    { effective_date: '2026-01-01', loaded_labor_rate: '30' },
+    { effective_date: '2026-04-01', loaded_labor_rate: '40' },
+  ];
+
+  test('picks the rate in force on each day', () => {
+    expect(rateAsOf(rates, '2026-03-31')).toBe(30);
+    expect(rateAsOf(rates, '2026-04-01')).toBe(40);
+    expect(rateAsOf([], '2026-04-01')).toBe(DEFAULT_LOADED_LABOR_RATE);
+    expect(rateAsOf(rates, '2025-12-31')).toBe(DEFAULT_LOADED_LABOR_RATE); // before first row
+  });
+
+  test('a mid-period rate change does NOT reprice earlier days', () => {
+    const { laborMinutes, laborCost } = costLaborByDay(
+      [
+        { work_date: '2026-03-15', total_job_minutes: '60' }, // 1h @ $30
+        { work_date: '2026-04-15', total_job_minutes: '60' }, // 1h @ $40
+      ],
+      rates,
+    );
+    expect(laborMinutes).toBe(120);
+    expect(laborCost).toBe(70); // not 80 (all-at-latest) or 60 (all-at-first)
+  });
+});
 
 describe('missingTableOnly', () => {
   test('substitutes the fallback only for undefined_table (42P01)', () => {
@@ -53,20 +81,11 @@ describe('assemblePnl', () => {
     expect(out.netIncome).toBe(600);
   });
 
-  test('labor cost = job minutes / 60 × loaded rate', () => {
-    const out = assemblePnl({
-      serviceRevenue: 500,
-      laborMinutes: 90,
-      loadedLaborRate: 40,
-    });
-    expect(out.cogs.labor).toBe(60); // 1.5h × $40
+  test('labor cost flows into COGS', () => {
+    const out = assemblePnl({ serviceRevenue: 500, laborCost: 60 });
+    expect(out.cogs.labor).toBe(60);
     expect(out.cogs.total).toBe(60);
     expect(out.grossProfit).toBe(440);
-  });
-
-  test('defaults the labor rate when company_financials is empty', () => {
-    const out = assemblePnl({ serviceRevenue: 100, laborMinutes: 60 });
-    expect(out.cogs.labor).toBe(DEFAULT_LOADED_LABOR_RATE);
   });
 
   test('empty period yields zeros with zero margins, not NaN', () => {
@@ -80,8 +99,7 @@ describe('assemblePnl', () => {
   test('full stack: revenue − cogs − opex − deductions', () => {
     const out = assemblePnl({
       serviceRevenue: 10000,
-      laborMinutes: 600, // 10h
-      loadedLaborRate: 35, // $350
+      laborCost: 350, // 10h × $35 via costLaborByDay
       materialsCost: 650,
       opexRows: [{ category: 'Rent', irs_line: '20b', total: '1000' }],
       mileageDeduction: 700,

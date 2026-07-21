@@ -12,11 +12,12 @@
  * Data sources (verified against the live schema):
  *   revenue      — cash received in the window (payment_date, an ET-stamped
  *                  DATE; statuses 'paid' + 'refunded' so a later refund can't
- *                  erase the original receipt) MINUS refunds recognized in
- *                  the window they occurred (refunded_at → ET day; covers
- *                  partial refunds, which keep status='paid'). See
- *                  paidRevenueForWindow. Disputes/chargebacks are not yet
- *                  ledgered on payments and are out of scope here.
+ *                  erase the original receipt) MINUS per-refund balance
+ *                  transactions from stripe_payout_transactions in the window
+ *                  they occurred. See paidRevenueForWindow for the full
+ *                  refund-ledger rationale and its sync-coverage caveat.
+ *                  Disputes/chargebacks are not yet ledgered and are out of
+ *                  scope here.
  *   labor        — time_entry_daily_summary.total_job_minutes × the loaded
  *                  labor rate from company_financials (the same rate per-visit
  *                  job costing uses; the summary table stores minutes, not
@@ -140,8 +141,7 @@ function prorateDepreciation(assets, startDate, endDate) {
 function assemblePnl({
   serviceRevenue = 0,
   otherRevenue = 0,
-  laborMinutes = 0,
-  loadedLaborRate = DEFAULT_LOADED_LABOR_RATE,
+  laborCost = 0,
   materialsCost = 0,
   opexRows = [],
   mileageDeduction = 0,
@@ -149,7 +149,7 @@ function assemblePnl({
 } = {}) {
   const revenue = round2(serviceRevenue);
   const other = round2(otherRevenue);
-  const laborCost = round2((Number(laborMinutes) || 0) / 60 * (Number(loadedLaborRate) || DEFAULT_LOADED_LABOR_RATE));
+  const labor = round2(laborCost);
   const materials = round2(materialsCost);
 
   const byCategory = new Map();
@@ -163,14 +163,14 @@ function assemblePnl({
   const opexTotal = round2(opexCategories.reduce((s, c) => s + c.amount, 0));
 
   const totalRevenue = round2(revenue + other);
-  const cogsTotal = round2(laborCost + materials);
+  const cogsTotal = round2(labor + materials);
   const grossProfit = round2(totalRevenue - cogsTotal);
   const deductionsTotal = round2((Number(mileageDeduction) || 0) + (Number(depreciationTotal) || 0));
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
   return {
     revenue: { serviceRevenue: revenue, otherRevenue: other, total: totalRevenue },
-    cogs: { labor: laborCost, materials, total: cogsTotal },
+    cogs: { labor, materials, total: cogsTotal },
     grossProfit,
     grossMargin: totalRevenue > 0 ? grossProfit / totalRevenue : 0,
     operatingExpenses: { categories: opexCategories, total: opexTotal },
@@ -211,9 +211,18 @@ function missingTableOnly(fallback) {
  *   status='refunded' — the cash really arrived in that period. A
  *   status='paid'-only filter made fully-refunded payments vanish
  *   retroactively from their original month.
- * - Refunded: refund_amount recognized in the period the refund happened
- *   (refunded_at, converted to an ET calendar day — it's a timestamptz),
- *   covering partial refunds too (those keep status='paid').
+ * - Refunded: per-refund balance transactions from
+ *   stripe_payout_transactions (type='refund'), each with its own Stripe
+ *   occurrence timestamp bucketed to an ET calendar day. This is the only
+ *   durable PER-REFUND ledger in the DB: payments.refund_amount is a
+ *   cumulative stamp (webhook-maintained, but one number can't allocate
+ *   multiple partial refunds across periods) and payments.refunded_at is
+ *   never written by the Stripe refund paths. Refund amounts are negative
+ *   in balance transactions, hence SUM(-amount).
+ *   Coverage caveat: rows exist once the payout containing the refund has
+ *   been synced (POST /api/admin/banking/sync); an unsynced tail lags until
+ *   the next sync, exactly like the Banking fees/payout views built on the
+ *   same table.
  * Exported so /revenue/reconcile reports the same revenue basis.
  */
 async function paidRevenueForWindow(db, startDate, endDate) {
@@ -223,34 +232,70 @@ async function paidRevenueForWindow(db, startDate, endDate) {
     .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
     .first()
     .catch(missingTableOnly({ total: '0' }));
-  const refunded = await db('payments')
-    .whereNotNull('refunded_at')
+  const refunded = await db('stripe_payout_transactions')
+    .where('type', 'refund')
     .whereRaw(
-      "DATE(refunded_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+      "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
       [startDate, endDate],
     )
-    .select(db.raw("COALESCE(SUM(refund_amount)::text, '0') as total"))
+    .select(db.raw("COALESCE(SUM(-amount)::text, '0') as total"))
     .first()
     .catch(missingTableOnly({ total: '0' }));
   return round2(parseFloat(received?.total || 0) - parseFloat(refunded?.total || 0));
 }
 
+/**
+ * Rate effective on a given ET calendar day: the newest company_financials
+ * row whose effective_date is on/before that day. rateRows must be sorted
+ * ascending by effective_date. Pure.
+ */
+function rateAsOf(rateRows, dateStr) {
+  let rate = DEFAULT_LOADED_LABOR_RATE;
+  for (const r of rateRows || []) {
+    const eff = typeof r.effective_date === 'string'
+      ? r.effective_date.slice(0, 10)
+      : etDateString(new Date(r.effective_date));
+    if (eff <= dateStr) {
+      const v = Number(r.loaded_labor_rate);
+      if (Number.isFinite(v) && v > 0) rate = v;
+    } else break;
+  }
+  return rate;
+}
+
+/**
+ * Cost daily job minutes at the rate effective ON EACH DAY. Applying one
+ * rate to a whole window retroactively re-priced historical work every time
+ * the loaded rate changed. Pure.
+ */
+function costLaborByDay(summaryRows, rateRows) {
+  let minutes = 0;
+  let cost = 0;
+  for (const row of summaryRows || []) {
+    const day = typeof row.work_date === 'string'
+      ? row.work_date.slice(0, 10)
+      : etDateString(new Date(row.work_date));
+    const mins = parseFloat(row.total_job_minutes) || 0;
+    minutes += mins;
+    cost += (mins / 60) * rateAsOf(rateRows, day);
+  }
+  return { laborMinutes: minutes, laborCost: round2(cost) };
+}
+
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, laborRow, financialsRow, matRow, opexRows, mileageRow, assets] = await Promise.all([
+  const [serviceRevenue, laborRows, rateRows, matRow, opexRows, mileageRow, assets] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
     db('time_entry_daily_summary')
       .whereBetween('work_date', [startDate, endDate])
-      .select(db.raw("COALESCE(SUM(total_job_minutes)::text, '0') as minutes"))
-      .first()
-      .catch(missingTableOnly({ minutes: '0' })),
-    // The rate effective for the REPORT PERIOD — not today's. Taking the
-    // newest row unconditionally rewrote historical P&Ls every time the
-    // loaded rate changed.
+      .select('work_date', 'total_job_minutes')
+      .catch(missingTableOnly([])),
+    // Full effective-dated rate history up to the period end — each day's
+    // labor is costed at the rate in force that day (see costLaborByDay).
     db('company_financials')
       .where('effective_date', '<=', endDate)
-      .orderBy('effective_date', 'desc')
-      .first()
-      .catch(missingTableOnly(null)),
+      .orderBy('effective_date', 'asc')
+      .select('effective_date', 'loaded_labor_rate')
+      .catch(missingTableOnly([])),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
@@ -284,11 +329,12 @@ async function buildPnlReport(db, startDate, endDate) {
       .catch(missingTableOnly([])),
   ]);
 
+  const { laborCost } = costLaborByDay(laborRows, rateRows);
+
   return assemblePnl({
     serviceRevenue,
     otherRevenue: 0,
-    laborMinutes: parseFloat(laborRow?.minutes || 0),
-    loadedLaborRate: Number(financialsRow?.loaded_labor_rate) || DEFAULT_LOADED_LABOR_RATE,
+    laborCost,
     materialsCost: parseFloat(matRow?.total || 0),
     opexRows,
     mileageDeduction: parseFloat(mileageRow?.total || 0),
@@ -302,6 +348,8 @@ module.exports = {
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,
+  rateAsOf,
+  costLaborByDay,
   missingTableOnly,
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
