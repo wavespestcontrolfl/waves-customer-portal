@@ -537,11 +537,12 @@ function uncatalogedComponentFinding(body) {
 }
 
 // ── citation-token residue gate ─────────────────────────────────────
-// A model-side citation apparatus (<cite index="12">…</cite> or bare
-// index="N" tokens) leaking into publishable copy — one live draft shipped
-// 12 of them. There is no legitimate use for this markup in a draft: real
-// sourcing is prose attribution plus an allowlisted link.
-const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']\d+["']/i;
+// A model-side citation apparatus (<cite index="12">…</cite>, bare
+// index="N" tokens, or markdown footnotes [^1] / [^1]: …) leaking into
+// publishable copy — one live draft shipped 12 of them. There is no
+// legitimate use for this markup in a draft: real sourcing is prose
+// attribution plus an allowlisted link.
+const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']\d+["']|\[\^[^\]]{1,30}\]/i;
 
 function citationResidueFinding(text) {
   const m = String(text || '').match(CITATION_RESIDUE_RE);
@@ -573,19 +574,38 @@ function outOfAreaCities() {
 }
 
 const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our technicians?|our techs?|our team|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection))\b/i;
-const CLAIM_CONTEXT_WINDOW = 90;
+
+// A clause that honestly LIMITS the footprint is not a claim — "Naples is
+// outside our service area", "we don't serve Tampa". Tested per CLAUSE, not
+// per sentence, so a disclaimer cannot shield an affirmative claim in the
+// next clause ("…, but we cover Tampa" still flags). Apostrophes are
+// normalized first so typographic "doesn't" matches.
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:do not|don'?t|does not|doesn'?t) (?:currently |yet )?(?:include|cover|serve|service|extend|reach)|not (?:currently )?(?:in|within|part of) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint)|no longer (?:serve|service|cover))\b/i;
+
+// Sentence split preserves dotted place abbreviations (St. Petersburg); a
+// rare genuine "St."-final sentence merges with the next, which only widens
+// the claim scope — fails closed. Clause split mirrors the astro-side gate.
+const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)\s+/;
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|and|yet|however|though|while)\s+/i;
 
 function offFootprintCityFinding(text) {
   const s = String(text || '');
   if (!s) return null;
-  for (const city of outOfAreaCities()) {
+  const cities = outOfAreaCities();
+  const cityRes = cities.map((city) => ({
+    city,
     // "St." may be written without the period; multi-word cities may wrap.
-    const cityRe = new RegExp(`\\b${escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+')}\\b`, 'gi');
-    let m;
-    while ((m = cityRe.exec(s)) !== null) {
-      const window = s.slice(Math.max(0, m.index - CLAIM_CONTEXT_WINDOW), Math.min(s.length, m.index + m[0].length + CLAIM_CONTEXT_WINDOW));
-      if (SERVICE_CLAIM_CONTEXT_RE.test(window)) {
-        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions are fine; service/CTA framing is not.`);
+    re: new RegExp(`\\b${escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+')}\\b`, 'i'),
+  }));
+  for (const sentence of s.split(FOOTPRINT_SENTENCE_SPLIT_RE)) {
+    for (const clause of sentence.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
+      const normalized = clause.replace(/[‘’]/g, "'");
+      if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
+      if (FOOTPRINT_DISCLAIMER_RE.test(normalized)) continue;
+      for (const { city, re } of cityRes) {
+        if (re.test(normalized)) {
+          return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
+        }
       }
     }
   }
@@ -605,6 +625,7 @@ function offFootprintCityFinding(text) {
 const ALLOWED_INTERNAL_LINKS = Object.freeze([
   '/',
   '/book/',
+  '/contact/',
   '/pest-control-quote/',
   '/pest-control-calculator/',
   // hub service pages (superset of content-brief-builder SERVICE_HUB_LINKS)
@@ -627,8 +648,27 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
 
 // /{service}-{city}-fl/ city-service pages (incl. the city quote pages the
 // city-service prompt mandates for CTAs and the Bradenton-only specialty
-// slugs the legacy optimizer prompt lists).
-const CITY_SERVICE_LINK_RE = /^\/(?:pest-control|lawn-care|mosquito-control|termite-control|rodent-control|bed-bug-control|termite-inspection|commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|lawn-aeration)-[a-z][a-z-]*-fl\/$/;
+// slugs the legacy optimizer prompt lists). Alternation is LONGEST-FIRST so
+// the captured city slug never swallows a service suffix
+// ("pest-control-quote-sarasota" must capture "sarasota", not
+// "quote-sarasota"). The city capture is validated against the real
+// footprint below — "/pest-control-fort-myers-fl/" is a dead out-of-area
+// link, not a pass.
+const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
+
+// City slugs a generated city-service link may target — the same canonical
+// footprint the off-footprint text gate uses. Fail-closed fallback: the
+// staffed-market slugs.
+function footprintCitySlugs() {
+  let footprint = null;
+  try {
+    ({ CITY_TO_LOCATION: footprint } = require('../../config/locations'));
+  } catch { footprint = null; }
+  if (!footprint) {
+    return new Set(['bradenton', 'lakewood-ranch', 'sarasota', 'venice', 'north-port', 'palmetto', 'parrish', 'port-charlotte']);
+  }
+  return new Set(Object.keys(footprint).map((c) => c.replace(/\s+/g, '-')));
+}
 
 function normalizeInternalPath(dest) {
   let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
@@ -637,9 +677,12 @@ function normalizeInternalPath(dest) {
   return p;
 }
 
-// Every site-relative destination in the body: markdown links/images and
-// href/src attributes. (Absolute URLs are the external gate's job.)
-const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)/gi;
+// Every site-relative destination in the body: markdown links/images,
+// href/src attributes, AND reference-style definitions ("[flea]: /path/") —
+// reference links render exactly like inline ones and shipped a dead
+// destination would be just as dead. (Absolute URLs are the external gate's
+// job.)
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/\S*)/gim;
 
 function internalRouteFinding(body, allowedInternalLinks = []) {
   const text = String(body || '');
@@ -652,13 +695,14 @@ function internalRouteFinding(body, allowedInternalLinks = []) {
   const re = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   let m;
   while ((m = re.exec(text)) !== null) {
-    const dest = m[1] || m[2];
+    const dest = m[1] || m[2] || m[3];
     // Anchor-only and in-repo image references are not routes.
     if (dest.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(dest);
     if (!norm) continue;
     if (allowed.has(norm)) continue;
-    if (CITY_SERVICE_LINK_RE.test(norm)) continue;
+    const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+    if (citySlug && footprintCitySlugs().has(citySlug)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
   }
   return null;

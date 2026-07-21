@@ -292,7 +292,11 @@ const DANGLING_META_ENDINGS = new Set([
 ]);
 
 function checkMetaDescriptionComplete(draft) {
-  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  // Refresh drafts of service/location pages carry the camelCase
+  // `metaDescription` variant — publishRefresh treats both casings as
+  // editable, so the completeness gate must inspect both too.
+  const m = (draft.meta_description || draft.metaDescription
+    || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
   const core = m.replace(/["'”’)\]]+$/, '');

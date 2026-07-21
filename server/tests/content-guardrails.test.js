@@ -1261,6 +1261,16 @@ describe('citation-token residue (CITATION_TOKEN_RESIDUE)', () => {
     }, {});
     expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(false);
   });
+
+  test('markdown footnote apparatus blocks (marker and definition)', () => {
+    for (const body of [
+      'Drywood termites swarm in spring.[^1]',
+      '[^1]: UF/IFAS entomology circular 122.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+    }
+  });
 });
 
 describe('off-footprint service claims (OFF_FOOTPRINT_CITY_CLAIM)', () => {
@@ -1301,6 +1311,30 @@ describe('off-footprint service claims (OFF_FOOTPRINT_CITY_CLAIM)', () => {
     const r = guardrails.evaluate({
       body: 'Clean educational body.',
       frontmatter: { meta_description: 'Serving Bonita Springs homes with pest control you can trust.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('honest out-of-area disclaimers pass (Codex round 1)', () => {
+    for (const body of [
+      'Fort Myers is outside our service area — if you are in Bradenton, schedule a visit instead.',
+      'Our service area doesn’t include Tampa, so check with a licensed local company there.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('a disclaimer clause does not shield an affirmative claim in the next clause', () => {
+    const r = guardrails.evaluate({
+      body: 'Naples is outside our service area, but we treat Tampa yards every week.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('abbreviated city spellings are caught (Ft. Myers)', () => {
+    const r = guardrails.evaluate({
+      body: 'Our techs treat Ft. Myers homes on the same schedule.',
     }, {});
     expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
@@ -1352,6 +1386,23 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     const blocked = guardrails.evaluate({ body }, {});
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['/lawn-care/fall-armyworm-outbreak/'] });
+    expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('reference-style definitions are policed too (Codex round 1)', () => {
+    const r = guardrails.evaluate({ body: 'See the [flea guide][flea].\n\n[flea]: /pest-library/fleas/\n' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
+  test('/contact/ is allowlisted (lawn and tree-shrub CTA target)', () => {
+    const r = guardrails.evaluate({ body: 'Reach us on the [contact page](/contact/).' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('city-service links to out-of-footprint cities block; footprint cities pass', () => {
+    const blocked = guardrails.evaluate({ body: '[Fort Myers pest control](/pest-control-fort-myers-fl/)' }, {});
+    expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const allowed = guardrails.evaluate({ body: '[Lakewood Ranch pest control](/pest-control-lakewood-ranch-fl/) and [North Port quotes](/pest-control-quote-north-port-fl/)' }, {});
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 

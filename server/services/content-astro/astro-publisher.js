@@ -448,14 +448,21 @@ function clampToWordBoundary(value, max) {
 // the shipped meta always reads as finished copy.
 const META_DESCRIPTION_MIN = 115;
 const DANGLING_TAIL_RE = /\s+(?:a|an|the|and|or|but|nor|to|of|for|with|in|on|at|by|from|into|over|under|near|vs|than|as|that|which|your|our|their|its|his|her|my)$/i;
+// Dotted abbreviations whose period is NOT a sentence end — "St. Augustine
+// grass" is a staple topic in this content, and cutting at "St." ships a
+// meta ending mid-name.
+const META_ABBREVIATION_TAIL_RE = /\b(?:St|Ft|Mt|Dr|Mr|Mrs|Ms|vs|etc|approx|U\.S|e\.g|i\.e)\.$/i;
 function clampMetaDescription(meta) {
   const s = String(meta || '').trim();
   if (s.length <= META_DESCRIPTION_MAX) return s;
   const window = s.slice(0, META_DESCRIPTION_MAX);
   for (let i = window.length - 1; i >= META_DESCRIPTION_MIN - 1; i--) {
     // A sentence end is . ! ? followed by whitespace/close-quote/end in the
-    // ORIGINAL string (so "4.5 stars" and "St. Augustine" never count).
-    if ('.!?'.includes(window[i]) && (i + 1 >= s.length || /[\s"'”’)\]]/.test(s[i + 1]))) {
+    // ORIGINAL string (so "4.5 stars" never counts), and not the period of a
+    // dotted abbreviation ("St. Augustine" never counts either).
+    if ('.!?'.includes(window[i])
+      && (i + 1 >= s.length || /[\s"'”’)\]]/.test(s[i + 1]))
+      && !META_ABBREVIATION_TAIL_RE.test(window.slice(0, i + 1))) {
       return window.slice(0, i + 1).trim();
     }
   }
@@ -1289,12 +1296,16 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   // generator actually rendered — the writer authored its alt before any
   // image existed, and an image/alt mismatch is a recurring Codex P2 that
   // parks the PR (remediation is body-only and cannot touch frontmatter).
-  // Outside the fail-closed block above: fail-open, null keeps the writer alt.
-  generated.alt = await describeHeroForAlt({
+  // Outside the fail-closed block above: fail-open. When vision is
+  // unavailable (no key / SDK / unusable output) fall back to the
+  // generation-prompt-derived alt already on `generated` — still closer to
+  // the real image than the writer's pre-image alt, which is the last
+  // resort in the caller.
+  generated.alt = (await describeHeroForAlt({
     buffer: generated.buffer,
     title: frontmatter.title,
     keyword: frontmatter.primary_keyword,
-  });
+  })) || generated.alt || null;
   return generated;
 }
 
