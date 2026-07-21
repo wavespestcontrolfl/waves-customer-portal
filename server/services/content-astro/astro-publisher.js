@@ -447,7 +447,21 @@ function clampToWordBoundary(value, max) {
 // dropping a dangling connective and closing the fragment with a period so
 // the shipped meta always reads as finished copy.
 const META_DESCRIPTION_MIN = 115;
-const DANGLING_TAIL_RE = /\s+(?:a|an|the|and|or|but|nor|to|of|for|with|in|on|at|by|from|into|over|under|near|vs|than|as|that|which|your|our|their|its|his|her|my)$/i;
+// The dangling-word set is content-quality-gate's DANGLING_META_ENDINGS —
+// the SAME set checkMetaDescriptionComplete rejects on, so a clamped meta
+// can never end on a word the gate calls dangling. Stripping loops because
+// removing one dangling word can expose another ("…of the" → "…of").
+const { DANGLING_META_ENDINGS } = require('../content/content-quality-gate');
+function stripDanglingTail(s) {
+  let out = String(s || '').trim();
+  for (;;) {
+    const words = out.split(/\s+/);
+    if (words.length <= 1) return out;
+    const last = (words[words.length - 1] || '').toLowerCase().replace(/[^a-z']/g, '');
+    if (!DANGLING_META_ENDINGS.has(last)) return out;
+    out = words.slice(0, -1).join(' ');
+  }
+}
 // Dotted abbreviations whose period is NOT a sentence end — "St. Augustine
 // grass" is a staple topic in this content, and cutting at "St." ships a
 // meta ending mid-name.
@@ -467,7 +481,7 @@ function clampMetaDescription(meta) {
     }
   }
   const wordCut = clampToWordBoundary(s, META_DESCRIPTION_MAX - 1); // leave room for the closing period
-  return `${wordCut.replace(DANGLING_TAIL_RE, '')}.`;
+  return `${stripDanglingTail(wordCut)}.`;
 }
 function clampTitle(title) {
   return clampToWordBoundary(title, TITLE_MAX);
@@ -858,7 +872,7 @@ async function publishAstro(postId) {
       slug,
       hero_image_ext: heroImageExt,
       featured_image_url: heroPublicRef,
-      hero_image_alt: heroImage?.alt || post.hero_image_alt,
+      hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
     });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
@@ -1213,6 +1227,26 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
 // Stamp the publisher-owned hero reference into autonomous frontmatter,
 // overriding whatever the writer agent emitted (including caption/credit —
 // agent-invented attribution for a generated image would be wrong).
+// A generation/vision-derived alt is produced AFTER the draft's guardrails
+// scan, so run it through the same policy before it lands in frontmatter —
+// prices, product names, brand tokens, footprint claims, citation residue.
+// Fail closed to the fallback (the already-scanned draft alt): a policy hit
+// or an evaluation error must never publish an unvetted string.
+function vetGeneratedAlt(generatedAlt, fallbackAlt) {
+  if (!generatedAlt) return fallbackAlt || null;
+  try {
+    const check = contentGuardrails.evaluate({ body: '', frontmatter: { hero_image_alt: String(generatedAlt) } }, {});
+    if (!check.pass) {
+      logger.warn(`[astro-publisher] generated hero alt failed guardrails (${check.findings.map((f) => f.code).join(', ')}) — keeping the draft alt`);
+      return fallbackAlt || null;
+    }
+  } catch (err) {
+    logger.warn(`[astro-publisher] generated-alt guardrail check errored (${err.message}) — keeping the draft alt`);
+    return fallbackAlt || null;
+  }
+  return String(generatedAlt);
+}
+
 function stampAutonomousHero(frontmatter, src, alt) {
   frontmatter.hero_image = { src, alt };
   frontmatter.og_image = src;
@@ -1434,8 +1468,11 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // A freshly generated hero carries a generation-derived alt that describes
   // the actual image — it wins over the agent's alt, which was written
   // before the image existed (the recurring alt↔hero mismatch). Reused
-  // committed heroes keep the draft alt.
-  stampAutonomousHero(frontmatter, hero.src, hero.alt || heroAlt);
+  // committed heroes keep the draft alt. The generated alt was produced
+  // AFTER the runner's guardrails scanned the draft, so vet it against the
+  // same policy here — a violating alt falls back to the already-scanned
+  // draft alt instead of bypassing the gates.
+  stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt));
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.

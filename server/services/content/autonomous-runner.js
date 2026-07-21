@@ -463,6 +463,13 @@ class AutonomousRunner {
     }
 
     const draft = dispatchResult.draft;
+    // Routes check_existing_content showed this session are legitimate link
+    // targets (the prompt mandates linking the existing post on a
+    // differentiated angle). They ride ON the draft payload so the
+    // stored-draft guardrail revalidation grants the same allowance.
+    if (draft && Array.isArray(dispatchResult.checked_existing_routes) && dispatchResult.checked_existing_routes.length) {
+      draft.checked_existing_routes = dispatchResult.checked_existing_routes;
+    }
     run.agent_id = dispatchResult.agent_id || null;
     run.agent_session_id = dispatchResult.session_id || null;
     run.draft_payload = draft || null;

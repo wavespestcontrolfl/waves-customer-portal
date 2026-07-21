@@ -521,8 +521,11 @@ const SAFE_MDX_COMPONENTS = Object.freeze([
 
 const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
 // A PascalCase JSX opening tag — the shape MDX treats as a component
-// invocation. Closing tags (</X>) reuse the same name and need no extra scan.
-const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9]*)\b/g;
+// invocation. Member expressions (<ComparisonTable.Row>) are captured WHOLE
+// so an invented subcomponent of a safe root can never slip through — the
+// dotted name is not in the closed set. Closing tags (</X>) reuse the same
+// name and need no extra scan.
+const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*)\b/g;
 
 function uncatalogedComponentFinding(body) {
   const text = String(body || '');
@@ -558,10 +561,16 @@ function citationResidueFinding(text) {
 // context (we serve / your home / call-schedule-book / our technicians /
 // same-day within ~90 chars) — bare educational mentions ("tegu lizards
 // spread from Fort Myers") must pass.
+// Regional SWFL leak candidates plus the major FL metros a "Southwest
+// Florida" writer plausibly names. Deliberate EXCLUSIONS: "St. Augustine"
+// (the grass — "your St. Augustine lawn" is core footprint copy) and
+// person-name cities like "Brandon" — both would false-positive constantly.
 const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Fort Myers', 'Cape Coral', 'Naples', 'Bonita Springs', 'Marco Island',
   'Estero', 'Lehigh Acres', 'St. Petersburg', 'Tampa', 'Winter Haven',
-  'Plant City',
+  'Plant City', 'Clearwater', 'Orlando', 'Miami', 'Jacksonville',
+  'Fort Lauderdale', 'Tallahassee', 'Gainesville', 'Lakeland', 'Kissimmee',
+  'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
 ]);
 
 function outOfAreaCities() {
@@ -732,6 +741,22 @@ function normalizeInternalPath(dest) {
 // job.)
 const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/\S*)/gim;
 
+// Absolute URLs on the HUB host are the same dead-route class spelled
+// long-form — "https://www.wavespestcontrol.com/pest-library/fleas/" must be
+// policed as "/pest-library/fleas/", not waved through by the external
+// gate's host allowlist. Other hosts stay the external gate's job.
+const ABSOLUTE_DEST_RE = /\]\(\s*<?\s*(https?:\/\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](https?:\/\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(https?:\/\/\S*)/gim;
+
+function hubHostSet() {
+  try {
+    const h = new URL(process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').hostname.toLowerCase();
+    const bare = h.replace(/^www\./, '');
+    return new Set([bare, `www.${bare}`]);
+  } catch {
+    return new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+  }
+}
+
 function internalRouteFinding(body, allowedInternalLinks = []) {
   const text = String(body || '');
   if (!text) return null;
@@ -740,10 +765,20 @@ function internalRouteFinding(body, allowedInternalLinks = []) {
     const norm = normalizeInternalPath(link);
     if (norm) allowed.add(norm);
   }
-  const re = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
+  const dests = [];
   let m;
-  while ((m = re.exec(text)) !== null) {
-    const dest = m[1] || m[2] || m[3];
+  const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
+  while ((m = rel.exec(text)) !== null) dests.push(m[1] || m[2] || m[3]);
+  const abs = new RegExp(ABSOLUTE_DEST_RE.source, ABSOLUTE_DEST_RE.flags);
+  const hubHosts = hubHostSet();
+  while ((m = abs.exec(text)) !== null) {
+    const raw = m[1] || m[2] || m[3];
+    try {
+      const u = new URL(raw);
+      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+    } catch { /* malformed URL — the external gate owns it */ }
+  }
+  for (const dest of dests) {
     // Anchor-only and in-repo image references are not routes.
     if (dest.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(dest);
@@ -1199,9 +1234,15 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     offFootprintCityFinding(publishableText),
     // Component + internal-route allowlists are body-structure policies for
     // NEW content; refresh drafts of legacy live pages are exempt (see the
-    // isRefresh option doc above).
+    // isRefresh option doc above). Routes surfaced to the writer by
+    // check_existing_content ride on the draft payload
+    // (checked_existing_routes) so the stored-draft revalidation grants the
+    // same allowance the original run did.
     isRefresh ? null : uncatalogedComponentFinding(body),
-    isRefresh ? null : internalRouteFinding(body, allowedInternalLinks),
+    isRefresh ? null : internalRouteFinding(body, [
+      ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
+      ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
+    ]),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');

@@ -1447,6 +1447,33 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
+  test('member-expression components are rejected (Codex round 2)', () => {
+    const r = guardrails.evaluate({ body: 'See <ComparisonTable.Row label="x" /> for details.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+  });
+
+  test('expanded FL metros are blocked; St. Augustine (the grass) never is', () => {
+    const blocked = guardrails.evaluate({ body: 'We treat Orlando homes on the same quarterly schedule.' }, {});
+    expect(blocked.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const grass = guardrails.evaluate({ body: 'We treat your St. Augustine lawn for chinch bugs every quarter.' }, {});
+    expect(grass.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('hub-host absolute URLs are policed as internal routes (Codex round 2)', () => {
+    const dead = guardrails.evaluate({ body: '[flea guide](https://www.wavespestcontrol.com/pest-library/fleas/)' }, {});
+    expect(dead.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const fine = guardrails.evaluate({ body: '[quote](https://www.wavespestcontrol.com/pest-control-quote/) and [external](https://ipm.ufl.edu/some/page/)' }, { requiredSourceUrls: ['https://ipm.ufl.edu/some/page/'] });
+    expect(fine.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('checked_existing_routes on the draft are allowed link targets (Codex round 2)', () => {
+    const body = 'We covered this in our [ghost ant guide](/pest-control/ghost-ants/).';
+    const blocked = guardrails.evaluate({ body }, {});
+    expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const allowed = guardrails.evaluate({ body, checked_existing_routes: ['/pest-control/ghost-ants/'] }, {});
+    expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
   test('reference-style definitions are policed too (Codex round 1)', () => {
     const r = guardrails.evaluate({ body: 'See the [flea guide][flea].\n\n[flea]: /pest-library/fleas/\n' }, {});
     expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);

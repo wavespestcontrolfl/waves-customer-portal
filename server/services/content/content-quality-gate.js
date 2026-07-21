@@ -961,7 +961,10 @@ function checkNoDuplicateTitle(draft, _brief, context) {
   return { ok: true };
 }
 
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor };
+// DANGLING_META_ENDINGS is exported as the single source of truth for
+// "words a meta may not end on" — astro-publisher's clamp fallback strips
+// against the SAME set so a clamped meta can never fail this gate.
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
