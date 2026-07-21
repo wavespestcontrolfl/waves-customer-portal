@@ -96,6 +96,20 @@ const addServiceRequestLimiter = rateLimit({
   message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
 });
 
+const bondTermSwitchLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Dark-launch contract: while GATE_TERMITE_BOND_OPTION is off the route
+  // answers a uniform 403 — a 429 on the Nth probe would reveal live
+  // infrastructure behind the kill switch, so the limiter engages only when
+  // the feature is on. 30/hr comfortably covers a customer comparing terms.
+  skip: () => !['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase()),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
 const extensionRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
@@ -2599,7 +2613,17 @@ function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
   // WaveGuard setup, all other recurring services take a prepay discount off the
   // recurring annual. Only one-time-only (no recurring) estimates are ineligible.
   const recurringRows = Array.isArray(recurring) ? recurring : [];
-  return recurringRows.length > 0;
+  if (!recurringRows.length) return false;
+  // Termite bond riders can't annual-prepay yet (codex #2915 r1): an
+  // annual_prepay_terms row carries ONE coverage service keyed on the
+  // primary name, the combined "…+ Termite Bond Service" visit can't be
+  // stamped, and the converter fails that conversion closed (422) — so the
+  // prepay CTA and the accept-time validation must never offer it. This
+  // predicate is the shared gate for both (SSR + React flag + accept).
+  if (recurringRows.some((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'))) {
+    return false;
+  }
+  return true;
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -2662,11 +2686,20 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
-      const key = recurringServiceKey(item);
-      if (!RECURRING_LINE_SERVICES.has(key)) return;
+      const rawKey = recurringServiceKey(item);
+      if (!RECURRING_LINE_SERVICES.has(rawKey)) return;
+      // Raw engine payloads ({ engineInputs, engineResult } — agent/engine
+      // drafts) carry the bond as service 'termite_bond' with bondTerm;
+      // normalize to the term-keyed service so route matching, the selector's
+      // selected-term detection, and the solo fold behave identically to
+      // mapped saves (codex #2915 r2).
+      const key = rawKey === 'termite_bond' && item.bondTerm
+        ? `termite_bond_${item.bondTerm}`
+        : rawKey;
+      const isBondLine = rawKey === 'termite_bond';
       const annual = key === 'lawn_care'
         ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
         : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
@@ -2700,9 +2733,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         cadence: item.cadence || null,
         frequencyKey: item.cadence || null,
         estimatedDurationMinutes: firstPositiveNumber(item.estimatedDurationMinutes, item.estimated_duration_minutes) || null,
-        waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
-        waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
-        countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
+        ...(isBondLine ? { bondTerm: item.bondTerm || null, bondYears: item.bondYears || null } : {}),
+        // Bond riders are hard-coded out of tier counting and the bundle %
+        // discount — the raw engine line only carries discountable:false, so
+        // the generic !== false defaults below would tier-count it.
+        waveGuardDiscountEligible: isBondLine ? false : recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: isBondLine ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
+        countsTowardWaveGuardTier: isBondLine ? false : (item.countsTowardWaveGuardTier !== false),
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
@@ -8385,6 +8422,22 @@ router.put('/:token/accept', async (req, res, next) => {
         // price_locked_at; its only writers are the two accept flows.
         .whereNull('price_locked_at')
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
+        // Freshness compare-and-swap (pre-push P0 on #2915): acceptedUpdates
+        // was built from this handler's earlier estimate read — a bond-term
+        // switch (or any estimate_data mutation) committed since would be
+        // silently clobbered here and the customer converted/billed at the
+        // OLD amount. A moved updated_at makes this 0-row → the existing 409
+        // → the page reloads fresh totals and re-accepts. Millisecond
+        // truncation on both sides (pg µs vs node ms — raw equality would
+        // 409 every accept); two same-ms writes are beyond clock resolution.
+        .modify((q) => {
+          if (estimate.updated_at) {
+            q.andWhere(trx.raw(
+              "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+              [estimate.updated_at],
+            ));
+          }
+        })
         .update(acceptedUpdates);
       if (!acceptedCount) {
         const err = new Error('Estimate is no longer active');
@@ -9972,6 +10025,277 @@ router.put('/:token/select-tier', async (req, res, next) => {
 // new preference to estimate_data.preferences, recomputes monthly / annual /
 // one-time totals, updates the row, and returns a fresh price payload for
 // client-side re-render.
+// ── Termite bond term switcher (owner 2026-07-20) ─────────────────────────
+const TERMITE_BOND_ROW_FLAGS = {
+  discountable: false,
+  discountEligible: false,
+  waveGuardDiscountEligible: false,
+  countsTowardWaveGuardTier: false,
+};
+
+function isTermiteBondRow(svc = {}) {
+  return String(recurringServiceKey(svc) || '').startsWith('termite_bond');
+}
+
+// Rewrite the persisted recurring rows to the chosen bond term using the
+// QUOTE-TIME bondOptions snapshot (never live constants — rates were locked
+// when the estimate priced). Adjusts the recurring aggregates and engine
+// totals by the exact bond delta; the caller applies the same deltas to
+// estimates.monthly_total/annual_total. The rewritten rows are the billing
+// truth: accept freezes them and the converter schedules/bills from them.
+// Quote-time bond options snapshot, both persisted shapes: v1-mapped saves
+// stamp it at result.results.tmBait.bondOptions; modular-engine saves carry
+// it on the termite-bait LINE ITEM inside engineResult.lineItems (codex
+// #2915 r3 — reading only the v1 spot left engine-backed estimates with a
+// priced snapshot but no selector).
+function termiteBondOptionsFromEstimateData(parsedData = {}) {
+  const v1 = parsedData?.result?.results?.tmBait?.bondOptions;
+  if (Array.isArray(v1) && v1.length) return v1;
+  const lineLists = [parsedData?.engineResult?.lineItems, parsedData?.result?.lineItems];
+  for (const lineItems of lineLists) {
+    if (!Array.isArray(lineItems)) continue;
+    const bait = lineItems.find((li) => li && li.service === 'termite_bait' && Array.isArray(li.bondOptions) && li.bondOptions.length);
+    if (bait) return bait.bondOptions;
+  }
+  return null;
+}
+
+// A term switch must reach every REPLAYABLE input shape too (codex #2915
+// r4): the bundle/accept path replays extractEngineInputs(estData) through
+// the live engine, so a rewrite that only touched the stored rows/result
+// would let the replay resurrect the OLD term into pricingBundle
+// frequencies — displaying the new selection while accept locks and bills
+// the old amount. Engine shapes carry services.termite.bondTerm; v1 admin
+// saves carry the form field inputs.termiteBondTerm.
+function syncBondTermIntoReplayableInputs(parsedData = {}, termKey) {
+  for (const shape of [parsedData?.engineInputs, parsedData?.engineRequest]) {
+    if (!shape || typeof shape !== 'object') continue;
+    const termite = shape.services?.termite;
+    if (termite && typeof termite === 'object') {
+      if (termKey) termite.bondTerm = termKey;
+      else delete termite.bondTerm;
+    }
+    // Real V2/admin saves replay engineRequest = { profile,
+    // selectedServices, options } through translateV2CallToV1Input — the
+    // bond rides options.termiteBondTerm there (codex #2915 r5).
+    if (shape.options && typeof shape.options === 'object'
+      && ('termiteBondTerm' in shape.options || Array.isArray(shape.selectedServices))) {
+      shape.options.termiteBondTerm = termKey || 'none';
+    }
+  }
+  const formInputs = parsedData?.inputs;
+  if (formInputs && typeof formInputs === 'object'
+    && ('termiteBondTerm' in formInputs || formInputs.svcTermiteBait !== undefined)) {
+    formInputs.termiteBondTerm = termKey || 'none';
+  }
+}
+
+function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
+  const result = parsedData?.result && typeof parsedData.result === 'object' ? parsedData.result : null;
+  const stats = result?.results?.tmBait || null;
+  const options = termiteBondOptionsFromEstimateData(parsedData);
+  if (!options || !options.length) return { ok: false, reason: 'bond_not_available' };
+  const normalized = termKey === 'none' || termKey == null || termKey === '' ? null : String(termKey);
+  const option = normalized ? options.find((o) => o.key === normalized) : null;
+  if (normalized && !option) return { ok: false, reason: 'invalid_bond_term' };
+
+  const lists = [result?.recurring, parsedData.recurring]
+    .filter((rec, idx, arr) => rec && Array.isArray(rec.services) && arr.indexOf(rec) === idx);
+  if (!lists.length) {
+    return applySelectedTermiteBondToRawEngineData(parsedData, option);
+  }
+
+  const currentRow = lists[0].services.find(isTermiteBondRow) || null;
+  const currentMonthly = Number(currentRow?.mo ?? currentRow?.monthly) || 0;
+  const currentAnnual = Number(currentRow?.annual) || Math.round(currentMonthly * 12 * 100) / 100;
+  const nextMonthly = option ? Number(option.monthly) || 0 : 0;
+  const nextAnnual = option ? Number(option.annual) || 0 : 0;
+  const monthlyDelta = Math.round((nextMonthly - currentMonthly) * 100) / 100;
+  const annualDelta = Math.round((nextAnnual - currentAnnual) * 100) / 100;
+
+  const nextRow = option ? {
+    name: option.name || `Termite Bond (${option.label} Term)`,
+    service: option.serviceKey || `termite_bond_${option.key}`,
+    bondTerm: option.key,
+    bondYears: option.years,
+    mo: nextMonthly,
+    monthly: nextMonthly,
+    perTreatment: Number(option.perApp ?? option.quarterly) || 0,
+    visitsPerYear: 4,
+    annual: nextAnnual,
+    ...TERMITE_BOND_ROW_FLAGS,
+  } : null;
+
+  for (const rec of lists) {
+    rec.services = rec.services.filter((svc) => !isTermiteBondRow(svc));
+    if (nextRow) rec.services.push({ ...nextRow });
+    for (const field of ['monthlyTotal', 'grandTotal']) {
+      if (Number.isFinite(Number(rec[field]))) rec[field] = Math.round((Number(rec[field]) + monthlyDelta) * 100) / 100;
+    }
+    for (const field of ['annualAfterDiscount', 'annualBeforeDiscount']) {
+      if (Number.isFinite(Number(rec[field]))) rec[field] = Math.round((Number(rec[field]) + annualDelta) * 100) / 100;
+    }
+  }
+  if (result.totals && typeof result.totals === 'object') {
+    const totalDeltas = [['year1', annualDelta], ['year2', annualDelta], ['year2mo', monthlyDelta]];
+    for (const [field, delta] of totalDeltas) {
+      if (Number.isFinite(Number(result.totals[field]))) result.totals[field] = Math.round((Number(result.totals[field]) + delta) * 100) / 100;
+    }
+  }
+  if (stats) stats.selectedBondTerm = option ? option.key : null;
+  syncBondTermIntoReplayableInputs(parsedData, option ? option.key : null);
+  const changed = monthlyDelta !== 0 || annualDelta !== 0
+    || Boolean(currentRow) !== Boolean(option)
+    || Boolean(currentRow && option && currentRow.bondTerm !== option.key);
+  return { ok: true, changed, monthlyDelta, annualDelta, selectedBondTerm: option ? option.key : null };
+}
+
+// Raw modular-engine payloads ({ engineInputs, engineResult }) have no
+// mapped recurring lists — the switch rewrites the engineResult itself:
+// the bond LINE ITEM (raw convention: service 'termite_bond' + bondTerm;
+// the read adapters term-key it) and the summary totals, by the same exact
+// snapshot deltas the mapped path uses (codex #2915 r3).
+function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
+  // Raw engine output may be persisted under engineResult OR directly under
+  // result (the display precedence reads result first) — mutate whichever
+  // container(s) actually hold the raw lineItems so the selector's source
+  // and the switch target can never be different copies (codex #2915 r6).
+  const containers = [parsedData?.engineResult, parsedData?.result]
+    .filter((c, idx, arr) => c && typeof c === 'object' && Array.isArray(c.lineItems)
+      && arr.indexOf(c) === idx);
+  const engineResult = containers[0] || null;
+  if (!engineResult) {
+    return { ok: false, reason: 'bond_not_available' };
+  }
+  const isBondLine = (li) => li && typeof li === 'object'
+    && String(li.service || '').toLowerCase().startsWith('termite_bond');
+  const currentLine = engineResult.lineItems.find(isBondLine) || null;
+  const currentMonthly = Number(currentLine?.monthly ?? currentLine?.mo) || 0;
+  const currentAnnual = Number(currentLine?.annual) || Math.round(currentMonthly * 12 * 100) / 100;
+  const nextMonthly = option ? Number(option.monthly) || 0 : 0;
+  const nextAnnual = option ? Number(option.annual) || 0 : 0;
+  const monthlyDelta = Math.round((nextMonthly - currentMonthly) * 100) / 100;
+  const annualDelta = Math.round((nextAnnual - currentAnnual) * 100) / 100;
+
+  for (const container of containers) {
+    container.lineItems = container.lineItems.filter((li) => !isBondLine(li));
+    if (option) {
+      container.lineItems.push({
+        service: 'termite_bond',
+        bondTerm: option.key,
+        bondYears: option.years,
+        name: option.name || `Termite Bond (${option.label} Term)`,
+        annual: nextAnnual,
+        monthly: nextMonthly,
+        perApp: Number(option.perApp ?? option.quarterly) || 0,
+        visitsPerYear: 4,
+        discountable: false,
+      });
+    }
+    const summary = container.summary && typeof container.summary === 'object' ? container.summary : null;
+    if (summary) {
+      const adjust = [
+        ['recurringAnnualBeforeDiscount', annualDelta],
+        ['recurringAnnualAfterDiscount', annualDelta],
+        ['recurringMonthlyAfterDiscount', monthlyDelta],
+        ['year1Total', annualDelta],
+        ['year2Annual', annualDelta],
+        ['year2Monthly', monthlyDelta],
+      ];
+      for (const [field, delta] of adjust) {
+        if (Number.isFinite(Number(summary[field]))) {
+          summary[field] = Math.round((Number(summary[field]) + delta) * 100) / 100;
+        }
+      }
+    }
+    const bait = container.lineItems.find((li) => li && li.service === 'termite_bait');
+    if (bait) bait.selectedBondTerm = option ? option.key : null;
+  }
+  syncBondTermIntoReplayableInputs(parsedData, option ? option.key : null);
+  const changed = monthlyDelta !== 0 || annualDelta !== 0
+    || Boolean(currentLine) !== Boolean(option)
+    || Boolean(currentLine && option && currentLine.bondTerm !== option.key);
+  return { ok: true, changed, monthlyDelta, annualDelta, selectedBondTerm: option ? option.key : null };
+}
+
+// Same contract as /preferences: a customer-page action on an active sent
+// estimate that rewrites estimate_data + the totals columns server-side,
+// TOCTOU-guarded against a concurrent accept (the accept path freezes
+// whatever rows this wrote — customerSelection alone never bills).
+// Estimate token format gate (same slug-or-64-hex pattern as the other
+// public estimate routes): malformed probes 404 before any DB read.
+const BOND_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
+router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
+  try {
+    // Kill-switch completeness (codex #2915 r1): the gate must dead-end this
+    // mutation even for estimates whose payloads still carry a bondOptions
+    // snapshot from when the gate was on.
+    if (!termiteBondOptionGateOn()) return res.status(403).json({ error: 'bond_option_disabled' });
+    // Generic-404 posture (AGENTS.md contract; codex #2915 r5): malformed
+    // tokens, unknown tokens, and non-active rows are indistinguishable — a
+    // leaked draft/archived token must not confirm the row exists.
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const term = req.body?.term;
+    if (typeof term !== 'string' || !term) {
+      return res.status(400).json({ error: 'term is required' });
+    }
+
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const outcome = applySelectedTermiteBondToEstimateData(parsedData, term);
+    if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+
+    const monthlyTotal = Math.max(0, Math.round((Number(estimate.monthly_total || 0) + outcome.monthlyDelta) * 100) / 100);
+    const annualTotal = Math.max(0, Math.round((Number(estimate.annual_total || 0) + outcome.annualDelta) * 100) / 100);
+    invalidateSendSnapshotPricingBundle(parsedData);
+    const bondUpdateCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+      .whereNull('price_locked_at')
+      // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
+      // write — an accept, a preference toggle, another bond switch — makes
+      // this update 0-row and the caller reloads server truth. Millisecond
+      // truncation on BOTH sides: pg stores microseconds, node Date carries
+      // ms, and raw equality would spuriously fail on every row.
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
+      .update({
+        estimate_data: JSON.stringify(parsedData),
+        monthly_total: monthlyTotal,
+        annual_total: annualTotal,
+        updated_at: db.fn.now(),
+      });
+    if (!bondUpdateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    clearEstimatePricingCache(estimate.id);
+    logger.info(`[estimate] ${estimate.id}: bond term -> ${outcome.selectedBondTerm || 'none'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
+    return res.json({
+      success: true,
+      selectedBondTerm: outcome.selectedBondTerm,
+      monthlyTotal,
+      annualTotal,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.put('/:token/preferences', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
@@ -14931,6 +15255,76 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   return repriced;
 }
 
+// GATE_TERMITE_BOND_OPTION — mirrored from the engine's emission gate. The
+// kill switch must be total for UNSOLD state (selector render + PUT /bond),
+// even on estimates whose payloads were priced while the gate was on
+// (codex #2915 r1). Already-SELECTED bond rows are sold state and keep
+// displaying, folding, and billing regardless — unset never rewrites a
+// quoted price.
+function termiteBondOptionGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+}
+
+// Termite bond selector payload (owner 2026-07-20): the quote-time option
+// snapshot + current selection ride the TERMITE section — bond lines are
+// section-suppressed riders (see buildPricingServices), and the customer
+// switches terms via PUT /:token/bond (server-side re-total, /preferences
+// pattern), so accept freezes already-rewritten rows.
+function attachTermiteBondSelector(services = [], estData = {}) {
+  // Both persisted shapes (v1-mapped stats OR the raw engine bait line) —
+  // codex #2915 r3: engine-backed estimates carry the snapshot on the line
+  // item, and reading only the v1 spot left them selector-less.
+  const options = termiteBondOptionsFromEstimateData(estData)
+    || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
+  const section = (services || []).find((s) => s?.key === 'termite_bait');
+  if (!section) return services;
+  // Raw engine payloads keep their rows under engineResult (same root
+  // precedence as the accept-path readers).
+  const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
+  const selectedRow = rows.find((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond')) || null;
+  // Selector (unsold state) requires BOTH a persisted snapshot and the live
+  // gate; the solo fold below runs off the selected ROW alone — sold state
+  // must keep pricing correctly even after a kill-switch flip.
+  if (options && options.length && termiteBondOptionGateOn()) {
+    section.bondOptions = options.map((opt) => ({
+      key: opt.key,
+      label: opt.label,
+      years: opt.years,
+      perApplicationAdd: Number(opt.perApp ?? opt.quarterly) || 0,
+      monthlyAdd: Number(opt.monthly) || 0,
+      annualAdd: Number(opt.annual) || 0,
+    }));
+    section.selectedBondTerm = selectedRow
+      ? (selectedRow.bondTerm || options.find((o) => o.serviceKey === selectedRow.service)?.key || null)
+      : null;
+  }
+  // SOLO termite estimates: the section frequency IS the plan the accept
+  // path freezes (effectiveMonthly/AnnualTotal read selectedFrequency), so a
+  // selected bond must ride its figures — monthly 35→50, annual 420→600,
+  // per-application 105→150 (the true price of the combined bait+bond
+  // visit; billing charges exactly this per completion). Split bundles keep
+  // the itemized 105 section — their accept totals come from the
+  // serviceCadenceCombos, which already sum every recurring row (bond
+  // included).
+  if (selectedRow && services.length === 1 && Array.isArray(section.frequencies)) {
+    const bondMonthly = Number(selectedRow.mo ?? selectedRow.monthly) || 0;
+    const bondAnnual = Number(selectedRow.annual) || Math.round(bondMonthly * 12 * 100) / 100;
+    const bondPerApp = Number(selectedRow.perTreatment) || 0;
+    const round2 = (n) => Math.round(Number(n) * 100) / 100;
+    section.frequencies = section.frequencies.map((frequency) => {
+      if (!frequency || frequency.quoteRequired) return frequency;
+      return {
+        ...frequency,
+        monthly: frequency.monthly != null ? round2(frequency.monthly + bondMonthly) : frequency.monthly,
+        monthlyBase: frequency.monthlyBase != null ? round2(frequency.monthlyBase + bondMonthly) : frequency.monthlyBase,
+        annual: frequency.annual != null ? round2(frequency.annual + bondAnnual) : frequency.annual,
+        perTreatment: frequency.perTreatment != null ? round2(frequency.perTreatment + bondPerApp) : frequency.perTreatment,
+      };
+    });
+  }
+  return services;
+}
+
 function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   const estResult = estData?.result || estData?.engineResult || estData || {};
   const recurringServices = recurringServicesWithSupplements(estResult);
@@ -14942,16 +15336,29 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   // backing combo pricing (set by the v1 recompute path); otherwise sections
   // keep the legacy ladder so sliders never appear without priceable combos.
   const hasServiceCadenceCombos = Array.isArray(payload.serviceCadenceCombos) && payload.serviceCadenceCombos.length > 0;
-  const recurringKeys = Array.from(new Set(
+  const allRecurringKeys = Array.from(new Set(
     recurringServices
       .map(recurringServiceKey)
       .filter(Boolean)
   ));
+  // Termite bond lines are RIDERS (owner 2026-07-20): they render inside
+  // the termite section (bond selector + breakdown row), never as their
+  // own section card — and they must not flip a solo termite estimate
+  // into the multi-service split layout. SECTION enumeration uses the
+  // suppressed list; the split-reconciliation below must use the FULL list
+  // — the bond's monthly is inside frequency.monthly and its treatment row
+  // is in the row set, so dropping its key from the row-sum side would
+  // collapse every bond-carrying multi-service plan into the single bundle
+  // card and strand the selector (codex #2915 r2).
+  const recurringKeys = allRecurringKeys.filter((key) => !String(key).startsWith('termite_bond'));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
-  const recurringRows = recurringServiceRowsByKey(recurringServices);
+  // Same rider suppression as recurringKeys above — a bond pair here would
+  // still mint its own split-section card.
+  const recurringRows = recurringServiceRowsByKey(recurringServices)
+    .filter(([key]) => !String(key).startsWith('termite_bond'));
   const recurringDiscount = Number(estResult?.recurring?.discount || payload?.recurring?.discount || 0) || 0;
 
   if (!isOneTimeOnly && hasRecurringPest && recurringKeys.filter((key) => key !== 'pest_control').length === 0) {
@@ -15002,7 +15409,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   }
 
   if (!isOneTimeOnly && recurringKeys.length > 1) {
-    if (canSplitRecurringSelectableLadder(frequencies, recurringKeys)) {
+    if (canSplitRecurringSelectableLadder(frequencies, allRecurringKeys)) {
       const hasRecurringPestSection = recurringKeys.includes('pest_control');
       const hasSelectableLadder = frequencies.filter((frequency) => frequency?.key).length > 1;
       const splitSections = recurringRows.map(([key, recurringService]) => {
@@ -15302,6 +15709,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     buildPricingServices(contractPayload, estimate, estData),
     lowConfidenceLines,
   );
+  attachTermiteBondSelector(services, estData);
   const combinedRecurring = withCombinedLowConfidenceRange(
     buildCombinedRecurring(contractPayload, estimate, estData, services),
     lowConfidenceRange,
@@ -17290,3 +17698,5 @@ module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
+module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
+module.exports.attachTermiteBondSelector = attachTermiteBondSelector;

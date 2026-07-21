@@ -11,6 +11,7 @@ import React, {
 import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
+  applyServerTermiteBondPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -867,6 +868,7 @@ function EstimateToolView() {
     termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
+    termiteBondTerm: "none",
     termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
@@ -1307,13 +1309,17 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
+        fetchConfigRow("termite_bond"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
-      return lawnRow.ok && pestRow.ok;
+      // Bond rates are save-validated against the live DB values, so the
+      // fallback preview must price from them too (pre-push P1 on #2915).
+      if (bondRow.ok) applyServerTermiteBondPricingConfig(bondRow.data);
+      return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
     return run;
@@ -1917,6 +1923,7 @@ function EstimateToolView() {
           thatchMeasurementSource: form.thatchMeasurementSource || "manual",
           termiteBaitSystem: form.termiteBaitSystem || "advance",
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
+          termiteBondTerm: form.termiteBondTerm || "none",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
           termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
           termiteFootprintSqFt,
@@ -2405,6 +2412,7 @@ function EstimateToolView() {
       termiteBaitComplexity: "",
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
+      termiteBondTerm: "none",
       termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
@@ -3642,6 +3650,24 @@ function EstimateToolView() {
                           ]}
                         />
                       </Field>
+                      {/* Residential bond rider (owner 2026-07-20): fixed
+                          quarterly warranty rate per term, priced by the
+                          engine — labels stay term-only so a DB rate change
+                          never strands a stale price here. Commercial keeps
+                          the manual-quote scope split below. */}
+                      {!isCommercialEstimateInput(form) && (
+                        <Field label="Bond (warranty)">
+                          <Select
+                            k="termiteBondTerm"
+                            options={[
+                              { value: "none", label: "No bond" },
+                              { value: "1yr", label: "1-Year term" },
+                              { value: "5yr", label: "5-Year term" },
+                              { value: "10yr", label: "10-Year term" },
+                            ]}
+                          />
+                        </Field>
+                      )}
                       {/* Scope-split is commercial-only — the residential termite
                           pricer ignores termiteScope, so hide it there to avoid a
                           "Bond — manual quote" label that still auto-prices. */}

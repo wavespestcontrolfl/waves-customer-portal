@@ -3327,6 +3327,8 @@ export function ServiceSection({
   ctaSlotMeta = null,
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
+  onSelectBondTerm = null,
+  bondBusy = false,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -3479,6 +3481,33 @@ export function ServiceSection({
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
           />
+        ) : null}
+
+        {/* Termite bond selector (owner 2026-07-20): optional re-treatment
+            warranty riding the same quarterly station check. Amounts come
+            from the section's quote-time bondOptions snapshot; a pick calls
+            PUT /:token/bond (server-side re-total) and the page reloads
+            server truth — the displayed price and the billed price can never
+            diverge. */}
+        {sectionSlug === 'termite_bait' && Array.isArray(section.bondOptions)
+          && section.bondOptions.length > 0 && onSelectBondTerm ? (
+          <div style={{ marginTop: 6 }} aria-label="Termite bond options">
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
+              Termite Bond — optional re-treatment warranty
+            </div>
+            <GlassFrequencyPills
+              frequencies={[
+                { key: 'none', label: 'No bond' },
+                ...section.bondOptions.map((opt) => ({
+                  key: opt.key,
+                  label: `${opt.label} · +$${opt.perApplicationAdd}/application`,
+                })),
+              ]}
+              selected={section.selectedBondTerm || 'none'}
+              onChange={(term) => onSelectBondTerm(term)}
+              disabled={disabled || bondBusy}
+            />
+          </div>
         ) : null}
 
         {/* One-time work belonging to THIS service lives inside its service
@@ -4016,6 +4045,54 @@ function EstimateViewPageInner() {
     addOnMutationChainRef.current = chained;
     await chained;
   }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
+
+  // Termite bond term picker (owner 2026-07-20). Mirrors onToggleAddOn:
+  // draft preview stays inert with an explanation, the PUT + reload sequence
+  // rides the SAME mutation chain (bond and add-on toggles both reprice the
+  // estimate — unserialized, a stale reload could win), and any error path
+  // resyncs to server truth.
+  const [bondBusy, setBondBusy] = useState(false);
+  const onSelectBondTerm = useCallback(async (term) => {
+    if (ctaPhaseRef.current === 'submitting') return;
+    if (adminDraftPreview) {
+      setError('Draft preview — the bond choice is the customer\'s to make once the estimate is sent. Preset it with the estimator\'s Bond selector.');
+      return;
+    }
+    const run = async () => {
+      setBondBusy(true);
+      try {
+        const r = await fetch(`${API_BASE}/estimates/${token}/bond`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term }),
+        });
+        if (!r.ok) throw new Error(`bond update failed: ${r.status}`);
+        // Annual prepay doesn't support bond riders (the converter fails that
+        // conversion closed) — a customer who already chose prepay and then
+        // adds a bond must come back through the payment choice, or the next
+        // confirm posts a combination the server rejects mid-flow (codex
+        // #2915 r3). The reloaded payload stops advertising prepay
+        // (annualPrepayEligible flips false), so resetting here is enough.
+        if (term !== 'none' && paymentPreference === 'prepay_annual') {
+          setPaymentPreference(null);
+          setCtaPhase('configure');
+          setError('Annual prepay isn’t available with a termite bond — pick a payment option again.');
+        }
+        await loadEstimate({ preserveSelection: true });
+        scrollToPriceSection();
+      } catch (err) {
+        setError(err.message);
+        // Resync to server truth — the PUT may have landed despite the error
+        // surfacing here (same rationale as the add-on path).
+        await loadEstimate({ preserveSelection: true }).catch(() => {});
+      } finally {
+        setBondBusy(false);
+      }
+    };
+    const chained = addOnMutationChainRef.current.then(run, run);
+    addOnMutationChainRef.current = chained;
+    await chained;
+  }, [adminDraftPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
     if (!scheduledServiceId) return;
@@ -4882,6 +4959,8 @@ function EstimateViewPageInner() {
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
                 onAddOnToggle={onToggleAddOn}
+                onSelectBondTerm={onSelectBondTerm}
+                bondBusy={bondBusy}
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}

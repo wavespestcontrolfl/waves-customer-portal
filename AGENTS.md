@@ -424,6 +424,25 @@ finding and warns on P1. Reviewers must return JSON matching
   checks as the GET, 6 req/hour limit, email sends idempotent per
   estimate+service+day, suppression-blocked addresses return 409 with no
   send, generic errors — no PII in responses or logs).
+  `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
+  estimate page — same contract family as the service-preferences toggles.
+  Token IS the auth: slug-or-64-hex format gate rejects malformed probes
+  before any DB read, and the 404 is generic — unknown token, malformed
+  token, and non-active rows (draft/archived/expired/locked) are
+  indistinguishable, so a leaked inactive token never confirms a row
+  exists. Dark behind GATE_TERMITE_BOND_OPTION (off → uniform 403
+  `bond_option_disabled` before any DB read, and the 30/hr per-IP limiter
+  — shared /64-collapsing `rateLimitKey` — `skip`s while dark so probes
+  never see a revealing 429). Mutates ONLY the termite-bond selection:
+  the requested term must exist in the estimate's own QUOTE-TIME
+  `bondOptions` snapshot (never live constants — invalid/absent fails
+  closed 400), the rewrite adjusts rows + totals by the exact snapshot
+  deltas, and the update is TOCTOU-guarded exactly like /preferences
+  (accept-active pre-check re-asserted in the UPDATE's whereNotIn +
+  `price_locked_at IS NULL`, 409 on a lost race) so a concurrent accept's
+  frozen price can never be overwritten. Rollback = unset the gate (route
+  dead-ends; already-selected bonds are sold state and keep billing as
+  quoted).)
   `/api/estimates/:token/extension-request` (POST; one-click "my link
   expired, I still want this" from the React estimate page's expired/
   not-found screen. Estimate token format gate (same slug-or-64-hex regex as

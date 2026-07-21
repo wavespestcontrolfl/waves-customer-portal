@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2 } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2, TERMITE } = require('./constants');
 
 // Optional logger — the engine must stay requireable from CLI/test harnesses
 // that don't carry the server logger, so binding events log best-effort.
@@ -78,7 +78,7 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
-  priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
@@ -963,6 +963,42 @@ function generateEstimate(input) {
       lineItems.push(result);
       if (!result.quoteRequired && !result.requiresMeasurement) {
         activeServiceKeys.push('termite_bait');
+        // Termite bond rider (owner 2026-07-20): only alongside a PRICED
+        // bait program — the warranty rides the bait stations' quarterly
+        // check. NOT added to activeServiceKeys (no WaveGuard tier) and
+        // discount-exempt (excludedFromPercentDiscount.termite_bond).
+        //
+        // GATE_TERMITE_BOND_OPTION (default OFF) is the single choke point:
+        // without the emitted bondOptions snapshot + bond line, the customer
+        // selector never renders, PUT /:token/bond 400s (bond_not_available),
+        // and the converter/billing paths see no bond rows — everything
+        // downstream is payload-driven. Kill = unset the var. Gate-off
+        // caveat: the ADMIN preview twin still prices a selected bond
+        // client-side, so picking a term while dark trips the pricing-drift
+        // flag on that draft (visible only to staff; harmless nudge that the
+        // gate is off).
+        const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+        if (bondGateOn) {
+          const bondTerm = termiteOptions.bondTerm;
+          if (bondTerm) {
+            const bond = priceTermiteBond(bondTerm);
+            if (bond) lineItems.push(bond);
+          }
+          // Quote-time snapshot of ALL bond options (rates locked when the
+          // estimate is priced) — the customer-facing selector renders and
+          // re-prices from these, never from live constants.
+          result.bondOptions = Object.entries(TERMITE.bond).map(([term, cfg]) => ({
+            key: term,
+            label: cfg.label,
+            years: cfg.years,
+            quarterly: cfg.quarterly,
+            perApp: cfg.quarterly,
+            annual: Math.round(cfg.quarterly * 4 * 100) / 100,
+            monthly: Math.round(((cfg.quarterly * 4) / 12) * 100) / 100,
+            name: `Termite Bond (${cfg.label} Term)`,
+            serviceKey: `termite_bond_${term}`,
+          }));
+        }
       }
     }
   }

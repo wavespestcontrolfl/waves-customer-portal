@@ -189,6 +189,38 @@ const COMBINED_SERVICE_ROUTES = [
     // selection stores the BILLING cadence.
     primaryUsesAcceptFrequency: true,
   },
+  // Termite bait + bond (owner 2026-07-20): the warranty rides the SAME
+  // quarterly station check — one visit, one scheduled row. The route NAME
+  // is load-bearing twice over: it carries "%Termite Bond%" so the
+  // termite_bonds lifecycle sync recognizes the completed visit, and the
+  // "(N-Year Term)" fragment so termYearsFrom mints the RIGHT term (a
+  // term-less combined label would mint every bond as 1-year). No combined
+  // catalog row exists — catalogServiceKey resolves the BAIT row so the
+  // visit closes out under the bait-station completion profile (the bond
+  // itself is an internal-only billing rider). Listed AFTER pest+termite:
+  // when pest consumes the bait line, the bond schedules standalone (its
+  // own internal rider series) — known v1 limitation, documented in the PR.
+  {
+    primaryKey: 'termite_bait',
+    companionKey: 'termite_bond_1yr',
+    catalogServiceKey: 'termite_bait',
+    name: 'Quarterly Termite Bait Station + Termite Bond Service (1-Year Term)',
+    companionDefaultPattern: 'quarterly',
+  },
+  {
+    primaryKey: 'termite_bait',
+    companionKey: 'termite_bond_5yr',
+    catalogServiceKey: 'termite_bait',
+    name: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)',
+    companionDefaultPattern: 'quarterly',
+  },
+  {
+    primaryKey: 'termite_bait',
+    companionKey: 'termite_bond_10yr',
+    catalogServiceKey: 'termite_bait',
+    name: 'Quarterly Termite Bait Station + Termite Bond Service (10-Year Term)',
+    companionDefaultPattern: 'quarterly',
+  },
   {
     primaryKey: 'lawn_care',
     companionKey: 'tree_shrub',
@@ -619,9 +651,15 @@ function recurringLinesFromEngineResult(data = {}) {
       && Number(li.annual) > 0
     )
     .map((li) => {
-      if (li.name || li.label || li.displayName || li.serviceName || li.service_name) return li;
-      const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(li)];
-      return synthesized ? { ...li, name: synthesized } : li;
+      // Raw engine bond lines carry service 'termite_bond' + bondTerm —
+      // normalize to the term-keyed service so the combined bait+bond
+      // scheduling routes match exactly like mapped saves (codex #2915 r2).
+      const base = li.service === 'termite_bond' && li.bondTerm
+        ? { ...li, service: `termite_bond_${li.bondTerm}` }
+        : li;
+      if (base.name || base.label || base.displayName || base.serviceName || base.service_name) return base;
+      const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(base)];
+      return synthesized ? { ...base, name: synthesized } : base;
     });
 }
 
@@ -1194,6 +1232,17 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+// The per-application charge divides the plan annual by the SINGLE unit's
+// visit count. Termite-bond riders are unit-count-exempt, so the single
+// unit is the non-bond line set (codex #2915 r6) — bait+bond derives 4
+// from the bait line; true multi-unit plans still return null.
+function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
+  const nonBond = (Array.isArray(recurringLines) ? recurringLines : [])
+    .filter((svc) => !String(recurringServiceKey(svc) || '').startsWith('termite_bond'));
+  if (nonBond.length !== 1 || supplementUnitCount !== 0) return null;
+  return visitsPerYearForRecurringService(nonBond[0]);
+}
+
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
@@ -1437,7 +1486,30 @@ const EstimateConverter = {
       supplementalCompanions,
     });
     const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
-    const recurringUnitCount = recurringServicesForConversion.length + supplementStandaloneUnits.length;
+    // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
+    // folds into the bait visit via its combined route, so counting it would
+    // flip a bait+bond plan to "multi-unit" and null out the whole-plan
+    // per-application fee/row price that the single combined visit must
+    // carry ($150/application = monitoring + bond, whole plan ÷ 4).
+    const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
+    const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
+    const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
+      + supplementStandaloneUnits.length;
+    // FAIL-CLOSED (same posture as the multi-service prepay guard below): an
+    // annual_prepay_terms row carries ONE coverage service keyed on the
+    // primary name — the combined "…+ Termite Bond Service" service_type
+    // can't be stamped, so its completions would bill again on top of the
+    // prepaid amount. Route bond + annual-prepay to manual conversion.
+    if (billingTerm === 'prepay_annual' && hasTermiteBondLine) {
+      const err = new Error(
+        'Annual prepay isn\'t supported with a termite bond rider yet — convert this estimate as per-application billing, or bill the prepay manually.'
+      );
+      err.code = 'ANNUAL_PREPAY_TERMITE_BOND_UNSUPPORTED';
+      err.isOperational = true;
+      err.status = 422;
+      err.statusCode = 422;
+      throw err;
+    }
     if (billingTerm === 'prepay_annual' && recurringUnitCount > 1) {
       const err = new Error(
         `Annual prepay isn't supported for multi-service plans (${recurringUnitCount} recurring services) yet — convert this estimate as monthly, or bill the annual prepay manually.`
@@ -1500,10 +1572,16 @@ const EstimateConverter = {
     // recurring unit only — the same gate the fee and estimated_price writers
     // use; a standalone supplement beside it means the plan annual isn't this
     // unit's annual, so the cadence fallback (status quo) applies.
-    const singleRecurringUnitVisits = (recurringServicesForConversion.length === 1
-      && supplementStandaloneUnits.length === 0)
-      ? visitsPerYearForRecurringService(recurringServicesForConversion[0])
-      : null;
+    // Rider-aware (codex #2915 r6): the bond is carved out of the unit
+    // count, so the "single unit" whose visits drive the per-application
+    // division is the NON-bond line set. Without this, a raw engine-backed
+    // bait+bond accept (no recurring.services for the cadence inference to
+    // read → monthly fallback) would stamp the monthly total as the
+    // per-visit fee ($50) instead of plan-annual ÷ visits ($600/4 = $150).
+    const singleRecurringUnitVisits = riderAwareSingleUnitVisits(
+      recurringServicesForConversion,
+      supplementStandaloneUnits.length,
+    );
     const perApplicationAmount = billingCadence
       ? perApplicationChargeAmount({
           billingCadence,
@@ -1822,16 +1900,29 @@ const EstimateConverter = {
         // rodent promotion above; all other remaining lines keep the
         // adjudicated 2026-06-12 semantic (owner decision).
         const promotedTermiteUnits = (remaining || [])
-          .filter((line) => recurringServiceKey(line) === 'termite_bait'
-            && visitsPerYearForRecurringService(line) === 4)
-          .map((line) => ({
-            service: {
-              name: line.name || line.serviceName || line.service_name || 'Termite Bait',
-              frequency: 'quarterly',
-              visitsPerYear: 4,
-            },
-            catalogServiceKey: 'termite_bait',
-          }));
+          .filter((line) => {
+            const key = String(recurringServiceKey(line) || '');
+            // Bond riders promote too (codex #2915 r2): when the pest route
+            // consumed the bait line, the bond stays in `remaining` — billed
+            // but otherwise never scheduled, so no visit ever carries
+            // "Termite Bond" and the lifecycle sync never mints the warranty.
+            return (key === 'termite_bait' || key.startsWith('termite_bond'))
+              && visitsPerYearForRecurringService(line) === 4;
+          })
+          .map((line) => {
+            const isBond = String(recurringServiceKey(line) || '').startsWith('termite_bond');
+            return {
+              service: {
+                name: line.name || line.serviceName || line.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
+                frequency: 'quarterly',
+                visitsPerYear: 4,
+              },
+              // Bond rows resolve their own catalog identity (internal-only
+              // billing-rider completion profile); bait resolves the station
+              // service.
+              catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
+            };
+          });
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
@@ -2845,3 +2936,4 @@ module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGua
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
+module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;

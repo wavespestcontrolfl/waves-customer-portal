@@ -272,6 +272,14 @@ const SERVICE_DETAILS_COPY = {
         ['Standard station checks', '4 per year (quarterly)'],
         ['Required for guarantee', 'Annual inspection + current payments'],
         ['Warranty type', 'Retreatment AND repair (per written agreement)'],
+        // Bond option (owner 2026-07-20): terms are program structure and
+        // stable; the per-application price for each term lives on the
+        // estimate's bond selector, never in this static guide (rates are
+        // DB-tunable and a stale printed price would misquote). Row hidden
+        // while GATE_TERMITE_BOND_OPTION is dark — the guide must not point
+        // customers at a selector that is intentionally absent (codex #2915
+        // r1). Env read at request time via the row filter below.
+        ['Bond term options', '1-, 5-, or 10-year warranty bond — pick the term on your estimate, priced per application', { requiresTermiteBondGate: true }],
         ['Repair coverage', 'Up to $1,000,000 for new covered WDO damage'],
         ['Transferable', 'Yes \u2014 to a new homeowner ($250 + transfer inspection)'],
         ['Station ownership', 'Yours \u2014 purchased once with installation'],
@@ -302,7 +310,12 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What are the term options, and what happens if I sell the house?',
-        a: 'You choose a 1-, 5-, or 10-year term, billed monthly or annually in advance — longer terms lock lower monthly rates, fixed for the term you pick. The guarantee is transferable to a new homeowner with a transfer inspection and a $250 transfer fee, which is a genuine selling point when you list the house: the buyer inherits active termite protection with its history documented in the app.',
+        // Cadence corrected 2026-07-20 (owner: per-application billing) —
+        // the bond rides the quarterly station check and is charged per
+        // application, never as a monthly/annual subscription. True for
+        // manually-scheduled bonds today and the estimate selector when
+        // GATE_TERMITE_BOND_OPTION is live.
+        a: 'You choose a 1-, 5-, or 10-year term, priced per application on the same quarterly station check — longer terms lock a lower per-application rate, fixed for the term you pick. The guarantee is transferable to a new homeowner with a transfer inspection and a $250 transfer fee, which is a genuine selling point when you list the house: the buyer inherits active termite protection with its history documented in the app.',
       },
       {
         q: 'Do I own the bait stations, or am I renting them?',
@@ -808,7 +821,18 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
         || registryNames.some((n) => n.includes(String(img.product).toLowerCase())));
       return images.length ? { ...copy.productImages, images } : null;
     })(),
-    systemBox: copy.systemBox || null,
+    // Gate-marked rows (a {requiresTermiteBondGate} third tuple element) are
+    // stripped while GATE_TERMITE_BOND_OPTION is dark — the guide must not
+    // point customers at a selector that is intentionally absent. Env read
+    // at request time; the marker element never reaches renderers either way.
+    systemBox: (() => {
+      if (!copy.systemBox) return null;
+      const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+      const rows = (copy.systemBox.rows || [])
+        .filter((row) => bondGateOn || !(Array.isArray(row) && row[2] && row[2].requiresTermiteBondGate))
+        .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
+      return { ...copy.systemBox, rows };
+    })(),
     responsibilities: copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
     // (termite, pest, mosquito) flagged the mid-document CTA as premature.

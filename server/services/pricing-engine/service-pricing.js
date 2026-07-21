@@ -3840,6 +3840,33 @@ function priceMosquito(property, options = {}) {
 // ============================================================
 // TERMITE BAIT STATIONS
 // ============================================================
+// Termite bond (re-treatment warranty rider, owner 2026-07-20). Fixed
+// quarterly rate by term, riding the same quarterly station check as the
+// bait program — so it prices per application, exact by construction
+// (annual = quarterly x 4; monthly = annual / 12, all whole cents for the
+// seeded 60/54/45 rates). The NAME is a load-bearing contract: the
+// termite_bonds lifecycle sync recognizes completed visits by the
+// "Termite Bond" + "(N-Year" fragments in service_type and mints the bond
+// row at that term.
+function priceTermiteBond(term) {
+  const cfg = TERMITE.bond[term];
+  if (!cfg) return null;
+  const quarterly = cfg.quarterly;
+  const annual = Math.round(quarterly * 4 * 100) / 100;
+  return {
+    service: 'termite_bond',
+    bondTerm: term,
+    bondYears: cfg.years,
+    name: `Termite Bond (${cfg.label} Term)`,
+    annual,
+    monthly: Math.round((annual / 12) * 100) / 100,
+    perApp: quarterly,
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    // Fixed warranty rate: no WaveGuard tier count, no bundle % discount.
+    discountable: false,
+  };
+}
+
 function priceTermiteBait(property, options = {}) {
   const {
     // Default switched to Advance Apr 2026 (was 'trelona') for competitive
@@ -7730,7 +7757,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,

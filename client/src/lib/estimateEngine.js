@@ -410,6 +410,52 @@ export function applyServerPestPricingConfig(config) {
   return PEST_BASE.enforceFloorPostDiscount;
 }
 
+// Termite bond quarterly rates by term — DB-tunable via
+// pricing_config.termite_bond (db-bridge synced server-side). The fallback
+// engine must preview the LIVE rates (pre-push P1 on #2915): a baked table
+// would make every selected-bond fallback quote unsavable after an admin
+// rate edit (assertLiveTermiteBondRates fails the save closed, and
+// "recalculate" would reprice from the same stale table). Absent/invalid
+// values reset the in-code defaults — the kill-value pattern. CENT
+// precision mirrors the bridge's bondRate() (never the whole-dollar r()).
+const TERMITE_BOND_RATES = { '1yr': 60, '5yr': 54, '10yr': 45 };
+const TERMITE_BOND_DEFAULT_RATES = { '1yr': 60, '5yr': 54, '10yr': 45 };
+const TERMITE_BOND_TERM_META = {
+  '1yr': { label: '1-Year', years: 1 },
+  '5yr': { label: '5-Year', years: 5 },
+  '10yr': { label: '10-Year', years: 10 },
+};
+
+export function applyServerTermiteBondPricingConfig(config) {
+  const rate = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  };
+  TERMITE_BOND_RATES['1yr'] = rate(config?.term_1yr) ?? TERMITE_BOND_DEFAULT_RATES['1yr'];
+  TERMITE_BOND_RATES['5yr'] = rate(config?.term_5yr) ?? TERMITE_BOND_DEFAULT_RATES['5yr'];
+  TERMITE_BOND_RATES['10yr'] = rate(config?.term_10yr) ?? TERMITE_BOND_DEFAULT_RATES['10yr'];
+  return { ...TERMITE_BOND_RATES };
+}
+
+function termiteBondOptionsTable() {
+  return ['1yr', '5yr', '10yr'].map((key) => {
+    const quarterly = TERMITE_BOND_RATES[key];
+    const annual = Math.round(quarterly * 4 * 100) / 100;
+    const meta = TERMITE_BOND_TERM_META[key];
+    return {
+      key,
+      label: meta.label,
+      years: meta.years,
+      quarterly,
+      perApp: quarterly,
+      annual,
+      monthly: Math.round((annual / 12) * 100) / 100,
+      name: `Termite Bond (${meta.label} Term)`,
+      serviceKey: `termite_bond_${key}`,
+    };
+  });
+}
+
 // Admin-facing low-margin review notes (owner ruling 2026-07-17: margins are
 // surfaced, never enforced). Reads the engine's report-only signals off a
 // mapped estimate result — the marginWarnings array plus the per-line
@@ -1304,6 +1350,7 @@ export function calculateEstimate(inputs) {
     termiteBaitComplexity,
     termiteBaitSystem,
     termiteMonitoringTier,
+    termiteBondTerm,
     trenchingPerimeterLF: _trenchingPerimeterLF,
     trenchingConcreteLF: _trenchingConcreteLF,
     trenchingDirtLF: _trenchingDirtLF,
@@ -2121,6 +2168,32 @@ export function calculateEstimate(inputs) {
         perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
         visitsPerYear: 4,
       });
+      // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
+      // the engine's quote-time bondOptions snapshot. Fixed quarterly rate
+      // per term on the shared quarterly check; NOT tier-counted, NOT
+      // bundle-discountable. Rates come from the live DB-synced table
+      // (applyServerTermiteBondPricingConfig), never a baked literal.
+      const TERMITE_BOND_OPTIONS = termiteBondOptionsTable();
+      R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
+      const tmBond = TERMITE_BOND_OPTIONS.find((o) => o.key === termiteBondTerm) || null;
+      R.tmBait.selectedBondTerm = tmBond ? tmBond.key : null;
+      if (tmBond) {
+        R.tmBond = tmBond;
+        wgServices.push({
+          name: tmBond.name,
+          service: tmBond.serviceKey,
+          bondTerm: tmBond.key,
+          bondYears: tmBond.years,
+          mo: tmBond.monthly,
+          perTreatment: tmBond.perApp,
+          visitsPerYear: 4,
+          annual: tmBond.annual,
+          discountable: false,
+          discountEligible: false,
+          waveGuardDiscountEligible: false,
+          countsTowardWaveGuardTier: false,
+        });
+      }
     } else {
       R.tmBait = {
         quoteRequired: true,
@@ -2849,6 +2922,12 @@ export function calculateEstimate(inputs) {
     ac++;
     ra += termiteMonthly * 12;
     lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
+    // Bond rider: in the recurring totals, no tier count (no ac++), no
+    // bundle % discount — mirrors server excludedFromPercentDiscount.
+    if (R.tmBond) {
+      ra += R.tmBond.annual;
+      lineItems.push({ name: R.tmBond.name, service: 'termite_bond', ann: R.tmBond.annual, discountable: false });
+    }
   }
   // Recurring Foam: standalone — flows into the recurring annual/monthly total
   // but does NOT count toward the WaveGuard tier (no ac++) and is not discountable

@@ -658,6 +658,86 @@ function parseStoredEstimateData(estimateData) {
 // delivery options. Returns the estimates-table write fields (everything
 // except the identity/lifecycle columns the caller owns: id, token, status,
 // expires_at, created_by_technician_id).
+// GATE_TERMITE_BOND_OPTION dark: a client-priced save (the legacy builder
+// posts {inputs, result} with no replayable engineRequest, so the server
+// falls back to the client preview) could persist a bond line the server
+// engine would never emit — rendered, acceptable, and billed despite the
+// kill switch (codex #2915 r1). Reject rather than strip: silently deleting
+// a line the operator saw priced would desync the client-computed totals
+// this save path trusts.
+// Selected bond rows across EVERY persisted shape: mapped recurring lists
+// AND the raw engine line items (engineResult.lineItems / result.lineItems)
+// — the public/converter paths merge raw rows back into pricing and
+// billing, so a guard that only scans recurring.services misses
+// engine-backed saves (codex #2915 r6).
+function selectedTermiteBondRows(estimateData) {
+  const mapped = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  const raw = [estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  return [...mapped, ...raw].filter((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
+    || /termite bond/i.test(String(svc?.name || '')));
+}
+
+function assertNoDarkTermiteBondPayload(estimateData) {
+  const gateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+  if (gateOn) return;
+  const hasBondRow = selectedTermiteBondRows(estimateData).length > 0;
+  if (hasBondRow) {
+    throw errorWithStatus('Termite bond option is disabled (GATE_TERMITE_BOND_OPTION) — remove the bond selection and save again.', 422);
+  }
+}
+
+// Client-priced saves can't server-recompute (the legacy builder ships no
+// replayable engineRequest), so a stale client bundle could persist
+// yesterday's bond rates after an admin edits pricing_config.termite_bond
+// (codex #2915 r2). The unconditional syncConstantsFromDB above has already
+// refreshed the live constants; fail the save closed on any mismatch —
+// never silently rewrite a line the operator saw priced.
+function assertLiveTermiteBondRates(estimateData) {
+  const { TERMITE } = require('./pricing-engine/constants');
+  const staleError = () => errorWithStatus('Termite bond rates have changed — recalculate the estimate before saving.', 422);
+
+  const bondRows = selectedTermiteBondRows(estimateData);
+  for (const row of bondRows) {
+    const term = row.bondTerm || String(row.service || '').replace(/^termite_bond_/, '');
+    const quarterly = Number(TERMITE.bond?.[term]?.quarterly);
+    const rowPerApp = Number(row.perTreatment ?? row.perApp);
+    if (!(quarterly > 0) || !(Math.abs(rowPerApp - quarterly) <= 0.005)) throw staleError();
+  }
+
+  // The quote-time OPTIONS snapshot must be live too (codex #2915 r3): a
+  // "No bond" save still persists selectable rates, and PUT /:token/bond
+  // later charges from that snapshot. But REJECTING an unselected stale
+  // snapshot would brick every legacy-fallback termite save after an admin
+  // rate edit until the client bundle redeploys (codex #2915 r4 — the
+  // fallback engine bakes its table at build time). Nothing was chosen, no
+  // total depends on it, and the builder shows term-only labels — so the
+  // server RESTAMPS unselected snapshots to the live rates instead
+  // (server-authoritative correction; both persisted shapes). Selected
+  // rows above still fail closed — those the operator saw priced.
+  const optionLists = [
+    estimateData?.result?.results?.tmBait?.bondOptions,
+    ...[estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+      .map((items) => (Array.isArray(items)
+        ? items.find((li) => li && li.service === 'termite_bait' && Array.isArray(li.bondOptions))?.bondOptions
+        : null)),
+  ];
+  for (const options of optionLists) {
+    if (!Array.isArray(options)) continue;
+    for (const opt of options) {
+      const cfg = TERMITE.bond?.[opt?.key];
+      const quarterly = Number(cfg?.quarterly);
+      if (!(quarterly > 0)) throw staleError(); // unknown term — never guess a rate
+      const annual = Math.round(quarterly * 4 * 100) / 100;
+      opt.quarterly = quarterly;
+      opt.perApp = quarterly;
+      opt.annual = annual;
+      opt.monthly = Math.round((annual / 12) * 100) / 100;
+    }
+  }
+}
+
 async function resolveEstimateWritePayload({
   database = db,
   body,
@@ -696,6 +776,8 @@ async function resolveEstimateWritePayload({
     logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
+  assertNoDarkTermiteBondPayload(trustedEstimateData);
+  assertLiveTermiteBondRates(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -1204,6 +1286,8 @@ async function reviseAdminEstimate({
 }
 
 module.exports = {
+  assertLiveTermiteBondRates,
+  assertNoDarkTermiteBondPayload,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,

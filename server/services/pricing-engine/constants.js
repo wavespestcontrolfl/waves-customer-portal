@@ -774,6 +774,18 @@ const TERMITE = {
   // cadence is program structure, not a tunable price value, so it lives
   // here rather than pricing_config.
   monitoringVisitsPerYear: 4,
+  // Termite bond (re-treatment warranty rider, owner 2026-07-20): fixed
+  // quarterly rate by term, billed per application on the shared quarterly
+  // station check. DB-tunable via pricing_config.termite_bond
+  // (term_1yr/term_5yr/term_10yr — see db-bridge); the label feeds the
+  // "Termite Bond (N-Year Term)" service name, which is ALSO the
+  // termite_bonds lifecycle-sync contract (termYearsFrom parses the
+  // "N-Year" fragment from the visit's service_type).
+  bond: {
+    '1yr':  { quarterly: r(60), label: '1-Year',  years: 1 },
+    '5yr':  { quarterly: r(54), label: '5-Year',  years: 5 },
+    '10yr': { quarterly: r(45), label: '10-Year', years: 10 },
+  },
 };
 
 // ============================================================
@@ -1852,6 +1864,7 @@ const WAVEGUARD = {
     pre_slab_termiticide: true, // Excluded — no discount
     pre_slab_termidor: true,    // Excluded — no discount
     foam_recurring: true,       // Recurring spot-foam: standalone, no WaveGuard tier or bundle % discount (cadence multiplier is its only discount)
+    termite_bond: true,         // Warranty rider (owner 2026-07-20): fixed quarterly rate by term, no tier count, no bundle % discount
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
     // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
     // it here stops the orchestrator discount loop from applying the 15% rc
