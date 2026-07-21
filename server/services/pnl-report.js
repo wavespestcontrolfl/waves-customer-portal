@@ -662,14 +662,24 @@ async function buildPnlReport(db, startDate, endDate) {
       .catch(missingTableOnly(null)),
     db('equipment_register')
       .where('asset_category', 'vehicle')
-      // Only a CURRENTLY-HELD vehicle bars the rate: active AND not disposed.
-      // An archived (active=false) vehicle left at disposed=false must not
-      // suppress an eligible active vehicle's mileage.
-      .where('active', true)
-      .whereNot('disposed', true)
       .where(function barred() {
         this.whereIn('depreciation_method', MILEAGE_BARRING_METHODS)
           .orWhere('section_179_elected', true);
+      })
+      // A vehicle bars the rate for a window it was HELD DURING, by its
+      // in-service/disposal INTERVAL — not current state. Current-state gating
+      // was wrong both ways: a since-disposed MACRS vehicle must still bar a
+      // historical P&L it was held in, and a vehicle placed in service after
+      // the window must not bar it. In service by window end AND not disposed
+      // before window start = interval overlaps [startDate, endDate]. (NULL
+      // in-service/disposal = open-ended, treated as still applicable.)
+      .where(function inServiceByWindowEnd() {
+        this.whereNull('placed_in_service_date')
+          .orWhere('placed_in_service_date', '<=', endDate);
+      })
+      .where(function notDisposedBeforeWindow() {
+        this.whereNull('disposal_date')
+          .orWhere('disposal_date', '>=', startDate);
       })
       .select('name', 'depreciation_method', 'section_179_elected')
       .catch(missingTableOnly([])),

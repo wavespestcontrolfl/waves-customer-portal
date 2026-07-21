@@ -498,7 +498,13 @@ async function computeDailySummary(equipmentId, date) {
       : null;
 
     const irsRate = getIrsRate(date);
-    const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
+    // SUM the persisted per-trip deductions (each already rounded at its own
+    // date-effective rate) rather than recomputing round(businessMiles × rate)
+    // — recomputing drifts by cents from the per-trip totals the P&L, IRS
+    // report, and backfill all use, so the summary must sum the same values.
+    const irsDeduction = parseFloat(
+      trips.reduce((sum, t) => sum + parseFloat(t.deduction_amount || 0), 0).toFixed(2),
+    );
 
     // Count completed jobs and revenue for this vehicle's technician on this date
     const equipment = await db('equipment').where('id', equipmentId).first();
@@ -596,7 +602,13 @@ async function computeMonthlySummary(equipmentId, monthDate) {
     const avgMpg = totalFuel > 0 ? parseFloat((totalMiles / totalFuel).toFixed(1)) : null;
 
     const irsRate = getIrsRate(monthStart);
-    const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
+    // Sum the daily deductions (which themselves sum persisted per-trip
+    // values) rather than recomputing businessMiles × rate — keeps the monthly
+    // figure equal to the P&L/CSV to the cent and correct across a mid-year
+    // rate change within the month.
+    const irsDeduction = parseFloat(
+      dailies.reduce((s, d) => s + parseFloat(d.irs_deduction || 0), 0).toFixed(2),
+    );
 
     const hardBrakesTotal = dailies.reduce((s, d) => s + (d.hard_brakes || 0), 0);
     const hardAccelsTotal = dailies.reduce((s, d) => s + (d.hard_accels || 0), 0);

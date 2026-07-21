@@ -42,6 +42,13 @@ const RATE_CASE = `CASE
   ELSE 0.67
 END`;
 
+// The rate table only knows 2024 onward. Pre-2024 trips had their own IRS
+// rates (2023 65.5¢, 2022 58.5/62.5¢, …) that this migration does NOT carry,
+// so it must NEVER overwrite them — every UPDATE below is floored at 2024-01-01
+// and pre-2024 rows keep their persisted values untouched. (The Bouncie
+// integration only produced 2026+ trips, so this is defensive, not corrective.)
+const TABLE_FLOOR = "DATE '2024-01-01'";
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('mileage_log'))) return;
 
@@ -68,6 +75,7 @@ exports.up = async function up(knex) {
             ELSE 'needs_review' END,
           updated_at = now()
       WHERE is_business = true
+        AND trip_date >= ${TABLE_FLOOR}
         AND source IS DISTINCT FROM 'manual'
         AND classification_method IS DISTINCT FROM 'manual'
         AND classification_method IS DISTINCT FROM 'manual_review'
@@ -80,6 +88,7 @@ exports.up = async function up(knex) {
           deduction_amount = ROUND(COALESCE(distance_miles, 0) * (${RATE_CASE})::numeric, 2),
           updated_at = now()
       WHERE is_business = true
+        AND trip_date >= ${TABLE_FLOOR}
     `);
 
     // 2. Non-business (incl. unclassified/personal) → no deduction. Clears any
@@ -90,6 +99,7 @@ exports.up = async function up(knex) {
           deduction_amount = 0,
           updated_at = now()
       WHERE (is_business IS DISTINCT FROM true)
+        AND trip_date >= ${TABLE_FLOOR}
         AND (COALESCE(deduction_amount, 0) <> 0 OR COALESCE(irs_rate, 0) <> 0)
     `);
 
@@ -121,10 +131,11 @@ exports.up = async function up(knex) {
                  SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
                  SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
           FROM mileage_log
-          WHERE equipment_id IS NOT NULL
+          WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
           GROUP BY equipment_id, trip_date
         ) t
         WHERE s.equipment_id = t.equipment_id AND s.summary_date = t.trip_date
+          AND s.summary_date >= ${TABLE_FLOOR}
       `);
     }
 
@@ -152,10 +163,11 @@ exports.up = async function up(knex) {
                  SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
                  SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
           FROM mileage_log
-          WHERE equipment_id IS NOT NULL
+          WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
           GROUP BY equipment_id, date_trunc('month', trip_date)::date
         ) t
         WHERE s.equipment_id = t.equipment_id AND s.summary_month = t.month
+          AND s.summary_month >= ${TABLE_FLOOR}
       `);
     }
   });
