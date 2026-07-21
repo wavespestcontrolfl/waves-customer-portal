@@ -1080,8 +1080,18 @@ router.get('/export/tax-package', async (req, res, next) => {
     // Gather all data with fallbacks. Transactions window on payment_date
     // (ET-stamped DATE) so the dump covers the same calendar year as the P&L —
     // a created_at window is UTC and shifts the year boundary by 4–5 ET hours.
+    // Full-refund MARKER rows (metadata.source='invoice_refund') are dated
+    // the REFUND day — exclude them here and append them re-dated to the
+    // invoice's paid period below, matching paidRevenueForWindow.
     let payments = [];
-    try { payments = await db('payments').whereBetween('payment_date', [sd, ed]).leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.payment_date', 'desc'); } catch { /* */ }
+    try {
+      payments = await db('payments')
+        .whereBetween('payment_date', [sd, ed])
+        .whereRaw("COALESCE(payments.metadata->>'source', '') <> 'invoice_refund'")
+        .leftJoin('customers', 'payments.customer_id', 'customers.id')
+        .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
+        .orderBy('payments.payment_date', 'desc');
+    } catch { /* */ }
 
     // pnl.csv revenue also counts estimate-deposit cash and paid-Stripe-
     // invoice gap rows (no payments row) — map both into transactions.csv so
@@ -1134,6 +1144,30 @@ router.get('/export/tax-package', async (req, res, next) => {
         type: 'invoice_paid',
         status: 'paid',
         description: `Invoice ${r.invoice_number} paid via Stripe (no payments-ledger row)`,
+        processor: 'stripe',
+      })));
+      // Fully refunded gap invoices: their receipt is the marker's amount,
+      // recognized in the invoice's PAID period (same effective-date rule as
+      // paidRevenueForWindow); the refund-day outflow lives in refunds.csv.
+      const markerRows = await db('payments as m')
+        .whereRaw("m.metadata->>'source' = 'invoice_refund'")
+        .leftJoin('invoices as gi', 'gi.stripe_payment_intent_id', 'm.stripe_payment_intent_id')
+        .leftJoin('customers as c', 'm.customer_id', 'c.id')
+        .whereRaw(
+          "DATE(COALESCE(gi.paid_at AT TIME ZONE 'America/New_York', m.payment_date::timestamp)) BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(DATE(COALESCE(gi.paid_at AT TIME ZONE 'America/New_York', m.payment_date::timestamp)), 'YYYY-MM-DD') as payment_date"),
+          'm.amount',
+          'gi.invoice_number',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...markerRows.map(r => ({
+        ...r,
+        type: 'invoice_paid',
+        status: 'paid (later fully refunded)',
+        description: `Invoice ${r.invoice_number || ''} paid via Stripe — later fully refunded (outflow in refunds.csv)`,
         processor: 'stripe',
       })));
       payments.sort((a, b) => String(b.payment_date || '').localeCompare(String(a.payment_date || '')));

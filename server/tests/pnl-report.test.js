@@ -22,7 +22,20 @@ const {
   costLaborByDay,
   dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
+  REFUND_TXN_TYPES,
 } = require('../services/pnl-report');
+
+describe('REFUND_TXN_TYPES', () => {
+  test('nets refunds and bounced-refund reversals, never failed-payment reversals', () => {
+    expect(REFUND_TXN_TYPES).toEqual(expect.arrayContaining(['refund', 'payment_refund', 'refund_failure']));
+    // payment_failure_refund reverses a PENDING ACH payment whose payments
+    // row is status='failed' and was never counted as a receipt — including
+    // it would subtract cash the revenue side never added (double
+    // subtraction, can drive revenue negative). Regression for the round-3
+    // pre-push P0.
+    expect(REFUND_TXN_TYPES).not.toContain('payment_failure_refund');
+  });
+});
 
 describe('dateCellStr', () => {
   test('renders node-postgres DATE cells (local-midnight Dates) without a day shift', () => {

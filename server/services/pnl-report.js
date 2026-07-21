@@ -272,12 +272,16 @@ function missingTableOnly(fallback) {
  * Exported so /revenue/reconcile reports the same revenue basis.
  */
 /**
- * Stripe balance-transaction types that move refund money. 'refund' (card),
- * 'payment_refund' (bank/local methods), and the *_failure variants —
- * bounced refunds that RETURN funds to the merchant as positive amounts,
- * which SUM(-amount) correctly nets back out.
+ * Stripe balance-transaction types that move refund money AGAINST cash the
+ * receipt side counted: 'refund' (card), 'payment_refund' (bank/local
+ * methods), and 'refund_failure' — a bounced refund RETURNING funds to the
+ * merchant as a positive amount, which SUM(-amount) correctly nets back out.
+ * Deliberately NOT 'payment_failure_refund': Stripe creates that when a
+ * PENDING ACH/local payment fails — the corresponding payments row is
+ * status='failed' and never entered the receipt side, so subtracting the
+ * reversal would remove cash that was never counted (double subtraction).
  */
-const REFUND_TXN_TYPES = ['refund', 'payment_refund', 'refund_failure', 'payment_failure_refund'];
+const REFUND_TXN_TYPES = ['refund', 'payment_refund', 'refund_failure'];
 
 async function paidRevenueForWindow(db, startDate, endDate) {
   const etWindow = (qb, column) => qb
