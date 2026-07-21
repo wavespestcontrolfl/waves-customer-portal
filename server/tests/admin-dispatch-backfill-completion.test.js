@@ -1824,6 +1824,12 @@ describe('completion route wiring (source contracts)', () => {
     expect((cardSource.match(/first_visit_completed_at: firstVisitStamp\(\)/g) || []).length).toBe(1);
     expect(cardSource).toMatch(/first_visit_completed_at: stamp,/);
     expect(cardSource).not.toMatch(/first_visit_completed_at: new Date\(\)/);
+    // Backward correction: a backfilled OLDER visit closed out after a later
+    // completion minted the card must pull the stamp back to the true first
+    // day — earlier caller instant wins, an existing stamp never moves
+    // forward, and absent/invalid firstVisitAt never rewrites an existing
+    // stamp with wall-clock now.
+    expect(cardSource).toMatch(/const shouldStamp = !existing\s*\n\s*\|\| \(firstVisitAt instanceof Date && !Number\.isNaN\(firstVisitAt\.getTime\(\)\) && firstVisitAt < existing\);/);
   });
 
   test('backfill never auto-applies account credit — invoice stays open for operator review', () => {

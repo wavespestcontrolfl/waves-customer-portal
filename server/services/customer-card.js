@@ -187,13 +187,23 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     }
 
     logger.info(`[customer-card] Minted card (customerId=${customerId} cardId=${card.id} location=${card.location_id})`);
-  } else if (!card.first_visit_completed_at) {
+  } else {
+    // Fill a missing stamp, and CORRECT an existing one backward when a
+    // caller supplies an earlier historical instant — a backfilled older
+    // visit closed out after a later completion already minted the card
+    // must pull the public "First visit" date back to the true first day.
+    // Never moves forward: the earliest known visit wins.
+    const existing = card.first_visit_completed_at ? new Date(card.first_visit_completed_at) : null;
     const stamp = firstVisitStamp();
-    await db('customer_cards').where({ id: card.id }).update({
-      first_visit_completed_at: stamp,
-      updated_at: new Date(),
-    });
-    card = { ...card, first_visit_completed_at: stamp };
+    const shouldStamp = !existing
+      || (firstVisitAt instanceof Date && !Number.isNaN(firstVisitAt.getTime()) && firstVisitAt < existing);
+    if (shouldStamp) {
+      await db('customer_cards').where({ id: card.id }).update({
+        first_visit_completed_at: stamp,
+        updated_at: new Date(),
+      });
+      card = { ...card, first_visit_completed_at: stamp };
+    }
   }
 
   // Short-link the review target so QR scans are click-tracked and the
