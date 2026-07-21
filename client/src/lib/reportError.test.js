@@ -55,6 +55,26 @@ describe('reportError', () => {
     expect(body.context).toBe('banking:payout');
   });
 
+  test('falls back to keepalive fetch when sendBeacon returns false', () => {
+    sendBeacon.mockReturnValue(false);
+    const fetchMock = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('fetch', fetchMock);
+    reportError(new Error('x'));
+    expect(sendBeacon).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/client-errors');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', keepalive: true });
+  });
+
+  test('does NOT double-send when sendBeacon succeeds', () => {
+    sendBeacon.mockReturnValue(true);
+    const fetchMock = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('fetch', fetchMock);
+    reportError(new Error('x'));
+    expect(sendBeacon).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('never throws, even if sendBeacon throws', () => {
     sendBeacon.mockImplementation(() => { throw new Error('beacon down'); });
     expect(() => reportError(new Error('x'))).not.toThrow();

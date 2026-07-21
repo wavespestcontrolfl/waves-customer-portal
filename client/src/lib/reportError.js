@@ -29,14 +29,17 @@ export function reportError(error, context) {
       url: typeof window !== 'undefined' ? safePath(window.location?.pathname) : undefined,
     });
 
-    // sendBeacon survives page unload (the typical case for a crash); fall back
-    // to keepalive fetch. Either way, swallow any failure.
+    // sendBeacon survives page unload (the typical case for a crash) but returns
+    // false when it can't queue the payload — fall back to keepalive fetch then.
+    // Either way, swallow any failure.
+    let queued = false;
     if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-      navigator.sendBeacon(
+      queued = navigator.sendBeacon(
         '/api/client-errors',
         new Blob([payload], { type: 'application/json' }),
       );
-    } else if (typeof fetch === 'function') {
+    }
+    if (!queued && typeof fetch === 'function') {
       fetch('/api/client-errors', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
