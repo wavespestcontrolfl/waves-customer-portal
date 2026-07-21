@@ -229,7 +229,13 @@ function isInjectionProduct(productRef = {}) {
 
 function isInsectLikeProduct(productRef = {}) {
   const textValue = productText(productRef);
-  return /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifenthrin|pyrethroid|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(textValue);
+  // bifen\w* (Bifen XTS/IT trade names + bifenazate), \w*thrin (the whole
+  // pyrethroid active family: deltamethrin, permethrin, cyfluthrin…) and the
+  // named actives cover catalog rows whose category is blank/Uncategorized —
+  // a full prod-catalog sweep (codex P1 r5) showed Delta Dust (Deltamethrin)
+  // and Elector PSP (Spinosad) deriving NO chip, which would skip the
+  // pollinator/IRAC gates now that the derivation replaces manual values.
+  return /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifen\w*|\w*thrin|pyrethroid|spinosad|spinetoram|indoxacarb|abamectin|emamectin|pyriproxyfen|acephate|chlorantraniliprole|acelepryn|fipronil|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(textValue);
 }
 
 function isFungicideLikeProduct(productRef = {}) {
@@ -471,7 +477,9 @@ function deriveTreeShrubTreatments({ products = [], productRows = [] } = {}) {
     if (isInsectFamilyProduct(ref)) chips.add(/\bhort(?:icultural)?[\s-]*oil\b/i.test(txt) ? 'Horticultural oil' : 'Insect treatment');
     if (isFungicideFamilyProduct(ref)) chips.add('Disease / fungicide treatment');
     if (isHerbicideFamilyProduct(ref)) chips.add(TS_PRE_EMERGENT_RE.test(txt) ? 'Pre-emergent bed treatment' : 'Weed spot treatment');
-    if (/micro[\s-]?nutrient|minor[\s-]?element/i.test(txt)) chips.add('Micronutrients');
+    // /chelat/: foliar chelated-iron/micronutrient rows (LESCO Chelated Iron
+    // Plus is filed Uncategorized) carry no other micronutrient marker.
+    if (/micro[\s-]?nutrient|minor[\s-]?element|chelat/i.test(txt)) chips.add('Micronutrients');
     // The amendment chip requires a positively amendment-like product
     // (catalog: "Soil Amendment", "Espoma Organic Soil Acidifier",
     // CarbonPro-L biostimulant). It is NOT the catch-all for unclassified

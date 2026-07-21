@@ -627,6 +627,18 @@ describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
     }
   });
 
+  test('blank-category insecticides classify by active or trade name (codex P1 r5)', () => {
+    // Real prod rows whose only pesticide signal is the active ingredient.
+    expect(derive([cat({ name: 'Delta Dust', category: '', active_ingredient: 'Deltamethrin 0.05%' })])).toBe('Insect treatment');
+    expect(derive([cat({ name: 'Elector PSP', category: '', active_ingredient: 'Spinosad 44.2%' })])).toBe('Insect treatment');
+    // Trade-name-only sparse row: Uncategorized, no active recorded.
+    expect(derive([cat({ name: 'Bifen XTS', category: 'Uncategorized' })])).toBe('Insect treatment');
+  });
+
+  test('chelated micronutrient rows derive Micronutrients, not empty', () => {
+    expect(derive([cat({ name: 'LESCO Chelated Iron Plus', category: 'Uncategorized', active_ingredient: 'Iron + N (foliar)' })])).toBe('Micronutrients');
+  });
+
   test('support products (adjuvants/surfactants/PGRs) make NO treatment claim (codex P3 r4)', () => {
     for (const row of [
       cat({ name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' }),

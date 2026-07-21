@@ -6624,11 +6624,15 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
       product.name,
       product.category,
       product.productCategory,
+      product.activeIngredient,
       product.applicationMethod,
       product.rateUnit,
     );
+  // Mirrors the server's isInsectLikeProduct (incl. the bifen\w*/\w*thrin/
+  // named-active terms added for blank-category catalog rows like Delta Dust
+  // and Elector PSP — codex P1 r5). Keep the two regexes in sync.
   const hasInsectProduct = selectedProducts.some((product) =>
-    /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifenthrin|pyrethroid|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(productsText(product)),
+    /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifen\w*|\w*thrin|pyrethroid|spinosad|spinetoram|indoxacarb|abamectin|emamectin|pyriproxyfen|acephate|chlorantraniliprole|acelepryn|fipronil|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(productsText(product)),
   );
   const hasFungicideProduct = selectedProducts.some((product) =>
     /\b(fungicide|fungus|disease|phytophthora|kphite|phosphite|phosphonate|copper|headway|artavia|propizol|frac)\b/.test(productsText(product)),
@@ -7918,14 +7922,25 @@ export function CompletionPanel({
   // so a row with NO category conservatively shows the fields rather than
   // hiding ones the server will 422 on (codex P1). Hiding requires a category
   // that is positively non-pesticide.
-  const pesticideProductPresent = selectedProducts.some((p) => {
-    const category = String(p.category || p.product_category || "");
-    if (/insectic|miticide|fungic|herbic|pesticid|\bigr\b|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
-    // "Uncategorized"/"other" style categories are non-blank but carry no
-    // signal (prod has Bifen XTS filed as Uncategorized) — they must stay on
-    // the conservative show-the-fields path, same as a missing category.
-    return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
-  });
+  // Reuses the legacy closeout's family classifiers (insect/fungicide/
+  // herbicide incl. the pre-emergent brands — Snapshot, Barricade,
+  // Prodiamine…) so every product the server will demand irac_frac_logged
+  // for surfaces the fields here; a category-word-only test hid them for
+  // brand-named pre-emergents and left the tech no way to satisfy the
+  // server 400 (codex P1 r5).
+  const tsPesticideFlags = treeShrubProductFlagsClient(selectedProducts);
+  const pesticideProductPresent =
+    tsPesticideFlags.hasInsectProduct ||
+    tsPesticideFlags.hasFungicideProduct ||
+    tsPesticideFlags.hasHerbicideProduct ||
+    selectedProducts.some((p) => {
+      const category = String(p.category || p.product_category || "");
+      if (/pesticid|termitic|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
+      // "Uncategorized"/"other" style categories are non-blank but carry no
+      // signal (prod has Bifen XTS filed as Uncategorized) — they must stay
+      // on the conservative show-the-fields path, same as a missing category.
+      return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
+    });
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -9983,15 +9998,23 @@ export function CompletionPanel({
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
         displayName: product.display_name || product.displayName || null,
-        // The catalog category feeds the pesticide/family flags — without it
-        // every selected product falls into the blank-category pesticide
-        // fallback and the simplified T&S form shows compliance fields on
-        // ordinary fertilizer visits (codex P3 r4). Protocol-added products
-        // are serialized without it, so fall back to the loaded catalog row.
+        // The catalog category and active ingredient feed the pesticide/
+        // family flags — without them every selected product falls into the
+        // blank-category pesticide fallback and the simplified T&S form shows
+        // compliance fields on ordinary fertilizer visits (codex P3 r4),
+        // while blank-category insecticides (Delta Dust, Elector PSP) are
+        // only recognizable by their active (codex P1 r5). Protocol-added
+        // products are serialized without either, so fall back to the loaded
+        // catalog row.
         category:
           product.category ??
           product.product_category ??
           (products || []).find((p) => String(p.id) === String(product.id))?.category ??
+          null,
+        activeIngredient:
+          product.active_ingredient ??
+          product.activeIngredient ??
+          (products || []).find((p) => String(p.id) === String(product.id))?.active_ingredient ??
           null,
         rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
