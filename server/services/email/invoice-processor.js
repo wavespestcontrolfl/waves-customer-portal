@@ -106,12 +106,32 @@ async function processVendorInvoice(email, classification) {
 
   if (amount > 0) {
     try {
-      const categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
+      let categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
+
+      // No vendor-domain mapping (the common case — every prod expense was
+      // landing category_id NULL this way): fall back to the same AI
+      // categorizer the admin POST /expenses route uses. Best-effort — a
+      // categorizer failure must never block recording the expense.
+      let deductibleAmount = amount;
+      if (!categoryRow) {
+        try {
+          const { autoCategorizeExpense } = require('../expense-categorizer');
+          const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
+          if (ai?.categoryId) {
+            categoryRow = { id: ai.categoryId };
+            if (ai.deductiblePercent !== undefined && ai.deductiblePercent < 100) {
+              deductibleAmount = parseFloat((amount * ai.deductiblePercent / 100).toFixed(2));
+            }
+          }
+        } catch (err) {
+          logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
+        }
+      }
 
       const [expense] = await db('expenses').insert({
         description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`,
         amount,
-        tax_deductible_amount: amount,
+        tax_deductible_amount: deductibleAmount,
         category_id: categoryRow?.id || null,
         vendor_name: vendorName,
         expense_date: invoiceDate,

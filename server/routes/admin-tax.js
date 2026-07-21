@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
@@ -522,76 +521,10 @@ router.post('/advisor/run', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════
 // AI EXPENSE AUTO-CATEGORIZATION
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Use Claude to auto-categorize an expense into an IRS Schedule C category.
- * Returns { categoryId, categoryName, irsLine, deductiblePercent, reasoning }
- */
-async function autoCategorizeExpense(vendorName, description, amount) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic();
-
-  // Get expense categories from the DB to match against
-  const categories = await db('expense_categories').orderBy('sort_order');
-  const categoryList = categories.map(c =>
-    `- ${c.name} (IRS Line ${c.irs_line}): ${c.irs_description}${c.notes ? ` — ${c.notes}` : ''}`
-  ).join('\n');
-
-  const prompt = `You are a tax categorization assistant for a pest control / lawn care business in Florida.
-
-Given this expense, categorize it into the correct IRS Schedule C category and determine deductibility.
-
-Expense details:
-- Vendor: ${vendorName || 'Unknown'}
-- Description: ${description || 'None provided'}
-- Amount: $${amount}
-
-Available categories:
-${categoryList}
-
-Respond ONLY with valid JSON (no markdown, no explanation):
-{
-  "categoryName": "exact category name from the list above",
-  "irsLine": "the IRS line number",
-  "deductiblePercent": 100,
-  "reasoning": "one sentence why"
-}
-
-Rules:
-- Business meals are 50% deductible
-- Vehicle expenses: use "Vehicle Expenses" category
-- Software, SaaS, hosting: use "Software & Technology"
-- Chemicals, PPE, equipment supplies: use "Supplies"
-- If truly unclear, use "Office Expenses" as default`;
-
-  const response = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 200,
-    messages: [{ role: 'user', content: prompt }],
-  });
-
-  const text = response.content[0]?.text || '{}';
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Try extracting JSON from response
-    const match = text.match(/\{[\s\S]*\}/);
-    parsed = match ? JSON.parse(match[0]) : {};
-  }
-
-  // Match the AI's category name to an actual DB record
-  if (parsed.categoryName) {
-    const match = categories.find(c =>
-      c.name.toLowerCase() === parsed.categoryName.toLowerCase()
-    );
-    if (match) {
-      parsed.categoryId = match.id;
-    }
-  }
-
-  return parsed;
-}
+// Shared with the email invoice-processor — see
+// server/services/expense-categorizer.js (extracted 2026-07-21 so emailed
+// vendor invoices stop landing uncategorized).
+const { autoCategorizeExpense } = require('../services/expense-categorizer');
 
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE LOG (Bouncie GPS Integration)
@@ -642,9 +575,7 @@ router.post('/mileage', async (req, res, next) => {
     }
 
     const year = new Date(tripDate).getFullYear();
-    // IRS rates by year (env override for current/future years)
-    const rateMap = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
-    const irsRate = rateMap[year] || parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
+    const irsRate = irsRateForYear(year);
     const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
 
     const [inserted] = await db('mileage_log').insert({
@@ -745,6 +676,108 @@ router.get('/mileage/stats', async (req, res, next) => {
         deduction: parseFloat(m.deduction),
         count: parseInt(m.count),
       })),
+    });
+  } catch (err) { next(err); }
+});
+
+// IRS standard-mileage rate for a trip's year (mirrors POST /mileage).
+const IRS_RATE_MAP = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
+function irsRateForYear(year) {
+  return IRS_RATE_MAP[year] || parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
+}
+const MILEAGE_PURPOSES = ['business', 'personal', 'unclassified'];
+
+// Classify trips (single or bulk) — the geofence classifier is RETIRED, so
+// every Bouncie trip lands 'unclassified' at $0 deduction and this is the
+// ONLY way to claim the miles. business → deduction at the trip-year IRS
+// rate; personal/unclassified → $0. Substantiation (which trips are
+// business) is the operator's call — nothing here auto-classifies.
+async function classifyTrips(ids, purpose) {
+  const rows = await db('mileage_log').whereIn('id', ids).select('id', 'trip_date', 'distance_miles');
+  let updated = 0;
+  let deductionTotal = 0;
+  for (const row of rows) {
+    const year = Number(String(dateCellStr(row.trip_date)).slice(0, 4));
+    const rate = irsRateForYear(year);
+    const miles = parseFloat(row.distance_miles) || 0;
+    const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
+    await db('mileage_log').where({ id: row.id }).update({
+      purpose,
+      irs_rate: purpose === 'business' ? rate : 0,
+      deduction_amount: deduction,
+    });
+    updated++;
+    deductionTotal += deduction;
+  }
+  return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100 };
+}
+
+// PUT /mileage/:id — reclassify one trip
+router.put('/mileage/:id', async (req, res, next) => {
+  try {
+    const { purpose } = req.body || {};
+    if (!MILEAGE_PURPOSES.includes(purpose)) {
+      return res.status(400).json({ error: `purpose must be one of: ${MILEAGE_PURPOSES.join(', ')}` });
+    }
+    const result = await classifyTrips([req.params.id], purpose);
+    if (!result.updated) return res.status(404).json({ error: 'Trip not found' });
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// POST /mileage/bulk-classify — { ids: [...], purpose }
+router.post('/mileage/bulk-classify', async (req, res, next) => {
+  try {
+    const { ids, purpose } = req.body || {};
+    if (!MILEAGE_PURPOSES.includes(purpose)) {
+      return res.status(400).json({ error: `purpose must be one of: ${MILEAGE_PURPOSES.join(', ')}` });
+    }
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500) {
+      return res.status(400).json({ error: 'ids must be a non-empty array (max 500)' });
+    }
+    const result = await classifyTrips(ids, purpose);
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// POST /expenses/auto-categorize — AI-categorize a batch of uncategorized
+// expenses (oldest first). Operator-triggered from the Expenses tab; results
+// come back per-expense so the picks are reviewable. Failures on one expense
+// never abort the batch.
+router.post('/expenses/auto-categorize', async (req, res, next) => {
+  try {
+    const rawLimit = parseInt(req.body?.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
+    const uncategorized = await db('expenses')
+      .whereNull('category_id')
+      .orderBy('expense_date', 'asc')
+      .limit(limit)
+      .select('id', 'vendor_name', 'description', 'amount');
+    const results = [];
+    for (const exp of uncategorized) {
+      try {
+        const ai = await autoCategorizeExpense(exp.vendor_name, exp.description, exp.amount);
+        if (ai?.categoryId) {
+          const update = { category_id: ai.categoryId, updated_at: new Date() };
+          if (ai.deductiblePercent !== undefined && ai.deductiblePercent < 100) {
+            update.tax_deductible_amount = parseFloat((exp.amount * ai.deductiblePercent / 100).toFixed(2));
+          }
+          await db('expenses').where({ id: exp.id }).update(update);
+          results.push({ id: exp.id, description: exp.description, category: ai.categoryName, reasoning: ai.reasoning, applied: true });
+        } else {
+          results.push({ id: exp.id, description: exp.description, applied: false, error: 'no matching category' });
+        }
+      } catch (err) {
+        results.push({ id: exp.id, description: exp.description, applied: false, error: err.message });
+      }
+    }
+    const remaining = await db('expenses').whereNull('category_id').count('* as n').first();
+    res.json({
+      success: true,
+      processed: results.length,
+      applied: results.filter(r => r.applied).length,
+      remaining: parseInt(remaining?.n || 0, 10),
+      results,
     });
   } catch (err) { next(err); }
 });
