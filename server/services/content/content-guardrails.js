@@ -573,7 +573,10 @@ function outOfAreaCities() {
   return OUT_OF_AREA_CITY_CANDIDATES.filter((c) => !footprint[c.toLowerCase()]);
 }
 
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our technicians?|our techs?|our team|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection))\b/i;
+// "our techs/team/technicians" needs an OPERATION VERB within two words — a
+// bare team mention ("our team reviewed Miami termite research") is a
+// factual reference, not a service claim.
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection))\b/i;
 
 // A clause that honestly LIMITS the footprint is not a claim — "Naples is
 // outside our service area", "we don't serve Tampa". Tested per CLAUSE, not
@@ -586,7 +589,10 @@ const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|
 // rare genuine "St."-final sentence merges with the next, which only widens
 // the claim scope — fails closed. Clause split mirrors the astro-side gate.
 const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)\s+/;
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|and|yet|however|though|while)\s+/i;
+// Bare adversatives and "and we/our …" split too — the joints where a
+// disclaimer half hides an affirmative half. Noun-phrase "and" ("lawns and
+// shrubs") does not split, so a claim verb keeps its full object list.
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|and|yet|however|though|while)\s+|\s+(?:but|however|yet|though)\s+|\s+and\s+(?=(?:we|our)\b)/i;
 
 function offFootprintCityFinding(text) {
   const s = String(text || '');
@@ -597,7 +603,11 @@ function offFootprintCityFinding(text) {
     // "St." may be written without the period; multi-word cities may wrap.
     re: new RegExp(`\\b${escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+')}\\b`, 'i'),
   }));
-  for (const sentence of s.split(FOOTPRINT_SENTENCE_SPLIT_RE)) {
+  // Newline block boundaries split FIRST — an unpunctuated heading, list
+  // item, or joined meta line must never merge with the next block into one
+  // pseudo-sentence.
+  const sentences = s.split(/\n+/).flatMap((line) => line.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+  for (const sentence of sentences) {
     for (const clause of sentence.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
       const normalized = clause.replace(/[‘’]/g, "'");
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
@@ -1110,8 +1120,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // the (possibly multi-domain) live page. A hardcoded price or literal-brand
   // leak hiding only in metaTitle/metaDescription would otherwise slip past the
   // body-only P0 guards. Mirror astro-publisher's REFRESH_EDITABLE_META_FIELDS.
-  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription', 'hero_image_alt']
     .map((f) => frontmatter[f])
+    .concat([frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
     .join('\n');

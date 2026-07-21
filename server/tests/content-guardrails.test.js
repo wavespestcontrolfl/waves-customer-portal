@@ -1339,6 +1339,38 @@ describe('off-footprint service claims (OFF_FOOTPRINT_CITY_CLAIM)', () => {
     expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
 
+  test('bare team mentions without an operation verb pass (factual references)', () => {
+    const r = guardrails.evaluate({
+      body: 'Our team reviewed Miami termite research before writing this guide.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('an unpunctuated heading never merges with the next block', () => {
+    const r = guardrails.evaluate({
+      body: '## Miami termite records\n\nOur techs treat Sarasota homes on quarterly visits.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('bare-conjunction clauses do not let a disclaimer shield a claim', () => {
+    for (const body of [
+      'Naples is outside our service area but we treat Tampa yards weekly.',
+      'Naples is outside our service area and we treat Tampa yards weekly.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('a service claim hiding in hero alt is caught', () => {
+    const r = guardrails.evaluate({
+      body: 'Clean educational body.',
+      frontmatter: { hero_image: { alt: 'Waves technician serving a Cape Coral home with your lawn treatment' } },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
   test('outOfAreaCities derives against CITY_TO_LOCATION (footprint cities never blocklisted)', () => {
     const { CITY_TO_LOCATION } = require('../config/locations');
     const list = guardrails.outOfAreaCities();
