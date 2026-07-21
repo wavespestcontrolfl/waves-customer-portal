@@ -667,6 +667,14 @@ describe('completion attempts', () => {
     // omitted flag ≡ explicit false; omitted duration ≡ null.
     expect(hashCompletionRequest({ ...base, backfill: false })).toBe(flagless);
     expect(hashCompletionRequest({ ...base, timeOnSite: null })).toBe(flagless);
+    // NORMAL completions post the panel's auto-elapsed timer as timeOnSite —
+    // it ticks every second, so it never enters the hash (fix round 13): a
+    // transient pre-commit failure must retry cleanly on the next tick, not
+    // 409 idempotency_key_mismatch. Only a backfill's operator-TYPED
+    // minutes bind pre-commit (the `retimed` split above).
+    expect(hashCompletionRequest({ ...base, timeOnSite: 61 }))
+      .toBe(hashCompletionRequest({ ...base, timeOnSite: 62 }));
+    expect(hashCompletionRequest({ ...base, timeOnSite: 61 })).toBe(flagless);
     // Matcher semantics: strict wants the full composite; resume wants core.
     expect(requestHashMatches(flagged, flagless)).toBe(false);
     expect(requestHashMatches(flagged, flagged)).toBe(true);
@@ -727,6 +735,43 @@ describe('completion attempts', () => {
         expect(result.status).toBe(409);
         expect(result.payload.code).toBe('idempotency_key_mismatch');
       }
+      // A BACKFILL retry that changes the operator-TYPED minutes pre-commit
+      // is equally a different payload — 409.
+      const typedFlipKnex = makeKnex([
+        noPriorSuccess(),
+        noResumableCompletion(),
+        noCompletedRecord(),
+        noPriorSnapshotAttempt(),
+        { insertError: uniqueViolation() },
+        { first: { id: 'attempt-1', status: 'failed', request_hash: storedHash, updated_at: new Date() } },
+      ]);
+      const typedFlip = await claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', backfill: true, timeOnSite: 60 }),
+      }, typedFlipKnex);
+      expect(typedFlip.payload.code).toBe('idempotency_key_mismatch');
+      // A NORMAL completion's retry after a pre-commit failure carries the
+      // panel's NEXT timer tick — that is noise, not a payload change: the
+      // failed row resets to pending and the retry proceeds (fix round 13;
+      // pre-fix this 409'd idempotency_key_mismatch on the next tick).
+      const normalStored = hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', timeOnSite: 61 });
+      const retryRow = { id: 'attempt-1', status: 'pending' };
+      const tickKnex = makeKnex([
+        noPriorSuccess(),
+        noResumableCompletion(),
+        noCompletedRecord(),
+        noPriorSnapshotAttempt(),
+        { insertError: uniqueViolation() },
+        { first: { id: 'attempt-1', status: 'failed', request_hash: normalStored, updated_at: new Date() } },
+        { returning: [retryRow] },
+      ]);
+      const tickRetry = await claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', timeOnSite: 62 }),
+      }, tickKnex);
+      expect(tickRetry).toEqual({ action: 'proceed', attempt: retryRow });
       // The same flagless retry against a COMMITTED record (side-effects
       // resume) is the round-6 recovery case and still resumes — the frozen
       // structured_notes are authoritative for the mode there.

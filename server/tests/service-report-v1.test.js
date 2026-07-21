@@ -1568,7 +1568,26 @@ describe('service report v1', () => {
     expect(blankDurationBackfill.durationMinutes).toBeNull();
     expect(blankDurationBackfill.timingNote)
       .toBe('Exact on-site duration was not available for this visit.');
-    // The typed shape shows exactly the operator's statement.
+    // …and the noon instant never renders as a literal exact time (fix
+    // round 13): the day-scale convention would print "completed 12:00 PM"
+    // — even BEFORE a real afternoon check-in. The completion event renders
+    // the unknown-time way (no occurredAt/displayTime, medium confidence),
+    // while the REAL kept arrival keeps its exact time.
+    const blankCompleted = blankDurationBackfill.events.find((e) => e.type === 'service_completed');
+    expect(blankCompleted).toBeDefined();
+    expect(blankCompleted.occurredAt).toBeNull();
+    expect(blankCompleted.displayTime).toBeNull();
+    expect(blankCompleted.confidence).toBe('medium');
+    expect(blankCompleted.customerDescription)
+      .toBe('Your technician completed the pest control service and finalized the report.');
+    const blankOnSite = blankDurationBackfill.events.find((e) => e.type === 'technician_on_site');
+    expect(blankOnSite.displayTime).toBe('10:00 AM');
+    // Events stay in lifecycle order (sortOrder, not timestamps).
+    expect(blankDurationBackfill.events.map((e) => e.type))
+      .toEqual(['technician_on_site', 'service_completed']);
+    // The typed shape shows exactly the operator's statement — and its
+    // completion instant is REAL (start + typed minutes), so the exact
+    // time stays.
     const typedBackfill = buildVisitTimeline({
       service: {
         status: 'completed',
@@ -1581,6 +1600,25 @@ describe('service report v1', () => {
       config: showDuration,
     });
     expect(typedBackfill.durationMinutes).toBe(45);
+    const typedCompleted = typedBackfill.events.find((e) => e.type === 'service_completed');
+    expect(typedCompleted.occurredAt).toBe('2026-06-20T14:45:00.000Z');
+    expect(typedCompleted.displayTime).toBe('10:45 AM');
+    expect(typedCompleted.confidence).toBe('high');
+    // A NO-START typed backfill's end stamps are the noon convention too —
+    // day-only, same as blank.
+    const noStartTyped = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        completed_at: '2026-06-20T16:00:00.000Z', // noon EDT (record end kept)
+      },
+      structured: { backfill: true, timeOnSite: 45 },
+      serviceLine: 'pest',
+      config: showDuration,
+    });
+    const noStartCompleted = noStartTyped.events.find((e) => e.type === 'service_completed');
+    expect(noStartCompleted.occurredAt).toBeNull();
+    expect(noStartCompleted.displayTime).toBeNull();
     // Non-backfill reports keep the pair-derived duration exactly.
     const liveReport = buildVisitTimeline({
       service: {
@@ -1593,6 +1631,10 @@ describe('service report v1', () => {
       config: showDuration,
     });
     expect(liveReport.durationMinutes).toBe(30);
+    const liveCompleted = liveReport.events.find((e) => e.type === 'service_completed');
+    expect(liveCompleted.occurredAt).toBe('2026-06-20T14:30:00.000Z');
+    expect(liveCompleted.displayTime).toBe('10:30 AM');
+    expect(liveCompleted.confidence).toBe('high');
   });
 
   test('visit timeline adds Service completed for completed reports even when Bouncie has no completion event', () => {

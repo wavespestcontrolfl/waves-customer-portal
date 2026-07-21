@@ -7351,27 +7351,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
     }
 
-    // Job costing (non-blocking, fire-and-forget)
-    if (!resumingCommittedCompletion) {
-      try {
-        const JobCosting = require('../services/job-costing');
-        // Backfill: the row's actual_start/actual_end pair now spans a stale
-        // check-in (days/weeks back) to today's office closeout, and the
-        // tech-window time_entries fallback would scoop every job clocked in
-        // between — either way weeks of labor booked to one visit. Labor may
-        // only come from entries tied to THIS job or the operator's explicit
-        // timeOnSite — never elapsed math over the stale span (same rule as
-        // service_time_minutes via applyBackfillDurationPolicy). Forwarded
-        // through the same workday-capped sanitizer the duration policy
-        // uses (idempotent on the already-sanitized effectiveTimeOnSite),
-        // so persisted duration and costed labor can never disagree.
-        void JobCosting.calculateJobCost(svc.id, undefined, isBackfillCompletion
-          ? { untrustedLifecycleSpan: true, explicitLaborMinutes: backfillTimeOnSiteMinutes(effectiveTimeOnSite) }
-          : {}).catch(e =>
-          logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
-        );
-      } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
-    }
+    // Job costing (non-blocking, fire-and-forget). Runs on FIRST RUN and on
+    // RESUME (Codex P2, PR #2897 fix round 13): the required-mint throw can
+    // 503 out of the mint try AFTER the record committed but BEFORE this
+    // line, so a resumed retry that then succeeds would finalize with no
+    // job_costs row / service_records financials until a manual recalc. The
+    // !resumingCommittedCompletion guard here was born as part of a batch
+    // wrap with the genuinely once-only side effects (activity log,
+    // job_complete notification — 8bfd069bd); costing itself needs no
+    // once-only protection: calculateJobCost is an idempotent UPSERT that
+    // re-derives everything from persisted state (five other callers invoke
+    // it repeatedly — manual recalc, expenses CRUD, billing-recovery,
+    // projects, the financials backfill), and its durable
+    // structured_notes.backfill guard re-derives the untrusted-span policy
+    // on every run, so a resume recomputes the same values a completed
+    // first run wrote. The opts are resume-safe too: isBackfillCompletion /
+    // effectiveTimeOnSite are the frozen re-derivations by this point.
+    try {
+      const JobCosting = require('../services/job-costing');
+      // Backfill: the row's actual_start/actual_end pair now spans a stale
+      // check-in (days/weeks back) to today's office closeout, and the
+      // tech-window time_entries fallback would scoop every job clocked in
+      // between — either way weeks of labor booked to one visit. Labor may
+      // only come from entries tied to THIS job or the operator's explicit
+      // timeOnSite — never elapsed math over the stale span (same rule as
+      // service_time_minutes via applyBackfillDurationPolicy). Forwarded
+      // through the same workday-capped sanitizer the duration policy
+      // uses (idempotent on the already-sanitized effectiveTimeOnSite),
+      // so persisted duration and costed labor can never disagree.
+      void JobCosting.calculateJobCost(svc.id, undefined, isBackfillCompletion
+        ? { untrustedLifecycleSpan: true, explicitLaborMinutes: backfillTimeOnSiteMinutes(effectiveTimeOnSite) }
+        : {}).catch(e =>
+        logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
+      );
+    } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
     // Follow-up suggestion for typed completions (profiles followup_policy /
     // default_followup_days). Cockroach only suggests for German — matched on

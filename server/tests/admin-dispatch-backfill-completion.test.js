@@ -811,10 +811,14 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     )).toBe(false);
   });
 
-  test('the segment split stays exact: telemetry+key out entirely; backfill+timeOnSite in the MODE segment only', () => {
+  test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only under backfill', () => {
     const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
     expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
-    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: timeOnSite \?\? null,/);
+    // Fix round 13: a NORMAL completion's timeOnSite is the panel's
+    // auto-elapsed timer (ticks every second) — hashing it turned any
+    // transient pre-commit failure into idempotency_key_mismatch on the
+    // next tick. Only a backfill's operator-TYPED minutes bind.
+    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \? \(timeOnSite \?\? null\) : null,/);
     // The resume claim is the ONLY core-segment comparison site; the
     // pending/failed/succeeded sites go through the strict matcher.
     expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
@@ -2347,6 +2351,31 @@ describe('completion route wiring (source contracts)', () => {
     expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && startTime && endTime\) \{/);
     // calculateJobCost threads the options through to calcLaborCost.
     expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes \},\s*\n\s*\);/);
+  });
+
+  test('job costing runs on RESUMED retries too — a released mint failure cannot finalize with financials missing (Codex P2, fix round 13)', () => {
+    // The required-mint throw 503s out of the mint try AFTER the record
+    // committed but BEFORE the costing call; the retry resumes via
+    // side_effects_pending. The old !resumingCommittedCompletion guard
+    // (born as a batch wrap with the once-only activity-log/notification
+    // sends, 8bfd069bd) made the successful retry finalize with no
+    // job_costs row until a manual recalc. calculateJobCost is an
+    // idempotent upsert re-derived from persisted state (five other
+    // callers re-run it freely; its durable structured_notes.backfill
+    // guard re-derives the untrusted-span policy every run), so the
+    // costing block now runs unguarded on both first run and resume.
+    const costingAt = source.indexOf('// Job costing (non-blocking, fire-and-forget)');
+    expect(costingAt).toBeGreaterThan(-1);
+    const costingBlock = source.slice(costingAt, source.indexOf('void JobCosting.calculateJobCost', costingAt));
+    expect(costingBlock).not.toContain('if (!resumingCommittedCompletion)');
+    expect(costingBlock).toContain('Runs on FIRST RUN and on');
+    // The genuinely once-only side effects keep their guard: the activity
+    // log + job_complete notification block directly above still runs
+    // first-run only.
+    const before = source.slice(0, costingAt);
+    const activityGuardAt = before.lastIndexOf('if (!resumingCommittedCompletion) {');
+    const activityBlock = source.slice(activityGuardAt, costingAt);
+    expect(activityBlock).toContain('Job form save failed');
   });
 
   test('tracker completion honors the duration policy at BOTH markComplete call sites (fix round 3)', () => {
