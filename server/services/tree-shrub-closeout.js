@@ -472,11 +472,22 @@ function deriveTreeShrubTreatments({ products = [], productRows = [] } = {}) {
     if (isFungicideFamilyProduct(ref)) chips.add('Disease / fungicide treatment');
     if (isHerbicideFamilyProduct(ref)) chips.add(TS_PRE_EMERGENT_RE.test(txt) ? 'Pre-emergent bed treatment' : 'Weed spot treatment');
     if (/micro[\s-]?nutrient|minor[\s-]?element/i.test(txt)) chips.add('Micronutrients');
+    // The amendment chip requires a positively amendment-like product
+    // (catalog: "Soil Amendment", "Espoma Organic Soil Acidifier",
+    // CarbonPro-L biostimulant). It is NOT the catch-all for unclassified
+    // products — adjuvants/surfactants/PGRs (LESCO 90/10, Hydretain, Primo
+    // Maxx, Shortstop) would otherwise publish "applied a soil amendment"
+    // in the customer narrative (codex P3 r4). No lime/sulfur markers: lime
+    // sulfur is a pesticide.
+    if (/soil[\s_-]*amendment|acidif|biostimulant|humic|humate|biochar|\bgypsum\b|soil[\s_-]*condition/i.test(`${txt} ${productCategoryText(ref)}`)) {
+      chips.add('Soil amendment / acidifier');
+    }
   }
-  // A product that matches no classifier (soil amendments etc.) still means
-  // work was performed — record the amendment chip rather than fabricating a
-  // pesticide claim or falling back to 'Inspection only'.
-  if (!chips.size) chips.add('Soil amendment / acidifier');
+  // Products recorded but none classified (support products: surfactants,
+  // wetting agents, PGRs): make NO treatment claim — the report still lists
+  // the products themselves, and 'Inspection only' would understate the
+  // visit while any chip would fabricate a treatment. treatments_completed
+  // is not required on the primary path, so empty is valid.
   return [...chips].join(', ');
 }
 

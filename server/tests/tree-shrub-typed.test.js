@@ -617,9 +617,31 @@ describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
     expect(derive([cat({ name: 'Roundup QuikPro', category: 'herbicide' })])).toContain('Weed spot treatment');
   });
 
-  test('unclassified product records the soil-amendment chip, never a pesticide claim', () => {
-    const out = derive([cat({ name: 'Soil Conditioner Plus', category: 'amendment' })]);
-    expect(out).toBe('Soil amendment / acidifier');
+  test('amendment-like products record the soil-amendment chip, never a pesticide claim', () => {
+    for (const row of [
+      cat({ name: 'Soil Conditioner Plus', category: 'amendment' }),
+      cat({ name: 'Espoma Organic Soil Acidifier', category: 'Soil Amendment' }),
+      cat({ name: 'LESCO CarbonPro-L w/ MobilEX Biostimulant Liquid Soil Amendment', category: 'soil_amendment' }),
+    ]) {
+      expect(derive([row])).toBe('Soil amendment / acidifier');
+    }
+  });
+
+  test('support products (adjuvants/surfactants/PGRs) make NO treatment claim (codex P3 r4)', () => {
+    for (const row of [
+      cat({ name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' }),
+      cat({ name: 'BRANDT Indicate 5', category: 'Adjuvant' }),
+      cat({ name: 'Shortstop 2SC Plant Growth Regulator for Trees & Shrubs', category: 'Plant Growth Regulator' }),
+    ]) {
+      expect(derive([row])).toBe('');
+    }
+    // A support product beside a classified product adds nothing — the
+    // classified chip stands alone.
+    const mixed = derive([
+      cat({ id: 'a', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' }),
+      cat({ id: 'b', name: 'Dominion 2L', category: 'insecticide' }),
+    ]);
+    expect(mixed).toBe('Insect treatment');
   });
 
   test('every derived chip is a legal treatments_completed option', () => {

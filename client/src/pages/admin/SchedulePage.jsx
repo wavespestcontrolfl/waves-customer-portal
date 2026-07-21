@@ -6633,6 +6633,13 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
   const hasFungicideProduct = selectedProducts.some((product) =>
     /\b(fungicide|fungus|disease|phytophthora|kphite|phosphite|phosphonate|copper|headway|artavia|propizol|frac)\b/.test(productsText(product)),
   );
+  // Mirrors the server's herbicide family classifier: herbicides carry
+  // rotation history too (HRAC), so the server requires iracFracLogged for
+  // them — without this flag the form enables Submit and then 400s (codex
+  // P2 r4).
+  const hasHerbicideProduct = selectedProducts.some((product) =>
+    /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(productsText(product)),
+  );
   const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
   const hasNpFertilizer = selectedProducts.some((product) => {
     const textValue = productsText(product);
@@ -6651,7 +6658,8 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
   return {
     hasInsectProduct,
     hasFungicideProduct,
-    needsIracFracLog: hasInsectProduct || hasFungicideProduct,
+    hasHerbicideProduct,
+    needsIracFracLog: hasInsectProduct || hasFungicideProduct || hasHerbicideProduct,
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
@@ -7913,7 +7921,10 @@ export function CompletionPanel({
   const pesticideProductPresent = selectedProducts.some((p) => {
     const category = String(p.category || p.product_category || "");
     if (/insectic|miticide|fungic|herbic|pesticid|\bigr\b|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
-    return !category.trim();
+    // "Uncategorized"/"other" style categories are non-blank but carry no
+    // signal (prod has Bifen XTS filed as Uncategorized) — they must stay on
+    // the conservative show-the-fields path, same as a missing category.
+    return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
   });
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
@@ -9972,6 +9983,16 @@ export function CompletionPanel({
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
         displayName: product.display_name || product.displayName || null,
+        // The catalog category feeds the pesticide/family flags — without it
+        // every selected product falls into the blank-category pesticide
+        // fallback and the simplified T&S form shows compliance fields on
+        // ordinary fertilizer visits (codex P3 r4). Protocol-added products
+        // are serialized without it, so fall back to the loaded catalog row.
+        category:
+          product.category ??
+          product.product_category ??
+          (products || []).find((p) => String(p.id) === String(product.id))?.category ??
+          null,
         rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
