@@ -865,7 +865,12 @@ router.get('/accounts-receivable', async (req, res, next) => {
     try {
       invoices = await db('invoices')
         .leftJoin('customers', 'invoices.customer_id', 'customers.id')
-        .whereIn('invoices.status', ['sent', 'overdue', 'unpaid', 'pending'])
+        // 'viewed' is what 'sent' becomes the moment the customer opens the
+        // invoice — omitting it made receivables VANISH from A/R on view
+        // ($1,374 across 5 invoices invisible at audit time). Deliberately
+        // excluded: draft/scheduled/sending (not yet receivable) and
+        // processing (ACH in flight settles on its own).
+        .whereIn('invoices.status', ['sent', 'viewed', 'overdue', 'unpaid', 'pending'])
         .select(
           'invoices.*',
           'customers.first_name', 'customers.last_name',
