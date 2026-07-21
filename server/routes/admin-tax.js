@@ -5,7 +5,10 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr } = require('../services/pnl-report');
+const {
+  buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
+  prorateAssetDepreciation, REFUND_TXN_TYPES,
+} = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1080,6 +1083,62 @@ router.get('/export/tax-package', async (req, res, next) => {
     let payments = [];
     try { payments = await db('payments').whereBetween('payment_date', [sd, ed]).leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.payment_date', 'desc'); } catch { /* */ }
 
+    // pnl.csv revenue also counts estimate-deposit cash and paid-Stripe-
+    // invoice gap rows (no payments row) — map both into transactions.csv so
+    // every receipt the P&L counts has a supporting transaction row.
+    try {
+      // Normalize DATE cells to YYYY-MM-DD so the combined date sort (and the
+      // CSV's date column) is stable across row sources.
+      payments = payments.map(p => ({ ...p, payment_date: dateCellStr(p.payment_date) || p.payment_date }));
+      const depositRows = await db('estimate_deposits as d')
+        .leftJoin('customers as c', 'd.customer_id', 'c.id')
+        .whereNotNull('d.received_at')
+        .whereRaw(
+          "DATE(d.received_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(d.received_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as payment_date"),
+          db.raw("(d.amount + COALESCE(d.card_surcharge, 0)) as amount"),
+          'd.status',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...depositRows.map(r => ({
+        ...r,
+        type: 'estimate_deposit',
+        description: 'Estimate deposit (deposits ledger — no payments row)',
+        processor: 'stripe',
+      })));
+      const gapRows = await db('invoices as i')
+        .leftJoin('customers as c', 'i.customer_id', 'c.id')
+        .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
+        .whereNotNull('i.stripe_payment_intent_id')
+        .whereNotExists(function gapGuard() {
+          this.select(db.raw('1'))
+            .from('payments as p')
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id')
+            .whereRaw("COALESCE(p.metadata->>'source', '') <> 'invoice_refund'");
+        })
+        .whereRaw(
+          "DATE(i.paid_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(i.paid_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as payment_date"),
+          db.raw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) as amount'),
+          'i.invoice_number',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...gapRows.map(r => ({
+        ...r,
+        type: 'invoice_paid',
+        status: 'paid',
+        description: `Invoice ${r.invoice_number} paid via Stripe (no payments-ledger row)`,
+        processor: 'stripe',
+      })));
+      payments.sort((a, b) => String(b.payment_date || '').localeCompare(String(a.payment_date || '')));
+    } catch { /* tables may not exist in dev */ }
+
     let expenses = [];
     try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch { /* */ }
 
@@ -1092,7 +1151,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     let refunds = [];
     try {
       refunds = await db('stripe_payout_transactions')
-        .where('type', 'refund')
+        // Same type set pnl.csv nets (REFUND_TXN_TYPES) — card refunds,
+        // bank/local-method refunds, and bounced-refund reversals — so every
+        // refund figure in the P&L has a supporting row here.
+        .whereIn('type', REFUND_TXN_TYPES)
         .whereRaw(
           "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
           [sd, ed],
@@ -1115,6 +1177,13 @@ router.get('/export/tax-package', async (req, res, next) => {
           this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
         })
         .orderBy('name');
+      // Per-asset depreciation for THIS package's year, same proration the
+      // P&L uses — the schedule's period column sums to pnl.csv's
+      // depreciation line by construction.
+      equipment = equipment.map(e => ({
+        ...e,
+        period_depreciation: prorateAssetDepreciation(e, sd, ed),
+      }));
     } catch { /* */ }
 
     // Labor detail. The summary table stores MINUTES (work_date keyed), not a

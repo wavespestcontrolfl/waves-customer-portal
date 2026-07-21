@@ -106,32 +106,54 @@ function getPeriodRange(period, { start_date, end_date } = {}, now = new Date())
   return { startDate, endDate };
 }
 
+function daysInYear(y) {
+  return ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 366 : 365;
+}
+
+// Date-ish (string or node-postgres DATE cell) → UTC-midnight Date, so day
+// arithmetic below is zone-independent.
+function toUTCDay(v) {
+  const s = dateCellStr(v);
+  return s ? new Date(`${s}T00:00:00Z`) : null;
+}
+
 /**
- * Per-asset depreciation prorated to the window: from
+ * ONE asset's depreciation prorated to the window: from
  * placed_in_service_date through disposal_date (when disposed), clamped to
- * the period. Pure. Section 179 / bonus assets carry annual_depreciation
- * NULL (their deduction was taken at purchase) and contribute nothing here.
- * Disposal CAPS the window rather than excluding the asset — filtering
- * disposed assets out (the old behavior) silently deleted their
- * depreciation from every historical P&L the moment they were disposed.
+ * the period, sliced per CALENDAR YEAR so each slice divides by that year's
+ * actual day count — a full leap year yields exactly the annual amount
+ * (a flat /365 paid 366/365ths of it). Pure. Section 179 / bonus assets
+ * carry annual_depreciation NULL and contribute nothing. Disposal CAPS the
+ * window rather than excluding the asset — filtering disposed assets out
+ * silently deleted their depreciation from every historical P&L.
  */
-function prorateDepreciation(assets, startDate, endDate) {
-  const periodStart = new Date(startDate);
-  const periodEnd = new Date(endDate);
+function prorateAssetDepreciation(asset, startDate, endDate) {
+  const annual = parseFloat(asset?.annual_depreciation || 0);
+  if (!annual) return 0;
+  const periodStart = toUTCDay(startDate);
+  const periodEnd = toUTCDay(endDate);
+  if (!periodStart || !periodEnd) return 0;
+  const inService = toUTCDay(asset.placed_in_service_date) || toUTCDay(asset.purchase_date);
+  const disposed = toUTCDay(asset.disposal_date);
+  const effStart = inService && inService > periodStart ? inService : periodStart;
+  const effEnd = disposed && disposed < periodEnd ? disposed : periodEnd;
+  if (effStart > effEnd) return 0;
   let total = 0;
-  for (const a of assets || []) {
-    const annual = parseFloat(a.annual_depreciation || 0);
-    if (!annual) continue;
-    const inService = a.placed_in_service_date
-      ? new Date(a.placed_in_service_date)
-      : (a.purchase_date ? new Date(a.purchase_date) : null);
-    const disposed = a.disposal_date ? new Date(a.disposal_date) : null;
-    const effStart = inService && inService > periodStart ? inService : periodStart;
-    const effEnd = disposed && disposed < periodEnd ? disposed : periodEnd;
-    if (effStart > effEnd) continue;
-    const effDays = (effEnd - effStart) / 86400000 + 1;
-    total += annual * (Math.max(0, effDays) / 365);
+  for (let y = effStart.getUTCFullYear(); y <= effEnd.getUTCFullYear(); y++) {
+    const yStart = new Date(Date.UTC(y, 0, 1));
+    const yEnd = new Date(Date.UTC(y, 11, 31));
+    const s = effStart > yStart ? effStart : yStart;
+    const e = effEnd < yEnd ? effEnd : yEnd;
+    const days = (e - s) / 86400000 + 1;
+    if (days > 0) total += annual * (days / daysInYear(y));
   }
+  return total;
+}
+
+/** Sum of prorateAssetDepreciation over the asset list. Pure. */
+function prorateDepreciation(assets, startDate, endDate) {
+  let total = 0;
+  for (const a of assets || []) total += prorateAssetDepreciation(a, startDate, endDate);
   return round2(total);
 }
 
@@ -468,10 +490,12 @@ module.exports = {
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,
+  prorateAssetDepreciation,
   rateAsOf,
   costLaborByDay,
   dateCellStr,
   missingTableOnly,
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
+  REFUND_TXN_TYPES,
 };

@@ -77,7 +77,11 @@ function mileageToCSV(trips) {
 }
 
 function depreciationToCSV(equipment) {
-  const headers = ['Asset Name', 'Category', 'Purchase Date', 'Cost Basis', 'Method', 'Useful Life', 'Annual Depreciation', 'Accumulated', 'Book Value', 'Section 179'];
+  // 'Depreciation (This Period)' is the asset's PRORATED amount for the
+  // export window (in-service through disposal, leap-year aware) — its
+  // column sum foots to pnl.csv's depreciation line, which the flat annual
+  // figure does not for mid-year in-service or disposed assets.
+  const headers = ['Asset Name', 'Category', 'Purchase Date', 'Cost Basis', 'Method', 'Useful Life', 'Annual Depreciation', 'Depreciation (This Period)', 'Accumulated', 'Book Value', 'Disposed', 'Section 179'];
   const lines = [row(headers)];
   for (const e of equipment) {
     lines.push(row([
@@ -88,8 +92,10 @@ function depreciationToCSV(equipment) {
       e.depreciation_method || '',
       e.useful_life_years != null ? `${e.useful_life_years} yrs` : '',
       e.annual_depreciation != null ? parseFloat(e.annual_depreciation).toFixed(2) : '',
+      e.period_depreciation != null ? parseFloat(e.period_depreciation).toFixed(2) : '',
       e.accumulated_depreciation != null ? parseFloat(e.accumulated_depreciation).toFixed(2) : '',
       e.current_book_value != null ? parseFloat(e.current_book_value).toFixed(2) : '',
+      e.disposal_date ? String(e.disposal_date).slice(0, 10) : (e.disposed ? 'Yes' : ''),
       e.section_179_elected ? `Yes ($${parseFloat(e.section_179_amount || 0).toFixed(2)})` : 'No',
     ]));
   }
@@ -233,12 +239,16 @@ function geoGridToCSV(pins, meta = {}) {
  * a positive number.
  */
 function refundsToCSV(refunds) {
-  const headers = ['Date (ET)', 'Amount Refunded', 'Fee Reversed', 'Customer', 'Description', 'Stripe Txn ID'];
+  // Amount is signed as it affects revenue: refunds negative (cash out),
+  // *_failure reversals positive (bounced refund returned to the merchant) —
+  // the column sums to the net refund figure pnl.csv subtracts.
+  const headers = ['Date (ET)', 'Type', 'Amount (± vs revenue)', 'Fee Reversed', 'Customer', 'Description', 'Stripe Txn ID'];
   const lines = [row(headers)];
   for (const r of refunds) {
     lines.push(row([
       r.refund_date_et || r.created_at_stripe || '',
-      r.amount != null ? Math.abs(parseFloat(r.amount)).toFixed(2) : '',
+      r.type || '',
+      r.amount != null ? parseFloat(r.amount).toFixed(2) : '',
       r.fee != null ? parseFloat(r.fee).toFixed(2) : '',
       r.customer_name || '',
       r.description || '',

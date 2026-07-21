@@ -175,6 +175,31 @@ describe('prorateDepreciation', () => {
     )).toBe(0);
   });
 
+  test('a full LEAP year yields exactly the annual amount (not 366/365ths)', () => {
+    const total = prorateDepreciation(
+      [{ annual_depreciation: '365', placed_in_service_date: '2023-06-01' }],
+      '2024-01-01', '2024-12-31',
+    );
+    expect(total).toBe(365);
+  });
+
+  test('leap-year partial windows divide by that year\'s 366 days', () => {
+    // Jan 1 – Jun 30 2024 = 182 days of a 366-day year.
+    const total = prorateDepreciation(
+      [{ annual_depreciation: '366', placed_in_service_date: '2023-01-01' }],
+      '2024-01-01', '2024-06-30',
+    );
+    expect(total).toBe(182);
+  });
+
+  test('a 365-day window spanning two calendar years sums per-year slices to one annual', () => {
+    const total = prorateDepreciation(
+      [{ annual_depreciation: '365', placed_in_service_date: '2024-01-01' }],
+      '2025-07-01', '2026-06-30',
+    );
+    expect(total).toBe(365);
+  });
+
   test('§179/bonus assets (annual NULL) and future assets contribute nothing', () => {
     const total = prorateDepreciation(
       [
