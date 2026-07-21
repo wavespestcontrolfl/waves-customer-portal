@@ -693,12 +693,15 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  * current version is already examined, so the nightly cadence costs nothing
  * between bumps.
  *
- * Spend rails: refuses when the item pool exceeds SEALED_EXAM_AUTO_MAX_ITEMS
- * (each item is several LLM calls; the refusal is LOGGED, never silent) or is
- * below SEALED_EXAM_AUTO_MIN_ITEMS (too small to mean anything). At most one
- * exam per leg per version ever runs; a failed run is resumed (keeping paid
- * results), not restarted. Serialized against the manual endpoint via the
- * same 'sms-sealed-eval' advisory lock and the one-running unique index.
+ * Spend rails gate NEW runs only: refuses to CREATE when the item pool
+ * exceeds SEALED_EXAM_AUTO_MAX_ITEMS (each item is several LLM calls; the
+ * refusal is LOGGED, never silent) or is below SEALED_EXAM_AUTO_MIN_ITEMS
+ * (too small to mean anything). Resumes are never pool-gated — they finish
+ * an already-paid, creation-frozen cohort. A completed run per (leg,
+ * version) always short-circuits, even when a newer failed rerun exists; a
+ * stranded 'running' row (crash/deploy) is resumed, not skipped, whenever
+ * the processing lock is free. Serialized against the manual endpoint via
+ * the same 'sms-sealed-eval' advisory lock and the one-running unique index.
  *
  * Ends with ONE digest bell per sweep that actually ran an exam — including
  * a pointer at pending pathology patch proposals, which the new baselines
@@ -706,46 +709,106 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
   const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  const { runExclusive, isLocked } = require('../utils/cron-lock');
 
-  const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id');
-  if (inFlight) return { skipped: 'run_in_progress', version: currentVersion };
+  const legs = {};
+  let ran = 0;
+
+  // Crash recovery comes FIRST — never skip on a stranded row. A
+  // status='running' row with nobody holding the processing lock is a
+  // crash/deploy leftover, and skipping would wedge the sweep forever (the
+  // one-running index blocks every new create while it sits). Resume it:
+  // runSealedExam completes a same-version run and retires a stale-version
+  // one. Only a lock actually HELD means a sitting is genuinely in progress.
+  const inFlight = await dbi('sms_sealed_eval_runs')
+    .where({ status: 'running' })
+    .first('id', 'provider_leg', 'prompt_version');
+  if (inFlight) {
+    if (await isLocked('sms-sealed-eval')) {
+      return { skipped: 'run_in_progress', version: currentVersion };
+    }
+    try {
+      const result = await runExclusive('sms-sealed-eval',
+        () => examRunner({ runId: inFlight.id, dbi }), { recordHealth: false });
+      if (result && result.skipped) {
+        return { skipped: 'run_in_progress', version: currentVersion };
+      }
+      // Only claim the leg when the stranded run examined the CURRENT
+      // version — a retired stale-version row must not shadow this leg's
+      // fresh run below.
+      if (inFlight.prompt_version === currentVersion) {
+        if (result && result.status === 'complete') {
+          legs[inFlight.provider_leg] = { outcome: 'resumed_stranded', runId: inFlight.id };
+          ran += 1;
+        } else {
+          // Ended failed again — leave it for tomorrow's failed-run resume
+          // rather than re-billing a flapping provider twice in one night.
+          legs[inFlight.provider_leg] = { outcome: 'exam_failed', error: result && result.error };
+          logger.error(`[sealed-eval] stranded-run resume (${inFlight.provider_leg} leg) ended failed: ${result && result.error}`);
+        }
+      }
+    } catch (err) {
+      // The stale-version resume path retires the row then throws by
+      // contract — the retirement is the recovery; the loop below starts
+      // fresh current-version runs.
+      logger.warn(`[sealed-eval] stranded-run recovery (${String(inFlight.id).slice(0, 8)}): ${err.message}`);
+    }
+  }
 
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   const active = Number(activeCount) || 0;
-  if (active < AUTO_EXAM_MIN_ITEMS) {
-    return { skipped: 'pool_too_small', active, version: currentVersion };
-  }
-  if (active > AUTO_EXAM_MAX_ITEMS) {
-    logger.warn(`[sealed-eval] auto-run refused: ${active} active items exceeds the spend cap of ${AUTO_EXAM_MAX_ITEMS} (SEALED_EXAM_AUTO_MAX_ITEMS) — run manually from the UI or raise the cap`);
-    return { skipped: 'spend_cap', active, version: currentVersion };
-  }
 
-  const { runExclusive } = require('../utils/cron-lock');
-  const legs = {};
-  let ran = 0;
   for (const leg of EXAM_LEGS) {
-    const existing = await dbi('sms_sealed_eval_runs')
-      .where({ provider_leg: leg, prompt_version: currentVersion })
-      .whereIn('status', ['complete', 'failed'])
-      .orderBy('started_at', 'desc')
-      .first('id', 'status');
-    if (existing && existing.status === 'complete') {
-      legs[leg] = { outcome: 'already_examined', runId: existing.id };
+    if (legs[leg]) continue; // settled by stranded recovery above
+    // A completed run for this (leg, version) always wins — a NEWER failed
+    // manual rerun must not trick the sweep into re-spending on a version
+    // that is already covered.
+    const complete = await dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'complete' })
+      .first('id');
+    if (complete) {
+      legs[leg] = { outcome: 'already_examined', runId: complete.id };
       continue;
+    }
+    const failed = await dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'failed' })
+      .orderBy('started_at', 'desc')
+      .first('id');
+    // Spend rails gate NEW runs only. A resume finishes an already-created,
+    // partially paid run whose cohort was FROZEN at creation — today's pool
+    // size is irrelevant to it, and blocking it would strand paid results.
+    if (!failed) {
+      if (active < AUTO_EXAM_MIN_ITEMS) {
+        legs[leg] = { outcome: 'pool_too_small', active };
+        continue;
+      }
+      if (active > AUTO_EXAM_MAX_ITEMS) {
+        logger.warn(`[sealed-eval] auto-run refused (${leg} leg): ${active} active items exceeds the spend cap of ${AUTO_EXAM_MAX_ITEMS} (SEALED_EXAM_AUTO_MAX_ITEMS) — run manually from the UI or raise the cap`);
+        legs[leg] = { outcome: 'spend_cap', active };
+        continue;
+      }
     }
     try {
       // Same lock the manual endpoint holds while processing — a concurrent
       // manual sitting makes this leg wait until tomorrow, never double-run.
       const result = await runExclusive('sms-sealed-eval', () => (
-        existing
-          ? examRunner({ runId: existing.id, dbi })
+        failed
+          ? examRunner({ runId: failed.id, dbi })
           : examRunner({ providerLeg: leg, triggeredBy: 'auto:prompt-watch', dbi })
       ), { recordHealth: false });
       if (result && result.skipped) {
         legs[leg] = { outcome: 'lock_busy' };
         continue;
       }
-      legs[leg] = { outcome: existing ? 'resumed' : 'ran' };
+      // runSealedExam resolves { status: 'failed' } on its internal bail-out
+      // paths (provider outage, no-progress batch) — that is NOT a success
+      // and must not count toward the digest.
+      if (result && result.status === 'failed') {
+        legs[leg] = { outcome: 'exam_failed', error: result.error };
+        logger.error(`[sealed-eval] auto exam (${leg} leg) ended failed: ${result.error}`);
+        continue;
+      }
+      legs[leg] = { outcome: failed ? 'resumed' : 'ran' };
       ran += 1;
     } catch (err) {
       if (err && err.code === 'RUN_IN_PROGRESS') {
