@@ -1760,3 +1760,7 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 **Change.** Tag the five tracker surfaces: `data-glass="card"` on the main state card, `data-glass="soft"` on the four sub-cards. Inline white backgrounds stay as the no-theme fallback. Plus one content bug visible in the same screenshot: the pet-plan checklist row hard-cut mid-word at 40 chars ("…during service. Plea"); it now truncates at a word boundary with an ellipsis and drops trailing punctuation before the ellipsis.
 
 **Verification.** Stubbed-render screenshots at 390 and 1440 against the vite dev client: all five cards render the frosted material and match the surrounding portal cards; the checklist row reads "Pet plan: Dogs will be inside during service…". `check:portal-brand` clean; PortalPage suites + glass-engine vitest 52/52 green.
+
+## 2026-07-21 — /book keeps the marketing chrome (owner exception, logged per the 07-17 glass rule)
+
+**Owner decision (2026-07-21).** The public booking page (`/book`, `PublicBookingPage.jsx`) stays in the standard wavespestcontrol.com warm marketing chrome and does not mount the glass scene. It renders embedded on the marketing site's /book page, so it matches that context rather than the portal app. This is the explicit exception entry the 2026-07-17 "glass is the rule" decision requires. The same-day audit verified every other customer-reachable React page mounts the glass scene (the only other non-glass renders are the print/PDF report modes and the WDO/termite paper certificates, both intentional).
