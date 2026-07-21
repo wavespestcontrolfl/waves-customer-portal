@@ -118,10 +118,11 @@ function initBouncieMileageCrons() {
         .where('trip_date', '>=', startDate)
         .whereNotNull('end_lat')
         .whereNotNull('end_lng')
-        // Never overwrite an operator's explicit classification: a trip
-        // reviewed as personal in the Tax Center must not silently become
-        // deductible because its endpoint matched a job.
-        .whereNot('classification_method', 'manual_review')
+        // Never overwrite an operator's explicit classification. BOTH operator
+        // methods are excluded: 'manual_review' (Tax Center) and 'manual' (the
+        // admin-mileage reclassify route) — a hand-confirmed trip with no
+        // customer must not be re-stamped as a job_match_suggested.
+        .whereNotIn('classification_method', ['manual', 'manual_review'])
         .whereNot('purpose', 'personal');
 
       let matched = 0;
@@ -155,7 +156,7 @@ function initBouncieMileageCrons() {
             const changed = await db('mileage_log')
               .where('id', trip.id)
               .whereNull('customer_id')
-              .whereNot('classification_method', 'manual_review')
+              .whereNotIn('classification_method', ['manual', 'manual_review'])
               .whereNot('purpose', 'personal')
               .update({
                 customer_id: jobMatch.customer_id,

@@ -246,4 +246,25 @@ describe('POST /expenses partial deductions', () => {
     });
     expect(state.inserted[0].tax_deductible_amount).toBe(30);
   });
+
+  test('an OPERATOR-selected meals category still gets 50% (no AI involved)', async () => {
+    // categoryId supplied → the AI path is skipped entirely; the policy must
+    // still apply to the operator's chosen category.
+    autoCategorizeExpense.mockClear();
+    const res = await post('/admin/tax/expenses', {
+      categoryId: 'cat-meals', description: 'Team dinner', amount: 200,
+      expenseDate: '2026-07-15', vendorName: 'Bistro',
+    });
+    expect(res.status).toBe(200);
+    expect(autoCategorizeExpense).not.toHaveBeenCalled();
+    expect(state.inserted[0].tax_deductible_amount).toBe(100); // 50% of 200
+  });
+
+  test('rejects a deductibleAmount above the expense amount', async () => {
+    const res = await post('/admin/tax/expenses', {
+      categoryId: 'cat-supplies', description: 'Bad', amount: 100, deductibleAmount: 500,
+      expenseDate: '2026-07-15', vendorName: 'X',
+    });
+    expect(res.status).toBe(400);
+  });
 });

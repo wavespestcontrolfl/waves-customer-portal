@@ -376,18 +376,7 @@ router.post('/expenses', async (req, res, next) => {
     if (!categoryId && (vendorName || description)) {
       try {
         aiCategory = await autoCategorizeExpense(vendorName, description, amount);
-        if (aiCategory?.categoryId) {
-          categoryId = aiCategory.categoryId;
-          // Same server-owned policy as the batch route: the partial
-          // deduction comes from the MATCHED CATEGORY's canonical name, not
-          // from the model's deductiblePercent (which it can omit or
-          // overstate). An operator-supplied deductibleAmount still wins.
-          const cat = await db('expense_categories').where({ id: categoryId }).first('name');
-          const partial = categoryDeductibleAmount(cat?.name, amount);
-          if (partial !== null) {
-            deductibleAmount = deductibleAmount ?? partial;
-          }
-        }
+        if (aiCategory?.categoryId) categoryId = aiCategory.categoryId;
       } catch (err) {
         aiCategorizeError = err.message;
         logger.warn(`[tax] AI expense categorization failed: ${err.message}`);
@@ -401,6 +390,15 @@ router.post('/expenses', async (req, res, next) => {
     const amt = parseFloat(amount);
     if (!Number.isFinite(amt) || amt < 0) {
       return res.status(400).json({ error: 'amount must be a number ≥ 0' });
+    }
+    // Server-owned partial-deduction policy applied to the FINAL category —
+    // whether the operator picked it or AI did — so an explicitly-selected
+    // "Meals & Entertainment" still lands at 50%. An explicit client-supplied
+    // deductibleAmount always wins.
+    if (deductibleAmount == null && categoryId) {
+      const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+      const partial = categoryDeductibleAmount(cat?.name, amt);
+      if (partial !== null) deductibleAmount = partial;
     }
     const deductible = deductibleAmount == null ? amt : parseFloat(deductibleAmount);
     if (!Number.isFinite(deductible) || deductible < 0 || deductible > amt) {
