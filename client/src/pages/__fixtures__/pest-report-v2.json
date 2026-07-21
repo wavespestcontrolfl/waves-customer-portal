@@ -1,0 +1,134 @@
+{
+  "reportVersion": "service_report_v1",
+  "serviceDate": "2026-07-21",
+  "customerName": "Jordan Rivera",
+  "customerFirstName": "Jordan",
+  "technician": "Adam",
+  "companyName": "Waves Pest Control",
+  "serviceLine": "pest",
+  "serviceType": "Quarterly Pest Control Service",
+  "serviceDisplayName": "Quarterly Pest Control",
+  "pestReportV2": {
+    "status": {
+      "key": "protected",
+      "label": "Protected",
+      "tone": "good"
+    },
+    "statusSummary": "Your property is in a strong position after this visit.",
+    "supportingMetric": {
+      "kind": "pressure",
+      "score": "1.4",
+      "max": 5,
+      "label": "Low",
+      "trend": "down",
+      "caption": "Pest pressure",
+      "rating": null,
+      "submittedRating": null
+    },
+    "defense": {
+      "summary": "Your property is in a strong position after this visit.",
+      "items": [
+        {
+          "key": "perimeter_shield",
+          "label": "Perimeter shield",
+          "status": "active",
+          "detail": "Exterior protection was applied today."
+        },
+        {
+          "key": "front_entry",
+          "label": "Front entry",
+          "status": "clear",
+          "detail": "No active entry finding was documented."
+        },
+        {
+          "key": "garage",
+          "label": "Garage",
+          "status": "watch",
+          "detail": "Light ant trailing noted near the garage door seal."
+        }
+      ]
+    },
+    "primaryMove": {
+      "title": "Pull mulch back from the entry",
+      "why": "Mulch against the slab holds moisture and shelters ants.",
+      "impact": "Reduces recurring activity at the front entry.",
+      "dueLabel": "Before next service"
+    },
+    "bugFiles": [
+      {
+        "pestKey": "ghost_ant",
+        "suspectLabel": "Ghost ant",
+        "confirmedByTech": true,
+        "whereSeen": "Front yard",
+        "whyItMatters": "Ghost ants trail toward entry points.",
+        "whatWeDid": "Targeted perimeter application",
+        "yourMove": "Pull mulch back from the slab"
+      }
+    ],
+    "pressureReceipt": {
+      "headline": "Since starting WaveGuard",
+      "stats": [
+        {
+          "label": "Visits completed",
+          "value": "6"
+        },
+        {
+          "label": "Interior findings",
+          "value": "0"
+        }
+      ]
+    },
+    "weatherCall": {
+      "headline": "Good treatment window.",
+      "body": "Low rainfall in the next 24 hours."
+    },
+    "aiSummary": {
+      "headline": "Service is complete.",
+      "body": "Exterior perimeter treated; light ant trailing noted near the garage and treated. No interior activity documented today."
+    },
+    "forecast": {
+      "monthName": "July",
+      "locationLabel": "Parrish, FL",
+      "weatherSummary": "Hot and humid with daily storms",
+      "headline": "Ant and mosquito pressure typically peaks in late July.",
+      "disclaimer": "Seasonal outlook based on regional trends.",
+      "pests": [
+        {
+          "key": "ghost_ant",
+          "label": "Ghost ants",
+          "emoji": null,
+          "level": "high",
+          "trend": "rising",
+          "note": "Rain pushes trails indoors."
+        },
+        {
+          "key": "mosquito",
+          "label": "Mosquitoes",
+          "emoji": null,
+          "level": "high",
+          "trend": "steady",
+          "note": "Standing water after storms."
+        },
+        {
+          "key": "spider",
+          "label": "Spiders",
+          "emoji": null,
+          "level": "moderate",
+          "trend": "steady",
+          "note": null
+        }
+      ]
+    }
+  },
+  "products": [
+    {
+      "name": "Termidor SC",
+      "category": "insecticide",
+      "target": "Ants",
+      "method": "Exterior perimeter"
+    }
+  ],
+  "customerEmail": "test.customer@example.com",
+  "customerPhone": "+19415550190",
+  "serviceAddress": "1200 Palm Row Ct, Parrish, FL 34219"
+}
