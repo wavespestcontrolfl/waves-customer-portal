@@ -1279,6 +1279,96 @@ describe('backfillExpectedMintAtCommit — frozen-required ≡ will-mint at comm
     })).toBe(true);
   });
 
+  test('dues coverage participates in the freeze — covered-at-commit freezes NOT-required, and the coverage-lapse resume cannot surprise-bill (Codex P2, fix round 12)', () => {
+    // The reported sequence: a backfilled monthly/WaveGuard visit that
+    // membershipDuesCoverVisit covers at commit. Forcing autopayCoversVisit
+    // false in the derivation froze required=TRUE; live shouldInvoice still
+    // suppressed on run one (no visible divergence), but a crash before
+    // succeed + a dues/autopay change before the retry made the resume
+    // honor frozen TRUE and mint for a visit that was covered when it
+    // completed. Coverage is a COMMIT-TIME business rule (payer + autopay +
+    // svc fields, all hoisted above the transaction), so it now freezes
+    // with its real value: covered → required=false — no mint was ever owed.
+    const coveredMemberVisit = {
+      ...AMOUNT_BASE,
+      waveguardTier: 'gold',
+      hasVisitPrice: false,
+      invoiceAmount: 89, // the dues rate the tier branch would bill
+      autopayCoversVisit: true,
+    };
+    expect(backfillExpectedMintAtCommit(coveredMemberVisit)).toBe(false);
+    // …the surprise-bill resume is dead: frozen FALSE governs even though
+    // the live tier branch would now mint (coverage lapsed post-commit).
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false, // dues/autopay changed before the retry
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      annualPrepayCovered: false,
+      createInvoiceOnComplete: false,
+      waveguardTier: 'gold',
+      hasVisitPrice: false,
+      invoiceAmount: 89,
+      autoInvoicePricedVisits: false,
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      visitPerformed: true,
+      typedOneTimeBilling: false,
+      isBackfillCompletion: true,
+      backfillMintRequired: false, // the frozen posture
+    })).toBe(false);
+    // UNCOVERED at commit is unchanged: freezes required=true, and a
+    // later coverage change cannot drop the owed mint — the resume still
+    // mints at the frozen money (posture governs).
+    const uncoveredMemberVisit = { ...coveredMemberVisit, autopayCoversVisit: false };
+    expect(backfillExpectedMintAtCommit(uncoveredMemberVisit)).toBe(true);
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: true, // autopay re-enabled before the retry
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      annualPrepayCovered: false,
+      createInvoiceOnComplete: false,
+      waveguardTier: 'gold',
+      hasVisitPrice: false,
+      invoiceAmount: 89,
+      autoInvoicePricedVisits: false,
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      visitPerformed: true,
+      typedOneTimeBilling: false,
+      isBackfillCompletion: true,
+      backfillMintRequired: true, // the frozen posture
+    })).toBe(false); // live coverage is a SUPPRESSOR — it still wins at mint
+    // (that suppression is the settle-guard convergence, not a dropped
+    // mint: with coverage genuinely back, dues own the visit again. With
+    // coverage still lapsed the posture mints:)
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      annualPrepayCovered: false,
+      createInvoiceOnComplete: false,
+      waveguardTier: null, // tier even cleared post-commit
+      hasVisitPrice: false,
+      invoiceAmount: 89,
+      autoInvoicePricedVisits: false,
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      visitPerformed: true,
+      typedOneTimeBilling: false,
+      isBackfillCompletion: true,
+      backfillMintRequired: true,
+    })).toBe(true);
+  });
+
   test('shapes with no expected mint freeze NOT-required: non-backfill, recap-only, $0, always-free, callback lanes', () => {
     expect(backfillExpectedMintAtCommit({ ...AMOUNT_BASE, isBackfillCompletion: false, createInvoiceOnComplete: true })).toBe(false);
     expect(backfillExpectedMintAtCommit({ ...AMOUNT_BASE, recapReviewOnly: true, createInvoiceOnComplete: true })).toBe(false);
@@ -1300,70 +1390,81 @@ describe('backfillExpectedMintAtCommit — frozen-required ≡ will-mint at comm
   });
 
   test('full-lattice equivalence: for every branch-input combo, frozen-required equals the live mint decision at commit', () => {
-    // The settlement suppressors are fixed OFF (they are post-transaction
-    // lookups; at commit the posture is the suppressor-free will-mint) and
-    // amount fixed positive — the dimensions below are exactly the branch
-    // inputs the decision reads. Delegation makes equality structural; this
-    // pins it against future drift in either function.
+    // The SETTLE-STATE suppressors are fixed OFF (they are post-transaction
+    // settlement lookups; at commit the posture is the settle-state-free
+    // will-mint) and amount fixed positive — the dimensions below are
+    // exactly the branch inputs the decision reads, PLUS the commit-time
+    // business suppressor autopayCoversVisit, which participates with its
+    // REAL value on both sides (fix round 12). Delegation makes equality
+    // structural; this pins it against future drift in either function.
     const bools = [true, false];
-    const suppressorFree = {
+    const settleStateFree = {
       recapReviewOnly: false,
       alreadyPaid: false,
       prepaidCovered: false,
-      autopayCoversVisit: false,
       preMintedInvoice: null,
       existingCompletionInvoice: null,
       annualPrepayCovered: false,
       invoiceAmount: 129,
     };
-    for (const createInvoiceOnComplete of bools) {
-      for (const waveguardTier of ['gold', null]) {
-        for (const explicitPerVisitLane of bools) {
-          for (const perApplicationBilling of bools) {
-            for (const annualPrepayBilling of bools) {
-              for (const hasVisitPrice of bools) {
-                for (const typedOneTimeBilling of bools) {
-                  for (const autoInvoicePricedVisits of bools) {
-                    for (const visitPerformed of bools) {
-                      for (const serviceType of ['Quarterly Pest Control Service', 'Pest Re-Service']) {
-                        const combo = {
-                          createInvoiceOnComplete,
-                          waveguardTier,
-                          explicitMembership: false,
-                          explicitPerVisitLane,
-                          perApplicationBilling,
-                          annualPrepayBilling,
-                          hasVisitPrice,
-                          typedOneTimeBilling,
-                          autoInvoicePricedVisits,
-                          visitPerformed,
-                          serviceType,
-                          isCallback: false,
-                        };
-                        const frozen = backfillExpectedMintAtCommit({
-                          ...combo, isBackfillCompletion: true, recapReviewOnly: false,
-                          invoiceAmount: suppressorFree.invoiceAmount,
-                        });
-                        const willMint = shouldAutoInvoiceCompletion({
-                          ...suppressorFree, ...combo,
-                          isBackfillCompletion: true,
-                          backfillMintRequired: null,
-                        });
-                        expect(frozen).toBe(willMint);
-                        // …and a SUPPLIED posture governs the same combo in
-                        // both directions (round 8's doctrine, broadened to
-                        // every branch): mutated live state can neither drop
-                        // the owed mint nor surprise-bill the resume.
-                        expect(shouldAutoInvoiceCompletion({
-                          ...suppressorFree, ...combo,
-                          isBackfillCompletion: true,
-                          backfillMintRequired: true,
-                        })).toBe(true);
-                        expect(shouldAutoInvoiceCompletion({
-                          ...suppressorFree, ...combo,
-                          isBackfillCompletion: true,
-                          backfillMintRequired: false,
-                        })).toBe(false);
+    for (const autopayCoversVisit of bools) {
+      for (const createInvoiceOnComplete of bools) {
+        for (const waveguardTier of ['gold', null]) {
+          for (const explicitPerVisitLane of bools) {
+            for (const perApplicationBilling of bools) {
+              for (const annualPrepayBilling of bools) {
+                for (const hasVisitPrice of bools) {
+                  for (const typedOneTimeBilling of bools) {
+                    for (const autoInvoicePricedVisits of bools) {
+                      for (const visitPerformed of bools) {
+                        for (const serviceType of ['Quarterly Pest Control Service', 'Pest Re-Service']) {
+                          const combo = {
+                            autopayCoversVisit,
+                            createInvoiceOnComplete,
+                            waveguardTier,
+                            explicitMembership: false,
+                            explicitPerVisitLane,
+                            perApplicationBilling,
+                            annualPrepayBilling,
+                            hasVisitPrice,
+                            typedOneTimeBilling,
+                            autoInvoicePricedVisits,
+                            visitPerformed,
+                            serviceType,
+                            isCallback: false,
+                          };
+                          const frozen = backfillExpectedMintAtCommit({
+                            ...combo, isBackfillCompletion: true, recapReviewOnly: false,
+                            invoiceAmount: settleStateFree.invoiceAmount,
+                          });
+                          const willMint = shouldAutoInvoiceCompletion({
+                            ...settleStateFree, ...combo,
+                            isBackfillCompletion: true,
+                            backfillMintRequired: null,
+                          });
+                          expect(frozen).toBe(willMint);
+                          // Coverage is a SUPPRESSOR in the live decision, so
+                          // covered combos can never freeze required.
+                          if (autopayCoversVisit) expect(frozen).toBe(false);
+                          // …and a SUPPLIED posture governs the same combo in
+                          // both directions (round 8's doctrine, broadened to
+                          // every branch): mutated live state can neither drop
+                          // the owed mint nor surprise-bill the resume. (The
+                          // posture-true leg holds for coverage-free resumes;
+                          // live coverage still suppresses ahead of it — the
+                          // settle-guard convergence, pinned separately.)
+                          expect(shouldAutoInvoiceCompletion({
+                            ...settleStateFree, ...combo,
+                            autopayCoversVisit: false,
+                            isBackfillCompletion: true,
+                            backfillMintRequired: true,
+                          })).toBe(true);
+                          expect(shouldAutoInvoiceCompletion({
+                            ...settleStateFree, ...combo,
+                            isBackfillCompletion: true,
+                            backfillMintRequired: false,
+                          })).toBe(false);
+                        }
                       }
                     }
                   }
@@ -1811,7 +1912,21 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // same hoisted derivations and row columns the shouldInvoice call
       // reads — the frozen posture can never describe a different population
       // than the one the mint decision bills.
-      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*recapReviewOnly,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
+      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
+      // Dues coverage joins the freeze with its REAL value (fix round 12):
+      // the coverage derivation is hoisted above the transaction — one
+      // derivation shared with the invoice block, like every other input —
+      // and the freeze sits after it.
+      expect((source.match(/const autopayCoversVisit = membershipDuesCoverVisit\(\{/g) || []).length).toBe(1);
+      expect((source.match(/const customerAutopayActive = await customerOnAutopay\(\{/g) || []).length).toBe(1);
+      expect((source.match(/let visitIsPayerBilled = false;/g) || []).length).toBe(1);
+      const coverageDeriveAt = source.indexOf('const autopayCoversVisit = membershipDuesCoverVisit({');
+      const freezeCallAt = source.indexOf('const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({');
+      expect(coverageDeriveAt).toBeGreaterThan(-1);
+      expect(freezeCallAt).toBeGreaterThan(coverageDeriveAt);
+      // Neutralization boundary: settle-state suppressors stay forced off in
+      // the derivation; the commit-time business suppressors pass through.
+      expect(source).toMatch(/recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*alreadyPaid: false,\s*\n\s*prepaidCovered: false,\s*\n\s*preMintedInvoice: null,\s*\n\s*existingCompletionInvoice: null,\s*\n\s*annualPrepayCovered: false,/);
       // The stamp lives in the SAME structured_notes object the completion
       // transaction inserts — between the trx open and the serialize — so a
       // crash can never leave a committed-but-unfrozen record. Since fix

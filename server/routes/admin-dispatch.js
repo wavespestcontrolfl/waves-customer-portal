@@ -3492,6 +3492,49 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // commit-time money freeze below and createFromService must read one
     // value (fix round 10).
     const completionInvoiceTaxRate = svc.property_type === 'commercial' ? 0.07 : 0;
+    // Third-party Bill-To + membership dues coverage — hoisted from the
+    // invoice block below (fix round 12): dues coverage is a COMMIT-TIME
+    // business suppressor, and the frozen posture must read the REAL value
+    // (a covered visit owes no mint — freezing required=true would let a
+    // crash-resume after a dues/autopay change surprise-bill covered
+    // membership work). Every input here is knowable at the freeze point:
+    // svc-loaded aliases plus two plain reads (payer resolution;
+    // payment_methods for the chargeable autopay method) on rows the
+    // completion transaction never writes. A payer-billed visit is owed by
+    // the payer's AP inbox, so the customer's autopay/prepay must neither
+    // suppress the AP invoice nor be credited against it — payer resolves
+    // FIRST so every coverage gate can exclude payer visits; resolveForInvoice
+    // never throws (falls back to self-pay), and any lookup error keeps the
+    // existing self-pay flow.
+    let visitIsPayerBilled = false;
+    try {
+      const PayerService = require('../services/payer');
+      const resolvedPayer = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      visitIsPayerBilled = !!resolvedPayer?.payerId;
+    } catch (e) {
+      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
+    }
+    const customerAutopayActive = await customerOnAutopay({
+      id: svc.customer_id,
+      autopay_enabled: svc.cust_autopay_enabled,
+      autopay_paused_until: svc.cust_autopay_paused_until,
+      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
+      ach_status: svc.cust_ach_status,
+    });
+    const autopayCoversVisit = membershipDuesCoverVisit({
+      visitIsPayerBilled,
+      perApplicationBilling,
+      annualPrepayBilling,
+      customerAutopayActive,
+      hasVisitPrice,
+      isRecurring: svc.is_recurring,
+      waveguardTier: svc.cust_waveguard_tier,
+      monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode,
+    });
     // Commit-time REQUIRED-mint posture (Codex P0, fix round 8; broadened
     // fix round 9). The posture reads MUTABLE billing state — the typed
     // profile (completionProfile.billingType via typedOneTimeBillingProfile),
@@ -3507,10 +3550,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // would bill (typed one-time, scheduler-flag, monthly-rate/tier,
     // explicit lanes, gated priced visits) freezes REQUIRED, so a transient
     // mint failure on ANY expected mint fail-closes instead of finalizing
-    // an unbilled closeout through the non-blocking catch.
+    // an unbilled closeout through the non-blocking catch. Dues coverage
+    // participates as a real input (fix round 12): a covered visit freezes
+    // NOT-required — no mint was ever owed for it.
     const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({
       isBackfillCompletion,
       recapReviewOnly,
+      autopayCoversVisit,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -5417,42 +5463,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !(invoiceAmount > 0) && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] ${svc.cust_billing_mode} visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (monthly-rate fallback suppressed for explicit non-monthly lanes) — invoice manually`);
     }
-    // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
-    // so the service customer's autopay/prepay must neither suppress the AP
-    // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
-    // (applyPrepaidCreditToInvoice). Resolve the effective payer up front —
-    // BEFORE autopay coverage is computed — so every coverage gate can exclude
-    // payer visits. resolveForInvoice never throws (it falls back to self-pay),
-    // and we keep the existing self-pay flow on any lookup error.
-    let visitIsPayerBilled = false;
-    try {
-      const PayerService = require('../services/payer');
-      const resolvedPayer = await PayerService.resolveForInvoice({
-        customerId: svc.customer_id,
-        scheduledServiceId: svc.id,
-      });
-      visitIsPayerBilled = !!resolvedPayer?.payerId;
-    } catch (e) {
-      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
-    }
-    const customerAutopayActive = await customerOnAutopay({
-      id: svc.customer_id,
-      autopay_enabled: svc.cust_autopay_enabled,
-      autopay_paused_until: svc.cust_autopay_paused_until,
-      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
-      ach_status: svc.cust_ach_status,
-    });
-    const autopayCoversVisit = membershipDuesCoverVisit({
-      visitIsPayerBilled,
-      perApplicationBilling,
-      annualPrepayBilling,
-      customerAutopayActive,
-      hasVisitPrice,
-      isRecurring: svc.is_recurring,
-      waveguardTier: svc.cust_waveguard_tier,
-      monthlyRate: svc.cust_monthly_rate,
-      billingMode: svc.cust_billing_mode,
-    });
+    // (visitIsPayerBilled + customerAutopayActive + autopayCoversVisit are
+    // hoisted above the completion transaction — fix round 12: dues coverage
+    // is a commit-time business suppressor the frozen posture must read, so
+    // the freeze and this block share one derivation, exactly like the
+    // billing-lane classification and the invoice amount.)
     // A priced recurring visit suppressed by membership coverage is logged +
     // parked for office review AFTER the invoice checks below — see the
     // shouldInvoice block (an already-paid / pre-minted / existing invoice
@@ -9280,18 +9295,38 @@ function backfillTypedOneTimeMintRequired({
 // finalized an unbilled closeout: the exact P0 shape the fail-closed leg
 // exists to stop. So the posture IS the will-mint decision at commit:
 // shouldAutoInvoiceCompletion itself, evaluated on the same commit-time
-// branch inputs the real decision reads, with the SETTLEMENT suppressors
-// neutralized (already-paid / pre-minted / existing invoice / prepaid /
-// annual-prepay / dues coverage are post-transaction lookups; at
-// enforcement time an existing settlement IS the promise kept — the catch
-// only fires on an attempted-and-failed mint, and the decision's own
-// suppressor gate still wins ahead of the frozen posture on every run).
+// branch inputs the real decision reads.
+//
+// Suppressor taxonomy (Codex P2, fix round 12) — two kinds, two treatments:
+//  - SETTLE-STATE suppressors stay NEUTRALIZED: already-paid, pre-minted,
+//    existing invoice, the out-of-band prepaid amount, and annual-prepay
+//    coverage. These describe whether a settlement artifact EXISTS — their
+//    absence at enforcement time means the mint FAILED, never that it was
+//    unowed; at mint time an existing settlement IS the promise kept (the
+//    decision's own suppressor gate still wins ahead of the frozen posture
+//    on every run, and the catch only fires on an attempted-and-failed
+//    mint). Annual-prepay coverage additionally REVALIDATES by design — a
+//    refunded term must bill again on resume, so freezing it would wrongly
+//    pin a since-refunded settlement.
+//  - COMMIT-TIME BUSINESS suppressors PARTICIPATE with their real values:
+//    recapReviewOnly (no invoice ever mints on that path) and
+//    autopayCoversVisit (membership dues cover the visit). Dues coverage is
+//    a business rule about the visit itself, fully knowable at the freeze
+//    point (the route hoists the payer + autopay derivations above the
+//    transaction) — a covered visit owes NO mint, so it must freeze
+//    required=false. Forcing it false froze required=true for covered
+//    membership work; live suppression hid the divergence on run one, but a
+//    crash before succeed plus a dues/autopay change before the retry made
+//    the resume honor frozen TRUE and surprise-bill a visit that was
+//    covered when it completed.
 // Delegating to the real decision function keeps frozen-required ≡
-// will-mint-at-commit for every input combination BY CONSTRUCTION — the
-// lattice test pins the equivalence so the two can never drift.
+// will-mint-at-commit (settle-state-free) for every input combination BY
+// CONSTRUCTION — the lattice test pins the equivalence so the two can
+// never drift.
 function backfillExpectedMintAtCommit({
   isBackfillCompletion = false,
   recapReviewOnly = false,
+  autopayCoversVisit = false,
   createInvoiceOnComplete = false,
   waveguardTier = null,
   explicitMembership = false,
@@ -9308,13 +9343,12 @@ function backfillExpectedMintAtCommit({
 }) {
   if (isBackfillCompletion !== true) return false;
   return shouldAutoInvoiceCompletion({
-    // recapReviewOnly is commit-time-known and genuinely means "no invoice
-    // ever mints on this path" — it participates. The settlement/coverage
-    // suppressors are neutralized per the contract above.
+    // Commit-time business suppressors participate (see taxonomy above);
+    // settle-state suppressors are neutralized.
     recapReviewOnly,
+    autopayCoversVisit,
     alreadyPaid: false,
     prepaidCovered: false,
-    autopayCoversVisit: false,
     preMintedInvoice: null,
     existingCompletionInvoice: null,
     annualPrepayCovered: false,
