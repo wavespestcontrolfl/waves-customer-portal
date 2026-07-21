@@ -722,14 +722,26 @@ async function classifyTrips(ids, purpose) {
     updated++;
     deductionTotal += deduction;
   }
-  // Recompute the affected daily summaries so mileage dashboards agree with
-  // the reclassification (same call the admin-mileage PUT path makes).
+  // Recompute the affected daily AND monthly summaries so mileage
+  // dashboards agree with the reclassification (the monthly cron only
+  // regenerates the PREVIOUS month — an older trip's month would otherwise
+  // stay stale indefinitely).
+  const monthKeys = new Set();
   for (const key of summaryKeys) {
     const [equipmentId, day] = key.split('|');
     try {
       await mileageService.computeDailySummary(equipmentId, day);
     } catch (err) {
-      logger.warn(`[tax] mileage summary recompute failed for ${equipmentId} ${day}: ${err.message}`);
+      logger.warn(`[tax] mileage daily summary recompute failed for ${equipmentId} ${day}: ${err.message}`);
+    }
+    monthKeys.add(`${equipmentId}|${day.slice(0, 7)}`);
+  }
+  for (const key of monthKeys) {
+    const [equipmentId, month] = key.split('|');
+    try {
+      await mileageService.computeMonthlySummary(equipmentId, `${month}-01`);
+    } catch (err) {
+      logger.warn(`[tax] mileage monthly summary recompute failed for ${equipmentId} ${month}: ${err.message}`);
     }
   }
   return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100 };

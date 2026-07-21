@@ -702,7 +702,6 @@ async function getIrsReport(year) {
   try {
     const yearStart = `${year}-01-01`;
     const yearEnd = `${year}-12-31`;
-    const irsRate = getIrsRate(year);
 
     const trips = await db('mileage_log')
       .where('trip_date', '>=', yearStart)
@@ -720,6 +719,7 @@ async function getIrsReport(year) {
     let ytdBusiness = 0;
     let ytdPersonal = 0;
     let ytdTrips = 0;
+    let ytdDeduction = 0;
 
     for (const trip of trips) {
       const tripDate = typeof trip.trip_date === 'string' ? trip.trip_date : trip.trip_date.toISOString().split('T')[0];
@@ -727,9 +727,16 @@ async function getIrsReport(year) {
       const miles = parseFloat(trip.distance_miles || 0);
       const isBiz = trip.is_business !== false && trip.purpose !== 'personal';
 
+      // Each trip deducts at ITS OWN date-effective rate — a single yearly
+      // rate misstated H2 miles whenever the IRS changed the rate mid-year.
+      const tripDeduction = isBiz
+        ? parseFloat((miles * getIrsRate(tripDate)).toFixed(2))
+        : 0;
+
       if (monthMap[monthKey]) {
         monthMap[monthKey].total_miles += miles;
         monthMap[monthKey].trip_count += 1;
+        monthMap[monthKey].irs_deduction += tripDeduction;
         if (isBiz) {
           monthMap[monthKey].business_miles += miles;
         } else {
@@ -739,29 +746,31 @@ async function getIrsReport(year) {
 
       ytdTotal += miles;
       ytdTrips += 1;
+      ytdDeduction += tripDeduction;
       if (isBiz) ytdBusiness += miles;
       else ytdPersonal += miles;
     }
 
-    // Calculate deductions
     const months = Object.values(monthMap).map(m => ({
       ...m,
       total_miles: parseFloat(m.total_miles.toFixed(2)),
       business_miles: parseFloat(m.business_miles.toFixed(2)),
       personal_miles: parseFloat(m.personal_miles.toFixed(2)),
-      irs_deduction: parseFloat((m.business_miles * irsRate).toFixed(2)),
+      irs_deduction: parseFloat(m.irs_deduction.toFixed(2)),
     }));
 
     return {
       year,
-      irs_rate: irsRate,
+      // Informational: the rate in force at the START of the year (the
+      // per-month/per-trip figures above use each trip's own rate).
+      irs_rate: getIrsRate(year),
       months,
       ytd: {
         total_miles: parseFloat(ytdTotal.toFixed(2)),
         business_miles: parseFloat(ytdBusiness.toFixed(2)),
         personal_miles: parseFloat(ytdPersonal.toFixed(2)),
         trip_count: ytdTrips,
-        irs_deduction: parseFloat((ytdBusiness * irsRate).toFixed(2)),
+        irs_deduction: parseFloat(ytdDeduction.toFixed(2)),
         business_pct: ytdTotal > 0 ? parseFloat(((ytdBusiness / ytdTotal) * 100).toFixed(1)) : 100,
       },
     };
@@ -784,7 +793,6 @@ async function exportIrsCsv(year) {
   try {
     const yearStart = `${year}-01-01`;
     const yearEnd = `${year}-12-31`;
-    const irsRate = getIrsRate(year);
 
     const trips = await db('mileage_log')
       .where('trip_date', '>=', yearStart)
@@ -800,16 +808,21 @@ async function exportIrsCsv(year) {
       const endAddr = (t.end_address || '').replace(/"/g, '""');
       const miles = parseFloat(t.distance_miles || 0).toFixed(2);
       const purpose = t.classification_notes || t.purpose || 'business';
-      const deduction = parseFloat((parseFloat(t.distance_miles || 0) * irsRate).toFixed(2));
+      // Per-row date-effective rate — one yearly rate misstated H2 rows
+      // whenever the IRS changed the rate mid-year.
+      const deduction = parseFloat((parseFloat(t.distance_miles || 0) * getIrsRate(date)).toFixed(2));
       return `${date},"${startAddr}","${endAddr}",${miles},"${purpose.replace(/"/g, '""')}",${deduction}`;
     });
 
     let csv = header + '\n' + rows.join('\n');
 
-    // Add totals row
+    // Totals sum the rounded per-row deductions (rates vary within a year).
     const totalMiles = trips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const totalDeduction = parseFloat((totalMiles * irsRate).toFixed(2));
-    csv += `\n\nTOTAL,,,"${totalMiles.toFixed(2)}","IRS Rate: $${irsRate}/mile","$${totalDeduction.toFixed(2)}"`;
+    const totalDeduction = trips.reduce((s, t) => {
+      const date = typeof t.trip_date === 'string' ? t.trip_date : t.trip_date.toISOString().split('T')[0];
+      return s + parseFloat((parseFloat(t.distance_miles || 0) * getIrsRate(date)).toFixed(2));
+    }, 0);
+    csv += `\n\nTOTAL,,,"${totalMiles.toFixed(2)}","Date-effective IRS rates","$${totalDeduction.toFixed(2)}"`;
 
     return csv;
   } catch (err) {

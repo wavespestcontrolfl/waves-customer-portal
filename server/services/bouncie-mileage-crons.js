@@ -117,7 +117,12 @@ function initBouncieMileageCrons() {
         .whereNull('customer_id')
         .where('trip_date', '>=', startDate)
         .whereNotNull('end_lat')
-        .whereNotNull('end_lng');
+        .whereNotNull('end_lng')
+        // Never overwrite an operator's explicit classification: a trip
+        // reviewed as personal in the Tax Center must not silently become
+        // deductible because its endpoint matched a job.
+        .whereNot('classification_method', 'manual_review')
+        .whereNot('purpose', 'personal');
 
       let matched = 0;
 
@@ -136,14 +141,20 @@ function initBouncieMileageCrons() {
           );
 
           if (jobMatch) {
+            const rate = mileageService.getIrsRate(tripDate);
             await db('mileage_log')
               .where('id', trip.id)
               .update({
                 customer_id: jobMatch.customer_id,
                 job_id: jobMatch.job_id,
+                // All canonical classification fields move together —
+                // is_business alone left purpose/rate contradicting it.
+                purpose: 'business',
                 is_business: true,
+                classification_method: 'job_match',
                 classification_notes: `Re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron)`,
-                deduction_amount: parseFloat(trip.distance_miles) * mileageService.getIrsRate(tripDate),
+                irs_rate: rate,
+                deduction_amount: parseFloat((parseFloat(trip.distance_miles || 0) * rate).toFixed(2)),
                 updated_at: db.fn.now(),
               });
             matched++;
