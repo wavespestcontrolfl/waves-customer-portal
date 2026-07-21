@@ -172,10 +172,24 @@ function assemblePnl({
 }
 
 /**
+ * Degrade to a fallback ONLY when the source table doesn't exist (Postgres
+ * 42P01 undefined_table — dev environments behind on migrations). Every other
+ * failure (connection, permission, bad column, syntax) PROPAGATES: the old
+ * blanket catches turned exactly those errors into a plausible all-zero
+ * report for months, which is the failure mode this module exists to kill.
+ */
+function missingTableOnly(fallback) {
+  return (err) => {
+    if (err && err.code === '42P01') return fallback;
+    throw err;
+  };
+}
+
+/**
  * Run the P&L queries for [startDate, endDate] (inclusive ET calendar dates)
  * and assemble the report. Every source column verified against the live
  * schema 2026-07-20. Individual sources still degrade to zero on a missing
- * TABLE (dev environments), but no longer on silently-wrong column names.
+ * TABLE (dev environments), but every other error propagates to the caller.
  */
 async function buildPnlReport(db, startDate, endDate) {
   const [revRow, laborRow, financialsRow, matRow, opexRows, mileageRow, assets] = await Promise.all([
@@ -184,23 +198,23 @@ async function buildPnlReport(db, startDate, endDate) {
       .whereBetween('payment_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
       .first()
-      .catch(() => ({ total: '0' })),
+      .catch(missingTableOnly({ total: '0' })),
     db('time_entry_daily_summary')
       .whereBetween('work_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(total_job_minutes)::text, '0') as minutes"))
       .first()
-      .catch(() => ({ minutes: '0' })),
+      .catch(missingTableOnly({ minutes: '0' })),
     db('company_financials')
       .orderBy('effective_date', 'desc')
       .first()
-      .catch(() => null),
+      .catch(missingTableOnly(null)),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
       .whereIn('expense_categories.name', COGS_CATEGORIES)
       .select(db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"))
       .first()
-      .catch(() => ({ total: '0' })),
+      .catch(missingTableOnly({ total: '0' })),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
@@ -213,18 +227,18 @@ async function buildPnlReport(db, startDate, endDate) {
       .select('expense_categories.name as category', 'expense_categories.irs_line')
       .sum('expenses.amount as total')
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
-      .catch(() => []),
+      .catch(missingTableOnly([])),
     db('mileage_log')
       .whereBetween('trip_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(deduction_amount)::text, '0') as total"))
       .first()
-      .catch(() => ({ total: '0' })),
+      .catch(missingTableOnly({ total: '0' })),
     db('equipment_register')
       .where('active', true)
       .where(function notDisposed() { this.whereNull('disposed').orWhere('disposed', false); })
       .whereNotNull('annual_depreciation')
       .select('annual_depreciation', 'placed_in_service_date', 'purchase_date')
-      .catch(() => []),
+      .catch(missingTableOnly([])),
   ]);
 
   return assemblePnl({
@@ -244,6 +258,7 @@ module.exports = {
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,
+  missingTableOnly,
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
 };

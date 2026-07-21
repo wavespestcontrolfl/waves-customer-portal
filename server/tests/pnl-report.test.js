@@ -17,8 +17,24 @@ const {
   assemblePnl,
   prorateDepreciation,
   getPeriodRange,
+  missingTableOnly,
   DEFAULT_LOADED_LABOR_RATE,
 } = require('../services/pnl-report');
+
+describe('missingTableOnly', () => {
+  test('substitutes the fallback only for undefined_table (42P01)', () => {
+    const err = new Error('relation "mileage_log" does not exist');
+    err.code = '42P01';
+    expect(missingTableOnly({ total: '0' })(err)).toEqual({ total: '0' });
+  });
+
+  test('rethrows every other error — no silent zeros', () => {
+    const err = new Error('column "payment_date" does not exist');
+    err.code = '42703';
+    expect(() => missingTableOnly({ total: '0' })(err)).toThrow('payment_date');
+    expect(() => missingTableOnly([])(new Error('connection refused'))).toThrow('connection refused');
+  });
+});
 
 describe('assemblePnl', () => {
   test('includes NULL-category expenses as Uncategorized opex', () => {
