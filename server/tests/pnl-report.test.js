@@ -174,6 +174,9 @@ describe('assemblePnl', () => {
       opexRows: [{ category: 'Rent', irs_line: '20b', total: '1000' }],
       mileageDeduction: 700,
       depreciationTotal: 300,
+      // Mileage only reaches `deductions` under an explicit standard-mileage
+      // election; unelected fails closed (covered in the line-9 suite below).
+      vehicleMethod: 'standard_mileage',
     });
     expect(out.cogs.total).toBe(1000);
     expect(out.grossProfit).toBe(9000);
@@ -307,5 +310,74 @@ describe('getPeriodRange', () => {
       startDate: '2026-02-01',
       endDate: '2026-02-28',
     });
+  });
+});
+
+describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () => {
+  // Both sides of line 9 present, so every branch has something to drop.
+  const inputs = {
+    serviceRevenue: 10000,
+    opexRows: [
+      { category: 'Vehicle Expenses', irs_line: '9', total: '2400.00' },
+      { category: 'Insurance', irs_line: '15', total: '600.00' },
+    ],
+    mileageDeduction: 3300,
+  };
+
+  test('unelected FAILS CLOSED: keeps actual vehicle expenses, drops mileage', () => {
+    const out = assemblePnl(inputs);
+    expect(out.vehicleDeduction.elected).toBe(false);
+    expect(out.vehicleDeduction.method).toBeNull();
+    // Recorded cash stays as opex; the computed deduction does not count.
+    expect(out.operatingExpenses.total).toBe(3000);
+    expect(out.deductions.mileage).toBe(0);
+    expect(out.deductions.total).toBe(0);
+    // The dropped amount is disclosed, not silently missing.
+    expect(out.vehicleDeduction.excludedMileage).toBe(3300);
+    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(0);
+    expect(out.netIncome).toBe(7000);
+  });
+
+  test('standard_mileage counts mileage and excludes Vehicle Expenses opex', () => {
+    const out = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage' });
+    expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')).toBeUndefined();
+    expect(out.operatingExpenses.total).toBe(600); // insurance only
+    expect(out.deductions.mileage).toBe(3300);
+    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(2400);
+    expect(out.vehicleDeduction.excludedMileage).toBe(0);
+    expect(out.netIncome).toBe(6100);
+  });
+
+  test('actual_expenses counts Vehicle Expenses opex and excludes mileage', () => {
+    const out = assemblePnl({ ...inputs, vehicleMethod: 'actual_expenses' });
+    expect(out.operatingExpenses.total).toBe(3000);
+    expect(out.deductions.mileage).toBe(0);
+    expect(out.vehicleDeduction.excludedMileage).toBe(3300);
+    expect(out.netIncome).toBe(7000);
+  });
+
+  test('line 9 is never deducted twice under any election', () => {
+    for (const vehicleMethod of [null, 'standard_mileage', 'actual_expenses']) {
+      const out = assemblePnl({ ...inputs, vehicleMethod });
+      const vehOpex = out.operatingExpenses.categories
+        .find(c => c.name === 'Vehicle Expenses')?.amount || 0;
+      // At most ONE side of line 9 may carry value.
+      expect(Math.min(vehOpex, out.deductions.mileage)).toBe(0);
+    }
+  });
+
+  test('unrecognized method strings fall back to unelected, never to a deduction', () => {
+    for (const bad of ['STANDARD_MILEAGE', 'mileage', '', 'actual', 0, true, {}]) {
+      const out = assemblePnl({ ...inputs, vehicleMethod: bad });
+      expect(out.vehicleDeduction.method).toBeNull();
+      expect(out.deductions.mileage).toBe(0);
+    }
+  });
+
+  test('election is inert when neither side has value', () => {
+    const out = assemblePnl({ serviceRevenue: 500, vehicleMethod: 'standard_mileage' });
+    expect(out.deductions.total).toBe(0);
+    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(0);
+    expect(out.netIncome).toBe(500);
   });
 });

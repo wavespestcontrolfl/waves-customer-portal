@@ -115,16 +115,17 @@ async function processVendorInvoice(email, classification) {
       let deductibleAmount = amount;
       if (!categoryRow) {
         try {
-          const { autoCategorizeExpense, sanitizeDeductiblePercent } = require('../expense-categorizer');
+          const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
           const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
           if (ai?.categoryId) {
             categoryRow = { id: ai.categoryId };
-            // deductiblePercent is untrusted (email-influenced AI output) —
-            // only a validated partial percent may reduce the deduction.
-            const pct = sanitizeDeductiblePercent(ai.deductiblePercent);
-            if (pct !== null) {
-              deductibleAmount = parseFloat((amount * pct / 100).toFixed(2));
-            }
+            // Partial deduction is derived from the MATCHED category's
+            // server-owned policy (e.g. meals 50%), never the email-influenced
+            // model output — resolve the canonical name to key it, since the
+            // categorizer's echoed name can differ in case.
+            const named = await db('expense_categories').where({ id: ai.categoryId }).first('name');
+            const partial = categoryDeductibleAmount(named?.name, amount);
+            if (partial !== null) deductibleAmount = partial;
           }
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);

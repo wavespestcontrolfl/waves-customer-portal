@@ -811,12 +811,20 @@ function ExpensesTab() {
   );
   const [categorizing, setCategorizing] = useState(false);
 
-  const uncategorizedCount = expenses.filter((e) => !e.categoryId).length;
+  // The button's count and the server's scope MUST come from the same rows:
+  // send the visible uncategorized ids (plus the year filter) so a run can
+  // never mutate expenses the operator isn't looking at, and so `remaining`
+  // reports the backlog on THIS screen. Capped at the route's 500 max.
+  const uncategorizedIds = expenses
+    .filter((e) => !e.categoryId)
+    .map((e) => e.id)
+    .slice(0, 500);
+  const uncategorizedCount = uncategorizedIds.length;
 
   const runAutoCategorize = async () => {
     if (
       !window.confirm(
-        "AI-categorize up to 20 uncategorized expenses into Schedule C categories? Each pick is recorded and reviewable — run again to continue through the backlog.",
+        `AI-categorize up to 20 of the ${uncategorizedCount} uncategorized ${yearFilter} expenses shown into Schedule C categories? Each pick is recorded and reviewable — run again to continue through the backlog.`,
       )
     ) {
       return;
@@ -825,7 +833,11 @@ function ExpensesTab() {
     try {
       const r = await adminFetch("/admin/tax/expenses/auto-categorize", {
         method: "POST",
-        body: JSON.stringify({ limit: 20 }),
+        body: JSON.stringify({
+          limit: 20,
+          year: yearFilter,
+          ids: uncategorizedIds,
+        }),
       });
       alert(
         `Categorized ${r.applied} of ${r.processed} — ${r.remaining} uncategorized remaining${r.remaining > 0 ? " (run again to continue)" : ""}`,
@@ -3114,6 +3126,42 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow label="Total Deductions" value={pnl.deductions?.total} bold />{" "}
+          {pnl.vehicleDeduction &&
+            !pnl.vehicleDeduction.elected &&
+            pnl.vehicleDeduction.excludedMileage > 0 && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "8px 10px",
+                  border: `1px solid ${D.amber}`,
+                  borderRadius: 6,
+                  color: D.amber,
+                  fontSize: 12,
+                  lineHeight: 1.45,
+                }}
+              >
+                {fmtM(pnl.vehicleDeduction.excludedMileage)} of classified
+                mileage is excluded until you elect a vehicle deduction method.
+                Standard mileage and actual vehicle expenses are the same
+                Schedule&nbsp;C line and can&apos;t both be deducted — set the
+                election in Financial Settings once your CPA confirms it.
+              </div>
+            )}{" "}
+          {pnl.vehicleDeduction?.methodConflict && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "8px 10px",
+                border: `1px solid ${D.red}`,
+                borderRadius: 6,
+                color: D.red,
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {pnl.vehicleDeduction.methodConflict.note}
+            </div>
+          )}{" "}
           <div style={{ height: 16 }} />{" "}
           <div
             style={{

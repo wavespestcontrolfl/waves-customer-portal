@@ -96,4 +96,32 @@ function sanitizeDeductiblePercent(v) {
   return ALLOWED_PARTIAL_DEDUCTION_PERCENTS.has(n) ? n : null;
 }
 
-module.exports = { autoCategorizeExpense, sanitizeDeductiblePercent };
+/**
+ * Server-owned partial-deduction policy keyed by the MATCHED category name —
+ * NOT by the model's echoed `deductiblePercent`. The model picking
+ * "Meals & Entertainment" but omitting (or overstating) the field must still
+ * yield the IRS 50% limitation, so the percent is derived from the category
+ * the server resolved, not from untrusted output. Values still pass through
+ * sanitizeDeductiblePercent so an un-sanctioned entry is inert rather than
+ * shipping a new deduction rule. A category with no entry means "full amount".
+ * expense_categories has only an is_deductible boolean — no percent column —
+ * so this map is where the graduated policy lives.
+ */
+const CATEGORY_DEDUCTIBLE_PCT = { 'Meals & Entertainment': 50 };
+
+/**
+ * The deductible amount for `amount` under the matched category's policy, or
+ * null to mean "leave the full amount" (no partial policy applies).
+ */
+function categoryDeductibleAmount(categoryName, amount) {
+  const pct = sanitizeDeductiblePercent(CATEGORY_DEDUCTIBLE_PCT[categoryName]);
+  if (pct === null) return null;
+  return parseFloat(((Number(amount) || 0) * pct / 100).toFixed(2));
+}
+
+module.exports = {
+  autoCategorizeExpense,
+  sanitizeDeductiblePercent,
+  CATEGORY_DEDUCTIBLE_PCT,
+  categoryDeductibleAmount,
+};

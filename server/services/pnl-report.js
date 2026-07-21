@@ -36,12 +36,27 @@
  *                  within the window (same proration everywhere, including the
  *                  tax package, which previously summed full-year amounts).
  *
- * NOTE — standard-mileage vs actual vehicle expenses: both currently flow
- * through (mileage as a deduction, any "Vehicle Expenses" category as opex).
- * The IRS method election is an owner/CPA decision, parked with Adam; until
- * it's made, every prod trip carries a $0 deduction (unclassified), so no
- * double-count is live. When the mileage-classification lane ships, wire the
- * elected method here and exclude the other side.
+ * VEHICLE METHOD ELECTION — standard mileage and actual vehicle expenses are
+ * the SAME Schedule C line 9 ("Car and truck expenses"): the `Vehicle
+ * Expenses` category carries irs_line '9' and mileage_log.deduction_amount is
+ * that same line by another route. The IRS lets you deduct one, never both.
+ * company_financials.vehicle_deduction_method elects which side counts:
+ *
+ *   'standard_mileage' — mileage deduction counts; Vehicle Expenses opex is
+ *                        excluded (still reported, as `excluded`).
+ *   'actual_expenses'  — Vehicle Expenses opex counts; mileage is excluded.
+ *   NULL (unelected)   — FAIL CLOSED: keep actual vehicle expenses (real
+ *                        recorded cash) and EXCLUDE the computed mileage
+ *                        deduction. Understating a deduction is the safe
+ *                        direction; manufacturing one is not.
+ *
+ * Every branch reports what it excluded in `vehicleDeduction`, so the number
+ * dropped is always visible rather than silently missing — same disclosure
+ * posture as the coverage note below. NULL is deliberately not treated as
+ * standard mileage: a vehicle depreciated under MACRS/§179 is BARRED from the
+ * standard mileage rate for its remaining life (Pub 463), and prod's register
+ * carries the van on MACRS — so defaulting would invent an unclaimable
+ * deduction. buildPnlReport surfaces that conflict as `methodConflict`.
  *
  * assemblePnl() is pure (no I/O) and unit-tested; buildPnlReport() runs the
  * queries and feeds it.
@@ -50,6 +65,14 @@
 const { etParts, etDateString } = require('../utils/datetime-et');
 
 const COGS_CATEGORIES = ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'];
+// Schedule C line 9 category — the actual-expenses side of the vehicle
+// election. Matched by NAME because that's the seeded identity
+// (20260401000069_tax_intelligence.js) and what the categorizer assigns.
+const VEHICLE_EXPENSE_CATEGORY = 'Vehicle Expenses';
+const VEHICLE_METHODS = ['standard_mileage', 'actual_expenses'];
+// Depreciation methods that disqualify a vehicle from the standard mileage
+// rate for the rest of its life (Pub 463).
+const MILEAGE_BARRING_METHODS = ['MACRS', 'section_179', 'bonus_100'];
 const DEFAULT_LOADED_LABOR_RATE = 35; // matches job-costing.js fallback
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -186,15 +209,31 @@ function assemblePnl({
   processingFees = 0,
   mileageDeduction = 0,
   depreciationTotal = 0,
+  vehicleMethod = null,
 } = {}) {
   const revenue = round2(serviceRevenue);
   const other = round2(otherRevenue);
   const labor = round2(laborCost);
   const materials = round2(materialsCost);
 
+  // ── Schedule C line 9: exactly one side of the vehicle election counts ──
+  // Unelected (NULL) fails closed to the actual-expenses side: recorded cash
+  // stays, the computed mileage figure is dropped. See the module header.
+  const method = VEHICLE_METHODS.includes(vehicleMethod) ? vehicleMethod : null;
+  const useStandardMileage = method === 'standard_mileage';
+  const rawMileage = round2(Number(mileageDeduction) || 0);
+  const countedMileage = useStandardMileage ? rawMileage : 0;
+
   const byCategory = new Map();
+  let excludedVehicleExpenses = 0;
   for (const row of opexRows) {
     const name = row.category || 'Uncategorized';
+    // Drop the actual-expenses side ONLY when standard mileage is elected —
+    // never on NULL, or an unelected P&L would lose both sides of line 9.
+    if (useStandardMileage && name === VEHICLE_EXPENSE_CATEGORY) {
+      excludedVehicleExpenses = round2(excludedVehicleExpenses + (parseFloat(row.total) || 0));
+      continue;
+    }
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
     prev.amount = round2(prev.amount + (parseFloat(row.total) || 0));
     byCategory.set(name, prev);
@@ -216,7 +255,7 @@ function assemblePnl({
   const totalRevenue = round2(revenue + other);
   const cogsTotal = round2(labor + materials);
   const grossProfit = round2(totalRevenue - cogsTotal);
-  const deductionsTotal = round2((Number(mileageDeduction) || 0) + (Number(depreciationTotal) || 0));
+  const deductionsTotal = round2(countedMileage + (Number(depreciationTotal) || 0));
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
   return {
@@ -226,9 +265,18 @@ function assemblePnl({
     grossMargin: totalRevenue > 0 ? grossProfit / totalRevenue : 0,
     operatingExpenses: { categories: opexCategories, total: opexTotal },
     deductions: {
-      mileage: round2(mileageDeduction),
+      mileage: countedMileage,
       depreciation: round2(depreciationTotal),
       total: deductionsTotal,
+    },
+    // What line 9 actually did, always reported — an excluded amount is
+    // disclosed, never silently missing.
+    vehicleDeduction: {
+      method,                       // null = unelected
+      elected: method !== null,
+      countedMileage,
+      excludedMileage: useStandardMileage ? 0 : rawMileage,
+      excludedVehicleExpenses,
     },
     netIncome,
     netMargin: totalRevenue > 0 ? netIncome / totalRevenue : 0,
@@ -496,7 +544,8 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets] = await Promise.all([
+  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets,
+    financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
@@ -556,7 +605,30 @@ async function buildPnlReport(db, startDate, endDate) {
         'depreciation_method', 'section_179_elected', 'section_179_amount', 'purchase_cost',
       )
       .catch(missingTableOnly([])),
+    // The vehicle-method election (newest financials row, same accessor every
+    // other company_financials consumer uses) and any register vehicle whose
+    // depreciation method bars the standard mileage rate.
+    db('company_financials')
+      .orderBy('effective_date', 'desc')
+      .select('vehicle_deduction_method')
+      .first()
+      .catch(missingTableOnly(null)),
+    db('equipment_register')
+      .where('asset_category', 'vehicle')
+      .where(function stillHeld() {
+        this.where('active', true).orWhere('disposed', false);
+      })
+      .where(function barred() {
+        this.whereIn('depreciation_method', MILEAGE_BARRING_METHODS)
+          .orWhere('section_179_elected', true);
+      })
+      .select('name', 'depreciation_method', 'section_179_elected')
+      .catch(missingTableOnly([])),
   ]);
+
+  const vehicleMethod = VEHICLE_METHODS.includes(financialsRow?.vehicle_deduction_method)
+    ? financialsRow.vehicle_deduction_method
+    : null;
 
   const report = assemblePnl({
     serviceRevenue,
@@ -574,7 +646,25 @@ async function buildPnlReport(db, startDate, endDate) {
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
     depreciationTotal: prorateDepreciation(assets, startDate, endDate),
+    vehicleMethod,
   });
+
+  // Pub 463 conflict: standard mileage elected while a held vehicle carries
+  // MACRS/§179 depreciation, which disqualifies that vehicle from the rate.
+  // Reported, never auto-corrected — reversing an election is a CPA call.
+  if (vehicleMethod === 'standard_mileage' && (barredVehicles || []).length > 0) {
+    report.vehicleDeduction.methodConflict = {
+      reason: 'depreciation_bars_standard_mileage',
+      vehicles: barredVehicles.map((v) => ({
+        name: v.name,
+        method: v.section_179_elected ? 'section_179' : v.depreciation_method,
+      })),
+      note: 'Standard mileage is elected, but these vehicles were depreciated '
+        + 'under MACRS/§179 — IRS Pub 463 bars the standard mileage rate for a '
+        + 'vehicle for the rest of its life once that depreciation is claimed. '
+        + 'Confirm the election with your CPA.',
+    };
+  }
 
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
   // synced payout-transaction ledger, which lags until each payout is paid
@@ -663,6 +753,9 @@ module.exports = {
   dateCellStr,
   missingTableOnly,
   COGS_CATEGORIES,
+  VEHICLE_EXPENSE_CATEGORY,
+  VEHICLE_METHODS,
+  MILEAGE_BARRING_METHODS,
   DEFAULT_LOADED_LABOR_RATE,
   OUTFLOW_REPORTING_CATEGORIES,
   CATEGORYLESS_TXN_TYPES,

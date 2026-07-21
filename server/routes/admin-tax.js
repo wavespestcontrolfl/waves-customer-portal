@@ -378,11 +378,14 @@ router.post('/expenses', async (req, res, next) => {
         aiCategory = await autoCategorizeExpense(vendorName, description, amount);
         if (aiCategory?.categoryId) {
           categoryId = aiCategory.categoryId;
-          // Untrusted AI output — only a validated partial percent may
-          // reduce the deduction (see sanitizeDeductiblePercent).
-          const pct = sanitizeDeductiblePercent(aiCategory.deductiblePercent);
-          if (pct !== null) {
-            deductibleAmount = deductibleAmount ?? parseFloat((amount * pct / 100).toFixed(2));
+          // Same server-owned policy as the batch route: the partial
+          // deduction comes from the MATCHED CATEGORY's canonical name, not
+          // from the model's deductiblePercent (which it can omit or
+          // overstate). An operator-supplied deductibleAmount still wins.
+          const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+          const partial = categoryDeductibleAmount(cat?.name, amount);
+          if (partial !== null) {
+            deductibleAmount = deductibleAmount ?? partial;
           }
         }
       } catch (err) {
@@ -526,7 +529,16 @@ router.post('/advisor/run', async (req, res, next) => {
 // Shared with the email invoice-processor — see
 // server/services/expense-categorizer.js (extracted 2026-07-21 so emailed
 // vendor invoices stop landing uncategorized).
-const { autoCategorizeExpense, sanitizeDeductiblePercent } = require('../services/expense-categorizer');
+const { autoCategorizeExpense, categoryDeductibleAmount } = require('../services/expense-categorizer');
+
+// Partial-deduction policy is SERVER-owned and derived from the MATCHED
+// category — never from the model's deductiblePercent. Keying off the model
+// meant a meal the AI correctly filed under "Meals & Entertainment" was
+// deducted at 100% whenever the model omitted the field or answered 100.
+// The policy is derived from the MATCHED category name and lives in the
+// shared expense-categorizer service (categoryDeductibleAmount) so the three
+// call sites — this route's POST /expenses and /expenses/auto-categorize, and
+// the email invoice-processor — share one source of truth.
 
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE LOG (Bouncie GPS Integration)
@@ -779,25 +791,55 @@ router.post('/mileage/bulk-classify', async (req, res, next) => {
 // expenses (oldest first). Operator-triggered from the Expenses tab; results
 // come back per-expense so the picks are reviewable. Failures on one expense
 // never abort the batch.
+// { limit?, year?, ids? } — the scope must match what the operator can SEE.
+// The tab counts its button from the rows it loaded for the selected tax
+// year, so a global oldest-first sweep mutated expenses off-screen and could
+// leave the visible backlog unchanged after a "successful" run.
 router.post('/expenses/auto-categorize', async (req, res, next) => {
   try {
     const rawLimit = parseInt(req.body?.limit, 10);
     const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
-    const uncategorized = await db('expenses')
-      .whereNull('category_id')
+    // ids = the exact visible backlog (bounded like bulk-classify); year =
+    // the tab's filter. Neither supplied keeps the old whole-table behavior
+    // for callers with no view to agree with (scripts, IB tools).
+    const { ids, year } = req.body || {};
+    if (ids !== undefined && (!Array.isArray(ids) || ids.length === 0 || ids.length > 500)) {
+      return res.status(400).json({ error: 'ids must be a non-empty array (max 500)' });
+    }
+    if (year !== undefined && !/^\d{4}$/.test(String(year))) {
+      return res.status(400).json({ error: 'year must be a 4-digit year' });
+    }
+    // ONE builder feeds both the batch selection and the `remaining` count —
+    // a differently-scoped count is exactly what let the tab report a
+    // backlog the run never touched.
+    const scoped = () => {
+      let q = db('expenses').whereNull('category_id');
+      if (ids !== undefined) q = q.whereIn('id', ids);
+      if (year !== undefined) q = q.where('tax_year', String(year));
+      return q;
+    };
+    const uncategorized = await scoped()
       .orderBy('expense_date', 'asc')
       .limit(limit)
       .select('id', 'vendor_name', 'description', 'amount');
+    // Canonical category names for the server-owned partial-deduction
+    // policy — resolved from the row the AI matched, never from its echoed
+    // categoryName string.
+    const categoryNames = new Map(
+      (await db('expense_categories').select('id', 'name')).map(c => [String(c.id), c.name]),
+    );
     const results = [];
     for (const exp of uncategorized) {
       try {
         const ai = await autoCategorizeExpense(exp.vendor_name, exp.description, exp.amount);
         if (ai?.categoryId) {
           const update = { category_id: ai.categoryId, updated_at: new Date() };
-          // Untrusted AI output — validated partial percents only.
-          const pct = sanitizeDeductiblePercent(ai.deductiblePercent);
-          if (pct !== null) {
-            update.tax_deductible_amount = parseFloat((exp.amount * pct / 100).toFixed(2));
+          // Partial deduction follows the MATCHED CATEGORY, not the model's
+          // deductiblePercent — a 50%-limited meal must land at 50% even
+          // when the model omits the field or claims 100.
+          const partial = categoryDeductibleAmount(categoryNames.get(String(ai.categoryId)), exp.amount);
+          if (partial !== null) {
+            update.tax_deductible_amount = partial;
           }
           await db('expenses').where({ id: exp.id }).update(update);
           results.push({ id: exp.id, description: exp.description, category: ai.categoryName, reasoning: ai.reasoning, applied: true });
@@ -808,7 +850,7 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
         results.push({ id: exp.id, description: exp.description, applied: false, error: err.message });
       }
     }
-    const remaining = await db('expenses').whereNull('category_id').count('* as n').first();
+    const remaining = await scoped().count('* as n').first();
     res.json({
       success: true,
       processed: results.length,

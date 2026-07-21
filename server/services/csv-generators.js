@@ -163,6 +163,22 @@ function pnlToCSV(pnlData) {
     lines.push(row(['', '']));
     lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));
   }
+  // Vehicle deduction election — disclose any classified mileage excluded
+  // because no method is elected, and any Pub 463 conflict, so the CPA sees
+  // the dropped figure rather than a silently-absent one.
+  const veh = pnlData.vehicleDeduction;
+  if (veh && !veh.elected && veh.excludedMileage > 0) {
+    lines.push(row(['', '']));
+    lines.push(row(['VEHICLE DEDUCTION NOTE',
+      `${veh.excludedMileage.toFixed(2)} of classified standard mileage is `
+      + 'EXCLUDED pending a vehicle deduction method election (standard mileage '
+      + 'vs. actual expenses — same Schedule C line 9). Actual vehicle expenses, '
+      + 'if any, remain in Operating Expenses above.']));
+  }
+  if (veh?.methodConflict?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['VEHICLE METHOD CONFLICT', veh.methodConflict.note]));
+  }
   return lines.join('\n');
 }
 
