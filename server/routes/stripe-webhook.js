@@ -1091,6 +1091,14 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     // the marker. Constant strings only — no request-derived input.
     description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
     metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
+    // Cash basis: the row was stamped with the INITIATION day when
+    // payment_intent.processing arrived; restamp to the SETTLEMENT day so
+    // revenue lands in the period the money actually cleared (an ACH
+    // initiated before a month/year end and settled after was reported in
+    // the wrong period). Safe: this update is scoped to status='processing'
+    // rows below, so card payments (settled same-day) are never touched,
+    // and a replay matches 0 rows.
+    payment_date: etDateString(),
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;

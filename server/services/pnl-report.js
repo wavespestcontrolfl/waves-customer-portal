@@ -514,20 +514,65 @@ async function buildPnlReport(db, startDate, endDate) {
 
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
   // synced payout-transaction ledger, which lags until each payout is paid
-  // AND synced. A window ending past the ledger watermark must SAY so, or
-  // the report reads as complete while overstating revenue/net income.
-  const ledgerHead = await db('stripe_payout_transactions')
-    .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
-    .first()
-    .catch(missingTableOnly({ through: null }));
+  // AND synced. Completeness is proven, not inferred from the newest
+  // transaction date (one fresh payout can leap past endDate while older
+  // ones sit in the backfill backlog): the window is closed only when
+  // (a) no paid payout still needs its transaction (re)sync, (b) no payout
+  // overlapping the window is still unsettled (its transactions don't exist
+  // in the ledger yet), and (c) the ledger has rows reaching the window end.
+  const [ledgerHead, backlogRow, unsettledRow] = await Promise.all([
+    db('stripe_payout_transactions')
+      .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
+      .first()
+      .catch(missingTableOnly({ through: null })),
+    // Same predicate as syncPayouts' self-healing pass.
+    db('stripe_payouts as sp')
+      .where('sp.status', 'paid')
+      .where(function needsResync() {
+        this.whereNull('sp.transaction_count')
+          .orWhere('sp.transaction_count', 0)
+          .orWhereExists(function preCategoryRows() {
+            this.select(db.raw('1'))
+              .from('stripe_payout_transactions as t')
+              .whereRaw('t.payout_id = sp.id')
+              .whereNull('t.reporting_category');
+          });
+      })
+      .count('* as n')
+      .first()
+      .catch(missingTableOnly({ n: 0 })),
+    // Pending/in-transit payouts created on-or-before the window end carry
+    // transactions the ledger can't have yet.
+    db('stripe_payouts')
+      .whereNotIn('status', ['paid', 'canceled', 'failed'])
+      .whereRaw(
+        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') <= ?::date",
+        [endDate],
+      )
+      .count('* as n')
+      .first()
+      .catch(missingTableOnly({ n: 0 })),
+  ]);
   const outflowLedgerThrough = ledgerHead?.through || null;
+  const backlogCount = parseInt(backlogRow?.n || 0, 10);
+  const unsettledCount = parseInt(unsettledRow?.n || 0, 10);
   let coverageNote = null;
   if (!outflowLedgerThrough) {
     coverageNote = 'Refund/dispute/fee ledger has never been synced — outflows and processing fees are NOT reflected in these figures. Run Banking → Sync, then regenerate.';
+  } else if (backlogCount > 0) {
+    coverageNote = `${backlogCount} paid payout(s) still await transaction sync — outflow and fee figures are incomplete. Run Banking → Sync (repeat until it reports no backfill), then regenerate.`;
+  } else if (unsettledCount > 0) {
+    coverageNote = `${unsettledCount} payout(s) in this window are still settling — their refunds/disputes/fees are not in the ledger yet. Figures firm up once they pay out and sync.`;
   } else if (outflowLedgerThrough < endDate) {
     coverageNote = `Refund/dispute/fee ledger is synced through ${outflowLedgerThrough} — outflows and processing fees after that date are not yet reflected. Run Banking → Sync, then regenerate for final figures.`;
   }
-  report.coverage = { outflowLedgerThrough, complete: !coverageNote, note: coverageNote };
+  report.coverage = {
+    outflowLedgerThrough,
+    backlogCount,
+    unsettledCount,
+    complete: !coverageNote,
+    note: coverageNote,
+  };
   return report;
 }
 
