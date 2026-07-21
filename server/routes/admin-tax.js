@@ -892,7 +892,17 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
       try {
         const ai = await autoCategorizeExpense(exp.vendor_name, exp.description, exp.amount);
         if (ai?.categoryId) {
-          const update = { category_id: ai.categoryId, updated_at: new Date() };
+          const update = {
+            category_id: ai.categoryId,
+            updated_at: new Date(),
+            // The description can include text imported from untrusted invoice
+            // emails (prompt-injectable). Categories are allow-listed and the
+            // deductible % is server-owned, so the blast radius is a possibly-
+            // wrong-but-valid category — FLAG the row so the operator verifies
+            // the AI pick rather than trusting it silently. This route is
+            // operator-triggered and returns per-row results for that review.
+            notes: db.raw("COALESCE(notes,'') || ' [AI-categorized — verify]'"),
+          };
           // Partial deduction follows the MATCHED CATEGORY, not the model's
           // deductiblePercent — a 50%-limited meal must land at 50% even
           // when the model omits the field or claims 100.

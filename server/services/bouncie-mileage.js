@@ -244,13 +244,16 @@ async function matchTripToJob(endLat, endLng, tripDate, options = {}) {
  * - If start OR end is within a 'business' or 'supplier' fence → business
  * - Default: unclassified/non-business until a job or business fence matches
  *
- * @returns {{ is_business: boolean, method: string, notes: string }}
+ * @returns {{ is_business: boolean, purpose: string, method: string, notes: string }}
+ *   purpose is the canonical state the row is written with: 'personal' for a
+ *   personal-fence match (operator-configured, definitive), else 'unclassified'
+ *   (business/suggested/needs-review all await operator confirmation at $0).
  */
 async function classifyTrip(startLat, startLng, endLat, endLng) {
-  const defaultResult = { is_business: false, method: 'needs_review', notes: 'Unclassified: no job or business/personal fence match' };
+  const defaultResult = { is_business: false, purpose: 'unclassified', method: 'needs_review', notes: 'Unclassified: no job or business/personal fence match' };
 
   if (!startLat || !startLng || !endLat || !endLng) {
-    return { is_business: false, method: 'needs_review', notes: 'Unclassified: missing start/end coordinates' };
+    return { is_business: false, purpose: 'unclassified', method: 'needs_review', notes: 'Unclassified: missing start/end coordinates' };
   }
 
   try {
@@ -269,6 +272,7 @@ async function classifyTrip(startLat, startLng, endLat, endLng) {
       if ((startInside || endInside) && fence.fence_type === 'personal') {
         return {
           is_business: false,
+          purpose: 'personal', // definitive — operator-configured personal fence
           method: 'auto',
           notes: `Personal: matched geo-fence "${fence.name}" (${fence.fence_type})`,
         };
@@ -293,6 +297,7 @@ async function classifyTrip(startLat, startLng, endLat, endLng) {
         // matches). Personal fences above stay non-business ($0 either way).
         return {
           is_business: false,
+          purpose: 'unclassified', // suggestion only — awaits operator confirm
           method: 'geo_fence_suggested',
           notes: `Suggested business — geo-fence "${fence.name}" (${fence.fence_type}). Confirm in Tax Center.`,
         };
@@ -408,7 +413,10 @@ async function processTripWebhook(event) {
         end_address: endAddr,
         distance_miles: distanceMiles,
         duration_minutes: durationMinutes,
-        purpose: classification.is_business ? 'business' : 'unclassified',
+        // Canonical purpose from classifyTrip: 'personal' for a personal-fence
+        // match (definitive), else 'unclassified'. A business classification
+        // is never auto-set (suggestion-only), so is_business here is false.
+        purpose: classification.purpose || (classification.is_business ? 'business' : 'unclassified'),
         irs_rate: irsRate,
         deduction_amount: deductionAmount,
         bouncie_trip_id: tripId,
