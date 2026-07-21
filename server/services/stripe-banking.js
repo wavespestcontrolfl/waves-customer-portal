@@ -291,6 +291,11 @@ async function syncPayouts(limit = 50) {
           logger.warn(`[stripe-banking] Status refresh failed for ${row.stripe_payout_id}:`, err.message);
         }
       }
+      // NULL category only marks a row stale when its TYPE is supposed to
+      // carry one — CATEGORYLESS_TXN_TYPES rows (e.g. payment_reversal) are
+      // complete as-is; treating them as stale would re-sync their payout on
+      // every run forever.
+      const { CATEGORYLESS_TXN_TYPES } = require('./pnl-report');
       const stale = await db('stripe_payouts as sp')
         .where('sp.status', 'paid')
         .where(function needsResync() {
@@ -300,7 +305,8 @@ async function syncPayouts(limit = 50) {
               this.select(db.raw('1'))
                 .from('stripe_payout_transactions as t')
                 .whereRaw('t.payout_id = sp.id')
-                .whereNull('t.reporting_category');
+                .whereNull('t.reporting_category')
+                .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
             });
         })
         .orderBy('sp.created_at_stripe', 'desc')

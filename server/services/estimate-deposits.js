@@ -365,13 +365,21 @@ async function receivedDepositTotal(estimateId) {
 // and credit the deposit before the webhook arrives; a late webhook must
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
-async function markDepositReceived({ paymentIntentId, estimateId, amountDollars, cardSurcharge = 0 }) {
+async function markDepositReceived({ paymentIntentId, estimateId, amountDollars, cardSurcharge = 0, receivedAt = null }) {
   // amountDollars is the FACE value (depositFaceValueDollars) — the credit
   // authority. cardSurcharge is the fee collected on top (0 for wallets,
   // non-credit funding, and pre-revert deposits); recorded so revenue and
   // reconciliation reports see the fee (deposits have no payments row).
   // The migration adding the column ships in this PR and Railway runs
   // migrations pre-deploy, so the column exists before this code runs.
+  // receivedAt: the SETTLEMENT moment when the caller knows it (the webhook
+  // passes Stripe's event timestamp) — received_at feeds the P&L's revenue
+  // bucketing, and stamping webhook DELIVERY time let a delayed/retried
+  // event move deposit cash across a month/year boundary. The accept-flow's
+  // live verification omits it (settlement is happening now).
+  const receivedStamp = receivedAt instanceof Date && !Number.isNaN(receivedAt.getTime())
+    ? receivedAt
+    : db.fn.now();
   const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
@@ -379,7 +387,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
       card_surcharge: Number(cardSurcharge) || 0,
       stripe_payment_intent_id: paymentIntentId,
       status: 'received',
-      received_at: db.fn.now(),
+      received_at: receivedStamp,
       updated_at: db.fn.now(),
     })
     .onConflict('stripe_payment_intent_id')
@@ -390,7 +398,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
     .update({
       status: 'received',
       card_surcharge: Number(cardSurcharge) || 0,
-      received_at: db.fn.now(),
+      received_at: receivedStamp,
       updated_at: db.fn.now(),
     });
 
@@ -1347,7 +1355,7 @@ async function sweepTerminalEstimateDeposits() {
 // Replay-safe: rows accept already consumed (received/credited) or already
 // refunded are untouched; otherwise eligibility is re-run and stale money
 // is refunded instead of recorded.
-async function handleDepositIntentSucceeded(paymentIntent) {
+async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) {
   const estimateId = paymentIntent?.metadata?.estimate_id;
   if (!estimateId) {
     logger.warn('[estimate-deposits] deposit PI succeeded without estimate_id metadata');
@@ -1384,6 +1392,9 @@ async function handleDepositIntentSucceeded(paymentIntent) {
     // Face value, not amount_received — see ensureDepositSatisfied.
     amountDollars: depositFaceValueDollars(paymentIntent),
     cardSurcharge: depositSurchargeDollars(paymentIntent),
+    // Stripe's succeeded-event timestamp (threaded from the webhook) — the
+    // settlement moment, not this handler's delivery time.
+    receivedAt: eventCreated ? new Date(eventCreated * 1000) : null,
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
 

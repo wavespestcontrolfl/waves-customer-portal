@@ -724,7 +724,7 @@ router.post(
 // on an already-paid statement is a no-op; processing/revert are conditional on
 // the statement's ACTIVE PI, so a stale/replaced PI's events match nothing. NOT
 // feature-gated — a confirmed money event must settle regardless of the flag.
-async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
+async function handleStatementPaymentIntentEvent(paymentIntent, eventType, eventCreated = null) {
   const statementId = Number(paymentIntent.metadata?.waves_statement_id);
   if (!Number.isInteger(statementId) || statementId <= 0) return;
   const piId = paymentIntent.id;
@@ -809,6 +809,11 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
         surchargeRateBps: rateBps,
         surchargePolicyVersion: policyVersion,
         cardFunding: funding,
+        // Stripe's event timestamp — the settlement moment. The payment row's
+        // payment_date buckets P&L revenue; stamping webhook delivery time
+        // let a delayed/retried event move statement cash across a period
+        // boundary.
+        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
       return true;
@@ -879,7 +884,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // P3: a payer-statement PI settles the consolidated statement (cascade), not an
   // invoice — route it before any invoice/tender logic and return.
   if (paymentIntent.metadata?.waves_statement_id) {
-    await handleStatementPaymentIntentEvent(paymentIntent, 'succeeded');
+    await handleStatementPaymentIntentEvent(paymentIntent, 'succeeded', eventCreated);
     return;
   }
 
@@ -887,7 +892,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // the deposit ledger BEFORE any invoice/tender logic runs against them.
   if (paymentIntent.metadata?.purpose === 'estimate_deposit') {
     const { handleDepositIntentSucceeded } = require('../services/estimate-deposits');
-    await handleDepositIntentSucceeded(paymentIntent);
+    await handleDepositIntentSucceeded(paymentIntent, eventCreated);
     return;
   }
 

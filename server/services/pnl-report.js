@@ -304,13 +304,25 @@ function missingTableOnly(fallback) {
  * partial_capture_reversal, charge_failure, fee, payout, and every other
  * category or type.
  *
- * Belt-and-braces guard applied in outflowTransactionsQuery: an outflow
- * whose LINKED payments row is status='failed' is excluded — its receipt
- * was never counted on the revenue side (e.g. a reversal of a failed ACH,
- * however Stripe categorizes it), so subtracting it would remove money
- * that was never added.
+ * Failed-payment reversals never net, via TWO layers in
+ * outflowTransactionsQuery: type='payment_failure_refund' is excluded
+ * outright (non-card failure refunds aren't source-linked, so a
+ * link-status guard alone can't catch them), and any outflow whose LINKED
+ * payments row is status='failed' is excluded — its receipt was never
+ * counted on the revenue side, so subtracting it would remove money that
+ * was never added.
  */
 const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal'];
+
+/**
+ * Balance-transaction TYPES that legitimately carry no reporting_category —
+ * a NULL category on these rows is normal, not "synced before the
+ * reporting_category column". Excluded from the stale-row predicates in
+ * both the coverage check and the payout-sync healing pass; without this,
+ * one synced ACH reversal would flag its payout stale forever (permanent
+ * coverage warning + endless re-syncs).
+ */
+const CATEGORYLESS_TXN_TYPES = ['payment_reversal', 'payment_failure_refund'];
 
 /**
  * The outflow rows netted against revenue for [startDate, endDate] (ET
@@ -326,6 +338,11 @@ function outflowTransactionsQuery(db, startDate, endDate) {
         // reporting_category — see the classification contract above.
         .orWhere('spt.type', 'payment_reversal');
     })
+    // A payment_failure_refund reverses a FAILED payment whose receipt was
+    // never counted — categorically excluded by TYPE, because non-card
+    // failure refunds aren't source-linked (payment_id null) and would slip
+    // past the linked-status guard below.
+    .whereNot('spt.type', 'payment_failure_refund')
     .where(function receiptWasCounted() {
       this.whereNull('lp.id').orWhereNot('lp.status', 'failed');
     })
@@ -574,7 +591,9 @@ async function buildPnlReport(db, startDate, endDate) {
       .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
       .first()
       .catch(missingTableOnly({ through: null })),
-    // Same predicate as syncPayouts' self-healing pass.
+    // Same predicate as syncPayouts' self-healing pass. NULL category only
+    // marks a row stale when its TYPE is supposed to carry one —
+    // CATEGORYLESS_TXN_TYPES rows are complete as-is.
     db('stripe_payouts as sp')
       .where('sp.status', 'paid')
       .where(function needsResync() {
@@ -584,7 +603,8 @@ async function buildPnlReport(db, startDate, endDate) {
             this.select(db.raw('1'))
               .from('stripe_payout_transactions as t')
               .whereRaw('t.payout_id = sp.id')
-              .whereNull('t.reporting_category');
+              .whereNull('t.reporting_category')
+              .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
           });
       })
       .count('* as n')
@@ -645,5 +665,6 @@ module.exports = {
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
   OUTFLOW_REPORTING_CATEGORIES,
+  CATEGORYLESS_TXN_TYPES,
   outflowTransactionsQuery,
 };

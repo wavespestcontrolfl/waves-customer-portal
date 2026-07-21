@@ -101,6 +101,11 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     surchargePolicyVersion = null,
     cardFunding = null,
     cardBrand = null,
+    // Settlement moment when the caller knows it (the webhook passes
+    // Stripe's event timestamp); payment_date buckets P&L revenue, so
+    // defaulting to handler-run time would let a delayed/retried webhook
+    // move statement cash across a period boundary.
+    settledAt = null,
     source = 'unknown',
   } = settlement;
 
@@ -141,7 +146,7 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     processor,
     stripe_payment_intent_id: stripePaymentIntentId,
     stripe_charge_id: stripeChargeId,
-    payment_date: etDateString(),
+    payment_date: etDateString(settledAt instanceof Date && !Number.isNaN(settledAt.getTime()) ? settledAt : undefined),
     amount: amountCents / 100,
     base_amount_cents: baseAmountCents,
     surcharge_amount_cents: surchargeAmountCents || 0,
