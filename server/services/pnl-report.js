@@ -203,6 +203,7 @@ function assemblePnl({
   otherRevenue = 0,
   laborCost = 0,
   materialsCost = 0,
+  cogsNonDeductible = 0,
   opexRows = [],
   processingFees = 0,
   mileageDeduction = 0,
@@ -230,7 +231,8 @@ function assemblePnl({
   const countedMileage = 0; // never auto-applied — see note above
 
   const byCategory = new Map();
-  let nonDeductibleExpenses = 0; // book-to-tax adjustment (e.g. 50% meals)
+  // book-to-tax adjustment (e.g. 50% meals) — seed with the COGS portion.
+  let nonDeductibleExpenses = round2(Number(cogsNonDeductible) || 0);
   for (const row of opexRows) {
     const name = row.category || 'Uncategorized';
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
@@ -574,9 +576,15 @@ async function buildPnlReport(db, startDate, endDate) {
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
       .whereIn('expense_categories.name', COGS_CATEGORIES)
-      .select(db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"))
+      .select(
+        db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"),
+        // COGS carries a non-deductible portion too (an operator can set a
+        // partial deductibleAmount on Supplies/Materials/Chemicals) — it must
+        // reach the book-to-tax add-back, same clamp as the opex query.
+        db.raw("COALESCE(SUM(expenses.amount - LEAST(expenses.amount, GREATEST(0, COALESCE(expenses.tax_deductible_amount, expenses.amount))))::text, '0') as non_deductible"),
+      )
       .first()
-      .catch(missingTableOnly({ total: '0' })),
+      .catch(missingTableOnly({ total: '0', non_deductible: '0' })),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
@@ -704,6 +712,7 @@ async function buildPnlReport(db, startDate, endDate) {
     // and the informational time-tracking CSV.
     laborCost: 0,
     materialsCost: parseFloat(matRow?.total || 0),
+    cogsNonDeductible: parseFloat(matRow?.non_deductible || 0),
     opexRows,
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),

@@ -66,7 +66,10 @@ function getIrsRate(tripDate) {
   if (typeof tripDate === 'number') {
     dstr = `${tripDate}-01-01`;
   } else if (tripDate instanceof Date) {
-    dstr = `${tripDate.getFullYear()}-${String(tripDate.getMonth() + 1).padStart(2, '0')}-${String(tripDate.getDate()).padStart(2, '0')}`;
+    // ET calendar day, NOT the server's local (UTC on Railway) day — an
+    // instant near midnight would otherwise land on the wrong date and, at a
+    // mid-year rate boundary like 2026-07-01, pick the wrong rate.
+    dstr = etDateString(tripDate);
   } else {
     dstr = String(tripDate || '').slice(0, 10);
   }
@@ -786,11 +789,12 @@ async function getIrsReport(year) {
       // would falsely show most synced mileage as personal.
       const isPersonal = trip.purpose === 'personal';
 
-      // Each trip deducts at ITS OWN date-effective rate — a single yearly
-      // rate misstated H2 miles whenever the IRS changed the rate mid-year.
-      const tripDeduction = isBiz
-        ? parseFloat((miles * getIrsRate(tripDate)).toFixed(2))
-        : 0;
+      // Use the PERSISTED per-trip deduction (written at the trip-date rate by
+      // every classification path and reconciled by the backfill) — the single
+      // authoritative value the P&L/CSV also use. Recomputing here would zero
+      // pre-2024 trips (getIrsRate fails closed below its table) even though
+      // those rows carry valid persisted deductions.
+      const tripDeduction = isBiz ? parseFloat(trip.deduction_amount || 0) : 0;
 
       if (monthMap[monthKey]) {
         monthMap[monthKey].total_miles += miles;
@@ -868,20 +872,19 @@ async function exportIrsCsv(year) {
       const endAddr = (t.end_address || '').replace(/"/g, '""');
       const miles = parseFloat(t.distance_miles || 0).toFixed(2);
       const purpose = t.classification_notes || t.purpose || 'business';
-      // Per-row date-effective rate — one yearly rate misstated H2 rows
-      // whenever the IRS changed the rate mid-year.
-      const deduction = parseFloat((parseFloat(t.distance_miles || 0) * getIrsRate(date)).toFixed(2));
+      // PERSISTED per-trip deduction (authoritative; written at the trip-date
+      // rate and reconciled by the backfill) — same value the P&L sums, and
+      // it preserves pre-2024 rows that getIrsRate would recompute to $0.
+      const deduction = parseFloat(t.deduction_amount || 0).toFixed(2);
       return `${date},"${startAddr}","${endAddr}",${miles},"${purpose.replace(/"/g, '""')}",${deduction}`;
     });
 
     let csv = header + '\n' + rows.join('\n');
 
-    // Totals sum the rounded per-row deductions (rates vary within a year).
+    // Totals sum the persisted per-row deductions (same authoritative values
+    // as the rows above; rates vary within a year, so this beats miles×rate).
     const totalMiles = trips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const totalDeduction = trips.reduce((s, t) => {
-      const date = typeof t.trip_date === 'string' ? t.trip_date : t.trip_date.toISOString().split('T')[0];
-      return s + parseFloat((parseFloat(t.distance_miles || 0) * getIrsRate(date)).toFixed(2));
-    }, 0);
+    const totalDeduction = trips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
     csv += `\n\nTOTAL,,,"${totalMiles.toFixed(2)}","Date-effective IRS rates","$${totalDeduction.toFixed(2)}"`;
 
     return csv;
