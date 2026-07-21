@@ -100,6 +100,7 @@ function defaultBlock(type = "paragraph") {
   if (type === "callout") return { type, content: "Important note for the customer." };
   if (type === "small_note") return { type, content: "Small supporting note." };
   if (type === "details") return { type, rows: [{ label: "Label", value: "{{variable}}" }] };
+  if (type === "list") return { type, items: ["First point."] };
   if (type === "cta") return { type, label: "Open", url_variable: "" };
   return { type: "paragraph", content: "New paragraph." };
 }
@@ -1511,7 +1512,7 @@ function BlockEditor({ blocks, onChange, variables }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap gap-2">
-        {["paragraph", "heading", "callout", "details", "cta", "small_note"].map((type) => (
+        {["paragraph", "heading", "callout", "details", "list", "cta", "small_note"].map((type) => (
           <Button
             key={type}
             size="sm"
@@ -1581,6 +1582,21 @@ function BlockEditor({ blocks, onChange, variables }) {
                 >
                   Add row
                 </Button>
+              </div>
+            ) : block.type === "list" ? (
+              <div className="space-y-1">
+                <Textarea
+                  rows={Math.max(3, asArray(block.items).length + 1)}
+                  value={asArray(block.items).join("\n")}
+                  onChange={(e) =>
+                    updateBlock(index, { ...block, items: e.target.value.split("\n") })
+                  }
+                  placeholder={"One check-list item per line."}
+                />
+                <p className="text-11 text-ink-tertiary">
+                  One item per line. Blank lines (and items whose variables resolve empty) are
+                  dropped from the sent email.
+                </p>
               </div>
             ) : block.type === "cta" ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
