@@ -41,6 +41,11 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import {
+  describeCardRequestState,
+  describeCardRequestResult,
+  canSendCardRequest,
+} from "../../components/schedule/cardLinkStatus";
 import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -1147,6 +1152,56 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     };
   }, [service.customerId, service.customer_id]);
 
+  // Card-on-file / Auto Pay secure-link state for this visit, shown in the
+  // Cards on file panel. Best-effort read — a failed load hides the action.
+  const [cardRequestInfo, setCardRequestInfo] = useState(null);
+  const [cardLinkSending, setCardLinkSending] = useState(false);
+  const [cardLinkNotice, setCardLinkNotice] = useState(null);
+  useEffect(() => {
+    if (!service?.id) return undefined;
+    let cancelled = false;
+    setCardLinkNotice(null);
+    adminFetch(`/admin/schedule/${service.id}/card-request`)
+      .then((json) => {
+        if (!cancelled) setCardRequestInfo(json);
+      })
+      .catch(() => {
+        if (!cancelled) setCardRequestInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service.id]);
+
+  const sendCardRequestLink = async () => {
+    const who =
+      customerData?.customer?.first_name ||
+      customerData?.customer?.name ||
+      "this customer";
+    if (!window.confirm(`Text ${who} a secure card / Auto Pay setup link?`))
+      return;
+    setCardLinkSending(true);
+    try {
+      const result = await adminFetch(
+        `/admin/schedule/${service.id}/card-request`,
+        { method: "POST" },
+      );
+      setCardLinkNotice(describeCardRequestResult(result));
+      try {
+        const fresh = await adminFetch(
+          `/admin/schedule/${service.id}/card-request`,
+        );
+        setCardRequestInfo(fresh);
+      } catch {
+        // keep the outcome notice; the rollup refresh is cosmetic
+      }
+    } catch (e) {
+      setCardLinkNotice({ tone: "bad", text: `Send failed: ${e.message}` });
+    } finally {
+      setCardLinkSending(false);
+    }
+  };
+
   const applyDiscountPreset = (id) => {
     setDiscountPresetId(id);
     if (!id) {
@@ -2131,6 +2186,50 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   No cards on file
                 </div>
               )}
+              {(() => {
+                const state =
+                  cardLinkNotice || describeCardRequestState(cardRequestInfo);
+                const showSend =
+                  !cardLinkNotice && canSendCardRequest(cardRequestInfo);
+                if (!state && !showSend) return null;
+                const toneColor =
+                  state?.tone === "good"
+                    ? D.green
+                    : state?.tone === "bad"
+                      ? D.red
+                      : D.muted;
+                return (
+                  <div style={{ marginTop: 8 }}>
+                    {state && (
+                      <div style={{ fontSize: 13, color: toneColor }}>
+                        {state.text}
+                      </div>
+                    )}
+                    {showSend && (
+                      <button
+                        type="button"
+                        onClick={sendCardRequestLink}
+                        disabled={cardLinkSending}
+                        style={{
+                          border: `1px solid ${D.border}`,
+                          background: "transparent",
+                          color: D.teal,
+                          fontSize: 12,
+                          fontWeight: 500,
+                          borderRadius: 6,
+                          padding: "6px 10px",
+                          cursor: cardLinkSending ? "default" : "pointer",
+                          opacity: cardLinkSending ? 0.6 : 1,
+                        }}
+                      >
+                        {cardLinkSending
+                          ? "Sending..."
+                          : "Text card / Auto Pay link"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
             </div>{" "}
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
               {" "}

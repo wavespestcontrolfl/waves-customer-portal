@@ -24,6 +24,7 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
+import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -128,6 +129,39 @@ export default function MobileAppointmentDetailSheet({
   // Saved payment methods, shown inside the estimate provenance card so the
   // tech knows a card is on file before choosing how to collect.
   const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
+  // Card-on-file / Auto Pay secure-link state + office send action (same
+  // rollup the desktop editor's Cards on file panel shows).
+  const [cardRequestInfo, setCardRequestInfo] = useState(null);
+  const [cardLinkSending, setCardLinkSending] = useState(false);
+  const [cardLinkNotice, setCardLinkNotice] = useState(null);
+
+  useEffect(() => {
+    setCardRequestInfo(null);
+    setCardLinkNotice(null);
+    if (!service?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/${service.id}/card-request`)
+      .then(data => { if (!cancelled) setCardRequestInfo(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id]);
+
+  const sendCardRequestLink = async () => {
+    if (!window.confirm(`Text ${service.customerName || 'this customer'} a secure card / Auto Pay setup link?`)) return;
+    setCardLinkSending(true);
+    try {
+      const result = await adminFetch(`/admin/schedule/${service.id}/card-request`, { method: 'POST' });
+      setCardLinkNotice(describeCardRequestResult(result));
+      try {
+        const fresh = await adminFetch(`/admin/schedule/${service.id}/card-request`);
+        setCardRequestInfo(fresh);
+      } catch { /* keep the outcome notice */ }
+    } catch (e) {
+      setCardLinkNotice({ tone: 'bad', text: `Send failed: ${e.message}` });
+    } finally {
+      setCardLinkSending(false);
+    }
+  };
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -441,6 +475,36 @@ export default function MobileAppointmentDetailSheet({
               </div>
               <span aria-hidden className="text-ink-secondary" style={{ fontSize: 22, lineHeight: 1 }}>›</span>
             </button>
+            {(() => {
+              const state = cardLinkNotice || describeCardRequestState(cardRequestInfo);
+              const showSend = !cardLinkNotice && canSendCardRequest(cardRequestInfo);
+              if (!state && !showSend) return null;
+              const toneClass = state?.tone === 'good'
+                ? 'text-zinc-900'
+                : state?.tone === 'bad'
+                  ? 'text-alert-fg'
+                  : 'text-ink-secondary';
+              return (
+                <div style={{ marginTop: 10 }}>
+                  {state && (
+                    <div className={toneClass} style={{ fontSize: 13 }}>
+                      {state.text}
+                    </div>
+                  )}
+                  {showSend && (
+                    <button
+                      type="button"
+                      onClick={sendCardRequestLink}
+                      disabled={cardLinkSending}
+                      className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring"
+                      style={{ padding: '13px 20px', fontSize: 15, opacity: cardLinkSending ? 0.6 : 1 }}
+                    >
+                      {cardLinkSending ? 'Sending...' : 'Text card / Auto Pay link'}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </section>
         )}
 

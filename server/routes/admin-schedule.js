@@ -2493,6 +2493,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
+      sendCardOnFileLink,
     } = req.body;
 
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
@@ -3408,6 +3409,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
             }
           }
         } catch (e) { logger.error(`Appointment confirmation SMS failed: ${e.message}`); }
+
+        // Office opted in to the secure-card / Auto Pay setup text (the
+        // "Text card-on-file link" checkbox, OFF by default). Parent visit
+        // only — a recurring series must never fan the link out per
+        // occurrence; every policy check (payer exemption, saved-card
+        // auto-secure, one-text-ever claim, gate + template levers) lives
+        // in requestCardForAppointment, which never throws.
+        if (sendCardOnFileLink === true) {
+          try {
+            const { requestCardForAppointment } = require('../services/appointment-card-request');
+            const cardResult = await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'admin' });
+            logger.info(`[schedule] admin card-link request for ${svc.id}: ${cardResult.action} (${cardResult.reason})`);
+          } catch (e) {
+            logger.error(`[schedule] admin card-link request failed for ${svc.id}: ${e.message}`);
+          }
+        }
 
         if (shouldSendNewRecurringWelcome) {
           try {
@@ -7301,6 +7318,59 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       deposit,
       payment,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/:id/card-request — card-on-file / Auto Pay
+// secure-link state for one appointment, for the schedule editor's Cards
+// on file panel. Read-only rollup of the three sources of truth: the
+// visit's one-text-ever stamp, the appointment_card_requests row, and the
+// customer's live Auto Pay state.
+router.get('/:id/card-request', async (req, res, next) => {
+  try {
+    const { isAppointmentCardRequestEnabled } = require('../services/appointment-card-request');
+    const visit = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'card_link_sent_at');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const request = await db('appointment_card_requests')
+      .where({ scheduled_service_id: visit.id })
+      .first('status', 'sent_at', 'completed_at');
+    let autopayActive = false;
+    if (visit.customer_id) {
+      try {
+        const customer = await db('customers').where({ id: visit.customer_id }).first();
+        autopayActive = !!(customer && await customerOnAutopay(customer));
+      } catch (e) {
+        logger.warn(`[schedule] card-request autopay check failed for ${visit.id}: ${e.message}`);
+      }
+    }
+    res.json({
+      enabled: isAppointmentCardRequestEnabled(),
+      autopayActive,
+      cardLinkSentAt: visit.card_link_sent_at || null,
+      request: request
+        ? { status: request.status, sentAt: request.sent_at || null, completedAt: request.completed_at || null }
+        : null,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/card-request — office-triggered secure-card
+// / Auto Pay setup text for an existing appointment (trigger 'admin'). All
+// policy lives in requestCardForAppointment (payer exemption, auto-secure
+// from a saved card, one-text-ever claim, gate + template levers) — this
+// route only resolves the visit and reports the outcome verbatim so the
+// editor can show WHY nothing was sent.
+router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
+  try {
+    const visit = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const { requestCardForAppointment } = require('../services/appointment-card-request');
+    const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
+    res.json({ requested: result.requested, action: result.action, reason: result.reason });
   } catch (err) { next(err); }
 });
 
