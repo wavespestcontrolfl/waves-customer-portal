@@ -9,7 +9,6 @@ const { parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
 
-const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 
@@ -21,9 +20,15 @@ function validateDateParam(value, name) {
   }
 }
 
-function applyBusinessDateRange(query, column, startDate, endDate) {
-  if (startDate) query = query.whereRaw(`DATE(${column} AT TIME ZONE ?) >= ?::date`, [BUSINESS_TZ, startDate]);
-  if (endDate) query = query.whereRaw(`DATE(${column} AT TIME ZONE ?) <= ?::date`, [BUSINESS_TZ, endDate]);
+// Stripe's arrival_date is a CALENDAR-DAY marker stored at midnight UTC —
+// "the day the funds arrive" — not an instant. Filter it by its UTC calendar
+// day so the range controls match what the UI displays (fmtDay renders the
+// same UTC day); the old AT TIME ZONE America/New_York conversion shifted
+// every midnight-UTC marker to the PREVIOUS ET day, so a payout shown as
+// arriving Jul 21 only matched a Jul 20 filter.
+function applyArrivalDayRange(query, column, startDate, endDate) {
+  if (startDate) query = query.whereRaw(`DATE(${column}) >= ?::date`, [startDate]);
+  if (endDate) query = query.whereRaw(`DATE(${column}) <= ?::date`, [endDate]);
   return query;
 }
 
@@ -148,8 +153,8 @@ router.get('/payouts', async (req, res) => {
       query = query.where('status', status);
       countQuery = countQuery.where('status', status);
     }
-    query = applyBusinessDateRange(query, 'arrival_date', start_date, end_date);
-    countQuery = applyBusinessDateRange(countQuery, 'arrival_date', start_date, end_date);
+    query = applyArrivalDayRange(query, 'arrival_date', start_date, end_date);
+    countQuery = applyArrivalDayRange(countQuery, 'arrival_date', start_date, end_date);
 
     const [{ count }] = await countQuery.count('* as count');
     const total = parseInt(count);
@@ -349,7 +354,7 @@ router.get('/export', async (req, res) => {
     // and would sit beside their replacement payout, so OFX LEDGERBAL never
     // reconciles). Mirrors the /stats status filter.
     let query = db('stripe_payouts').where({ status: 'paid' });
-    query = applyBusinessDateRange(query, 'arrival_date', start_date, end_date);
+    query = applyArrivalDayRange(query, 'arrival_date', start_date, end_date);
     const payouts = await query.orderBy('arrival_date', 'desc');
 
     if (format === 'ofx') {
@@ -386,7 +391,7 @@ router.get('/stats', async (req, res) => {
 
     let statsQuery = db('stripe_payouts')
       .where('status', 'paid');
-    statsQuery = applyBusinessDateRange(statsQuery, 'arrival_date', mtdStart, null);
+    statsQuery = applyArrivalDayRange(statsQuery, 'arrival_date', mtdStart, null);
     const stats = await statsQuery
       .select(
         db.raw('COALESCE(SUM(amount), 0) as mtd_deposited'),

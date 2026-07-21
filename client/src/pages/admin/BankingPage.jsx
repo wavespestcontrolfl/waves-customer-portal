@@ -18,7 +18,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { reportError } from "../../lib/reportError";
@@ -80,13 +80,23 @@ const fmtM = (n) =>
         maximumFractionDigits: 2,
       })
     : "$0.00";
-const fmtD = (d) => (d ? new Date(d).toLocaleDateString() : "--");
+// Real instants (created_at_stripe, reconciled_at) render as their ET
+// calendar day; bare new Date(d).toLocaleDateString() showed them (and the
+// midnight-UTC Stripe arrival dates) one day early for an ET viewer.
+const fmtD = (d) => (d ? formatETDate(d) : "--");
+// Calendar-day values (Stripe arrival_date is midnight UTC "the day it
+// arrives") keep their day via the noon-UTC anchor.
+const fmtDay = (d) => (d ? formatETDateOnly(d) : "--");
 
 const STATUS_COLORS = {
   paid: D.green,
   pending: D.amber,
   in_transit: "#0A7EC2",
   failed: D.red,
+  // Money clawed back or a payout that never happened is a genuine alert —
+  // these previously fell through to a calm neutral gray.
+  canceled: D.red,
+  reversed: D.red,
 };
 const INSTANT_PAYOUT_FEE_RATE = 0.015;
 
@@ -173,12 +183,20 @@ function PayoutsTab() {
   const [expanded, setExpanded] = useState(null);
   const [txns, setTxns] = useState({});
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  // reqId guard (same pattern as CashFlowTab): rapid Next/Previous clicks
+  // must not let a slower OLDER request — success or failure — clobber the
+  // newer page's rows or paint its error.
+  const reqIdRef = useRef(0);
 
   const load = useCallback(async (p) => {
+    const reqId = ++reqIdRef.current;
     setLoading(true);
     try {
       const d = await adminFetch(`/admin/banking/payouts?limit=20&page=${p}`);
+      if (reqId !== reqIdRef.current) return;
       setPayouts(d.payouts || []);
+      setLoadError(null);
       // Use the authoritative `pages` field from the backend instead of guessing
       // from page length (a short first page would otherwise disable Next).
       setHasMore(
@@ -187,9 +205,13 @@ function PayoutsTab() {
           : (d.payouts || []).length === 20,
       );
     } catch (e) {
-      /* no-op */
+      if (reqId !== reqIdRef.current) return;
+      // Distinguish "load failed" from "no payouts" — the old no-op catch
+      // rendered a silently empty table.
+      setPayouts([]);
+      setLoadError(e.message || "Failed to load");
     }
-    setLoading(false);
+    if (reqId === reqIdRef.current) setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -214,6 +236,40 @@ function PayoutsTab() {
 
   return (
     <div>
+      {!loading && loadError && (
+        <div
+          style={{
+            background: `${D.red}11`,
+            border: `1px solid ${D.red}`,
+            borderRadius: 8,
+            padding: "14px 16px",
+            marginBottom: 12,
+            color: D.red,
+            fontSize: 14,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <span>Couldn't load payouts ({loadError}).</span>
+          <button
+            onClick={() => load(page)}
+            style={{
+              background: "transparent",
+              border: `1px solid ${D.red}`,
+              borderRadius: 6,
+              padding: "6px 14px",
+              color: D.red,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
@@ -288,7 +344,7 @@ function PayoutsTab() {
                       ? fmtM(p.fees)
                       : "--"}
                   </td>
-                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>
+                  <td style={tdStyle}>{fmtDay(p.arrival_date)}</td>
                   <td style={{ ...tdStyle, textAlign: "center" }}>
                     {p.reconciled ? (
                       <span style={{ color: D.green, fontSize: 16 }}>
@@ -494,6 +550,8 @@ function CashFlowTab() {
   const [period, setPeriod] = useState("weekly");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const reqIdRef = useRef(0);
 
   const today = new Date();
   const threeMonthsAgo = new Date(today);
@@ -503,16 +561,26 @@ function CashFlowTab() {
   const [endDate, setEndDate] = useState(etDateString(today));
 
   const load = useCallback(async () => {
+    // reqId: a slower earlier range/period response must not overwrite the
+    // newer selection (#2913 pattern, previously only on the balance hero).
+    const reqId = ++reqIdRef.current;
     setLoading(true);
     try {
       const d = await adminFetch(
         `/admin/banking/cash-flow?start_date=${startDate}&end_date=${endDate}&period=${period}`,
       );
+      if (reqId !== reqIdRef.current) return;
       setData(d);
+      setLoadError(null);
     } catch (e) {
-      /* no-op */
+      if (reqId !== reqIdRef.current) return;
+      // Clear stale data and surface the failure — the old no-op catch left
+      // this tab rendering confident "$0.00" cards (or the PREVIOUS range's
+      // numbers mislabeled as the new range) on a failed fetch.
+      setData(null);
+      setLoadError(e.message || "Failed to load cash flow");
     }
-    setLoading(false);
+    if (reqId === reqIdRef.current) setLoading(false);
   }, [startDate, endDate, period]);
 
   useEffect(() => {
@@ -630,7 +698,43 @@ function CashFlowTab() {
           </ResponsiveContainer>{" "}
         </div>
       )}
-      {!loading && (
+      {!loading && loadError && (
+        <div
+          style={{
+            background: `${D.red}11`,
+            border: `1px solid ${D.red}`,
+            borderRadius: 8,
+            padding: "14px 16px",
+            color: D.red,
+            fontSize: 14,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <span>
+            Couldn't load cash flow ({loadError}). Figures are unavailable —
+            not zero.
+          </span>
+          <button
+            onClick={load}
+            style={{
+              background: "transparent",
+              border: `1px solid ${D.red}`,
+              borderRadius: 6,
+              padding: "6px 14px",
+              color: D.red,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!loading && !loadError && (
         <div
           style={{
             display: "grid",
@@ -640,22 +744,22 @@ function CashFlowTab() {
         >
           <SummaryCard
             label="Revenue In"
-            value={fmtM(totalIn)}
+            value={data ? fmtM(totalIn) : "—"}
             color={D.green}
           />{" "}
           <SummaryCard
             label="Expenses + Fees"
-            value={fmtM(totalOut)}
+            value={data ? fmtM(totalOut) : "—"}
             color={D.red}
           />{" "}
           <SummaryCard
             label="Operating Net"
-            value={fmtM(net)}
+            value={data ? fmtM(net) : "—"}
             color={net >= 0 ? D.green : D.red}
           />{" "}
           <SummaryCard
             label="Stripe Fees"
-            value={fmtM(summary.stripe_fees)}
+            value={data ? fmtM(summary.stripe_fees) : "—"}
             color={D.amber}
           />{" "}
         </div>
@@ -728,6 +832,7 @@ function SummaryCard({ label, value, color }) {
 function ReconciliationTab() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [actuals, setActuals] = useState({});
   const [notes, setNotes] = useState({});
   const [reconciling, setReconciling] = useState(null);
@@ -737,8 +842,13 @@ function ReconciliationTab() {
     try {
       const d = await adminFetch("/admin/banking/reconciliation");
       setItems(Array.isArray(d) ? d : d.payouts || []);
+      setLoadError(null);
     } catch (e) {
-      /* no-op */
+      // A failed load must be distinguishable from "nothing outstanding" —
+      // the old no-op catch rendered the reassuring "No payouts to
+      // reconcile" empty state, hiding unreconciled payouts.
+      setItems([]);
+      setLoadError(e.message || "Failed to load");
     }
     setLoading(false);
   }, []);
@@ -782,7 +892,44 @@ function ReconciliationTab() {
         </div>
       )}
 
-      {!loading && items.length === 0 && (
+      {!loading && loadError && (
+        <div
+          style={{
+            background: `${D.red}11`,
+            border: `1px solid ${D.red}`,
+            borderRadius: 8,
+            padding: "14px 16px",
+            color: D.red,
+            fontSize: 14,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <span>
+            Couldn't load reconciliation ({loadError}) — outstanding payouts
+            may be hidden.
+          </span>
+          <button
+            onClick={load}
+            style={{
+              background: "transparent",
+              border: `1px solid ${D.red}`,
+              borderRadius: 6,
+              padding: "6px 14px",
+              color: D.red,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!loading && !loadError && items.length === 0 && (
         <div
           style={{
             color: D.muted,
@@ -1224,7 +1371,7 @@ function ExportsTab() {
                       {p.status}
                     </Badge>
                   </td>
-                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>
+                  <td style={tdStyle}>{fmtDay(p.arrival_date)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1815,7 +1962,7 @@ export default function BankingPage() {
             {balanceError
               ? "Unavailable"
               : balance?.next_payout?.arrival_date
-                ? fmtD(balance.next_payout.arrival_date)
+                ? fmtDay(balance.next_payout.arrival_date)
                 : "No payout scheduled"}
           </div>{" "}
         </div>{" "}
