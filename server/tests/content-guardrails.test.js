@@ -1363,6 +1363,32 @@ describe('off-footprint service claims (OFF_FOOTPRINT_CITY_CLAIM)', () => {
     }
   });
 
+  test('a negation about some other service does not shield a city claim', () => {
+    const r = guardrails.evaluate({
+      body: "Waves Pest Control serves Naples with quarterly pest plans that don't include termite coverage.",
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('city-scoped negation passes ("does not include Tampa")', () => {
+    const r = guardrails.evaluate({ body: 'Our service area doesn’t include Tampa.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('a soft-wrapped paragraph is scanned as one rendered sentence', () => {
+    const r = guardrails.evaluate({
+      body: 'From Sarasota to Cape Coral,\nwe treat the same trouble spots.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('third-person "now serving" brand claim is caught; footprint version passes', () => {
+    const blocked = guardrails.evaluate({ body: 'Waves Pest Control is now serving customers in Naples.' }, {});
+    expect(blocked.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const fine = guardrails.evaluate({ body: 'Waves Pest Control is now serving customers in Sarasota and Bradenton.' }, {});
+    expect(fine.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
   test('a service claim hiding in hero alt is caught', () => {
     const r = guardrails.evaluate({
       body: 'Clean educational body.',

@@ -576,14 +576,50 @@ function outOfAreaCities() {
 // "our techs/team/technicians" needs an OPERATION VERB within two words — a
 // bare team mention ("our team reviewed Miami termite research") is a
 // factual reference, not a service claim.
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection))\b/i;
+// Third-person brand claims ("Waves Pest Control is now serving …") assert
+// operation exactly like "we serve".
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in))\b/i;
 
-// A clause that honestly LIMITS the footprint is not a claim — "Naples is
-// outside our service area", "we don't serve Tampa". Tested per CLAUSE, not
-// per sentence, so a disclaimer cannot shield an affirmative claim in the
-// next clause ("…, but we cover Tampa" still flags). Apostrophes are
-// normalized first so typographic "doesn't" matches.
-const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:do not|don'?t|does not|doesn'?t) (?:currently |yet )?(?:include|cover|serve|service|extend|reach)|not (?:currently )?(?:in|within|part of) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint)|no longer (?:serve|service|cover))\b/i;
+// Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
+// the service area itself and safely exempt a whole clause ("Naples is
+// outside our service area"). Bare negated verbs ("don't include") are NOT
+// clause-level exemptions — "plans that don't include termite coverage"
+// negates a service line, not the footprint — so negation exempts a city
+// only when the city itself is the OBJECT of the negated verb (see
+// cityNegationRe). Tested on apostrophe-normalized text.
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|not (?:currently )?(?:in|within|part of) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint))\b/i;
+
+// "…does not include Tampa", "we no longer serve Naples" — the negated
+// verb's object (within a few words) is this specific city.
+function cityNegationRe(citySource) {
+  return new RegExp(
+    `(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to)?|reach|treat|visit)(?:\\s+\\w+){0,3}?\\s+${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    'i',
+  );
+}
+
+// Markdown-aware segmentation: blank lines split blocks; marker lines
+// (headings, list items, quotes, tables, JSX) are their own segments; and
+// consecutive PROSE lines re-join with a space — a soft-wrapped paragraph
+// renders as one sentence and must be scanned as one.
+const MARKDOWN_MARKER_LINE_RE = /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s?|\||<\/?[A-Za-z])/;
+
+function markdownSegments(body) {
+  const segments = [];
+  for (const block of String(body || '').split(/\n{2,}/)) {
+    let prose = '';
+    for (const line of block.split('\n')) {
+      if (MARKDOWN_MARKER_LINE_RE.test(line)) {
+        if (prose) { segments.push(prose); prose = ''; }
+        segments.push(line);
+      } else {
+        prose = prose ? `${prose} ${line.trim()}` : line;
+      }
+    }
+    if (prose) segments.push(prose);
+  }
+  return segments;
+}
 
 // Sentence split preserves dotted place abbreviations (St. Petersburg); a
 // rare genuine "St."-final sentence merges with the next, which only widens
@@ -598,24 +634,26 @@ function offFootprintCityFinding(text) {
   const s = String(text || '');
   if (!s) return null;
   const cities = outOfAreaCities();
-  const cityRes = cities.map((city) => ({
-    city,
+  const cityRes = cities.map((city) => {
     // "St." may be written without the period; multi-word cities may wrap.
-    re: new RegExp(`\\b${escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+')}\\b`, 'i'),
-  }));
-  // Newline block boundaries split FIRST — an unpunctuated heading, list
-  // item, or joined meta line must never merge with the next block into one
-  // pseudo-sentence.
-  const sentences = s.split(/\n+/).flatMap((line) => line.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+    const source = escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
+    return { city, re: new RegExp(`\\b${source}\\b`, 'i'), negationRe: cityNegationRe(source) };
+  });
+  // Markdown segmentation first — blocks/marker lines split, soft-wrapped
+  // prose re-joins so a hard-wrapped paragraph is scanned as the one
+  // sentence it renders as (the joined meta lines stay separate segments).
+  const sentences = markdownSegments(s).flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
   for (const sentence of sentences) {
     for (const clause of sentence.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
       const normalized = clause.replace(/[‘’]/g, "'");
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
       if (FOOTPRINT_DISCLAIMER_RE.test(normalized)) continue;
-      for (const { city, re } of cityRes) {
-        if (re.test(normalized)) {
-          return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
-        }
+      for (const { city, re, negationRe } of cityRes) {
+        if (!re.test(normalized)) continue;
+        // Negation scoped to THIS city ("does not include Tampa") exempts
+        // only this city — a negation about some other service does not.
+        if (negationRe.test(normalized)) continue;
+        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
       }
     }
   }
@@ -1120,13 +1158,16 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // the (possibly multi-domain) live page. A hardcoded price or literal-brand
   // leak hiding only in metaTitle/metaDescription would otherwise slip past the
   // body-only P0 guards. Mirror astro-publisher's REFRESH_EDITABLE_META_FIELDS.
+  // Joined as BLOCKS (blank lines): the markdown-aware scanners re-join
+  // consecutive prose lines, so single-newline joins would merge the body's
+  // last sentence with the title into one pseudo-sentence.
   const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription', 'hero_image_alt']
     .map((f) => frontmatter[f])
     .concat([frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
-    .join('\n');
-  const publishableText = editableMeta ? `${body}\n${editableMeta}` : body;
+    .join('\n\n');
+  const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
   const findings = [
     // Price must cover everything that ships: body AND meta.
