@@ -159,6 +159,10 @@ function pnlToCSV(pnlData) {
   lines.push(row(['', '']));
   lines.push(row(['NET INCOME', (pnlData.netIncome || 0).toFixed(2)]));
   lines.push(row(['Net Margin', ((pnlData.netMargin || 0) * 100).toFixed(1) + '%']));
+  if (pnlData.coverage?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));
+  }
   return lines.join('\n');
 }
 

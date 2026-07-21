@@ -501,7 +501,7 @@ async function buildPnlReport(db, startDate, endDate) {
 
   const { laborCost } = costLaborByDay(laborRows, rateRows);
 
-  return assemblePnl({
+  const report = assemblePnl({
     serviceRevenue,
     otherRevenue: 0,
     laborCost,
@@ -511,6 +511,24 @@ async function buildPnlReport(db, startDate, endDate) {
     mileageDeduction: parseFloat(mileageRow?.total || 0),
     depreciationTotal: prorateDepreciation(assets, startDate, endDate),
   });
+
+  // Coverage disclosure — refunds/disputes/fees come exclusively from the
+  // synced payout-transaction ledger, which lags until each payout is paid
+  // AND synced. A window ending past the ledger watermark must SAY so, or
+  // the report reads as complete while overstating revenue/net income.
+  const ledgerHead = await db('stripe_payout_transactions')
+    .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
+    .first()
+    .catch(missingTableOnly({ through: null }));
+  const outflowLedgerThrough = ledgerHead?.through || null;
+  let coverageNote = null;
+  if (!outflowLedgerThrough) {
+    coverageNote = 'Refund/dispute/fee ledger has never been synced — outflows and processing fees are NOT reflected in these figures. Run Banking → Sync, then regenerate.';
+  } else if (outflowLedgerThrough < endDate) {
+    coverageNote = `Refund/dispute/fee ledger is synced through ${outflowLedgerThrough} — outflows and processing fees after that date are not yet reflected. Run Banking → Sync, then regenerate for final figures.`;
+  }
+  report.coverage = { outflowLedgerThrough, complete: !coverageNote, note: coverageNote };
+  return report;
 }
 
 module.exports = {

@@ -2715,7 +2715,22 @@ function PnlTab() {
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted }}>
             {pnl ? `${pnl.startDate} to ${pnl.endDate}` : "Select a period"}
-          </div>{" "}
+          </div>
+          {/* Coverage disclosure: refunds/disputes/fees come from the synced
+              payout ledger — when it lags the window, the figures are NOT
+              final and must say so instead of reading as complete. */}
+          {pnl?.coverage?.note && (
+            <div
+              style={{
+                fontSize: 12,
+                color: D.amber,
+                marginTop: 4,
+                maxWidth: 620,
+              }}
+            >
+              {pnl.coverage.note}
+            </div>
+          )}{" "}
         </div>{" "}
         <button
           onClick={downloadPnl}
