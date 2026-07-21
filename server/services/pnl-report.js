@@ -297,9 +297,12 @@ function missingTableOnly(fallback) {
  *   dispute           — chargeback withdrawal on open (subtract)
  *   dispute_reversal  — dispute won, funds reinstated (adds back; lost =
  *                       no further row, stays subtracted)
- *   payment_reversal  — bank return clawing back already-credited ACH funds
- * Explicitly NOT listed: partial_capture_reversal, charge_failure, fee,
- * payout, and every other category.
+ * Post-settlement ACH bank returns are matched separately by
+ * type='payment_reversal' — that value is a balance-transaction TYPE with
+ * no reporting_category of its own, so a category-only filter would miss
+ * clawed-back ACH funds entirely. Explicitly NOT netted:
+ * partial_capture_reversal, charge_failure, fee, payout, and every other
+ * category or type.
  *
  * Belt-and-braces guard applied in outflowTransactionsQuery: an outflow
  * whose LINKED payments row is status='failed' is excluded — its receipt
@@ -307,7 +310,7 @@ function missingTableOnly(fallback) {
  * however Stripe categorizes it), so subtracting it would remove money
  * that was never added.
  */
-const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal', 'payment_reversal'];
+const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal'];
 
 /**
  * The outflow rows netted against revenue for [startDate, endDate] (ET
@@ -317,7 +320,12 @@ const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'di
 function outflowTransactionsQuery(db, startDate, endDate) {
   return db('stripe_payout_transactions as spt')
     .leftJoin('payments as lp', 'spt.payment_id', 'lp.id')
-    .whereIn('spt.reporting_category', OUTFLOW_REPORTING_CATEGORIES)
+    .where(function outflowClass() {
+      this.whereIn('spt.reporting_category', OUTFLOW_REPORTING_CATEGORIES)
+        // Post-settlement ACH bank returns: a TYPE with no canonical
+        // reporting_category — see the classification contract above.
+        .orWhere('spt.type', 'payment_reversal');
+    })
     .where(function receiptWasCounted() {
       this.whereNull('lp.id').orWhereNot('lp.status', 'failed');
     })

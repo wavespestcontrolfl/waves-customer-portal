@@ -31,8 +31,12 @@ describe('OUTFLOW_REPORTING_CATEGORIES', () => {
     // covers partial-capture reversals whose receipt already reflects only
     // the captured amount (subtracting them would double-count).
     expect(OUTFLOW_REPORTING_CATEGORIES).toEqual([
-      'refund', 'refund_failure', 'dispute', 'dispute_reversal', 'payment_reversal',
+      'refund', 'refund_failure', 'dispute', 'dispute_reversal',
     ]);
+    // payment_reversal (post-settlement ACH bank return) is a TYPE with no
+    // canonical reporting_category — matched by its own type branch in
+    // outflowTransactionsQuery, never via this category list.
+    expect(OUTFLOW_REPORTING_CATEGORIES).not.toContain('payment_reversal');
     // Poison categories stay out: partial-capture reversals and charge
     // failures never net against revenue.
     expect(OUTFLOW_REPORTING_CATEGORIES).not.toContain('partial_capture_reversal');
