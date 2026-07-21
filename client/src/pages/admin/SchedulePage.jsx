@@ -5544,6 +5544,46 @@ export function TypedFindingsSection({
             <span style={{ color: requiredColor }}> *</span>
           )}
         </div>
+        {schema.type === "tree_shrub" ? (
+          /* Owner directive 2026-07-21 round 2: NO pills/chips on the T&S
+             closeout — every selection is a dropdown like the findings
+             fields (and lawn), so the whole form closes out in seconds.
+             Same toggle contract as the chip row: the diff between the
+             dropdown's value and current state is the one toggled chip. */
+          <ProjectFindingFieldInput
+            field={{
+              key: "next_steps",
+              label: "Next steps",
+              type: "multi_select",
+              options: schema.nextStepChips || [],
+            }}
+            id={`typed-next-steps-${schema.type}`}
+            name="nextStepChips"
+            value={nextStepChips.join(", ")}
+            onChange={(value) => {
+              const next = String(value || "")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              const toggled =
+                next.find((c) => !nextStepChips.includes(c)) ||
+                nextStepChips.find((c) => !next.includes(c));
+              if (toggled) onToggleChip(toggled);
+            }}
+            inputStyle={{ width: "100%", boxSizing: "border-box" }}
+            optionDisabledReason={(option) => {
+              if (nextStepChips.includes(option)) return null;
+              const conflict = typedNextStepChipConflict(
+                schema.type,
+                option,
+                values,
+              );
+              if (conflict) return conflict;
+              if (nextStepChips.length >= 4) return "Up to 4 next steps";
+              return null;
+            }}
+          />
+        ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);
@@ -5584,6 +5624,7 @@ export function TypedFindingsSection({
             );
           })}
         </div>
+        )}
       </div>
       {/* Recommendations textarea + AI draft stay PRIMARY-only: companion
           sections pass onRecommendationsChange={null} and are chips-first
