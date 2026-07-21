@@ -761,12 +761,13 @@ async function getIrsReport(year) {
     const monthMap = {};
     for (let m = 1; m <= 12; m++) {
       const key = `${year}-${String(m).padStart(2, '0')}`;
-      monthMap[key] = { month: key, total_miles: 0, business_miles: 0, personal_miles: 0, trip_count: 0, irs_deduction: 0 };
+      monthMap[key] = { month: key, total_miles: 0, business_miles: 0, personal_miles: 0, unclassified_miles: 0, trip_count: 0, irs_deduction: 0 };
     }
 
     let ytdTotal = 0;
     let ytdBusiness = 0;
     let ytdPersonal = 0;
+    let ytdUnclassified = 0;
     let ytdTrips = 0;
     let ytdDeduction = 0;
 
@@ -780,6 +781,10 @@ async function getIrsReport(year) {
       // (which filters is_business=true) and the manual-review policy where
       // unclassified trips carry $0 until an operator confirms them.
       const isBiz = trip.is_business === true;
+      // Personal is ONLY an explicit personal classification — an unreviewed
+      // (unclassified) trip is neither business nor personal, or the report
+      // would falsely show most synced mileage as personal.
+      const isPersonal = trip.purpose === 'personal';
 
       // Each trip deducts at ITS OWN date-effective rate — a single yearly
       // rate misstated H2 miles whenever the IRS changed the rate mid-year.
@@ -791,18 +796,17 @@ async function getIrsReport(year) {
         monthMap[monthKey].total_miles += miles;
         monthMap[monthKey].trip_count += 1;
         monthMap[monthKey].irs_deduction += tripDeduction;
-        if (isBiz) {
-          monthMap[monthKey].business_miles += miles;
-        } else {
-          monthMap[monthKey].personal_miles += miles;
-        }
+        if (isBiz) monthMap[monthKey].business_miles += miles;
+        else if (isPersonal) monthMap[monthKey].personal_miles += miles;
+        else monthMap[monthKey].unclassified_miles += miles;
       }
 
       ytdTotal += miles;
       ytdTrips += 1;
       ytdDeduction += tripDeduction;
       if (isBiz) ytdBusiness += miles;
-      else ytdPersonal += miles;
+      else if (isPersonal) ytdPersonal += miles;
+      else ytdUnclassified += miles;
     }
 
     const months = Object.values(monthMap).map(m => ({
@@ -810,6 +814,7 @@ async function getIrsReport(year) {
       total_miles: parseFloat(m.total_miles.toFixed(2)),
       business_miles: parseFloat(m.business_miles.toFixed(2)),
       personal_miles: parseFloat(m.personal_miles.toFixed(2)),
+      unclassified_miles: parseFloat(m.unclassified_miles.toFixed(2)),
       irs_deduction: parseFloat(m.irs_deduction.toFixed(2)),
     }));
 
@@ -823,6 +828,7 @@ async function getIrsReport(year) {
         total_miles: parseFloat(ytdTotal.toFixed(2)),
         business_miles: parseFloat(ytdBusiness.toFixed(2)),
         personal_miles: parseFloat(ytdPersonal.toFixed(2)),
+        unclassified_miles: parseFloat(ytdUnclassified.toFixed(2)),
         trip_count: ytdTrips,
         irs_deduction: parseFloat(ytdDeduction.toFixed(2)),
         business_pct: ytdTotal > 0 ? parseFloat(((ytdBusiness / ytdTotal) * 100).toFixed(1)) : 100,

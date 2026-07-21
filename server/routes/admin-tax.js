@@ -718,36 +718,41 @@ const MILEAGE_PURPOSES = ['business', 'personal', 'unclassified'];
 // rate; personal/unclassified → $0. Substantiation (which trips are
 // business) is the operator's call — nothing here auto-classifies.
 async function classifyTrips(ids, purpose) {
-  const rows = await db('mileage_log')
-    .whereIn('id', ids)
-    .select('id', 'trip_date', 'distance_miles', 'equipment_id');
   let updated = 0;
   let deductionTotal = 0;
   const summaryKeys = new Set();
-  for (const row of rows) {
-    const tripDay = dateCellStr(row.trip_date);
-    const rate = mileageService.getIrsRate(tripDay);
-    const miles = parseFloat(row.distance_miles) || 0;
-    const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
-    await db('mileage_log').where({ id: row.id }).update({
-      purpose,
-      // Keep the canonical classification fields other surfaces read
-      // (admin-mileage filters on is_business) in lockstep with purpose.
-      is_business: purpose === 'business',
-      classification_method: 'manual_review',
-      classification_notes: 'Classified via Tax Center mileage review',
-      irs_rate: purpose === 'business' ? rate : 0,
-      deduction_amount: deduction,
-      updated_at: new Date(),
-    });
-    if (row.equipment_id && tripDay) summaryKeys.add(`${row.equipment_id}|${tripDay}`);
-    updated++;
-    deductionTotal += deduction;
-  }
-  // Recompute the affected daily AND monthly summaries so mileage
-  // dashboards agree with the reclassification (the monthly cron only
-  // regenerates the PREVIOUS month — an older trip's month would otherwise
-  // stay stale indefinitely).
+  // ALL the row updates commit together or not at all — up to 500 rows updated
+  // one at a time would otherwise leave deductions half-applied (and summaries
+  // never recomputed) if one update failed midway.
+  await db.transaction(async (trx) => {
+    const rows = await trx('mileage_log')
+      .whereIn('id', ids)
+      .select('id', 'trip_date', 'distance_miles', 'equipment_id');
+    for (const row of rows) {
+      const tripDay = dateCellStr(row.trip_date);
+      const rate = mileageService.getIrsRate(tripDay);
+      const miles = parseFloat(row.distance_miles) || 0;
+      const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
+      await trx('mileage_log').where({ id: row.id }).update({
+        purpose,
+        // Keep the canonical classification fields other surfaces read
+        // (admin-mileage filters on is_business) in lockstep with purpose.
+        is_business: purpose === 'business',
+        classification_method: 'manual_review',
+        classification_notes: 'Classified via Tax Center mileage review',
+        irs_rate: purpose === 'business' ? rate : 0,
+        deduction_amount: deduction,
+        updated_at: new Date(),
+      });
+      if (row.equipment_id && tripDay) summaryKeys.add(`${row.equipment_id}|${tripDay}`);
+      updated++;
+      deductionTotal += deduction;
+    }
+  });
+  // Recompute the affected daily AND monthly summaries AFTER the classification
+  // commits — derived state, best-effort, and a recompute failure must not roll
+  // back the now-durable classification. (The monthly cron only regenerates the
+  // PREVIOUS month, so an older trip's month would otherwise stay stale.)
   const monthKeys = new Set();
   for (const key of summaryKeys) {
     const [equipmentId, day] = key.split('|');
