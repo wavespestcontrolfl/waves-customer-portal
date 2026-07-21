@@ -462,26 +462,34 @@ async function syncBalanceTransactions(limit = 100) {
   }
 
   // Persist state. Pages arrive newest-first, so:
-  // - EXHAUSTED run: the range is fully covered — advance the watermark,
-  //   stamp last_sync_at (as the START time, see above), clear any cursor.
-  // - CAP-HIT run: the OLDEST part of the range is still unfetched. Never
-  //   advance the watermark or last_sync_at (coverage must keep saying
-  //   "not done"), but SAVE the deep-page cursor so the next run resumes
-  //   where this one stopped instead of refetching the same newest pages
-  //   forever. Upserted rows are kept either way (idempotent).
+  // - FRESH (cursor-free) EXHAUSTED run: the range is fully covered —
+  //   advance the watermark, stamp last_sync_at (the START time, see
+  //   above), clear any cursor. This is the ONLY transition that certifies
+  //   coverage.
+  // - CAP-HIT run: the OLDEST part of the range is still unfetched — save
+  //   the deep-page cursor so the next run resumes where this one stopped;
+  //   never advance the watermark or last_sync_at.
+  // - RESUMED run that exhausts: the old tail is done, but transactions
+  //   created SINCE the capped run sort before the cursor and were skipped
+  //   — clear the cursor WITHOUT certifying; the next (fresh) run re-scans
+  //   from the watermark and certifies. Upserted rows are always kept.
+  const resumedRun = !!resumeCursor;
+  const certifies = !hasMore && !resumedRun;
   try {
     const existing = await db('stripe_sync_state')
       .where('sync_type', 'balance_transactions')
       .first();
     const patch = hasMore
       ? { cursor: startingAfter }
-      : {
-        last_sync_at: syncStartedAt.toISOString(),
-        cursor: null,
-        ...(newestCreated > watermark
-          ? { last_created_at: new Date(newestCreated * 1000).toISOString() }
-          : {}),
-      };
+      : certifies
+        ? {
+          last_sync_at: syncStartedAt.toISOString(),
+          cursor: null,
+          ...(newestCreated > watermark
+            ? { last_created_at: new Date(newestCreated * 1000).toISOString() }
+            : {}),
+        }
+        : { cursor: null };
     if (existing) {
       await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
     } else {
@@ -492,10 +500,12 @@ async function syncBalanceTransactions(limit = 100) {
   }
   if (hasMore) {
     logger.warn(`[stripe-banking] Balance-transaction sync hit the ${MAX_PAGES}-page cap — resume cursor saved; run Sync again to continue`);
+  } else if (resumedRun) {
+    logger.info('[stripe-banking] Resumed backfill segment complete — run Sync once more for a fresh certifying pass');
   }
 
   if (upserted > 0) logger.info(`[stripe-banking] Balance-transaction sync upserted ${upserted} row(s)`);
-  return { upserted, has_more: hasMore };
+  return { upserted, has_more: hasMore, certified: certifies };
 }
 
 /**

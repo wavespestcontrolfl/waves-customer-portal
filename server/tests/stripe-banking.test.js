@@ -4,6 +4,8 @@ describe('stripe banking service', () => {
   let insertedRows;
   let payoutUpdate;
   let payoutAttempts;
+  let syncStateRow;
+  let syncStatePatch;
   let service;
 
   function makePayoutAttemptQuery() {
@@ -45,6 +47,8 @@ describe('stripe banking service', () => {
     insertedRows = null;
     payoutUpdate = null;
     payoutAttempts = [];
+    syncStateRow = null;
+    syncStatePatch = null;
 
     stripeClient = {
       balance: { retrieve: jest.fn() },
@@ -69,7 +73,25 @@ describe('stripe banking service', () => {
         return {
           where: jest.fn().mockReturnThis(),
           del: jest.fn().mockResolvedValue(1),
-          insert: jest.fn((rows) => { insertedRows = rows; return Promise.resolve(rows); }),
+          // Row-by-row upsert chain (insert → onConflict → merge); rows are
+          // accumulated so tests can assert everything written.
+          insert: jest.fn((rows) => {
+            const arr = Array.isArray(rows) ? rows : [rows];
+            insertedRows = (insertedRows || []).concat(arr);
+            return {
+              onConflict: jest.fn(() => ({
+                merge: jest.fn().mockResolvedValue(1),
+              })),
+            };
+          }),
+        };
+      }
+      if (table === 'stripe_sync_state') {
+        return {
+          where: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => syncStateRow),
+          update: jest.fn((patch) => { syncStatePatch = patch; return Promise.resolve(1); }),
+          insert: jest.fn((patch) => { syncStatePatch = patch; return Promise.resolve([1]); }),
         };
       }
       if (table === 'stripe_payout_idempotency_attempts') return makePayoutAttemptQuery();
@@ -198,6 +220,57 @@ describe('stripe banking service', () => {
     });
     expect(insertedRows).toHaveLength(2);
     expect(payoutUpdate).toEqual({ fee_total: 3.75, transaction_count: 2 });
+  });
+
+  test('syncBalanceTransactions: a fresh exhausted run certifies coverage', async () => {
+    stripeClient.balanceTransactions.list.mockResolvedValueOnce({
+      data: [{ id: 'txn_a', source: 'py_x', type: 'charge', reporting_category: 'charge', amount: 5000, fee: 150, net: 4850, created: 1770000000 }],
+      has_more: false,
+    });
+
+    const result = await service.syncBalanceTransactions();
+
+    expect(result).toMatchObject({ upserted: 1, has_more: false, certified: true });
+    // Certification: last_sync_at stamped (the run START time), cursor
+    // cleared, watermark advanced to the newest transaction.
+    expect(syncStatePatch.cursor).toBeNull();
+    expect(typeof syncStatePatch.last_sync_at).toBe('string');
+    expect(syncStatePatch.last_created_at).toBe(new Date(1770000000 * 1000).toISOString());
+  });
+
+  test('syncBalanceTransactions: a cap-hit run saves a resume cursor and never certifies', async () => {
+    // Same has_more page every call — the run exhausts its page cap.
+    stripeClient.balanceTransactions.list.mockResolvedValue({
+      data: [{ id: 'txn_cap', source: 'py_x', type: 'charge', reporting_category: 'charge', amount: 100, fee: 3, net: 97, created: 1770000500 }],
+      has_more: true,
+    });
+
+    const result = await service.syncBalanceTransactions();
+
+    expect(result.has_more).toBe(true);
+    expect(result.certified).toBe(false);
+    // Only the deep-page cursor persists — no last_sync_at, no watermark.
+    expect(syncStatePatch).toEqual({ sync_type: 'balance_transactions', cursor: 'txn_cap' });
+    expect(syncStatePatch.last_sync_at).toBeUndefined();
+    expect(syncStatePatch.last_created_at).toBeUndefined();
+  });
+
+  test('syncBalanceTransactions: a resumed run that exhausts clears the cursor WITHOUT certifying', async () => {
+    // Transactions created since the capped run sort BEFORE the cursor and
+    // were skipped — only a fresh cursor-free pass may certify.
+    syncStateRow = { sync_type: 'balance_transactions', cursor: 'txn_resume', last_created_at: new Date(1769000000 * 1000).toISOString() };
+    stripeClient.balanceTransactions.list.mockResolvedValueOnce({
+      data: [{ id: 'txn_old', source: 'py_x', type: 'charge', reporting_category: 'charge', amount: 200, fee: 6, net: 194, created: 1769500000 }],
+      has_more: false,
+    });
+
+    const result = await service.syncBalanceTransactions();
+
+    expect(stripeClient.balanceTransactions.list).toHaveBeenCalledWith(
+      expect.objectContaining({ starting_after: 'txn_resume' }),
+    );
+    expect(result.certified).toBe(false);
+    expect(syncStatePatch).toEqual({ cursor: null });
   });
 
   test('createInstantPayout validates available balance and upserts returned payout', async () => {
