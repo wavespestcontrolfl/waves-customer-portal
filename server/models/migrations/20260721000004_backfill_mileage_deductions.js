@@ -31,7 +31,11 @@
  */
 
 // Kept in one place so the row update and the summary rollup use the same SQL.
+// Mirrors getIrsRate in bouncie-mileage.js, INCLUDING its fail-closed horizon:
+// a date past the last covered year has no verified rate, so it resolves to 0
+// (checked first, since the >= arms below would otherwise catch 2027 at 0.76).
 const RATE_CASE = `CASE
+  WHEN trip_date > DATE '2026-12-31' THEN 0
   WHEN trip_date >= DATE '2026-07-01' THEN 0.76
   WHEN trip_date >= DATE '2026-01-01' THEN 0.725
   WHEN trip_date >= DATE '2025-01-01' THEN 0.70
@@ -104,6 +108,7 @@ exports.up = async function up(knex) {
               THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
               ELSE 0 END,
             irs_rate = (CASE
+              WHEN s.summary_date > DATE '2026-12-31' THEN 0
               WHEN s.summary_date >= DATE '2026-07-01' THEN 0.76
               WHEN s.summary_date >= DATE '2026-01-01' THEN 0.725
               WHEN s.summary_date >= DATE '2025-01-01' THEN 0.70
@@ -134,6 +139,7 @@ exports.up = async function up(knex) {
               THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
               ELSE 0 END,
             irs_rate = (CASE
+              WHEN s.summary_month > DATE '2026-12-31' THEN 0
               WHEN s.summary_month >= DATE '2026-07-01' THEN 0.76
               WHEN s.summary_month >= DATE '2026-01-01' THEN 0.725
               WHEN s.summary_month >= DATE '2025-01-01' THEN 0.70

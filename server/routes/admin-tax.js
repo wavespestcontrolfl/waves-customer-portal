@@ -591,8 +591,11 @@ router.post('/mileage', async (req, res, next) => {
     // A hand-entered trip IS an operator classification — mark it as such so
     // is_business/purpose/method agree (the schema defaults are is_business=
     // true + classification_method='auto', which left manual entries looking
-    // auto-classified and mis-attributed). Only a business trip deducts.
-    const isBusiness = (purpose || 'business') !== 'personal';
+    // auto-classified and mis-attributed). ONLY an explicit business purpose
+    // deducts: commuting (home ↔ regular workplace) and personal trips are
+    // nondeductible, so anything other than 'business' is $0.
+    const resolvedPurpose = purpose || 'business';
+    const isBusiness = resolvedPurpose === 'business';
     // Date-effective (the IRS changes the rate mid-year).
     const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDate) : 0;
     const deductionAmount = isBusiness ? parseFloat((distanceMiles * irsRate).toFixed(2)) : 0;
@@ -604,7 +607,7 @@ router.post('/mileage', async (req, res, next) => {
       end_address: endAddress || null,
       distance_miles: distanceMiles,
       duration_minutes: durationMinutes || null,
-      purpose: purpose || 'business',
+      purpose: resolvedPurpose,
       is_business: isBusiness,
       classification_method: 'manual',
       irs_rate: irsRate,

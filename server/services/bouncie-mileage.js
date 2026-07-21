@@ -52,6 +52,12 @@ const IRS_MILEAGE_RATE_TABLE = [
   { from: '2026-01-01', rate: 0.725 }, // Notice 2026-10
   { from: '2026-07-01', rate: 0.76 },  // Announcement 2026-11 (IRB 2026-29)
 ];
+// The table is only authoritative through the end of the last covered year.
+// The final entry is effective FROM its date but NOT forever — the IRS sets a
+// new rate each year, so a date past this horizon has no verified rate yet.
+// FAIL CLOSED (rate 0) rather than silently reusing 2026 H2's 0.76 for 2027+;
+// bump this and add the entry when the IRS publishes the next rate.
+const IRS_RATE_COVERED_THROUGH = '2026-12-31';
 
 function getIrsRate(tripDate) {
   let dstr;
@@ -61,6 +67,12 @@ function getIrsRate(tripDate) {
     dstr = `${tripDate.getFullYear()}-${String(tripDate.getMonth() + 1).padStart(2, '0')}-${String(tripDate.getDate()).padStart(2, '0')}`;
   } else {
     dstr = String(tripDate || '').slice(0, 10);
+  }
+  // Beyond the verified horizon → 0 (fail closed). A visible run of $0
+  // deductions signals "add the new IRS rate", never a silently-wrong figure.
+  if (dstr > IRS_RATE_COVERED_THROUGH) {
+    logger.warn(`[bouncie-mileage] no verified IRS mileage rate for ${dstr} (beyond ${IRS_RATE_COVERED_THROUGH}) — returning 0; add the published rate`);
+    return 0;
   }
   let rate = IRS_MILEAGE_RATE_TABLE[0].rate;
   for (const entry of IRS_MILEAGE_RATE_TABLE) {
@@ -269,10 +281,15 @@ async function classifyTrip(startLat, startLng, endLat, endLng) {
 
       if ((startDist <= radius || endDist <= radius) &&
           (fence.fence_type === 'business' || fence.fence_type === 'supplier' || fence.fence_type === 'customer_zone')) {
+        // SUGGEST, don't auto-deduct. Under the manual-review policy every
+        // synced trip stays unclassified at $0 until an operator confirms it —
+        // a geo-fence proximity match is a hint, not substantiation, so it
+        // must not set is_business/deduction on its own (same rule as job
+        // matches). Personal fences above stay non-business ($0 either way).
         return {
-          is_business: true,
-          method: 'auto',
-          notes: `Business: matched geo-fence "${fence.name}" (${fence.fence_type})`,
+          is_business: false,
+          method: 'geo_fence_suggested',
+          notes: `Suggested business — geo-fence "${fence.name}" (${fence.fence_type}). Confirm in Tax Center.`,
         };
       }
     }

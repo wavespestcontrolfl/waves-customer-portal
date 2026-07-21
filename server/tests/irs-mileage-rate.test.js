@@ -33,4 +33,13 @@ describe('IRS standard mileage rate', () => {
   test('dates before the table floor resolve to the earliest known rate', () => {
     expect(getIrsRate('2020-01-01')).toBe(0.67);
   });
+
+  test('FAILS CLOSED past the verified horizon (no silent reuse of 0.76)', () => {
+    // 2027 has no published rate yet — must be 0, not 2026 H2's 0.76.
+    expect(getIrsRate('2027-01-01')).toBe(0);
+    expect(getIrsRate('2027-08-01')).toBe(0);
+    expect(getIrsRate(2027)).toBe(0);
+    // The last covered day is still the real rate.
+    expect(getIrsRate('2026-12-31')).toBe(0.76);
+  });
 });
