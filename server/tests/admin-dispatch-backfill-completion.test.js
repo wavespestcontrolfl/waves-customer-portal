@@ -1022,11 +1022,18 @@ describe('completion route wiring (source contracts)', () => {
     // The mint call passes the quiet flag straight off the completion's
     // backfill state…
     expect(source).toMatch(/ensureCardForCompletion\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceRecordId: record\.id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*suppressIssuedEmail: isBackfillCompletion,/);
+    // …with the backdated first-visit instant so the public card's "First
+    // visit" date shows the day the visit happened, not office-entry day.
+    expect(source).toMatch(/firstVisitAt: isBackfillCompletion \? toETNoonServiceDate\(record\.service_date\) : null,/);
     // …and the service honors it: the email leg is gated, everything before
-    // it (card row / promoter enroll / short link) still runs.
+    // it (card row / promoter enroll / short link) still runs, and both
+    // first_visit_completed_at stamp sites use the caller's instant.
     const cardSource = fs.readFileSync(path.join(__dirname, '../services/customer-card.js'), 'utf8');
-    expect(cardSource).toMatch(/async function ensureCardForCompletion\(\{ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false \}\)/);
+    expect(cardSource).toMatch(/async function ensureCardForCompletion\(\{ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false, firstVisitAt = null \}\)/);
     expect(cardSource).toMatch(/if \(!suppressIssuedEmail\) \{\s*\n\s*await maybeSendCardEmail\(card, customer\);\s*\n\s*\}/);
+    expect((cardSource.match(/first_visit_completed_at: firstVisitStamp\(\)/g) || []).length).toBe(1);
+    expect(cardSource).toMatch(/first_visit_completed_at: stamp,/);
+    expect(cardSource).not.toMatch(/first_visit_completed_at: new Date\(\)/);
   });
 
   test('backfill never auto-applies account credit — invoice stays open for operator review', () => {

@@ -6393,6 +6393,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
           suppressIssuedEmail: isBackfillCompletion,
+          // The card's public "First visit" date must show the day the visit
+          // happened — for a backfill that's the backdated service day the
+          // record already carries, not the office closeout instant.
+          firstVisitAt: isBackfillCompletion ? toETNoonServiceDate(record.service_date) : null,
         }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
       } catch (e) {
         logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);

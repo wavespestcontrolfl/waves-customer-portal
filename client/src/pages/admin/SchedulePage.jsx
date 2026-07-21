@@ -8401,7 +8401,12 @@ export function CompletionPanel({
     (oneTimeRecapOnly || !!requestReview) &&
     !willInvoice &&
     !reviewSuppressionReason;
-  const effectiveSendSms = !isIncompleteVisit && (oneTimeRecapOnly || sendSms);
+  // A backdated quiet closeout suppresses every customer send server-side —
+  // the client-side flag must agree, or the success overlay and CTA sub-label
+  // claim "SMS + Report sent" for a completion that texted nobody.
+  const backfillQuietCloseout = backfillEligible && backfillCloseout;
+  const effectiveSendSms =
+    !isIncompleteVisit && !backfillQuietCloseout && (oneTimeRecapOnly || sendSms);
   const reviewSendsWithCompletionSms =
     willReview &&
     effectiveSendSms &&

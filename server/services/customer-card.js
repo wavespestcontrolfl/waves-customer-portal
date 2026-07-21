@@ -141,8 +141,14 @@ async function resolveTechnicianId({ serviceRecordId, scheduledServiceId }) {
  * is a customer send. Backdated quiet completions (backfill) pass true so the
  * visit stays silent; email_sent_at is left unstamped, so the email goes out
  * on the customer's next REAL completion instead (Codex P1, stale-sweep lane).
+ *
+ * firstVisitAt: the public card renders first_visit_completed_at as the
+ * customer's "First visit" date. Backfills pass the backdated service-day
+ * instant so a card minted off a stale closeout shows the day the visit
+ * actually happened, not the office-entry day. Invalid/absent → now.
  */
-async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false }) {
+async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false, firstVisitAt = null }) {
+  const firstVisitStamp = () => (firstVisitAt instanceof Date && !Number.isNaN(firstVisitAt.getTime()) ? firstVisitAt : new Date());
   if (!customerId) return null;
 
   const customer = await db('customers').where({ id: customerId }).first();
@@ -162,7 +168,7 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
       service_record_id: serviceRecordId,
       location_id: location.id,
       review_target_url: location.googleReviewUrl,
-      first_visit_completed_at: new Date(),
+      first_visit_completed_at: firstVisitStamp(),
     };
     // Race-safe: a concurrent completion inserts first → ignore and re-read.
     await db('customer_cards').insert(insertRow).onConflict('customer_id').ignore();
@@ -182,11 +188,12 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
 
     logger.info(`[customer-card] Minted card (customerId=${customerId} cardId=${card.id} location=${card.location_id})`);
   } else if (!card.first_visit_completed_at) {
+    const stamp = firstVisitStamp();
     await db('customer_cards').where({ id: card.id }).update({
-      first_visit_completed_at: new Date(),
+      first_visit_completed_at: stamp,
       updated_at: new Date(),
     });
-    card = { ...card, first_visit_completed_at: new Date() };
+    card = { ...card, first_visit_completed_at: stamp };
   }
 
   // Short-link the review target so QR scans are click-tracked and the
