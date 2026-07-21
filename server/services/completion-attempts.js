@@ -15,25 +15,78 @@ function isUniqueViolation(err) {
   return err?.code === '23505';
 }
 
-function hashCompletionRequest(body) {
-  // completionTelemetry carries per-attempt timestamps (submitClickedAt) —
-  // including it would make every legitimate retry an
-  // idempotency_key_mismatch for typed completions.
-  //
-  // `backfill` is a completion-MODE flag, not visit data (Codex P2, PR
-  // #2897 fix round): once the service record commits, its truth is frozen
-  // in structured_notes.backfill and admin-dispatch re-derives it on
-  // resume. A crash-resumed retry (fresh panel mount, auto-retry) can
-  // arrive WITHOUT the flag, and hashing it stranded exactly the committed
-  // backfill the re-derivation exists to recover — the resume claim 409'd
-  // completion_resume_payload_mismatch before the quiet side effects could
-  // run. Excluding it loses nothing pre-commit either: with no committed
-  // record the body governs the fresh run, the same outcome a fresh
-  // idempotency key would produce.
+// Two-segment request hash: `<core>:<mode>` (Codex P1, PR #2897 fix round
+// 10 — narrowing the fix-round-6 exclusion).
+//
+// completionTelemetry carries per-attempt timestamps (submitClickedAt) —
+// including it anywhere would make every legitimate retry an
+// idempotency_key_mismatch for typed completions. idempotencyKey is the
+// key itself.
+//
+// `backfill` and `timeOnSite` are completion-MODE fields with a split
+// authority story:
+//  - PRE-commit (pending/failed/succeeded same-key retries) the BODY is the
+//    only truth there is, and both fields are consequential — `backfill`
+//    flips the loud↔quiet contract (customer sends, charges, dating) and
+//    `timeOnSite` feeds the persisted duration and costed labor. Round 6
+//    stripped `backfill` (and, earlier, `timeOnSite`) from EVERY hash, so a
+//    same-key retry after a PRE-commit failure could flip them while
+//    passing the idempotency check. They now hash into the MODE segment,
+//    and the pre-commit comparison sites match on the FULL composite.
+//  - POST-commit (a committed service record exists) the frozen
+//    structured_notes are authoritative for both — admin-dispatch re-derives
+//    mode and duration from the record on resume and the body has no vote —
+//    so a crash-resumed retry that legally disagrees (flagless fresh panel
+//    mount, auto-elapsed timer) must NOT strand the committed completion on
+//    completion_resume_payload_mismatch. claimSideEffectsRun (the only
+//    committed-record claim) therefore matches on the CORE segment alone.
+//
+// Legacy rows: attempts stored before this round carry a single-segment
+// hash whose projection equals today's CORE exactly (the old exclusion
+// set). Both matchers treat a separator-free stored hash as core-only, so
+// in-flight attempts across the deploy keep matching.
+function completionRequestHashSegments(body) {
   const { idempotencyKey, timeOnSite, completionTelemetry, backfill, ...stableBody } = body || {};
-  return crypto.createHash('sha256')
+  const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');
+  // Normalized so an omitted flag and an explicit false (same intent) hash
+  // identically, and undefined/null duration unify.
+  const mode = crypto.createHash('sha256')
+    .update(JSON.stringify(sortObjectKeys({
+      backfill: backfill === true,
+      timeOnSite: timeOnSite ?? null,
+    })))
+    .digest('hex');
+  return { core, mode };
+}
+
+function hashCompletionRequest(body) {
+  const { core, mode } = completionRequestHashSegments(body);
+  return `${core}:${mode}`;
+}
+
+function coreHashSegment(hash) {
+  return String(hash || '').split(':')[0];
+}
+
+// PRE-commit sites (pending / failed / succeeded-replay): the full
+// composite must match — a same-key retry may not flip the completion mode
+// or the typed duration. Null/absent on either side keeps the existing
+// tolerant behavior (legacy rows without a stored hash never 409 on it).
+function requestHashMatches(storedHash, incomingHash) {
+  if (!storedHash || !incomingHash) return true;
+  if (!String(storedHash).includes(':')) {
+    return storedHash === coreHashSegment(incomingHash);
+  }
+  return storedHash === incomingHash;
+}
+
+// POST-commit resume (claimSideEffectsRun): the committed record's frozen
+// structured_notes own the mode fields — only the CORE payload must agree.
+function resumeHashMatches(storedHash, incomingHash) {
+  if (!storedHash || !incomingHash) return true;
+  return coreHashSegment(storedHash) === coreHashSegment(incomingHash);
 }
 
 function sortObjectKeys(value) {
@@ -58,7 +111,11 @@ function sideEffectsRunningPayload() {
 
 async function claimSideEffectsRun(row, requestHash, knex = db) {
   if (!row?.service_record_id) return null;
-  if (row.request_hash && requestHash && row.request_hash !== requestHash) {
+  // Core-only match: the committed record exists (service_record_id), so
+  // the frozen structured_notes are authoritative for backfill/timeOnSite
+  // and the retry body legally disagrees on them (see the hash contract
+  // above). Everything else in the payload must still match.
+  if (!resumeHashMatches(row.request_hash, requestHash)) {
     return {
       action: 'conflict',
       status: 409,
@@ -107,8 +164,11 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     .first();
   if (priorSuccess) {
     if (priorSuccess.idempotency_key === idempotencyKey && priorSuccess.response) {
-      // Same client retry after success — replay stored response.
-      if (priorSuccess.request_hash && requestHash && priorSuccess.request_hash !== requestHash) {
+      // Same client retry after success — replay stored response. Full-hash
+      // strict (mode fields included): the mismatch permit lives ONLY in
+      // claimSideEffectsRun; a replay never re-runs anything, so strictness
+      // costs nothing and keeps one rule for every non-resume site.
+      if (!requestHashMatches(priorSuccess.request_hash, requestHash)) {
         return {
           action: 'conflict',
           status: 409,
@@ -286,8 +346,14 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     // recorded request_hash and the new payload doesn't match it, the
     // client is reusing the key with different data. Reject before
     // replaying a stale response or rerunning under a different body.
-    const hashMismatch =
-      existing.request_hash && requestHash && existing.request_hash !== requestHash;
+    // FULL composite (mode segment included): these are the PRE-commit
+    // states — no committed record exists, the body is the only truth, and
+    // a retry that flips `backfill`/`timeOnSite` after a pre-commit failure
+    // would re-run the completion under a different loud/quiet + duration
+    // contract while passing the check (Codex P1, fix round 10). The
+    // committed-resume states route through claimSideEffectsRun above,
+    // which permits exactly that mode disagreement.
+    const hashMismatch = !requestHashMatches(existing.request_hash, requestHash);
 
     if (existing.status === 'succeeded' && existing.response) {
       if (hashMismatch) {
@@ -594,6 +660,11 @@ async function storeResolvedSnapshot(
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  // Exported for the contract tests: the pre-commit strict matcher, the
+  // committed-resume core matcher, and the segment reader they share.
+  requestHashMatches,
+  resumeHashMatches,
+  coreHashSegment,
   hashResolvedSnapshot,
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,

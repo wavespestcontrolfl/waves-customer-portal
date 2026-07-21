@@ -756,11 +756,14 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
 
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
-// completion — and hashCompletionRequest deliberately excludes `backfill` and
-// `timeOnSite`, so a resumed retry's body may legally disagree with what was
-// committed (a flagless retry of a backfill, a still-checked checkbox against
-// a normal completion, the panel's auto-elapsed timer instead of the typed
-// duration). On the side-effect resume path the body therefore has NO vote:
+// completion — and the request hash carries `backfill`/`timeOnSite` in a
+// separate MODE segment that ONLY the committed-record resume claim ignores
+// (completion-attempts claimSideEffectsRun, fix round 10 — pre-commit
+// retries match on the full composite), so a resumed retry's body may
+// legally disagree with what was committed (a flagless retry of a backfill,
+// a still-checked checkbox against a normal completion, the panel's
+// auto-elapsed timer instead of the typed duration). On the side-effect
+// resume path the body therefore has NO vote:
 //  - MODE re-derives from the frozen flag in BOTH directions. A flagless
 //    retry of a committed backfill stays QUIET (the original hazard), and a
 //    flagged retry of a committed NORMAL completion stays LOUD — the
@@ -783,15 +786,40 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
 //    lost AR). Strict boolean true only, and only under the frozen backfill
 //    mode — a normal completion's record can never smuggle a mint
 //    requirement in.
+//  - REQUIRED-MINT MONEY (Codex P0, fix round 10): the frozen
+//    backfillMintAmountCents / backfillMintTaxRate stamped beside the
+//    posture. Only the posture was frozen in round 8, and the amount
+//    recomputed live — so clearing the visit's price after a released
+//    required-mint failure flipped the amount guard false and the retry
+//    finalized WITHOUT the required invoice, while editing it minted the
+//    WRONG amount. Restored only under the frozen backfill mode with the
+//    posture TRUE (the freeze never stamps them otherwise), and validated
+//    hard: cents must be a positive integer (dollars = cents/100), the tax
+//    rate a finite fraction below 1 — anything else restores null, and the
+//    route's mint block fail-closes a required resume whose frozen amount
+//    is missing rather than minting a recomputed number.
 // bodyDisagreed reports a mismatch for the route to log. Pure for
 // testability (_test).
 function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = false } = {}) {
   const frozen = frozenStructuredNotes || {};
   const isBackfillCompletion = frozen.backfill === true;
+  const backfillMintRequired = isBackfillCompletion && frozen.backfillMintRequired === true;
+  const frozenCents = frozen.backfillMintAmountCents;
+  const backfillMintAmount = backfillMintRequired
+    && Number.isInteger(frozenCents) && frozenCents > 0
+    ? frozenCents / 100
+    : null;
+  const frozenTaxRate = frozen.backfillMintTaxRate;
+  const backfillMintTaxRate = backfillMintRequired
+    && Number.isFinite(frozenTaxRate) && frozenTaxRate >= 0 && frozenTaxRate < 1
+    ? frozenTaxRate
+    : null;
   return {
     isBackfillCompletion,
     effectiveTimeOnSite: frozen.timeOnSite ?? null,
-    backfillMintRequired: isBackfillCompletion && frozen.backfillMintRequired === true,
+    backfillMintRequired,
+    backfillMintAmount,
+    backfillMintTaxRate,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
 }
@@ -2841,11 +2869,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // body flag has no vote — the frozen structured_notes decide the mode in
     // BOTH directions below (frozenResumeCompletionState), before any
     // send/invoice decision reads it. A disagreeing retry only reaches the
-    // resume claim because hashCompletionRequest excludes `backfill` from
-    // the request hash (Codex P2, PR #2897 fix round) — hashed, the
-    // mismatch 409'd completion_resume_payload_mismatch in
-    // claimCompletionAttempt and stranded the committed completion before
-    // the re-derivation could run.
+    // resume claim because claimSideEffectsRun matches on the hash's CORE
+    // segment — `backfill` lives in the mode segment that only the
+    // COMMITTED-record resume ignores (Codex P2 fix round, narrowed round
+    // 10: pre-commit same-key retries match the full composite, so the flag
+    // can't flip loud↔quiet before a record exists) — hashed everywhere,
+    // the mismatch 409'd completion_resume_payload_mismatch and stranded
+    // the committed completion before the re-derivation could run.
     const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });
     if (backfillPlan.error) {
       return res.status(backfillPlan.status || 400).json(backfillPlan.error);
@@ -3457,6 +3487,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
+    // The mint's TAX basis derives from an input (property_type), not from
+    // the amount — hoisted for the same single-derivation reason: the
+    // commit-time money freeze below and createFromService must read one
+    // value (fix round 10).
+    const completionInvoiceTaxRate = svc.property_type === 'commercial' ? 0.07 : 0;
     // Commit-time REQUIRED-mint posture (Codex P0, fix round 8; broadened
     // fix round 9). The posture reads MUTABLE billing state — the typed
     // profile (completionProfile.billingType via typedOneTimeBillingProfile),
@@ -3495,6 +3530,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // block overwrites it with the FROZEN structured_notes posture before
     // any consumer runs.
     let backfillReviewMintRequired = backfillMintRequiredAtCommit;
+    // The required mint's FROZEN money (Codex P0, fix round 10): null on
+    // first run — the live derivations above ARE the commit values the
+    // freeze stamps — and populated from the frozen structured_notes on
+    // resume. The mint block prefers these whenever the effective posture is
+    // REQUIRED, so a price cleared/edited (or property_type flipped) between
+    // a released mint failure and the retry can neither skip the owed
+    // invoice via the amount guard nor mint a different amount.
+    let backfillFrozenMintAmount = null;
+    let backfillFrozenMintTaxRate = null;
     // Billing pre-gate for typed one-time completions — ports the project
     // flow's enforcement (resolveProjectCompletionBilling) so a one-time
     // specialty job can't complete unbilled, and fires BEFORE any customer
@@ -4001,7 +4045,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // by-then-mutable profile (edited/removed → a live
             // recomputation would silently finalize the closeout with the
             // owed invoice unminted).
-            ...(isBackfillCompletion && backfillMintRequiredAtCommit ? { backfillMintRequired: true } : {}),
+            ...(isBackfillCompletion && backfillMintRequiredAtCommit ? {
+              backfillMintRequired: true,
+              // The required mint's MONEY is frozen beside the posture
+              // (Codex P0, fix round 10): amount and tax basis recompute
+              // from MUTABLE visit/customer billing fields, so a post-commit
+              // edit would otherwise make a released-failure retry mint the
+              // WRONG amount — or, with the price cleared, skip the required
+              // mint at the amount guard and finalize the closeout unbilled.
+              // Integer cents so jsonb round-trips exactly; stamped ONLY on
+              // the required-mint shape to keep the notes lean.
+              backfillMintAmountCents: Math.round(Number(invoiceAmount) * 100),
+              backfillMintTaxRate: completionInvoiceTaxRate,
+            } : {}),
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
@@ -4838,10 +4894,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // backfill money/comms gate read the same committed truth on a resumed
     // retry; the customer-comms re-force stays below, after the
     // frozen-delivery re-derivation it must override. A disagreeing retry
-    // reaches this line only because hashCompletionRequest excludes
-    // `backfill` and `timeOnSite` (Codex P2, PR #2897 fix round): the resume
-    // claim in claimCompletionAttempt compares request hashes first, and
-    // hashing either field made the retry 409
+    // reaches this line only because the committed-record resume claim
+    // (claimSideEffectsRun) matches the hash's CORE segment — `backfill` and
+    // `timeOnSite` hash into the mode segment it alone ignores (Codex P2,
+    // PR #2897 fix round; narrowed round 10 so pre-commit retries still
+    // match the full composite) — hashed there too, the retry 409'd
     // (completion_resume_payload_mismatch) before this line. First-run keeps
     // the request-derived values — the freeze is written FROM them inside the
     // transaction above.
@@ -4867,6 +4924,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // catch) — the billing profile may have changed since commit, and the
       // committed posture is the money truth (Codex P0, fix round 8).
       backfillReviewMintRequired = frozenResume.backfillMintRequired;
+      // …and so does the frozen mint MONEY (Codex P0, fix round 10): the
+      // amount/tax the operator's commit derived, validated by the helper —
+      // null when absent/invalid, which the mint block fail-closes on for a
+      // required resume instead of recomputing from mutated billing state.
+      backfillFrozenMintAmount = frozenResume.backfillMintAmount;
+      backfillFrozenMintTaxRate = frozenResume.backfillMintTaxRate;
       isBackfillCompletion = frozenResume.isBackfillCompletion;
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
@@ -5489,6 +5552,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first();
       }
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
+    // Required-mint money authority (Codex P0, fix round 10): on a resume
+    // whose frozen posture is REQUIRED, the FROZEN amount/tax are the money
+    // truth — the live derivations read by-now-mutable billing fields, and
+    // a price cleared after a released mint failure would flip the amount
+    // guard false and finalize the closeout without its required invoice
+    // (lost AR), while an edited price/property_type would mint the wrong
+    // money. First runs keep the live values (identical to what the freeze
+    // just stamped in this same request). A required resume MISSING its
+    // frozen amount (pre-round-10 record, corrupt notes) deliberately keeps
+    // the live value HERE so the decision still reaches the mint block —
+    // which then refuses to mint the unverifiable amount and fail-closes
+    // through the existing release/503 catch.
+    const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null
+      ? backfillFrozenMintAmount
+      : invoiceAmount;
+    const mintInvoiceTaxRate = backfillReviewMintRequired && backfillFrozenMintTaxRate != null
+      ? backfillFrozenMintTaxRate
+      : completionInvoiceTaxRate;
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
@@ -5508,7 +5589,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       perApplicationBilling,
       annualPrepayBilling,
       hasVisitPrice,
-      invoiceAmount,
+      // The frozen amount on a required resume, the live derivation
+      // otherwise — guard and mint read the SAME number (fix round 10).
+      invoiceAmount: mintInvoiceAmount,
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
       serviceType: svc.service_type,
       isCallback: svc.is_callback,
@@ -5843,11 +5926,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (shouldInvoice) {
       try {
+        // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
+        // fix round 10): reaching here without it (a record committed
+        // before the money freeze existed, or corrupt notes) means the only
+        // available number is a live recomputation from mutable billing
+        // state — refuse, and take the fail-closed release/503 path in the
+        // catch below rather than finalize with the wrong money.
+        if (backfillReviewMintRequired && resumingCommittedCompletion
+          && backfillFrozenMintAmount == null) {
+          throw new Error('required backfill mint amount missing from the frozen structured_notes — refusing to mint a recomputed amount');
+        }
         const InvoiceService = require('../services/invoice');
         invoice = await InvoiceService.createFromService(record.id, {
-          amount: invoiceAmount,
+          // The frozen money on a required resume — the exact number the
+          // decision's amount guard just passed (mintInvoiceAmount /
+          // mintInvoiceTaxRate are one derivation, fix round 10).
+          amount: mintInvoiceAmount,
           description: svc.service_type,
-          taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
+          taxRate: mintInvoiceTaxRate,
           useScheduledReplay: true,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
@@ -9272,7 +9368,6 @@ function shouldAutoInvoiceCompletion({
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
-  if (!(Number(invoiceAmount) > 0)) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every
@@ -9283,15 +9378,22 @@ function shouldAutoInvoiceCompletion({
   // declines even when a live branch would now bill — the completion
   // committed as not-required, and state flipped since commit (a cioc flag
   // set, a profile made one_time, a price added) must not surprise-bill the
-  // resumed quiet closeout. Sitting BELOW the suppressors and the amount
-  // guard keeps the round-8 convergences: an invoice/payment already in
-  // place IS the promise kept, and a posture-true resume whose amount
-  // resolved to zero never mints a $0 invoice. First runs pass the
-  // commit-time derivation (backfillExpectedMintAtCommit) here, so
-  // governed-vs-live can't disagree on run one either; null = legacy
-  // callers decide live below.
+  // resumed quiet closeout. Sitting BELOW the suppressors keeps the round-8
+  // convergence — an invoice/payment already in place IS the promise kept —
+  // but ABOVE the amount guard (Codex P0, fix round 10): invoiceAmount is
+  // live-derived from mutable billing fields, and a price cleared after a
+  // released required-mint failure flipped the guard false and finalized
+  // the closeout WITHOUT its required invoice. A $0 mint still can't
+  // happen: the route feeds a REQUIRED decision the FROZEN commit-time
+  // amount (positive by construction — the posture only freezes true when
+  // this same amount guard passed at commit), and a required resume whose
+  // frozen amount is missing fail-closes at the mint instead of minting a
+  // recomputed number. First runs pass the commit-time derivation
+  // (backfillExpectedMintAtCommit) here, so governed-vs-live can't disagree
+  // on run one either; null = legacy callers decide live below.
   if (isBackfillCompletion && backfillMintRequired === true) return true;
   if (isBackfillCompletion && backfillMintRequired != null) return false;
+  if (!(Number(invoiceAmount) > 0)) return false;
   // Explicit scheduler flag stays the strongest signal (operator intent).
   if (createInvoiceOnComplete) return true;
   // Annual-prepay customers are never auto-billed at completion for their

@@ -87,6 +87,9 @@ const { buildServiceRecordCompletionTimingFields } = require('../services/servic
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
   hashCompletionRequest,
+  requestHashMatches,
+  resumeHashMatches,
+  coreHashSegment,
   claimCompletionAttempt,
   releaseCompletionAttemptForResume,
 } = require('../services/completion-attempts');
@@ -752,14 +755,19 @@ describe('shouldCaptureApplicationConditions — no current-day weather on backd
   });
 });
 
-describe('hashCompletionRequest — flagless backfill resumes reach the re-derivation (Codex P2, PR #2897 fix round)', () => {
+describe('hashCompletionRequest — flagless backfill resumes reach the re-derivation, pre-commit retries stay strict (Codex P2 fix round; narrowed round 10)', () => {
   // The crash-resume contract: after the service record commits, a retry may
-  // arrive WITHOUT `backfill` (fresh panel mount). claimCompletionAttempt
-  // compares request hashes before the route's structured_notes
-  // re-derivation can heal the flag — so the flag must not be part of the
-  // hash, or the committed quiet completion strands on
+  // arrive WITHOUT `backfill` (fresh panel mount). The committed-record
+  // resume claim (claimSideEffectsRun) compares the hash's CORE segment
+  // only, so the route's structured_notes re-derivation can heal the flag —
+  // hashed there, the committed quiet completion stranded on
   // completion_resume_payload_mismatch with its invoice/side effects never
-  // run.
+  // run. But the round-6 exclusion was FILE-WIDE: a same-key retry after a
+  // PRE-commit failure could flip loud↔quiet (or the typed duration) while
+  // passing the idempotency check — no committed record exists there, so
+  // the body is the only truth. Round 10 narrows: `backfill`/`timeOnSite`
+  // hash into a second MODE segment; every pre-commit comparison matches
+  // the FULL composite, and only claimSideEffectsRun matches on the core.
   const committedBody = {
     idempotencyKey: 'key-1',
     notes: 'Quarterly service completed',
@@ -768,26 +776,54 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     timeOnSite: 45,
   };
 
-  test('the flag never splits the hash — a flagless retry hashes identically to the original', () => {
+  test('the flag splits the FULL hash (pre-commit strictness) but never the CORE the resume claim compares', () => {
     const original = hashCompletionRequest(committedBody);
     const flaglessRetry = { ...committedBody };
     delete flaglessRetry.backfill;
-    expect(hashCompletionRequest(flaglessRetry)).toBe(original);
-    // …and an explicit false is equally irrelevant (mode truth lives in the
-    // frozen structured_notes, either direction).
-    expect(hashCompletionRequest({ ...committedBody, backfill: false })).toBe(original);
+    // Pre-commit: a flipped mode is a different payload now.
+    expect(hashCompletionRequest(flaglessRetry)).not.toBe(original);
+    expect(requestHashMatches(original, hashCompletionRequest(flaglessRetry))).toBe(false);
+    // Committed-record resume: the core matches, so the flagless retry
+    // reaches the structured_notes re-derivation exactly as in round 6.
+    expect(resumeHashMatches(original, hashCompletionRequest(flaglessRetry))).toBe(true);
+    expect(coreHashSegment(hashCompletionRequest(flaglessRetry))).toBe(coreHashSegment(original));
+    // Same-intent flag spellings do not split even the full hash: omitted ≡
+    // explicit false (both mean "not a backfill").
+    expect(hashCompletionRequest({ ...flaglessRetry, backfill: false }))
+      .toBe(hashCompletionRequest(flaglessRetry));
+    // The panel's auto-elapsed timer is the same class: full splits, core
+    // does not — the frozen timeOnSite governs the committed resume.
+    const retimed = hashCompletionRequest({ ...committedBody, timeOnSite: 20160 });
+    expect(retimed).not.toBe(original);
+    expect(resumeHashMatches(original, retimed)).toBe(true);
   });
 
-  test('real payload changes still mismatch — the strip is surgical', () => {
+  test('real payload changes mismatch BOTH segments — resume never accepts different work', () => {
     expect(hashCompletionRequest({ ...committedBody, notes: 'different work entirely' }))
       .not.toBe(hashCompletionRequest(committedBody));
-    expect(hashCompletionRequest({ ...committedBody, visitOutcome: 'customer_concern' }))
-      .not.toBe(hashCompletionRequest(committedBody));
+    expect(resumeHashMatches(
+      hashCompletionRequest(committedBody),
+      hashCompletionRequest({ ...committedBody, notes: 'different work entirely' }),
+    )).toBe(false);
+    expect(resumeHashMatches(
+      hashCompletionRequest(committedBody),
+      hashCompletionRequest({ ...committedBody, visitOutcome: 'customer_concern' }),
+    )).toBe(false);
   });
 
-  test('the volatile-field strip list stays exact: idempotencyKey, timeOnSite, telemetry, backfill', () => {
+  test('the segment split stays exact: telemetry+key out entirely; backfill+timeOnSite in the MODE segment only', () => {
     const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
     expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
+    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: timeOnSite \?\? null,/);
+    // The resume claim is the ONLY core-segment comparison site; the
+    // pending/failed/succeeded sites go through the strict matcher.
+    expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
+    expect((attemptsSource.match(/resumeHashMatches\(/g) || []).length).toBe(2); // definition + the claimSideEffectsRun call
+    expect(attemptsSource).toMatch(/const hashMismatch = !requestHashMatches\(existing\.request_hash, requestHash\);/);
+    expect(attemptsSource).toMatch(/if \(!requestHashMatches\(priorSuccess\.request_hash, requestHash\)\) \{/);
+    // Telemetry stays hash-free everywhere — a retry's timings never 409.
+    expect(hashCompletionRequest({ ...committedBody, completionTelemetry: { submitClickedAt: 1 } }))
+      .toBe(hashCompletionRequest(committedBody));
   });
 });
 
@@ -1432,6 +1468,146 @@ describe('backfillExpectedMintAtCommit — frozen-required ≡ will-mint at comm
   });
 });
 
+describe('frozen required-mint MONEY — the amount can neither vanish nor change on resume (Codex P0, fix round 10)', () => {
+  const suppressorFree = {
+    recapReviewOnly: false,
+    alreadyPaid: false,
+    prepaidCovered: false,
+    autopayCoversVisit: false,
+    preMintedInvoice: null,
+    existingCompletionInvoice: null,
+    annualPrepayCovered: false,
+    createInvoiceOnComplete: false,
+    waveguardTier: null,
+    autoInvoicePricedVisits: false,
+    serviceType: 'Bed Bug Treatment',
+    isCallback: false,
+    visitPerformed: true,
+    typedOneTimeBilling: false,
+    hasVisitPrice: false,
+  };
+
+  test('frozenResumeCompletionState restores the frozen cents as dollars, and the tax basis, ONLY under the required backfill mode', () => {
+    const frozen = frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 35000, backfillMintTaxRate: 0.07, timeOnSite: 45 },
+      { requestBackfill: false },
+    );
+    expect(frozen.backfillMintRequired).toBe(true);
+    expect(frozen.backfillMintAmount).toBe(350);
+    expect(frozen.backfillMintTaxRate).toBe(0.07);
+    // Fractional cents round-trip exactly (the freeze stamps integer cents).
+    expect(frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 12999 },
+      {},
+    ).backfillMintAmount).toBe(129.99);
+    // A record that is not a required backfill can never smuggle money in —
+    // same strictness as the posture itself.
+    expect(frozenResumeCompletionState(
+      { backfill: true, backfillMintAmountCents: 35000, backfillMintTaxRate: 0.07 },
+      {},
+    )).toMatchObject({ backfillMintRequired: false, backfillMintAmount: null, backfillMintTaxRate: null });
+    expect(frozenResumeCompletionState(
+      { backfillMintRequired: true, backfillMintAmountCents: 35000 },
+      {},
+    )).toMatchObject({ backfillMintRequired: false, backfillMintAmount: null });
+  });
+
+  test('invalid frozen money restores null — the route then fail-closes instead of minting it', () => {
+    const base = { backfill: true, backfillMintRequired: true };
+    for (const cents of [undefined, null, 0, -100, 129.5, '35000', Number.NaN, Infinity]) {
+      expect(frozenResumeCompletionState(
+        { ...base, backfillMintAmountCents: cents },
+        {},
+      ).backfillMintAmount).toBeNull();
+    }
+    for (const rate of [undefined, null, -0.07, 1, 1.5, '0.07', Number.NaN]) {
+      expect(frozenResumeCompletionState(
+        { ...base, backfillMintAmountCents: 35000, backfillMintTaxRate: rate },
+        {},
+      ).backfillMintTaxRate).toBeNull();
+    }
+    // …and a valid zero tax rate is a real value, not "missing".
+    expect(frozenResumeCompletionState(
+      { ...base, backfillMintAmountCents: 35000, backfillMintTaxRate: 0 },
+      {},
+    ).backfillMintTaxRate).toBe(0);
+  });
+
+  test('the P0 sequence: price CLEARED after a released mint failure — the frozen amount keeps the decision true and prices the mint', () => {
+    // Commit froze required + $350 (cents). Post-commit the visit price is
+    // cleared: the live derivation now yields 0. Round 9's amount guard ran
+    // FIRST and returned false — shouldInvoice=false, the retry finalized
+    // WITHOUT the required invoice. The route now feeds the guard the
+    // frozen amount (mintInvoiceAmount), and the posture governs from above
+    // the guard, so the decision stays true and the mint prices at $350.
+    const frozen = frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 35000, backfillMintTaxRate: 0 },
+      { requestBackfill: false },
+    );
+    const mintInvoiceAmount = frozen.backfillMintRequired && frozen.backfillMintAmount != null
+      ? frozen.backfillMintAmount
+      : 0; // live derivation after the price was cleared
+    expect(mintInvoiceAmount).toBe(350);
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      invoiceAmount: mintInvoiceAmount,
+      isBackfillCompletion: frozen.isBackfillCompletion,
+      backfillMintRequired: frozen.backfillMintRequired,
+    })).toBe(true);
+    // Even a live-zero amount cannot skip a REQUIRED decision anymore (the
+    // frozen-missing legacy resume): the posture sits above the guard, so
+    // the decision reaches the mint block — which refuses the recomputed
+    // amount and fail-closes through the release/503 catch (source pins).
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      invoiceAmount: 0,
+      isBackfillCompletion: true,
+      backfillMintRequired: true,
+    })).toBe(true);
+    // Unchanged posture-null and posture-false semantics around the guard:
+    // no live branch mints $0, and a committed not-required stays declined.
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      createInvoiceOnComplete: true,
+      invoiceAmount: 0,
+      isBackfillCompletion: true,
+      backfillMintRequired: null,
+    })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      createInvoiceOnComplete: true,
+      invoiceAmount: 0,
+      isBackfillCompletion: true,
+      backfillMintRequired: false,
+    })).toBe(false);
+    // Suppressors still beat the frozen money: an invoice already in place
+    // IS the promise kept — never a second mint at the frozen amount.
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      existingCompletionInvoice: { id: 'inv' },
+      invoiceAmount: 350,
+      isBackfillCompletion: true,
+      backfillMintRequired: true,
+    })).toBe(false);
+  });
+
+  test('the WRONG-amount leg: an edited price cannot change the resumed mint — the frozen cents win over the live derivation', () => {
+    const frozen = frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 35000, backfillMintTaxRate: 0.07 },
+      { requestBackfill: false },
+    );
+    const liveRecomputedAmount = 899; // price edited post-commit
+    const mintInvoiceAmount = frozen.backfillMintRequired && frozen.backfillMintAmount != null
+      ? frozen.backfillMintAmount
+      : liveRecomputedAmount;
+    const mintInvoiceTaxRate = frozen.backfillMintRequired && frozen.backfillMintTaxRate != null
+      ? frozen.backfillMintTaxRate
+      : 0; // property_type flipped residential post-commit
+    expect(mintInvoiceAmount).toBe(350);
+    expect(mintInvoiceTaxRate).toBe(0.07);
+  });
+});
+
 describe('required-mint failure leaves the closeout resumable — fail-closed bypass leg (Codex P0, fix round 7)', () => {
   // Behavioral leg drives the real completion-attempts machinery against an
   // ops-queue knex mock (same style as completion-attempts.test.js): a
@@ -1606,10 +1782,17 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*recapReviewOnly,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
       // The stamp lives in the SAME structured_notes object the completion
       // transaction inserts — between the trx open and the serialize — so a
-      // crash can never leave a committed-but-unfrozen record.
-      const stamp = '...(isBackfillCompletion && backfillMintRequiredAtCommit ? { backfillMintRequired: true } : {}),';
+      // crash can never leave a committed-but-unfrozen record. Since fix
+      // round 10 the stamp carries the required mint's MONEY beside the
+      // posture: integer cents + the tax basis, from the same hoisted
+      // derivations, gated on the same required-mint condition (lean notes).
+      const stamp = '...(isBackfillCompletion && backfillMintRequiredAtCommit ? {';
       const stampAt = source.indexOf(stamp);
       expect(stampAt).toBeGreaterThan(-1);
+      expect(source).toMatch(/\.\.\.\(isBackfillCompletion && backfillMintRequiredAtCommit \? \{\s*\n\s*backfillMintRequired: true,\s*\n(?:\s*\/\/[^\n]*\n)*\s*backfillMintAmountCents: Math\.round\(Number\(invoiceAmount\) \* 100\),\s*\n\s*backfillMintTaxRate: completionInvoiceTaxRate,\s*\n\s*\} : \{\}\),/);
+      // The tax basis is hoisted beside the amount — one derivation feeds
+      // the freeze AND the mint (property_type is a mutable input).
+      expect((source.match(/const completionInvoiceTaxRate = /g) || []).length).toBe(1);
       // The COMPLETION transaction is the nearest trx open above the stamp
       // (the file has other, earlier transactions on other routes).
       const trxAt = source.lastIndexOf("await db.transaction(async (trx) => {", stampAt);
@@ -1639,16 +1822,45 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // the live (posture-null) path…
       expect(source).toMatch(/if \(isBackfillCompletion && typedOneTimeBilling && hasVisitPrice\) \{[\s\S]{0,900}return backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback,\s*\n\s*serviceType,\s*\n\s*\}\);/);
       // …and a supplied posture governs EVERY branch, in both directions,
-      // from directly below the suppressor + amount guards (round 9): the
-      // governed returns must sit between the amount guard and the first
-      // live branch (the scheduler flag).
-      expect(source).toMatch(/if \(isBackfillCompletion && backfillMintRequired === true\) return true;\s*\n\s*if \(isBackfillCompletion && backfillMintRequired != null\) return false;/);
+      // directly below the SUPPRESSORS but ABOVE the amount guard (round 9;
+      // reordered round 10): invoiceAmount is live-derived from mutable
+      // billing fields, and a price cleared after a released required-mint
+      // failure must not flip the guard false and finalize the closeout
+      // without its required invoice. The governed returns sit between the
+      // suppressor block and the amount guard; the first live branch (the
+      // scheduler flag) follows the guard.
+      expect(source).toMatch(/if \(isBackfillCompletion && backfillMintRequired === true\) return true;\s*\n\s*if \(isBackfillCompletion && backfillMintRequired != null\) return false;\s*\n\s*if \(!\(Number\(invoiceAmount\) > 0\)\) return false;/);
       const amountGuardAt = source.indexOf('if (!(Number(invoiceAmount) > 0)) return false;');
       const governTrueAt = source.indexOf('if (isBackfillCompletion && backfillMintRequired === true) return true;');
+      const suppressorGateAt = source.indexOf('|| preMintedInvoice || existingCompletionInvoice) {');
       const ciocBranchAt = source.indexOf('if (createInvoiceOnComplete) return true;');
-      expect(amountGuardAt).toBeGreaterThan(-1);
-      expect(governTrueAt).toBeGreaterThan(amountGuardAt);
-      expect(ciocBranchAt).toBeGreaterThan(governTrueAt);
+      expect(suppressorGateAt).toBeGreaterThan(-1);
+      expect(governTrueAt).toBeGreaterThan(suppressorGateAt);
+      expect(amountGuardAt).toBeGreaterThan(governTrueAt);
+      expect(ciocBranchAt).toBeGreaterThan(amountGuardAt);
+    });
+
+    test('the required mint\'s MONEY is frozen, restored, and threaded to BOTH the amount guard and the mint (Codex P0, fix round 10)', () => {
+      // Resume restores the validated frozen money right beside the posture…
+      expect(source).toMatch(/backfillReviewMintRequired = frozenResume\.backfillMintRequired;[\s\S]{0,600}backfillFrozenMintAmount = frozenResume\.backfillMintAmount;\s*\n\s*backfillFrozenMintTaxRate = frozenResume\.backfillMintTaxRate;/);
+      // …ONE derivation decides the number both consumers read: the frozen
+      // amount on a required resume, the live derivation otherwise…
+      expect(source).toMatch(/const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null\s*\n\s*\? backfillFrozenMintAmount\s*\n\s*: invoiceAmount;/);
+      expect(source).toMatch(/const mintInvoiceTaxRate = backfillReviewMintRequired && backfillFrozenMintTaxRate != null\s*\n\s*\? backfillFrozenMintTaxRate\s*\n\s*: completionInvoiceTaxRate;/);
+      // …the decision's amount guard reads it…
+      expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\}\);/);
+      // …and the mint itself reads the SAME pair — never the live values.
+      expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*amount: mintInvoiceAmount,\s*\n\s*description: svc\.service_type,\s*\n\s*taxRate: mintInvoiceTaxRate,/);
+      expect(source).not.toMatch(/amount: invoiceAmount,/);
+      // A required resume MISSING its frozen amount refuses to mint a
+      // recomputed number — the throw sits INSIDE the try, before the mint,
+      // so the existing release/503 catch owns the outcome.
+      const throwAt = source.indexOf("throw new Error('required backfill mint amount missing from the frozen structured_notes — refusing to mint a recomputed amount');");
+      const mintAt = source.indexOf('invoice = await InvoiceService.createFromService(record.id, {');
+      const tryAt = source.lastIndexOf('if (shouldInvoice) {', mintAt);
+      expect(throwAt).toBeGreaterThan(tryAt);
+      expect(mintAt).toBeGreaterThan(throwAt);
+      expect(source).toMatch(/if \(backfillReviewMintRequired && resumingCommittedCompletion\s*\n\s*&& backfillFrozenMintAmount == null\) \{/);
     });
 
     test('resume swaps the live posture for the FROZEN one before any consumer — invoice decision included (fix round 8)', () => {
