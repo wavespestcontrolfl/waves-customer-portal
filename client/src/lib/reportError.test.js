@@ -12,20 +12,16 @@ describe('reportError', () => {
 
   const beaconBody = async () => JSON.parse(await sendBeacon.mock.calls[0][1].text());
 
-  test('beacons only the structured, non-free-form fields', async () => {
+  test('beacons only the bounded, non-free-form fields', async () => {
     reportError(new TypeError('Boom'), { context: 'PageErrorBoundary', componentStack: 'in <App>' });
     expect(sendBeacon).toHaveBeenCalledTimes(1);
     expect(sendBeacon.mock.calls[0][0]).toBe('/api/client-errors');
     const body = await beaconBody();
-    // The free-form message/stack are NOT sent — the server transforms the rest.
-    expect(body).toEqual({
-      name: 'TypeError',
-      context: 'PageErrorBoundary',
-      route: '/admin/banking',
-      componentStack: 'in <App>',
-    });
+    // Only name/context/route — never message, stack, or the (unbounded) component stack.
+    expect(body).toEqual({ name: 'TypeError', context: 'PageErrorBoundary', route: '/admin/banking' });
     expect(body).not.toHaveProperty('message');
     expect(body).not.toHaveProperty('stack');
+    expect(body).not.toHaveProperty('componentStack');
   });
 
   test('accepts a plain string context', async () => {

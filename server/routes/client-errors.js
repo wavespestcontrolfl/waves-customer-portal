@@ -23,13 +23,17 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-// A JS error name / constructor name (TypeError, ChunkLoadError, …). Must be a
-// short identifier AND carry no long digit run (a PAN/SSN smuggled into the name
-// field); anything else collapses to a generic label — never echo attacker text.
-const errorName = (value) => {
-  const v = String(value || '');
-  return /^[A-Za-z][A-Za-z0-9_.$]{0,60}$/.test(v) && !/\d{5,}/.test(v) ? v : 'Error';
-};
+// A JS error name. Identifier-shape checks still let attacker PII through (a
+// person's name is identifier-shaped), so this is a strict allowlist of standard
+// + common web error names; anything else collapses to "Error".
+const ERROR_NAMES = new Set([
+  'Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'EvalError', 'URIError', 'AggregateError', 'DOMException', 'ChunkLoadError',
+  'AbortError', 'NetworkError', 'TimeoutError', 'NotFoundError', 'SecurityError',
+  'QuotaExceededError', 'NotAllowedError', 'InvalidStateError', 'DataError',
+]);
+const errorName = (value) =>
+  (ERROR_NAMES.has(String(value || '')) ? String(value) : 'Error');
 
 // Context is a FIXED, code-set label — a shape check alone still lets attacker
 // text (e.g. "a4242424242424242") through on this public route, so collapse to a
@@ -58,22 +62,13 @@ const routeRoot = (value) => {
   return ROUTE_ROOTS.has(first) ? first : 'other';
 };
 
-// React component stacks are "in ComponentName" / "at ComponentName" lines.
-// Extract ONLY those identifier tokens (dropping any injected free text), which
-// are code symbols, not user data. Capped.
-const componentNames = (value) => {
-  const matches = String(value || '').match(/\b(?:in|at) [A-Za-z][A-Za-z0-9]{0,50}/g);
-  if (!matches) return undefined;
-  // componentStack is public/attacker-controlled too — drop any "component"
-  // carrying a long digit run (a PAN/SSN dressed up as a component name).
-  const safe = matches.filter((m) => !/\d{5,}/.test(m)).slice(0, 40);
-  return safe.length ? safe.join('\n') : undefined;
-};
-
-// POST /api/client-errors  { name, context, route, componentStack }
+// POST /api/client-errors  { name, context, route }
+// componentStack is intentionally NOT accepted: React component names are
+// unbounded, so on a public endpoint an attacker could inject a person's name as
+// a fake "component". Only the three allowlisted/transformed fields are kept.
 router.post('/', limiter, (req, res) => {
   try {
-    const { name, context, route, componentStack } = req.body || {};
+    const { name, context, route } = req.body || {};
     const err = new Error(errorName(name));
     err.name = errorName(name);
     Sentry.captureException(err, {
@@ -82,7 +77,6 @@ router.post('/', limiter, (req, res) => {
         client_error: {
           context: contextLabel(context),
           route: routeRoot(route),
-          componentStack: componentNames(componentStack),
         },
       },
     });

@@ -31,19 +31,18 @@ const ctxOf = () => mockCapture.mock.calls[0][1].contexts.client_error;
 
 describe('POST /api/client-errors', () => {
   test('forwards a well-formed report tagged source=client and returns 204', async () => {
-    const res = await post({
-      name: 'TypeError', context: 'PageErrorBoundary', route: '/admin/banking',
-      componentStack: '\n    in BankingPage\n    in div\n    in Router',
-    });
+    const res = await post({ name: 'TypeError', context: 'PageErrorBoundary', route: '/admin/banking' });
     expect(res.status).toBe(204);
     const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error.name).toBe('TypeError');
     expect(captureContext.tags).toEqual({ source: 'client' });
-    expect(ctxOf()).toEqual({
-      context: 'PageErrorBoundary',
-      route: 'admin',
-      componentStack: 'in BankingPage\nin div\nin Router',
-    });
+    expect(ctxOf()).toEqual({ context: 'PageErrorBoundary', route: 'admin' });
+  });
+
+  test('componentStack is never accepted (unbounded → could carry PII)', async () => {
+    await post({ name: 'TypeError', route: '/admin/x', componentStack: 'in AdamBenetti' });
+    expect(ctxOf()).not.toHaveProperty('componentStack');
+    expect(JSON.stringify(mockCapture.mock.calls[0])).not.toMatch(/AdamBenetti/);
   });
 
   test('reduces the route to an allowlisted root — token/PII tails never persist', async () => {
@@ -69,32 +68,17 @@ describe('POST /api/client-errors', () => {
     expect(ctxOf().context).toBeUndefined(); // shape-valid but not allowlisted
   });
 
-  test('name rejects a PAN even with a leading letter (digit-run guard)', async () => {
-    await post({ name: '4242424242424242', route: '/admin/x' }); // bare PAN
-    expect(mockCapture.mock.calls[0][0].name).toBe('Error');
-    mockCapture.mockClear();
-    await post({ name: 'a4242424242424242', route: '/admin/x' }); // letter + PAN
-    expect(mockCapture.mock.calls[0][0].name).toBe('Error');
-    mockCapture.mockClear();
-    await post({ name: 'ChunkLoadError', route: '/admin/x' }); // real error name
-    expect(mockCapture.mock.calls[0][0].name).toBe('ChunkLoadError');
-  });
-
-  test('componentStack keeps only "in/at ComponentName" tokens, dropping injected PII', async () => {
-    await post({
-      name: 'E', route: '/admin/x',
-      componentStack: 'in BankingPage\nSSN 123-45-6789 card 4242424242424242\n at PayoutModal',
-    });
-    const stack = ctxOf().componentStack;
-    expect(stack).toBe('in BankingPage\nat PayoutModal');
-    expect(stack).not.toMatch(/123-45-6789|4242/);
-  });
-
-  test('componentStack drops a PAN-shaped "component" (digit-run guard)', async () => {
-    await post({ name: 'E', route: '/admin/x', componentStack: 'in A4242424242424242\n in BankingPage' });
-    const stack = ctxOf().componentStack;
-    expect(stack).toBe('in BankingPage');
-    expect(stack).not.toMatch(/4242/);
+  test('name is a strict allowlist — PANs and person-names collapse to Error', async () => {
+    for (const bad of ['4242424242424242', 'a4242424242424242', 'AdamBenetti', 'DropTable']) {
+      mockCapture.mockClear();
+      await post({ name: bad, route: '/admin/x' });
+      expect(mockCapture.mock.calls[0][0].name).toBe('Error');
+    }
+    for (const ok of ['TypeError', 'ChunkLoadError', 'RangeError']) {
+      mockCapture.mockClear();
+      await post({ name: ok, route: '/admin/x' });
+      expect(mockCapture.mock.calls[0][0].name).toBe(ok);
+    }
   });
 
   test('a missing/empty body still returns 204 (never 500s)', async () => {

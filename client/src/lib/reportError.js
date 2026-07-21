@@ -2,14 +2,14 @@
 // forwards to Sentry server-side. Must NEVER throw into the caller — a broken
 // reporter can't be allowed to break an error boundary or a handler catch.
 //
-// The endpoint is public, so the SERVER strictly transforms every field into a
-// non-sensitive shape (validated error name, allowlisted route root, validated
-// context label, component-name-only stack). We therefore send ONLY those
-// structured fields — never the free-form error message or stack, which can
-// carry bearer tokens, card/SSN data, or PII.
+// The endpoint is public, so the SERVER strictly allowlists/transforms every
+// field into a non-sensitive shape (allowlisted error name, allowlisted route
+// root, allowlisted context label). We therefore send ONLY those bounded fields
+// — never the free-form message, stack, or component stack, which can carry
+// bearer tokens, card/SSN data, or PII.
 //
 // reportError(error, context)
-//   context: a string label, or { context, componentStack } from a boundary.
+//   context: a string label, or { context } from a boundary.
 export function reportError(error, context) {
   try {
     const meta = typeof context === 'string' ? { context } : context || {};
@@ -17,7 +17,6 @@ export function reportError(error, context) {
       name: error?.name,
       context: meta.context,
       route: typeof window !== 'undefined' ? window.location?.pathname : undefined,
-      componentStack: meta.componentStack,
     });
 
     // sendBeacon survives page unload (the typical case for a crash) but returns
