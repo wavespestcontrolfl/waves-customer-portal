@@ -396,7 +396,14 @@ async function syncBalanceTransactions(limit = 100) {
   const stripe = getStripe();
   if (!stripe) throw new Error('Stripe not configured');
 
+  // Coverage honesty: the P&L treats last_sync_at as "the ledger is current
+  // through this moment", so it must be the time the sync STARTED — pages
+  // are read from that instant's view of the stream, and a run that
+  // straddles ET midnight would otherwise claim a day it never re-read.
+  const syncStartedAt = new Date();
+
   let watermark = 0;
+  let resumeCursor = null;
   try {
     const syncState = await db('stripe_sync_state')
       .where('sync_type', 'balance_transactions')
@@ -404,16 +411,26 @@ async function syncBalanceTransactions(limit = 100) {
     if (syncState?.last_created_at) {
       watermark = Math.floor(new Date(syncState.last_created_at).getTime() / 1000);
     }
+    // A prior run that hit the page cap left a resume cursor (a Stripe txn
+    // id): continue paging DEEPER from it instead of refetching the same
+    // newest pages forever.
+    if (syncState?.cursor && String(syncState.cursor).startsWith('txn_')) {
+      resumeCursor = String(syncState.cursor);
+    }
   } catch { /* table may not exist yet */ }
 
   const rows = [];
-  let startingAfter = null;
+  let startingAfter = resumeCursor;
   let hasMore = true;
-  const MAX_PAGES = 100;
+  const MAX_PAGES = 200;
   for (let pageIdx = 0; pageIdx < MAX_PAGES && hasMore; pageIdx++) {
     const page = await stripe.balanceTransactions.list({
       limit,
-      ...(watermark > 0 ? { created: { gt: watermark } } : {}),
+      // gte, not gt: Stripe timestamps are second-granular, so a later
+      // transaction can share the watermark second — an exclusive filter
+      // would skip it forever. The 1-second overlap is deduped by the
+      // stripe_txn_id upsert.
+      ...(watermark > 0 ? { created: { gte: watermark } } : {}),
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
     rows.push(...(page.data || []));
@@ -421,6 +438,7 @@ async function syncBalanceTransactions(limit = 100) {
     startingAfter = page.data?.length ? page.data[page.data.length - 1].id : null;
     if (!startingAfter) break;
   }
+
   let upserted = 0;
   let newestCreated = watermark;
   if (rows.length) {
@@ -443,34 +461,37 @@ async function syncBalanceTransactions(limit = 100) {
     }
   }
 
-  // Persist watermark + last-run stamp ONLY when pagination fully exhausted:
-  // pages arrive newest-first, so a truncated run has processed the newest
-  // slice while the OLDEST part of the range is still unfetched — advancing
-  // the watermark (or stamping last_sync_at, which the P&L coverage check
-  // treats as proof of completeness) would skip that gap forever and label
-  // incomplete figures final. A truncated run persists nothing and reports
-  // has_more so the operator/coverage keep saying "not done".
-  if (hasMore) {
-    logger.warn(`[stripe-banking] Balance-transaction sync hit the ${MAX_PAGES}-page safety cap — sync state NOT advanced; rows upserted so far are kept (idempotent)`);
-  } else {
-    try {
-      const existing = await db('stripe_sync_state')
-        .where('sync_type', 'balance_transactions')
-        .first();
-      const patch = {
-        last_sync_at: new Date().toISOString(),
+  // Persist state. Pages arrive newest-first, so:
+  // - EXHAUSTED run: the range is fully covered — advance the watermark,
+  //   stamp last_sync_at (as the START time, see above), clear any cursor.
+  // - CAP-HIT run: the OLDEST part of the range is still unfetched. Never
+  //   advance the watermark or last_sync_at (coverage must keep saying
+  //   "not done"), but SAVE the deep-page cursor so the next run resumes
+  //   where this one stopped instead of refetching the same newest pages
+  //   forever. Upserted rows are kept either way (idempotent).
+  try {
+    const existing = await db('stripe_sync_state')
+      .where('sync_type', 'balance_transactions')
+      .first();
+    const patch = hasMore
+      ? { cursor: startingAfter }
+      : {
+        last_sync_at: syncStartedAt.toISOString(),
+        cursor: null,
         ...(newestCreated > watermark
-          ? { last_created_at: new Date(newestCreated * 1000).toISOString(), cursor: new Date(newestCreated * 1000).toISOString() }
+          ? { last_created_at: new Date(newestCreated * 1000).toISOString() }
           : {}),
       };
-      if (existing) {
-        await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
-      } else {
-        await db('stripe_sync_state').insert({ sync_type: 'balance_transactions', ...patch });
-      }
-    } catch (err) {
-      logger.warn('[stripe-banking] Could not update balance-transaction sync state:', err.message);
+    if (existing) {
+      await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
+    } else {
+      await db('stripe_sync_state').insert({ sync_type: 'balance_transactions', ...patch });
     }
+  } catch (err) {
+    logger.warn('[stripe-banking] Could not update balance-transaction sync state:', err.message);
+  }
+  if (hasMore) {
+    logger.warn(`[stripe-banking] Balance-transaction sync hit the ${MAX_PAGES}-page cap — resume cursor saved; run Sync again to continue`);
   }
 
   if (upserted > 0) logger.info(`[stripe-banking] Balance-transaction sync upserted ${upserted} row(s)`);
