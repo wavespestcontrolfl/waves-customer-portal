@@ -405,3 +405,64 @@ describe('stale-snapshot bypass guards', () => {
     expect(pricingBundleMissingRequiredSetupFee(feeLess, bundleMix)).toBe(false);
   });
 });
+
+describe('termite-bait rows with explicit per-application fields (billed per application, owner 2026-07-20)', () => {
+  // New engine payloads persist the pricer's visitsPerYear/perApp on the
+  // recurring row (perTreatment 105 = 35 x 12 / 4 pre-discount). The section
+  // must lead with the NET per-application price, flag per-application
+  // billing (no "Billed $X/mo" note), and the combined breakdown row must
+  // carry displayPrice + visits so it renders "/ application", not "/ month".
+  function perAppBundleEstimate() {
+    const estimate = pestMosquitoTermiteEstimate();
+    const services = estimate.estimate_data.result.recurring.services;
+    const termiteIdx = services.findIndex((svc) => svc.service === 'termite_bait');
+    services[termiteIdx] = {
+      name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35,
+      perTreatment: 105, visitsPerYear: 4,
+    };
+    return estimate;
+  }
+
+  test('split section: NET per-application price, billedPerApplication flagged, monthly figures intact', async () => {
+    const bundle = await buildPricingBundle(perAppBundleEstimate());
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite).toBeTruthy();
+    // Codex #2911 r2: explicit per-app fields must NOT promote termite onto
+    // the mirrored pest cadence ladder — its cadence is fixed, so the
+    // section stays a single 'recurring' entry (no active selector).
+    expect(termite.frequencies).toHaveLength(1);
+    const entry = termite.frequencies[0];
+    expect(entry.key).toBe('recurring');
+    // 105 pre-discount -> 89.25 net of Gold 15%, same figure the legacy
+    // derivation produced — the price is unchanged, only its authority moved
+    // from a display-time derivation to the persisted row.
+    expect(entry.perTreatment).toBeCloseTo(89.25, 2);
+    expect(entry.visitsPerYear).toBe(4);
+    expect(entry.billedPerApplication).toBe(true);
+    expect(entry.monthly).toBeCloseTo(29.75, 2);
+    expect(entry.monthlyBase).toBeCloseTo(35, 2);
+  });
+
+  test('combined combo row carries displayPrice + visits so the breakdown renders per application', async () => {
+    const bundle = await buildPricingBundle(perAppBundleEstimate());
+    const defaultCombo = bundle.serviceCadenceCombos.find(
+      (c) => c.key === 'mosquito:monthly12|pest_control:quarterly',
+    );
+    const termiteRow = (defaultCombo.perServiceTreatments || []).find((r) => r.service === 'termite_bait');
+    expect(termiteRow).toBeTruthy();
+    expect(termiteRow.displayPrice).toBeCloseTo(89.25, 2);
+    expect(termiteRow.visitsPerYear).toBe(4);
+    expect(termiteRow.perTreatment).toBeCloseTo(105, 2);
+    // Monthly figures still ride along for totals math.
+    expect(termiteRow.monthly).toBeCloseTo(29.75, 2);
+  });
+
+  test('legacy rows (no explicit fields) keep the display-only derivation WITHOUT the billing flag', async () => {
+    const bundle = await buildPricingBundle(pestMosquitoTermiteEstimate());
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    const entry = termite.frequencies[0];
+    expect(entry.perTreatment).toBeCloseTo(89.25, 2);
+    expect(entry.visitsPerYear).toBe(4);
+    expect(entry.billedPerApplication).toBeUndefined();
+  });
+});

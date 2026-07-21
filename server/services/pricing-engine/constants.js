@@ -769,6 +769,11 @@ const TERMITE = {
     basic:   { monthly: r(35), label: 'Basic' },
     premier: { monthly: r(65), label: 'Premier' },
   },
+  // Stations are checked quarterly (owner directive 2026-07-10) and the
+  // program is displayed AND billed per application (owner 2026-07-20) —
+  // cadence is program structure, not a tunable price value, so it lives
+  // here rather than pricing_config.
+  monitoringVisitsPerYear: 4,
 };
 
 // ============================================================

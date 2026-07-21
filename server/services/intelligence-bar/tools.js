@@ -9,7 +9,11 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const {
+  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
+  windowDurationMinutes, deriveWindowEnd,
+} = require('../../utils/datetime-et');
+const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
 const {
@@ -1250,8 +1254,68 @@ async function updatePropertyAccess(input) {
 }
 
 
+// Terminal scheduled_services statuses — one-way; never movable.
+const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// Live tracker-lifecycle statuses — movable, but the move must rewind the
+// tracker lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival
+// timestamps don't survive onto the new date.
+const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
+
+// scheduled_date validation is the shared strict calendar-date helper
+// (datetime-et.validScheduleDate) — same rules as schedule-tools' mover, so
+// an impossible date like 2099-02-31 is rejected here, not normalized by JS
+// Date into a real day or passed on to a raw PG cast error.
+
+// Parse the tool's time_window contract — "morning" (8-12), "afternoon"
+// (12-5), or a specific time like "9:00 AM" / "14:30" — into an HH:MM
+// window start. Returns { start } (null start when no time was given) or
+// { error } for garbage input, so callers return a clear tool error instead
+// of a Postgres time-cast error.
+function parseTimeWindowStart(timeWindow) {
+  if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
+  const raw = String(timeWindow).trim().toLowerCase();
+  if (raw === 'morning') return { start: '08:00' };
+  if (raw === 'afternoon') return { start: '12:00' };
+  const m = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!m) {
+    return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
+  }
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] ? parseInt(m[2], 10) : 0;
+  if (m[3] === 'pm' && hour < 12) hour += 12;
+  if (m[3] === 'am' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) {
+    return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
+  }
+  return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
+}
+
+// Window length + end derivation are the shared datetime-et helpers
+// (windowDurationMinutes / deriveWindowEnd). deriveWindowEnd returns null on
+// a midnight-crossing end instead of the old local modulo-24h wrap, which
+// turned an accepted 23:30 start into a 23:30–00:30 same-day block — a
+// non-positive span invisible to the overlap predicates and nonsense to the
+// elapsed guard.
+
 async function createAppointment(input) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
+
+  const dateStr = validScheduleDate(scheduled_date);
+  if (!dateStr) {
+    return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
+  }
+  const win = parseTimeWindowStart(time_window);
+  if (win.error) return { error: win.error };
+
+  // Flat-60 convention (admin-schedule: every service call defaults to 60
+  // minutes) so overlap checks see a real block, not an open-ended start.
+  // deriveWindowEnd returns null when start+60 would cross midnight — the
+  // old modulo wrap turned a 23:30 start into a 23:30–00:30 same-day block
+  // no overlap predicate could see. Reject up front, before any DB read.
+  const windowEnd = win.start ? deriveWindowEnd(win.start, 60) : null;
+  if (win.start && !windowEnd) {
+    return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
@@ -1263,25 +1327,72 @@ async function createAppointment(input) {
     if (tech) technician_id = tech.id;
   }
 
+  // A today target whose window already elapsed in ET is unreachable — the
+  // visit lands in a past window no route can serve. Same cutoff logic the
+  // rebooker uses (datetime-et.sameDayWindowElapsed); a today target with no
+  // specific time, or a still-future window, is still allowed.
+  if (sameDayWindowElapsed(dateStr, windowEnd || win.start)) {
+    return { error: 'That time has already passed today — pick a later window or a future date.' };
+  }
+
+  // status 'pending', matching the column default and every other writer —
+  // 'scheduled' is not in the scheduled_services status CHECK set and threw
+  // on every insert. track_token_expires_at is stamped by the INSERT trigger
+  // (set_default_track_token_expiry).
   const [appointment] = await db('scheduled_services').insert({
     customer_id,
-    scheduled_date,
+    scheduled_date: dateStr,
     service_type,
     technician_id,
-    status: 'scheduled',
-    window_start: time_window || null,
+    status: 'pending',
+    window_start: win.start,
+    window_end: windowEnd,
     notes: notes || null,
     created_at: new Date(),
     updated_at: new Date(),
   }).returning('*');
 
-  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for ${customer.first_name} ${customer.last_name} on ${scheduled_date}`);
+  // Register the durable confirmation/reminder row synchronously with the
+  // insert, like the canonical admin create path (admin-schedule POST) —
+  // without it the 72h/24h reminder cron never sees the visit. Registration
+  // only: sendConfirmation:false marks the confirmation not-applicable
+  // (mirroring an admin-created visit with the "Send confirmation SMS"
+  // checkbox off), so no SMS goes out — sends stay operator-initiated.
+  //
+  // Windowless creates ("put this customer on Friday") register at the
+  // canonical date+08:00 slot time — the convention the reminder DB sync
+  // trigger, the self-heal sweep, and the same-slot dedup all COALESCE on —
+  // but with BOTH reminder windows pre-closed (closeReminderWindows): the
+  // 72h/24h texts render the appointment_time's clock time, so an armed
+  // windowless row would promise "at 8:00 AM" for a time nobody chose.
+  // Skipping registration instead would not help: selfHealMissingReminderRows
+  // registers any row-less future visit at 08:00 ARMED within 15 minutes.
+  // When a real window is later set, the sync trigger's time_changed branch
+  // re-arms the windows from the real start, so reminders resume with a time
+  // the operator actually picked.
+  //
+  // Best-effort like the admin path: a registration failure must not fail
+  // the already-committed insert (registerAppointment also self-alerts).
+  try {
+    const AppointmentReminders = require('../appointment-reminders');
+    await AppointmentReminders.registerAppointment(
+      appointment.id, customer_id,
+      `${dateStr}T${win.start || '08:00'}`,
+      service_type, 'admin_ib',
+      { sendConfirmation: false, closeReminderWindows: !win.start },
+    );
+  } catch (err) {
+    logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
+  }
+
+  // Ids only — customer names/phones/addresses never go to logs (PII rule).
+  logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
 
   return {
     success: true,
     appointment_id: appointment.id,
     customer_name: `${customer.first_name} ${customer.last_name}`,
-    date: scheduled_date,
+    date: dateStr,
     service_type,
     technician: technician_name || 'Unassigned',
   };
@@ -1294,24 +1405,144 @@ async function rescheduleAppointment(input) {
   const appt = await db('scheduled_services').where('id', appointment_id).first();
   if (!appt) return { error: 'Appointment not found' };
 
+  // Terminal rows are one-way — a completed/cancelled visit must not quietly
+  // come back to life on a new date.
+  if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
+    return { error: `Cannot reschedule a ${appt.status} appointment` };
+  }
+
+  const dateStr = validScheduleDate(new_date);
+  if (!dateStr) {
+    return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
+  }
+  const win = parseTimeWindowStart(new_time_window);
+  if (win.error) return { error: win.error };
+
   const customer = await db('customers').where('id', appt.customer_id).first();
   const oldDate = appt.scheduled_date;
 
-  await db('scheduled_services').where('id', appointment_id).update({
-    scheduled_date: new_date,
-    window_start: new_time_window || appt.window_start,
-    notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
-    updated_at: new Date(),
-  });
+  // Preserve the original visit's window length when a new start is given.
+  // Persisting only window_start against a stale window_end collapses the
+  // window to zero (09:00→10:00 against a stored 10:00 end) — token expiry
+  // and the audit log both read window_end, so both would break. The shared
+  // deriveWindowEnd returns null when the preserved duration would carry the
+  // end past midnight — reject rather than persist a wrapped, inverted block.
+  const newStart = win.start || appt.window_start;
+  const newWindowEnd = win.start
+    ? deriveWindowEnd(win.start, windowDurationMinutes(appt.window_start, appt.window_end))
+    : appt.window_end;
+  if (win.start && !newWindowEnd) {
+    return { error: 'That window would cross midnight — pick an earlier start.' };
+  }
 
-  logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${new_date}`);
+  // A today target whose effective window already elapsed in ET is unreachable
+  // — moving into a past window strands the visit. Same cutoff logic as the
+  // rebooker (window_end preferred, else start); a still-future today window
+  // is allowed.
+  if (sameDayWindowElapsed(dateStr, newWindowEnd || newStart)) {
+    return { error: 'That window has already passed today — pick a later window or a future date.' };
+  }
+
+  // Moving a live (en_route/on_site) visit rewinds the tracker lifecycle the
+  // same way the rebooker does, so stale arrival timestamps can't poison
+  // duration capture on the new date. Lazy require: rebooker is heavy.
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const wasLive = LIVE_APPOINTMENT_STATUSES.includes(String(appt.status));
+  const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+
+  // Compare-and-swap on the OBSERVED status + schedule fields: the terminal
+  // guard and the wasLive classification above came from the initial read —
+  // if the visit completed (or got cancelled / went live) between that read
+  // and this write, an update by id alone would apply the stale branch and
+  // rewrite a terminal row back onto the schedule. Status alone also let two
+  // ORDINARY moves of the same confirmed row both match — the later write
+  // silently clobbered the newer date/window and logged from a stale
+  // snapshot. Matching the observed scheduled_date + window_start makes the
+  // later writer miss instead (knex renders a null value in the object form
+  // as IS NULL — the same contract auto-dispatch's rebooker `expect` relies
+  // on). window_end is in the predicate too: the UPDATE below always writes
+  // it from this pre-read — verbatim on a date-only move, and via the
+  // preserved-duration derivation on a timed one — so a concurrent edit that
+  // only resized the END (the bulk route's explicit-end form) would otherwise
+  // still match on start alone and get its end silently restored from the
+  // stale snapshot. Field-level CAS is the repo's established pattern for
+  // exactly this (rebooker options.expect); deliberately NOT
+  // SELECT..FOR UPDATE, which would put a row lock + transaction around a
+  // quick single-row mover for no added safety. updated_at stays out of the
+  // predicate: knex never auto-touches it and not every mover stamps it (the
+  // bulk route's UPDATE doesn't), so it isn't a reliable change marker. Zero
+  // rows matched = the row changed under us; refuse instead of writing.
+  const observedDate = appt.scheduled_date instanceof Date
+    ? appt.scheduled_date.toISOString().slice(0, 10)
+    : (appt.scheduled_date ? String(appt.scheduled_date).slice(0, 10) : null);
+  const updatedRows = await db('scheduled_services')
+    .where('id', appointment_id)
+    .where('status', String(appt.status))
+    .where({
+      scheduled_date: observedDate,
+      window_start: appt.window_start ?? null,
+      window_end: appt.window_end ?? null,
+    })
+    .update({
+      scheduled_date: dateStr,
+      window_start: newStart,
+      window_end: newWindowEnd,
+      notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
+      // Public track links live until the day after the visit — refresh onto
+      // the new date, same as schedule-tools' movers.
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, newWindowEnd),
+      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — a moved
+      // en_route/on_site row would keep a live status on a future date. Land it
+      // back on 'confirmed' in the same UPDATE, matching the rebooker's own path.
+      ...(wasLive ? { status: 'confirmed' } : {}),
+      ...liveReset,
+      updated_at: new Date(),
+    });
+  if (updatedRows === 0) {
+    return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
+  }
+
+  // Rebooker-parity side effects of the live → confirmed flip above:
+  // job_status_history audit row, tech_status release, customer tracker
+  // refresh. Best-effort: the move is committed — a side-effect failure
+  // must not report the move itself as failed.
+  if (wasLive) {
+    try {
+      await applyLiveMoveSideEffects(db, appt);
+    } catch (err) {
+      logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+    }
+  }
+
+  // Audit row, matching the rebooker's reschedule_log conventions.
+  // Best-effort: the move above is already committed — a log failure must
+  // not report the move itself as failed.
+  try {
+    await db('reschedule_log').insert({
+      scheduled_service_id: appointment_id,
+      customer_id: appt.customer_id,
+      original_date: oldDate,
+      new_date: dateStr,
+      reason_code: 'admin',
+      initiated_by: 'admin_ib',
+      original_window: appt.window_start ? `${appt.window_start}-${appt.window_end}` : null,
+      new_window: newStart
+        ? (newWindowEnd ? `${newStart}-${newWindowEnd}` : newStart)
+        : null,
+      notes: reason || null,
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar] reschedule_log insert failed for ${appointment_id}: ${err.message}`);
+  }
+
+  logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
 
   return {
     success: true,
     appointment_id,
     customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
     old_date: oldDate,
-    new_date,
+    new_date: dateStr,
     service_type: appt.service_type,
   };
 }

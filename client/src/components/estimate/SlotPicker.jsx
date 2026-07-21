@@ -89,6 +89,23 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
           Nearby day — a tech is servicing a property close to you
         </div>
       ) : null}
+      {/* Rain chip (GATE_BOOKING_RAIN_CHIPS): soft, muted amber heads-up on
+          rainy days (>= 40%). rainChance is absent when the server gate is
+          off. Never alarmist — this is a conversion funnel. */}
+      {Number.isFinite(slot.rainChance) && slot.rainChance >= 40 ? (
+        glass ? (
+          <span className="gc-slot-rain">☔ {Math.round(slot.rainChance)}% rain</span>
+        ) : (
+          <div style={{
+            marginTop: 6, fontSize: 12, fontWeight: 600,
+            color: isSelected ? '#FFEDD5' : '#B45309',
+            background: isSelected ? 'rgba(255,255,255,.16)' : '#FFF7ED',
+            padding: '3px 9px', borderRadius: 999, alignSelf: 'flex-start',
+          }}>
+            ☔ {Math.round(slot.rainChance)}% rain
+          </div>
+        )
+      ) : null}
     </button>
   );
 }

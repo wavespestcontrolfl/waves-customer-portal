@@ -8193,6 +8193,157 @@ async function markRescheduleReminderNotified(serviceIds) {
   }
 }
 
+// Snapshot the reminder rows THIS request just synced (appointment_time +
+// updated_at), captured right after syncRescheduleReminder and BEFORE the SMS
+// attempt — so the values reflect this invocation's own write, not a newer
+// reschedule that may land during the (slow) send. rearmRescheduleReminderWindows
+// guards its write on these so it never stomps a row that moved on underneath.
+//
+// Best-effort, with a DISTINCT failure result: [] means the read succeeded and
+// found no reminder rows (genuinely nothing to re-arm), while a failed read
+// returns { failed: true, guards: [] }. The snapshot only GUARDS the re-arm,
+// so the read failing must never abort the reschedule/SMS itself — but it also
+// must not masquerade as "no rows": syncRescheduleReminder already covered the
+// due windows in anticipation of this route's SMS, so a blocked send that then
+// silently skipped the re-arm would leave BOTH reminders suppressed and the
+// customer hearing nothing. rearmRescheduleReminderWindows sees the marker and
+// degrades to its unguarded fallback (same failure shape as reschedule-sms.js's
+// reminderGuardReadFailed path).
+async function captureReminderGuards(serviceIds) {
+  const ids = (Array.isArray(serviceIds) ? serviceIds : [serviceIds]).filter(Boolean);
+  if (!ids.length) return [];
+  try {
+    const rows = await db('appointment_reminders')
+      .whereIn('scheduled_service_id', ids)
+      .select('scheduled_service_id', 'appointment_time', 'updated_at');
+    return rows.map((r) => ({
+      scheduledServiceId: r.scheduled_service_id,
+      appointmentTime: r.appointment_time,
+      updatedAt: r.updated_at,
+    }));
+  } catch (err) {
+    logger.error(`[dispatch] reminder guard snapshot failed (${ids.join(', ')}): ${err.message} — a blocked/failed send will re-arm unguarded`);
+    return { failed: true, guards: [] };
+  }
+}
+
+// No-send compensation (mirrors reschedule-public.js): syncRescheduleReminder
+// with willNotify:true covers any due 24h/72h window in anticipation of THIS
+// route's own SMS. When that SMS never actually goes out (no phone / blocked /
+// send threw), the covered flags would suppress every reminder of the new
+// time — re-arm so the 15-min cron still reminds the customer. A possible
+// duplicate was the risk covering guards against; silence is worse.
+//
+// Each window only re-arms while the cron can still deliver it (shared
+// AppointmentReminders boundary predicates): the 72h window needs the
+// appointment more than 24.25h out (reminder72hStillReachable — the cron's
+// 72h branch never fires once the appointment is within 24.25h, so clearing
+// the flag for a same/next-day appointment leaves a dead armed window the
+// scan re-selects every 15 minutes forever, and the covered flag the sync
+// stamped was already the correct terminal state; the re-armed 24h window
+// carries the fallback notice for those); the 24h window needs the START
+// still in the future (reminder24hStillReachable — a same-day move can be
+// valid because its window END hasn't elapsed while the start already
+// passed, and the cron's 24h branch requires hoursUntil > 0, so a cleared
+// flag there can never send either — the row would just rescan forever).
+// A guard with neither window deliverable skips its write entirely.
+//
+// Guarded per-row on the appointment_time + updated_at captured at read time
+// (captureReminderGuards, before the SMS): the re-arm is scoped by service id
+// alone would clobber a NEWER reschedule that committed while this request's
+// send was in flight — that newer move re-stamped appointment_time (or bumped
+// updated_at via its own markRescheduleNoticeSent), so clearing the flags here
+// would undo its covered/sent state and double-text the customer. Zero rows
+// matched = the row moved on underneath; skip it, the newer reschedule owns it.
+// Mirrors handleReschedule's own re-arm guard shape (id + appointment_time +
+// updated_at + suppressed_by_sibling).
+//
+// When the pre-send snapshot READ failed (guards is captureReminderGuards'
+// { failed: true } marker — NOT the genuine-empty [], which stays a no-op),
+// the re-arm can't be scoped by pre-send row state. Fall back to the re-arm
+// scoped as tightly as the static predicates allow: the caller-supplied
+// service ids (unguardedFallback) plus the sibling-suppressed/cancelled
+// carve-outs, which don't depend on the snapshot; the 72h band is judged from
+// each entry's caller-known NEW appointment time — the same date+window the
+// caller's own syncRescheduleReminder stamped onto the row, i.e. what the
+// cleared flag would fire for. Trade-off, decided per the same precedent as
+// reschedule-sms.js's reminderGuardReadFailed path ("silence is worse"): the
+// snapshot guard only prevents a POSSIBLE duplicate text when a newer
+// reschedule re-stamped the row mid-send; skipping the re-arm instead risks
+// the customer never hearing about the new time at all. Prefer the re-arm,
+// accept the narrow double-text window, and log loudly.
+async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
+  const snapshotFailed = Boolean(guards) && !Array.isArray(guards) && guards.failed === true;
+  const list = (snapshotFailed
+    ? (Array.isArray(unguardedFallback) ? unguardedFallback : [unguardedFallback])
+    : (Array.isArray(guards) ? guards : [guards])
+  ).filter((g) => g && g.scheduledServiceId);
+  if (!list.length) {
+    // Failure marker but no caller-supplied scope: never fall back to an
+    // unscoped update — surface the stuck-suppressed risk instead.
+    if (snapshotFailed) logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
+    return;
+  }
+  // Shared boundary predicates — never a local copy of the cron's cutoffs.
+  const { reminder72hStillReachable, reminder24hStillReachable } = require('../services/appointment-reminders');
+  // Same update-builder shape as reschedule-sms.js's rearmUpdateFor: each
+  // window re-arms only while the cron can still deliver it; null when
+  // neither can (skip the write — don't bump updated_at on a row whose
+  // flags aren't changing).
+  const rearmUpdateFor = (apptTime) => {
+    const windows = {
+      ...(reminder72hStillReachable(apptTime) ? {
+        reminder_72h_sent: false,
+        reminder_72h_sent_at: null,
+      } : {}),
+      ...(reminder24hStillReachable(apptTime) ? {
+        reminder_24h_sent: false,
+        reminder_24h_sent_at: null,
+      } : {}),
+    };
+    if (Object.keys(windows).length === 0) return null;
+    return { ...windows, updated_at: db.fn.now() };
+  };
+  if (snapshotFailed) {
+    logger.warn(`[dispatch] re-arming reminders for ${list.map((g) => g.scheduledServiceId).join(', ')} WITHOUT the pre-send snapshot guard (snapshot read had failed) — a concurrent newer reschedule may get a duplicate reminder`);
+  }
+  for (const g of list) {
+    try {
+      // g.appointmentTime is the row's just-synced NEW time (captured by
+      // captureReminderGuards after syncRescheduleReminder; on the fallback
+      // path, recomputed by the caller from the same date+window it synced),
+      // and on the guarded path the appointment_time predicate below means
+      // the update only lands on a row still at that time — so the band
+      // decision is judged against exactly the appointment the cleared flag
+      // would fire for.
+      const rearmUpdate = rearmUpdateFor(g.appointmentTime);
+      if (!rearmUpdate) {
+        logger.info(`[dispatch] no reminder window re-armed for ${g.scheduledServiceId} — the appointment start has already passed, so the cron could never deliver a cleared flag`);
+        continue;
+      }
+      let query = db('appointment_reminders')
+        .where({ scheduled_service_id: g.scheduledServiceId })
+        // A sibling-suppressed row is suppressed BY SETTING both sent flags —
+        // clearing them here would put it back in the cron's send set alongside
+        // the slot's owner (two texts per window for one slot). Same carve-out
+        // the success path takes in markRescheduleNoticeSent. A cancelled row
+        // must stay silent for the same reason. Both survive the lost snapshot.
+        .where('suppressed_by_sibling', false)
+        .where('cancelled', false);
+      if (!snapshotFailed) {
+        // The move-on-underneath guard: only re-arm the exact row state this
+        // invocation synced. A newer reschedule changes at least one of these.
+        query = query
+          .where('appointment_time', g.appointmentTime)
+          .where('updated_at', g.updatedAt);
+      }
+      await query.update(rearmUpdate);
+    } catch (err) {
+      logger.error(`[dispatch] reminder re-arm after failed notice failed (${g.scheduledServiceId}): ${err.message}`);
+    }
+  }
+}
+
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
@@ -8408,6 +8559,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
         }
       }
+      // Sync each occurrence's reminder and snapshot its guard IMMEDIATELY
+      // after — capture must sit adjacent to its own sync, before ANY awaited
+      // board broadcast. A snapshot taken after the emits would capture a
+      // concurrent dispatcher's newer reschedule of an occurrence as "our"
+      // state, and a later SMS failure would then re-arm against it —
+      // clearing the newer reschedule's covered flags and double-texting the
+      // customer (the guard exists precisely so zero rows match in that case).
+      const seriesReminderGuards = [];
+      let seriesGuardSnapshotFailed = false;
       for (const occurrence of occurrences) {
         await syncRescheduleReminder(
           occurrence.id,
@@ -8415,6 +8575,22 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           { start: occurrence.windowStart, end: occurrence.windowEnd },
           { willNotify: notifyCustomer !== false },
         );
+        const occurrenceGuards = await captureReminderGuards(occurrence.id);
+        if (Array.isArray(occurrenceGuards)) {
+          seriesReminderGuards.push(...occurrenceGuards);
+        } else {
+          // Per-occurrence snapshot read failed — degrade the WHOLE set to
+          // the unguarded fallback below. rearmRescheduleReminderWindows'
+          // failure marker is all-or-nothing (same semantics as the previous
+          // single whole-series snapshot query failing); a partially-guarded
+          // list would silently skip the re-arm for the failed occurrence,
+          // and silence is worse than a possible duplicate.
+          seriesGuardSnapshotFailed = true;
+        }
+      }
+      // Board broadcasts only AFTER every sync→capture pair — an awaited emit
+      // between a sync and its capture would reopen the snapshot gap above.
+      for (const occurrence of occurrences) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
         } catch (err) {
@@ -8471,6 +8647,17 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
             logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
           }
         }
+        if (!notificationSent) {
+          // Fallback scope for a failed guard snapshot: each occurrence's NEW
+          // time, recomputed exactly as syncRescheduleReminder stamped it above.
+          const guardsForRearm = seriesGuardSnapshotFailed
+            ? { failed: true, guards: seriesReminderGuards }
+            : seriesReminderGuards;
+          await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
+            scheduledServiceId: occurrence.id,
+            appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
+          })));
+        }
       }
 
       const { rescheduledOccurrences, ...response } = result;
@@ -8506,6 +8693,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, newWindow, { willNotify: notifyCustomer !== false });
+    // Snapshot the just-synced reminder state BEFORE the SMS, so the no-send
+    // re-arm below can't stomp a newer reschedule that lands during the send.
+    const reminderGuards = await captureReminderGuards(req.params.serviceId);
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
@@ -8548,6 +8738,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           notificationError = err.message;
           logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
         }
+      }
+      if (!notificationSent) {
+        // Fallback scope for a failed guard snapshot: the visit's NEW time,
+        // recomputed exactly as syncRescheduleReminder stamped it above.
+        await rearmRescheduleReminderWindows(reminderGuards, [{
+          scheduledServiceId: req.params.serviceId,
+          appointmentTime: parseETDateTime(rescheduleReminderTime(newDate, newWindow)),
+        }]);
       }
       return res.json({ ...result, notificationSent, notificationError });
     }
@@ -9718,4 +9916,6 @@ module.exports._test = {
   BACKFILL_INFERRED_START_FIELDS,
   BACKFILL_LIFECYCLE_END_FIELDS,
   BACKFILL_RECORD_END_FIELDS,
+  rearmRescheduleReminderWindows,
+  captureReminderGuards,
 };

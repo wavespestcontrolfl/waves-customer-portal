@@ -4845,8 +4845,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#475569;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
   .slot-btn .slot-reason{display:block;font-size:14px;color:#475569;line-height:1.35}
+  .slot-btn .slot-chip{display:inline-block;margin-top:6px;font-size:12px;font-weight:600;line-height:1.3;color:#B45309;background:#FFF7ED;border:1px solid #FED7AA;border-radius:999px;padding:2px 8px}
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
+  .slot-btn.selected .slot-chip{color:#FFEDD5;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.35)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
   .pay-pref-grid.options{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
   @media(max-width:560px){.pay-pref-grid,.pay-pref-grid.options{grid-template-columns:1fr}}
@@ -5826,10 +5828,16 @@ ${shellQuestionsBar()}
     const day = fmtSlotDay(s.date);
     const start = fmtSlotTime(s.windowStart);
     const reason = slotReason(s);
+    // Rain chip (GATE_BOOKING_RAIN_CHIPS): soft heads-up only on rainy days
+    // (>= 40%). rainChance is absent when the gate is off — render nothing.
+    const rain = (typeof s.rainChance === 'number' && isFinite(s.rainChance) && s.rainChance >= 40)
+      ? '<span class="slot-chip">\\u2614 ' + Math.round(s.rainChance) + '% rain</span>'
+      : '';
     return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + start + '">'
       + '<span class="slot-day">' + day + '</span>'
       + '<span class="slot-time">' + start + '</span>'
       + '<span class="slot-reason">' + reason + '</span>'
+      + rain
       + '</button>';
   }
 
@@ -14537,16 +14545,24 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
-  // Termite bait monitoring bills a flat monthly but stations are checked
-  // quarterly (owner directive 2026-07-10) — surface per-check pricing so the
-  // card leads with the price per station check like every other service
-  // ($29.75/mo → $89.25/check, 4 checks/yr). Display-only: the recurring row
-  // and billing stay monthly (the card notes "Billed $X/mo").
+  // Termite bait: stations are checked quarterly (owner directive
+  // 2026-07-10) and NEW estimates persist explicit perTreatment/visitsPerYear
+  // and are BILLED per application (owner 2026-07-20) — flag those so the
+  // card drops the "Billed $X/mo" note, which would misstate the charge.
+  // OLD payloads (perTreatment/visitsPerYear null) keep the display-only
+  // derivation ($29.75/mo → $89.25/check) AND the monthly note: their
+  // accept path still bills the flat monthly, so the note stays truthful
+  // for exactly the estimates it still applies to.
   let effectiveVisits = visitsPerYear;
-  if (key === 'termite_bait' && !(displayPrice && visitsPerYear) && monthly != null) {
-    const TERMITE_CHECKS_PER_YEAR = 4;
-    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
-    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
+  let billedPerApplication = false;
+  if (key === 'termite_bait') {
+    if (displayPrice && visitsPerYear) {
+      billedPerApplication = true;
+    } else if (monthly != null) {
+      const TERMITE_CHECKS_PER_YEAR = 4;
+      effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+      displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
+    }
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -14566,6 +14582,7 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     perTreatment: displayPrice || null,
     perVisit: key === 'pest_control' ? (anchorPrice || null) : null,
     visitsPerYear: effectiveVisits || null,
+    ...(billedPerApplication ? { billedPerApplication: true } : {}),
     included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
     addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
     quoteRequired: false,
@@ -14625,7 +14642,13 @@ function sectionFrequenciesForRecurringService(key, recurringService = {}, baseF
         const row = treatmentRowForServiceFrequency(frequency, key);
         return row ? frequencyFromTreatmentRow(frequency, key, row, recurringService, {
           allowAddOns: false,
-          useBaseFrequencyKey: preserveSelectableKeys && !isFlatMonthlyRow(row),
+          // Termite bait monitoring now carries explicit per-application data
+          // (visitsPerYear 4, owner 2026-07-20) so it no longer reads as
+          // flat-monthly — but its cadence is FIXED, so never mirror the
+          // pest-keyed ladder onto it: that renders an active
+          // Quarterly/Bi-monthly/Monthly selector on a program with exactly
+          // one cadence (codex #2911 r2).
+          useBaseFrequencyKey: preserveSelectableKeys && key !== 'termite_bait' && !isFlatMonthlyRow(row),
         }) : null;
       })
       .filter(Boolean);

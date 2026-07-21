@@ -2115,8 +2115,11 @@ export function calculateEstimate(inputs) {
         name: termiteMonitoringTier === 'premier' ? 'Termite Bait (Premier)' : 'Termite Bait (Basic)',
         service: 'termite_bait',
         mo: termiteMonitoringTier === 'premier' ? 65 : 35,
-        perTreatment: null,
-        visitsPerYear: null,
+        // Quarterly station checks, billed per application (owner
+        // 2026-07-20) — mirrors server priceTermiteBait visitsPerYear/perApp
+        // (perApp = monthly x 3, exact: $105 basic / $195 premier).
+        perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
+        visitsPerYear: 4,
       });
     } else {
       R.tmBait = {

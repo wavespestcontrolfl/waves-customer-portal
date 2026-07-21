@@ -149,8 +149,85 @@ function etWeekStart(date = new Date()) {
   return etDateString(addETDays(date, offsetToMonday));
 }
 
+// Strict calendar-date validator for scheduled_date (a plain DATE column
+// holding ET calendar dates). A plain regex + `new Date(...)` is not enough:
+// JS silently normalizes impossible dates (2099-02-31 → 2099-03-03), and a
+// shape-only regex lets 2099-99-99 reach the DATE update as a raw PG cast
+// error. We parse Y/M/D, construct a UTC date, and reject the value unless
+// every component reproduces exactly — then reject past-ET dates too. Returns
+// the normalized YYYY-MM-DD string, or null for garbage / impossible / past
+// input so callers surface a clear tool error instead of a Postgres failure
+// or a visit no "upcoming" query ever finds.
+function validScheduleDate(value) {
+  const dateStr = String(value == null ? '' : value).split('T')[0];
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) {
+    return null;
+  }
+  if (dateStr < etDateString()) return null;
+  return dateStr;
+}
+
+// Same-day elapsed-window guard, extracted from SmartRebooker.reschedule so
+// every mover (bulk admin reschedule, IB create/reschedule/move) rejects a
+// move into an already-past window with the identical ET cutoff logic.
+// Returns true when `dateStr` (YYYY-MM-DD, or an ISO string we split on 'T')
+// is TODAY in ET AND `cutoff` — the effective window time, HH:MM[:SS], the
+// caller resolves as window_end || window_start (new value preferred, else the
+// stored one) — is at or before the current ET wall-clock minute. A missing
+// cutoff or a non-today date returns false (still movable), matching the
+// rebooker's `if (cutoff)` guard: a same-day target with a still-future window
+// (or no window at all) is not elapsed.
+function sameDayWindowElapsed(dateStr, cutoff) {
+  const day = String(dateStr == null ? '' : dateStr).split('T')[0];
+  if (day !== etDateString()) return false;
+  if (!cutoff) return false;
+  const [ch, cm] = String(cutoff).split(':').map(Number);
+  if (Number.isNaN(ch)) return false;
+  const nowEt = etParts(new Date());
+  return ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute;
+}
+
+// Window-derivation helpers shared by every mover that builds a complete
+// window from a new start (bulk admin reschedule, IB create/reschedule) —
+// extracted here alongside sameDayWindowElapsed so the movers stay in
+// lockstep on how ends are derived, not just on how elapsed-ness is judged.
+
+// Minutes spanned by an HH:MM[:SS] window, defaulting to the flat-60
+// admin-schedule convention when either bound is missing or the stored span
+// is non-positive — so preserving a window's length across a move never
+// collapses it to zero.
+function windowDurationMinutes(start, end) {
+  if (!start || !end) return 60;
+  const [sh, sm] = String(start).split(':').map(Number);
+  const [eh, em] = String(end).split(':').map(Number);
+  const diff = (eh * 60 + em) - (sh * 60 + sm);
+  return diff > 0 ? diff : 60;
+}
+
+// 'HH:MM' end for a window starting at `start` (HH:MM[:SS]) and lasting
+// `durationMin` minutes — or null when the end would land at or past
+// midnight. A modulo-24h wrap (23:30 + 60 → 00:30) yields a same-day block
+// that sorts at or before its own start: a non-positive span the overlap
+// predicates can't see and the elapsed guard misreads. Callers must treat
+// null as a validation failure ("pick an earlier start"), never as a
+// windowless visit.
+function deriveWindowEnd(start, durationMin) {
+  const [h, m] = String(start == null ? '' : start).split(':').map(Number);
+  if (!Number.isFinite(h)) return null;
+  const total = h * 60 + (m || 0) + durationMin;
+  if (!Number.isFinite(total) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
-  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart,
+  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
+  sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

@@ -4015,6 +4015,14 @@ function priceTermiteBait(property, options = {}) {
     },
     annual: monitoringAnnual,
     monthly: monitoringMonthly,
+    // Quarterly station checks, billed per application (owner 2026-07-20).
+    // perApp = monthly x 12 / visits, exact by construction (annual is
+    // monthly x 12): $35/mo -> $105/application, 4 applications/yr. The
+    // v1 mapper forwards these onto the persisted recurring services row,
+    // which is what flips the estimate view, accept billing cadence,
+    // per_application_fee, and series seeding to per-application.
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    perApp: Math.round(monitoringMonthly * (12 / TERMITE.monitoringVisitsPerYear) * 100) / 100,
   };
 }
 

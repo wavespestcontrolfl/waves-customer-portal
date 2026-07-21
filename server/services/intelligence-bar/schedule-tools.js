@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 
 const SCHEDULE_TOOLS = [
@@ -385,8 +385,25 @@ async function assignTechnician(input) {
 }
 
 
+// Terminal scheduled_services statuses — one-way; never movable. Live
+// (en_route/on_site) rows ARE movable, but the move must rewind the tracker
+// lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival timestamps
+// don't survive onto the new date.
+const TERMINAL_MOVE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
+
 async function moveStopsToDay(input) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
+
+  // scheduled_date is a plain DATE column holding ET calendar dates — a
+  // garbage, impossible (2099-02-31), or past target moves stops where no
+  // upcoming query finds them, or throws a raw PG cast error. Shared strict
+  // validator: a shape-only regex let impossible dates reach the DATE update.
+  const dateStr = validScheduleDate(newDate);
+  if (!dateStr) {
+    return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${newDate}")` };
+  }
+
   const services = await db('scheduled_services')
     .whereIn('id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -397,43 +414,175 @@ async function moveStopsToDay(input) {
 
   if (!services.length) return { error: 'No services found for the given IDs' };
 
-  const stops = services.map(s => ({
+  // Terminal rows are one-way — refuse to move them, and report them so the
+  // operator sees exactly what stays behind.
+  const nonTerminal = services.filter((s) => !TERMINAL_MOVE_STATUSES.has(String(s.status)));
+  const skippedTerminal = services
+    .filter((s) => TERMINAL_MOVE_STATUSES.has(String(s.status)))
+    .map((s) => ({ id: s.id, status: s.status }));
+  if (!nonTerminal.length) {
+    return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to move' };
+  }
+
+  // A move TO today whose stop window already elapsed in ET would land the
+  // stop in a past window no route can serve — reject those per-stop with the
+  // rebooker's shared cutoff logic (window_end preferred, else window_start),
+  // and report them so the operator sees what stayed behind. A stop with a
+  // still-future window today, or any move to a future date, is unaffected.
+  const movable = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
+  const skippedElapsed = nonTerminal
+    .filter((s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start))
+    .map((s) => ({ id: s.id, status: s.status }));
+  if (!movable.length) {
+    return {
+      error: 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    };
+  }
+
+  const stops = movable.map(s => ({
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
     city: s.city,
     service_type: s.service_type,
     old_date: s.scheduled_date,
-    new_date: newDate,
+    new_date: dateStr,
   }));
 
   if (confirmed !== true) {
     return {
       proposal: true,
-      would_move_to: newDate,
+      would_move_to: dateStr,
       stop_count: stops.length,
       reason: reason || null,
       stops,
-      note: `Would move ${stops.length} stop(s) to ${newDate}. Re-call with confirmed:true to apply.`,
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      note: `Would move ${stops.length} stop(s) to ${dateStr}. Re-call with confirmed:true to apply.`,
     };
   }
 
-  for (const s of services) {
+  // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
+  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const movedIds = new Set();
+  const skippedConflict = [];
+  for (const s of movable) {
     const oldDate = s.scheduled_date;
-    await db('scheduled_services').where('id', s.id).update({
-      scheduled_date: newDate,
-      notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
-      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, newDate, s.window_end),
-      updated_at: new Date(),
-    });
+    // A live (en_route/on_site) stop being moved rewinds its tracker
+    // lifecycle exactly like the rebooker's live override does.
+    const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
+    const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+    // Compare-and-swap on the OBSERVED status + schedule fields: everything
+    // below (the wasLive classification, the lifecycle rewind, the
+    // 'confirmed' restamp) was derived from the initial read — if the stop
+    // completed, got cancelled, or went live between that read and this
+    // write, applying the stale branch by id alone would rewrite a terminal
+    // row back to 'confirmed' (or leave a now-live row unrewound). Status
+    // alone also let two ORDINARY moves of the same confirmed stop both
+    // match — the later write silently clobbered the newer date and logged
+    // from a stale snapshot. Matching the observed scheduled_date +
+    // window_start makes the later writer miss instead (knex renders a null
+    // value in the object form as IS NULL — the same contract auto-dispatch's
+    // rebooker `expect` relies on). window_end is in the predicate too: this
+    // mover never writes the window columns themselves, but it DOES stamp
+    // track_token_expires_at derived from the observed end (and classified
+    // movability + logs the window pair off the same read) — a concurrent
+    // end-resize would otherwise still match and get a token expiry computed
+    // from the stale end. Field-level CAS is the repo's established
+    // pattern for exactly this (rebooker options.expect); deliberately NOT
+    // SELECT..FOR UPDATE, which would put row locks + a transaction around a
+    // quick per-stop mover for no added safety. updated_at stays out of the
+    // predicate: knex never auto-touches it and not every mover stamps it
+    // (the bulk route's UPDATE doesn't), so it isn't a reliable change
+    // marker. Zero rows matched = the stop changed under us; skip it and
+    // report the conflict.
+    const observedDate = s.scheduled_date instanceof Date
+      ? s.scheduled_date.toISOString().slice(0, 10)
+      : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
+    const updatedRows = await db('scheduled_services')
+      .where('id', s.id)
+      .where('status', String(s.status))
+      .where({
+        scheduled_date: observedDate,
+        window_start: s.window_start ?? null,
+        window_end: s.window_end ?? null,
+      })
+      .update({
+        scheduled_date: dateStr,
+        notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
+        track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+        // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
+        // moved en_route/on_site stop back on 'confirmed' so it isn't left live
+        // on a future date, matching the rebooker's own path.
+        ...(wasLive ? { status: 'confirmed' } : {}),
+        ...liveReset,
+        updated_at: new Date(),
+      });
+    if (updatedRows === 0) {
+      // Best-effort re-read so the operator sees the status that blocked the
+      // move (falls back to the stale one if the row vanished).
+      let nowStatus = s.status;
+      try {
+        const row = await db('scheduled_services').where('id', s.id).first('status');
+        if (row) nowStatus = row.status;
+      } catch { /* reporting only */ }
+      skippedConflict.push({ id: s.id, status: nowStatus });
+      continue;
+    }
+    movedIds.add(s.id);
+    // Rebooker-parity side effects of the live → confirmed flip above:
+    // job_status_history audit row, tech_status release, customer tracker
+    // refresh. Best-effort: the move is committed — a side-effect failure
+    // must not report the whole batch as failed.
+    if (wasLive) {
+      try {
+        await applyLiveMoveSideEffects(db, s);
+      } catch (err) {
+        logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+      }
+    }
+    // Audit row matching the rebooker's reschedule_log conventions.
+    // Best-effort: the move is committed — a log failure must not report
+    // the whole batch as failed.
+    try {
+      await db('reschedule_log').insert({
+        scheduled_service_id: s.id,
+        customer_id: s.customer_id,
+        original_date: oldDate,
+        new_date: dateStr,
+        reason_code: 'admin',
+        initiated_by: 'admin_ib',
+        original_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        new_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        notes: reason || null,
+      });
+    } catch (err) {
+      logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+    }
   }
 
-  logger.info(`[intelligence-bar:schedule] Moved ${stops.length} stops to ${newDate}`);
+  const movedStops = stops.filter((st) => movedIds.has(st.id));
+
+  if (!movedStops.length) {
+    return {
+      error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
+      ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    };
+  }
+
+  logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
   return {
     success: true,
-    moved_count: stops.length,
-    new_date: newDate,
-    stops,
+    moved_count: movedStops.length,
+    new_date: dateStr,
+    stops: movedStops,
+    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+    ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
+    ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
   };
 }
 

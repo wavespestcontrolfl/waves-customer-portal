@@ -552,6 +552,12 @@ const NEARBY_DETOUR_MINUTES = 15;
 // block instead of just the 8 AM gap start. Skips noon (lunch is reserved).
 const OPEN_DAY_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
+// Rain chips (GATE_BOOKING_RAIN_CHIPS): office point for the NWS daily rain
+// outlook. Rain is a DAILY value on these surfaces, and SWFL storm systems
+// are regional — one office-point lookup covers the whole service area
+// without leaking per-customer coordinates into a weather API call chain.
+const RAIN_OFFICE_POINT = { lat: 27.4217, lng: -82.4065 };
+
 function inTimeOfDay(startTimeHHMM, timeOfDay) {
   if (!timeOfDay || timeOfDay === 'any') return true;
   const min = timeToMin(startTimeHHMM);
@@ -791,6 +797,18 @@ function roundPublicCoord(value) {
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
 async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '' }) {
+  // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
+  // daily outlook so it overlaps the slot computation; stamped onto days/slots
+  // just before the return. Bounded + cached + fail-open in the service (null
+  // → nothing stamped, payload keeps today's exact shape); the extra .catch is
+  // belt-and-braces — weather decoration must never break or delay availability.
+  const { isEnabled } = require('../config/feature-gates');
+  const rainOutlookPromise = isEnabled('bookingRainChips')
+    ? require('../services/weather-forecast')
+      .getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng)
+      .catch(() => null)
+    : null;
+
   const result = await findAvailableSlots({
     lat,
     lng,
@@ -996,6 +1014,23 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     });
   }
   days.sort((a, b) => a.date.localeCompare(b.date));
+
+  // Stamp the daily rain chance (gate on + outlook resolved only — otherwise
+  // nothing is added and the payload is byte-identical to today). Day objects
+  // AND their slots carry it: /book reads day.rainChance on the day list, the
+  // rescheduler (which consumes these days/slots verbatim) reads both.
+  const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
+  if (rainOutlook) {
+    const stampRain = (target, date) => {
+      const chance = rainOutlook[date]?.rainChance;
+      if (Number.isFinite(chance)) target.rainChance = chance;
+    };
+    for (const day of days) {
+      stampRain(day, day.date);
+      for (const s of day.slots) stampRain(s, day.date);
+    }
+    for (const s of curatedSlots) stampRain(s, s.date);
+  }
 
   return {
     slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, ...slot }) => slot),
@@ -1835,7 +1870,16 @@ async function createSelfBooking(payload = {}) {
       conflictQuery.where((q) => {
         if (technician_id) q.orWhere('scheduled_services.technician_id', technician_id);
         if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
-        if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+        if (zoneCities.length) {
+          // Case-insensitive: customer city casing is free-text — an
+          // exact-case IN silently drops zone conflicts (the estimate
+          // generator lowercases both sides; match it).
+          const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
+          q.orWhereRaw(
+            `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
+            lowered,
+          );
+        }
         q.orWhere((hold) => {
           hold.whereNull('scheduled_services.customer_id')
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');

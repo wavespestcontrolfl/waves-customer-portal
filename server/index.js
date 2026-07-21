@@ -468,6 +468,7 @@ app.use('/.well-known', require('./routes/well-known'));
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
+app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
