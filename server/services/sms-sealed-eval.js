@@ -681,6 +681,123 @@ async function evaluateExamGate({ dbi = db } = {}) {
   return blockers;
 }
 
+// --- Auto-run on prompt bump -----------------------------------------------
+
+const AUTO_EXAM_MIN_ITEMS = envNum('SEALED_EXAM_AUTO_MIN_ITEMS', 10);
+const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
+
+/**
+ * Nightly sweep: make sure the CURRENT drafter PROMPT_VERSION has a completed
+ * exam on every leg — covers both the first-ever baselines and every future
+ * prompt bump, with no human click. No-ops (cheap SELECTs only) when the
+ * current version is already examined, so the nightly cadence costs nothing
+ * between bumps.
+ *
+ * Spend rails: refuses when the item pool exceeds SEALED_EXAM_AUTO_MAX_ITEMS
+ * (each item is several LLM calls; the refusal is LOGGED, never silent) or is
+ * below SEALED_EXAM_AUTO_MIN_ITEMS (too small to mean anything). At most one
+ * exam per leg per version ever runs; a failed run is resumed (keeping paid
+ * results), not restarted. Serialized against the manual endpoint via the
+ * same 'sms-sealed-eval' advisory lock and the one-running unique index.
+ *
+ * Ends with ONE digest bell per sweep that actually ran an exam — including
+ * a pointer at pending pathology patch proposals, which the new baselines
+ * exist to grade.
+ */
+async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
+  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+
+  const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id');
+  if (inFlight) return { skipped: 'run_in_progress', version: currentVersion };
+
+  const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
+  const active = Number(activeCount) || 0;
+  if (active < AUTO_EXAM_MIN_ITEMS) {
+    return { skipped: 'pool_too_small', active, version: currentVersion };
+  }
+  if (active > AUTO_EXAM_MAX_ITEMS) {
+    logger.warn(`[sealed-eval] auto-run refused: ${active} active items exceeds the spend cap of ${AUTO_EXAM_MAX_ITEMS} (SEALED_EXAM_AUTO_MAX_ITEMS) — run manually from the UI or raise the cap`);
+    return { skipped: 'spend_cap', active, version: currentVersion };
+  }
+
+  const { runExclusive } = require('../utils/cron-lock');
+  const legs = {};
+  let ran = 0;
+  for (const leg of EXAM_LEGS) {
+    const existing = await dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion })
+      .whereIn('status', ['complete', 'failed'])
+      .orderBy('started_at', 'desc')
+      .first('id', 'status');
+    if (existing && existing.status === 'complete') {
+      legs[leg] = { outcome: 'already_examined', runId: existing.id };
+      continue;
+    }
+    try {
+      // Same lock the manual endpoint holds while processing — a concurrent
+      // manual sitting makes this leg wait until tomorrow, never double-run.
+      const result = await runExclusive('sms-sealed-eval', () => (
+        existing
+          ? examRunner({ runId: existing.id, dbi })
+          : examRunner({ providerLeg: leg, triggeredBy: 'auto:prompt-watch', dbi })
+      ), { recordHealth: false });
+      if (result && result.skipped) {
+        legs[leg] = { outcome: 'lock_busy' };
+        continue;
+      }
+      legs[leg] = { outcome: existing ? 'resumed' : 'ran' };
+      ran += 1;
+    } catch (err) {
+      if (err && err.code === 'RUN_IN_PROGRESS') {
+        legs[leg] = { outcome: 'run_in_progress' };
+      } else {
+        legs[leg] = { outcome: 'error', error: err.message };
+        logger.error(`[sealed-eval] auto exam (${leg} leg) failed: ${err.message}`);
+      }
+    }
+  }
+
+  if (ran > 0) {
+    try {
+      const summary = await summaryFn({ dbi });
+      const lines = EXAM_LEGS.map((leg) => {
+        const run = summary.legs[leg];
+        if (!run) return `${leg}: no completed run yet`;
+        const pct = run.unsafeRate != null ? ` (${Math.round(run.unsafeRate * 100)}%)` : '';
+        let sig = '';
+        if (run.significance?.significant) {
+          sig = run.significance.direction === 'regressed'
+            ? ` — REGRESSION vs baseline (p=${run.significance.pValue})`
+            : ` — significant improvement vs baseline (p=${run.significance.pValue})`;
+        } else if (run.baselineRunId) {
+          sig = ' — no significant change vs baseline';
+        }
+        return `${leg}: ${run.unsafeCount}/${run.itemsJudged} unsafe${pct}${sig}`;
+      });
+      let proposalNote = '';
+      try {
+        const pending = await dbi('sms_patch_proposals').where({ status: 'pending' }).count({ n: '*' }).first();
+        const n = Number(pending?.n) || 0;
+        if (n > 0) {
+          proposalNote = ` ${n} pathology patch proposal${n === 1 ? '' : 's'} pending review — these results are the report card to grade them against.`;
+        }
+      } catch {
+        // proposals table optional context only — never block the digest
+      }
+      await require('./notification-service').notifyAdmin(
+        'agents',
+        `Sealed exam auto-run complete: ${currentVersion}`,
+        `${lines.join(' · ')}.${proposalNote}`,
+        { link: '/admin/agents?tab=shadow', metadata: { version: currentVersion, legs } },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[sealed-eval] auto-run digest notify failed (non-blocking): ${notifyErr.message}`);
+    }
+  }
+
+  return { version: currentVersion, active, ran, legs };
+}
+
 module.exports = {
   sealEvalItems,
   createExamRun,
@@ -689,6 +806,7 @@ module.exports = {
   computeSignificance,
   getSealedExamSummary,
   evaluateExamGate,
+  runAutoExamSweep,
   EXAM_LEGS,
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,
