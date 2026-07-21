@@ -641,6 +641,15 @@ async function buildPnlReport(db, startDate, endDate) {
     // The vehicle-method election (newest financials row, same accessor every
     // other company_financials consumer uses) and any register vehicle whose
     // depreciation method bars the standard mileage rate.
+    //
+    // SCOPE — the election is COMPANY-WIDE (one vehicle_deduction_method), and
+    // the business operates a single service vehicle. Mileage and vehicle
+    // depreciation are therefore aggregated, not split per vehicle: if ANY
+    // held vehicle is barred, the standard-mileage election fails closed for
+    // the whole company. With one vehicle that is exact; the conservative
+    // direction (never over-claiming) is deliberate if a second vehicle is
+    // ever added — per-vehicle elections would be the enhancement then, and
+    // mileage_log has no FK into equipment_register to attribute miles today.
     db('company_financials')
       .orderBy('effective_date', 'desc')
       .select('vehicle_deduction_method')

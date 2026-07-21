@@ -106,30 +106,33 @@ async function processVendorInvoice(email, classification) {
 
   if (amount > 0) {
     try {
+      const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
       let categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
 
       // No vendor-domain mapping (the common case — every prod expense was
       // landing category_id NULL this way): fall back to the same AI
       // categorizer the admin POST /expenses route uses. Best-effort — a
       // categorizer failure must never block recording the expense.
-      let deductibleAmount = amount;
       if (!categoryRow) {
         try {
-          const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
           const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
+          // Fetch the FULL row so the partial-deduction policy below keys off
+          // the canonical name (the model's echoed name can differ in case).
           if (ai?.categoryId) {
-            categoryRow = { id: ai.categoryId };
-            // Partial deduction is derived from the MATCHED category's
-            // server-owned policy (e.g. meals 50%), never the email-influenced
-            // model output — resolve the canonical name to key it, since the
-            // categorizer's echoed name can differ in case.
-            const named = await db('expense_categories').where({ id: ai.categoryId }).first('name');
-            const partial = categoryDeductibleAmount(named?.name, amount);
-            if (partial !== null) deductibleAmount = partial;
+            categoryRow = await db('expense_categories').where({ id: ai.categoryId }).first();
           }
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
         }
+      }
+
+      // Server-owned partial-deduction policy applied to the FINAL matched
+      // category, whichever path resolved it — a meals vendor mapped by
+      // DOMAIN must still land at 50%, not just an AI-matched one.
+      let deductibleAmount = amount;
+      if (categoryRow?.name) {
+        const partial = categoryDeductibleAmount(categoryRow.name, amount);
+        if (partial !== null) deductibleAmount = partial;
       }
 
       const [expense] = await db('expenses').insert({

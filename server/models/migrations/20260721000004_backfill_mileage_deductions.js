@@ -8,12 +8,19 @@
  * the two surfaces disagree for the same trips. This one-time backfill makes
  * the persisted values authoritative and consistent with getIrsRate():
  *
- *   - is_business = true  → irs_rate = the rate effective on trip_date;
- *                           deduction_amount = round(distance_miles * rate, 2)
+ *   - RETIRE legacy auto-classifications first: rows the old webhook/cron
+ *     marked is_business=true from a PROXIMITY job match (or geo-fence) were
+ *     never operator-substantiated. Under the manual-review policy only an
+ *     operator classification (classification_method 'manual'/'manual_review')
+ *     substantiates a business trip, so every other is_business=true row is
+ *     reset to unclassified/$0 (job context kept as a suggestion). Otherwise
+ *     the automatic deductions this PR retires would survive in the backfill.
+ *   - is_business = true  → (now only operator-classified) irs_rate = the rate
+ *                           effective on trip_date; deduction_amount =
+ *                           round(distance_miles * rate, 2)
  *   - everything else     → irs_rate = 0, deduction_amount = 0 (clears any
- *                           stale deduction left by the old auto-classifier;
- *                           unclassified/personal trips deduct nothing under
- *                           the manual-review policy)
+ *                           stale deduction; unclassified/personal trips
+ *                           deduct nothing under the manual-review policy)
  *
  * The rate breakpoints are inlined (a migration must reproduce forever,
  * independent of later service edits) and MUST match IRS_MILEAGE_RATE_TABLE
@@ -35,7 +42,27 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('mileage_log'))) return;
 
   await knex.transaction(async (trx) => {
-    // 1. Business trips → date-effective rate + recomputed deduction.
+    // 0. RETIRE legacy auto-classifications: any is_business=true row NOT
+    //    classified by an operator was auto-set from a proximity match and is
+    //    not substantiated. Reset to unclassified/$0, keeping job context as a
+    //    suggestion so it resurfaces in the Tax Center review. Idempotent —
+    //    once is_business=false the row no longer matches.
+    await trx.raw(`
+      UPDATE mileage_log
+      SET is_business = false,
+          purpose = 'unclassified',
+          deduction_amount = 0,
+          irs_rate = 0,
+          classification_method = CASE
+            WHEN customer_id IS NOT NULL THEN 'job_match_suggested'
+            ELSE 'needs_review' END,
+          updated_at = now()
+      WHERE is_business = true
+        AND classification_method IS DISTINCT FROM 'manual'
+        AND classification_method IS DISTINCT FROM 'manual_review'
+    `);
+
+    // 1. Operator-classified business trips → date-effective rate + deduction.
     await trx.raw(`
       UPDATE mileage_log
       SET irs_rate = (${RATE_CASE}),
@@ -82,6 +109,11 @@ exports.up = async function up(knex) {
       await trx.raw(`
         UPDATE mileage_monthly_summary s
         SET irs_deduction = COALESCE(t.total, 0),
+            irs_rate = (CASE
+              WHEN s.summary_month >= DATE '2026-07-01' THEN 0.76
+              WHEN s.summary_month >= DATE '2026-01-01' THEN 0.725
+              WHEN s.summary_month >= DATE '2025-01-01' THEN 0.70
+              ELSE 0.67 END),
             updated_at = now()
         FROM (
           SELECT equipment_id, date_trunc('month', trip_date)::date AS month, SUM(deduction_amount) AS total
