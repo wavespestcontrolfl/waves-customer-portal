@@ -1,0 +1,165 @@
+/**
+ * AI-written "What we applied today" narrative (owner 2026-07-21: the
+ * template sentence was weak — the customer should hear WHY each product was
+ * chosen for what we found, WHAT it does in plain mechanism language, and the
+ * BENEFIT to expect). Generated once per (service record, inputs) with the
+ * report writer policy (GPT-5.6 Sol → Claude Opus), banned-copy validated,
+ * cached in service_report_ai_summaries, and ALWAYS falling back to the
+ * deterministic buildTreatmentSummary sentence — a report never renders
+ * without an applied-solutions line because a model was down.
+ */
+const crypto = require('crypto');
+const db = require('../../models/db');
+const MODELS = require('../../config/models');
+const { dispatchWithFallback } = require('../llm/call');
+const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
+const { findBannedCustomerCopy } = require('./activity-indicators');
+
+const PROMPT_VERSION = 'treatment_narrative_v1';
+
+// Same over-claim vocabulary the other customer-copy validators enforce,
+// plus rate/registration leakage ("2 oz", "EPA Reg. No.").
+const FORBIDDEN = [
+  /\b(safe|non-?toxic|harmless|eliminated?|eradicated?|guaranteed?|pest-?free|cure[sd]?|permanent(ly)?)\b/i,
+  /\bchemicals?\b/i,
+  /\b\d+(\.\d+)?\s*(oz|ounces?|ml|gal|gallons?|lbs?|pounds?)\b/i,
+  /\bepa\b/i,
+  /\$\s?\d/,
+];
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function cleanLine(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function productFactLines(products = []) {
+  return products.map((p) => {
+    const parts = [
+      p.kind && p.kind !== 'other' ? p.kind.replace(/_/g, ' ') : null,
+      p.activeIngredient ? `active: ${cleanLine(p.activeIngredient)}` : null,
+      p.method ? `method: ${METHOD_PHRASES[String(p.method).toLowerCase()] || cleanLine(p.method).replace(/_/g, ' ')}` : null,
+      (p.targets || []).length ? `targets: ${p.targets.map(cleanLine).join(', ')}` : null,
+      p.whatItDoes ? `role: ${cleanLine(p.whatItDoes)}` : null,
+    ].filter(Boolean);
+    return `- ${cleanLine(p.name)}${parts.length ? ` — ${parts.join('; ')}` : ''}`;
+  }).join('\n');
+}
+
+function buildTreatmentNarrativePrompt({ serviceLine, products, findingsText, photoSummary }) {
+  const lineNoun = serviceLine === 'lawn' ? 'lawn' : serviceLine === 'tree_shrub' ? 'landscape plants (trees, shrubs, palms, and beds)' : 'property';
+  return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control & Lawn Care in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
+
+Explain the treatment like a knowledgeable, friendly plant-health professional:
+- WHY each product was chosen, tied directly to what was found on this visit.
+- WHAT each product does, in plain mechanism language (for example: absorbed by the roots and carried through the plant so pests that feed on it are controlled; a contact spray that coats the leaves; stops insects from feeding within days).
+- The BENEFIT the customer should expect and roughly when — what should improve over the coming weeks, and what they might still see in the meantime.
+
+Rules:
+- 3 to 5 sentences, one paragraph, plain text only. No headings, bullets, greeting, or sign-off.
+- Product names are fine. NEVER include application rates, quantities, prices, EPA details, or the word "chemical".
+- Never say safe, non-toxic, eliminated, guaranteed, pest-free, or cured. Never promise results — use "designed to", "should", "you can expect".
+- Ground every claim in the findings and products below. Do not invent findings, pests, or products.
+
+What we found on this visit:
+${findingsText || '[routine visit — no significant findings recorded]'}
+
+Products applied:
+${productFactLines(products)}
+
+Photo observations (context): ${cleanLine(photoSummary) || '[none]'}
+
+Return only the paragraph.`;
+}
+
+function validateNarrative(text) {
+  const t = String(text || '').trim();
+  if (!t) return 'empty';
+  if (t.length > 1200) return 'too_long';
+  if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
+  const banned = findBannedCustomerCopy(t);
+  if (banned.length) return `banned:${banned.join(',')}`;
+  return null;
+}
+
+/**
+ * Returns the narrative string (AI when available+valid, else the
+ * deterministic template). Never throws; never returns '' when the visit
+ * had classified products.
+ */
+async function buildTreatmentNarrative({
+  serviceRecordId,
+  serviceLine,
+  treatment,
+  findingsText = '',
+  photoSummary = '',
+  knex = db,
+} = {}) {
+  const fallback = buildTreatmentSummary(treatment);
+  if (!fallback) return null;
+  const products = (treatment?.products || []);
+  if (!serviceRecordId) return fallback;
+
+  try {
+    const facts = {
+      serviceLine,
+      products: products.map((p) => ({
+        name: p.name, kind: p.kind, activeIngredient: p.activeIngredient,
+        method: p.method, targets: p.targets, whatItDoes: p.whatItDoes,
+      })),
+      findingsText: cleanLine(findingsText),
+      photoSummary: cleanLine(photoSummary),
+    };
+    const inputHash = crypto.createHash('sha256').update(stableStringify(facts)).digest('hex');
+    const existing = await knex('service_report_ai_summaries')
+      .where({ service_record_id: serviceRecordId, input_hash: inputHash, prompt_version: PROMPT_VERSION })
+      .first()
+      .catch(() => null);
+    if (existing?.summary_json) {
+      const parsed = typeof existing.summary_json === 'string' ? JSON.parse(existing.summary_json) : existing.summary_json;
+      if (parsed?.text) return parsed.text;
+      return fallback;
+    }
+
+    const prompt = buildTreatmentNarrativePrompt({
+      serviceLine,
+      products,
+      findingsText: facts.findingsText,
+      photoSummary: facts.photoSummary,
+    });
+    const generated = await dispatchWithFallback(
+      MODELS.TEXT_POLICIES.report,
+      { text: prompt, jsonMode: false, maxTokens: 400 },
+      { validate: (result) => validateNarrative(result.text) },
+    );
+    const text = generated.ok ? String(generated.text || '').trim() : '';
+    const problem = text ? validateNarrative(text) : 'generation_failed';
+    const finalText = problem ? fallback : text;
+
+    await knex('service_report_ai_summaries').insert({
+      service_record_id: serviceRecordId,
+      input_hash: inputHash,
+      prompt_version: PROMPT_VERSION,
+      model: problem ? null : 'text_policy:report',
+      status: problem ? 'fallback' : 'ok',
+      summary_json: JSON.stringify({ text: finalText, mode: problem ? 'deterministic_fallback' : 'ai' }),
+      validation_json: JSON.stringify({ problem: problem || null }),
+      generated_at: new Date(),
+    }).onConflict(['service_record_id', 'input_hash', 'prompt_version']).ignore().catch(() => {});
+
+    return finalText;
+  } catch {
+    return fallback;
+  }
+}
+
+module.exports = {
+  PROMPT_VERSION,
+  buildTreatmentNarrative,
+  buildTreatmentNarrativePrompt,
+  validateNarrative,
+};

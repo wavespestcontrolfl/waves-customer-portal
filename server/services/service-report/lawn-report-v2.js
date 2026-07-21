@@ -14,6 +14,7 @@
 const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
 const { buildLawnInsightCards } = require('./lawn-report-insights');
+const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
@@ -67,6 +68,7 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
       whatItDoes: cls.whatItDoes,
       targets,
       area,
+      method: app.applicationMethod || app.application_method || null,
     };
   }).filter(Boolean);
 
@@ -534,7 +536,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const photoList = [...allPhotos]
     .sort((a, b) => (b.isBest ? 1 : 0) - (a.isBest ? 1 : 0) || (Number(b.qualityScore) || 0) - (Number(a.qualityScore) || 0))
     .slice(0, 6)
-    .map((p) => ({ url: p.url, label: p.isBest ? 'Best view' : (p.zone || null) }));
+    // Label = WHERE the photo was taken (zone) — "Best view" told the
+    // customer nothing (owner 2026-07-21); isBest still drives ordering.
+    .map((p) => ({ url: p.url, label: p.zone || null }));
   const photoSummary = String(
     lawnAssessment.observations || lawnAssessment.aiSummary || lawnAssessment.customerSummary || '',
   ).trim() || null;
@@ -575,6 +579,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     rootCause,
     seasonalNote,
     todaysFocus: treatment ? treatment.focus : [],
+    // Plain-language applied-solutions sentence for the hero card (owner
+    // 2026-07-21 — the summary must say what was applied, not just tags).
+    treatmentSummary: buildTreatmentSummary(treatment),
     watching: issues.slice(0, 3).map((i) => i.headline), // "main things we're watching"
     mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,

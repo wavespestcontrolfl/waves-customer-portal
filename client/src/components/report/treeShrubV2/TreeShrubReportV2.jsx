@@ -249,6 +249,16 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
         </div>
       ) : null}
 
+      {/* What we applied today — the tech-chosen solutions in plain language
+          (owner 2026-07-21: the summary must summarize the actual treatment,
+          not leave it to the product cards at the bottom of the page). */}
+      {snapshot.treatmentSummary ? (
+        <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
+          <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
+        </div>
+      ) : null}
+
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
           <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>What we’re monitoring</div>

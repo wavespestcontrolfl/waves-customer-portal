@@ -63,7 +63,9 @@ const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
 const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-sonnet-5';
 const FAST      = process.env.MODEL_FAST      || 'claude-sonnet-5';
 const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-5';
-const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
+// Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
+// health scores and report claims — best model is the live model.
+const VISION    = process.env.MODEL_VISION    || 'claude-opus-4-8';
 
 // Automatic deep-review work stays on Opus. Fable is available only through
 // the explicit EXTREME tier so routine verifiers/fact checks cannot silently
@@ -182,7 +184,9 @@ const TEXT_POLICIES = Object.freeze({
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
   }),
   customerCopy: Object.freeze({
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE }),
+    // Owner 2026-07-21: customer-facing recap copy rides the flagship —
+    // "sonnet is not cutting it" on the report/recap surfaces.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   contentDraft: Object.freeze({

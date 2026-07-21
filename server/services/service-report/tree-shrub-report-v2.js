@@ -18,6 +18,7 @@
  */
 
 const { buildTreeShrubVisualCategories, scoreStatus } = require('./tree-shrub-visual-categories');
+const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildTreeShrubInsightCards } = require('./tree-shrub-report-insights');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
@@ -100,6 +101,7 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
       whatItDoes: cls.whatItDoes,
       targets,
       area,
+      method: app.applicationMethod || app.application_method || null,
     };
   }).filter(Boolean);
 
@@ -310,7 +312,9 @@ function buildTreeShrubReportV2({
     // Captions are the OTHER customer-visible free-text path (set at closeout / typed
     // completion) — run them through the same over-claim scrub as the photo summary so
     // a caption like "confirmed scale infestation" can't bypass the signals guardrail.
-    .map((p) => ({ url: p.url, label: p.label || (p.isBest ? 'Best view' : (p.zone || null)), caption: scrubObservations(p.caption) }));
+    // Label = WHERE the photo was taken (zone) — "Best view" told the
+    // customer nothing (owner 2026-07-21); isBest still drives ordering.
+    .map((p) => ({ url: p.url, label: p.zone || p.label || null, caption: scrubObservations(p.caption) }));
   const photoSummary = scrubObservations(
     treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '',
   );
@@ -360,6 +364,9 @@ function buildTreeShrubReportV2({
     scoreExplanation,
     peaceOfMind,
     todaysFocus: treatment ? treatment.focus : [],
+    // Plain-language applied-solutions sentence for the hero card (owner
+    // 2026-07-21 — the summary must say what was applied, not just tags).
+    treatmentSummary: buildTreatmentSummary(treatment),
     watching: issues.slice(0, 3).map((i) => i.headline),
     mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,

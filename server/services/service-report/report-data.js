@@ -2603,6 +2603,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         waterGapHistory,
         mowingTrendFallback,
       });
+      // AI "What we applied today" narrative — same contract as the T&S path
+      // (owner 2026-07-21: across all reports).
+      if (reportV2?.snapshot?.treatmentSummary) {
+        const { buildTreatmentNarrative } = require('./treatment-narrative');
+        reportV2.snapshot.treatmentSummary = await buildTreatmentNarrative({
+          serviceRecordId: service.id,
+          serviceLine: 'lawn',
+          treatment: reportV2.treatment,
+          findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
+          photoSummary: reportV2.photoSummary || '',
+          knex,
+        });
+      }
       // 7-day rainfall chart — sourced from the client's exact lat/lng (the same
       // Open-Meteo trailing-7-day series behind waterContext.rainfallInches7d), so
       // the chart is property-specific and always reconciles with the "rain this
@@ -2714,6 +2727,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           customerConcern: structuredCustomerConcern(structured),
           waterSnapshot: null, // Phase 3: landscape water calibration
         });
+        // AI "What we applied today" narrative (owner 2026-07-21): why each
+        // product, what it does, the benefit — cached per input hash; the
+        // deterministic template stands in when generation misses.
+        if (reportV2?.snapshot?.treatmentSummary) {
+          const { buildTreatmentNarrative } = require('./treatment-narrative');
+          reportV2.snapshot.treatmentSummary = await buildTreatmentNarrative({
+            serviceRecordId: service.id,
+            serviceLine: 'tree_shrub',
+            treatment: reportV2.treatment,
+            findingsText: treeShrubAssessment.observations || '',
+            photoSummary: reportV2.photoSummary || '',
+            knex,
+          });
+        }
         // Next scheduled tree & shrub visit — confident date from a real upcoming
         // row, else omitted (never invent a precise date the data can't back).
         if (reportV2) {

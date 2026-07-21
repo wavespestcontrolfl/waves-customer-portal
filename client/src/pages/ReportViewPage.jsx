@@ -361,12 +361,10 @@ function formatReportTitleDate(value) {
 }
 
 function serviceDisplayName(data = {}) {
-  const raw = data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
-  // Customers see the service, not the billing cadence: "Quarterly Pest Control"
-  // renders as "Pest Control" (owner 2026-07-09 — match lawn / tree & shrub, which
-  // carry no term qualifier).
-  const stripped = String(raw).replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '').trim();
-  return stripped || raw;
+  // EXACT schedule service name, cadence included — "Bi-Monthly Tree & Shrub
+  // Care Service" renders as-is (owner 2026-07-21, reversing the 2026-07-09
+  // cadence-strip ruling; this stray strip survived the #2930 reversal).
+  return String(data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service').trim() || 'Service';
 }
 
 function reportDocumentTitle(data = {}) {
@@ -446,15 +444,10 @@ function formatCustomerPhone(phone) {
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
 // The displayed arrival window is ALWAYS window_start + 2 hours — window_end
 // is the internal job block and never renders on customer surfaces.
-// "Every 6 Weeks Lawn Care Service" -> "Lawn Care": the next-service cell names
-// the service, not the billing cadence (owner 2026-07-09).
+// EXACT service name, cadence included (owner 2026-07-21 — reversal of the
+// 2026-07-09 strip applies to every report surface, next-service cell too).
 function nextServiceName(serviceType) {
-  const cleaned = String(serviceType || '')
-    .replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '')
-    .replace(/^every\s+\d+\s+(weeks?|months?|days?)\s+/i, '')
-    .replace(/\s+service$/i, '')
-    .trim();
-  return cleaned || null;
+  return String(serviceType || '').trim() || null;
 }
 
 function formatNextAppointmentLabel(nextAppointment) {
@@ -592,6 +585,26 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
     if (!latest || readyAtMs > latest.readyAtMs) return { target, readyAtMs };
     return latest;
   }, null)?.target || null;
+}
+
+// "What Waves did today" cell: the actual work, not "service areas were
+// completed today" (owner 2026-07-21 — the customer knows it completed; the
+// cell must say what happened: treatments applied, areas covered, photos
+// documented). Shared by every report line.
+export function visitWorkSummary(data = {}, fallback = '') {
+  const appCount = (Array.isArray(data.applications) ? data.applications : [])
+    .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name).length;
+  const photoCount = [data.photos, data.completionPhotos, data.reportV2?.photos]
+    .map((list) => (Array.isArray(list) ? list.length : 0))
+    .reduce((max, n) => Math.max(max, n), 0);
+  const coverage = normalizeServiceCoverage(data);
+  const completed = (coverage?.items || []).filter((item) => isCompletedCoverageStatus(item.status));
+  const parts = [
+    appCount ? `${appCount} product${appCount === 1 ? '' : 's'} applied` : null,
+    completed.length ? `${completed.length} area${completed.length === 1 ? '' : 's'} serviced` : null,
+    photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : fallback;
 }
 
 export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now()) {
@@ -1517,7 +1530,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
               <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
-              <figcaption>{photo.isBest ? 'Best view' : formatEnumLabel(photo.type || 'Turf photo')}</figcaption>
+              <figcaption>{formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}
         </div>
@@ -1736,13 +1749,9 @@ function useReadinessNow(context, mode) {
 
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
-  const completionTime = getReportCompletionTime(data);
-  const completionDisplayTime = formatTimelineTime(completionTime);
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const smartStatus = smartStatusSummary(data, mode, nowMs);
-  const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
-  const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   // ALL-CAPS records (older customer rows) title-case for display, same rule
   // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
   const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
@@ -1808,7 +1817,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <div className="service-status-grid">
           <div className="sr-cell">
             <div className="sr-cell-label">What Waves did today</div>
-            <div className="sr-cell-value">{smartStatus.completedLine}</div>
+            <div className="sr-cell-value">{visitWorkSummary(data, smartStatus.completedLine)}</div>
           </div>
           {/* Gate on: the photo card below carries the tech identity, so the
               plain-text cell would duplicate the name inside the same card. */}
@@ -1818,10 +1827,9 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               <div className="sr-cell-value">{technician}</div>
             </div>
           )}
-          <div className="sr-cell">
-            <div className="sr-cell-label">Completion status</div>
-            <div className="sr-cell-value">{completionStatus}</div>
-          </div>
+          {/* No "Completion status: Completed" cell — the status badge above
+              already says it, and the customer is reading a completed report
+              (owner 2026-07-21). */}
           {nextAppointmentLabel && (
             <div className="sr-cell">
               <div className="sr-cell-label">Next service</div>
