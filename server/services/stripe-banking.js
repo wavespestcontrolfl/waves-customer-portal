@@ -421,44 +421,56 @@ async function syncBalanceTransactions(limit = 100) {
     startingAfter = page.data?.length ? page.data[page.data.length - 1].id : null;
     if (!startingAfter) break;
   }
-  if (hasMore) {
-    logger.warn(`[stripe-banking] Balance-transaction sync hit ${MAX_PAGES} page safety cap — run again to continue`);
-  }
-
   let upserted = 0;
   let newestCreated = watermark;
   if (rows.length) {
     const linkMaps = await resolveTxnLinkMaps(rows);
+    // Merge every column EXCEPT payout_id: the global stream carries no
+    // payout linkage (null), and blindly merging null would erase linkage
+    // previously written by the per-payout sync for automatic payouts.
+    const MERGE_COLS = [
+      'type', 'reporting_category', 'amount', 'fee', 'net', 'description',
+      'customer_name', 'customer_id', 'invoice_id', 'payment_id',
+      'available_on', 'created_at_stripe',
+    ];
     for (const txn of rows) {
       if (txn.created && txn.created > newestCreated) newestCreated = txn.created;
       await db('stripe_payout_transactions')
         .insert(txnRowFromStripe(txn, linkMaps, null))
         .onConflict('stripe_txn_id')
-        .merge();
+        .merge(MERGE_COLS);
       upserted++;
     }
   }
 
-  // Persist watermark + last-run stamp. last_sync_at moves on EVERY
-  // successful run (even zero-row ones) — the P&L coverage check reads it
-  // to prove the ledger has been brought current past a window end.
-  try {
-    const existing = await db('stripe_sync_state')
-      .where('sync_type', 'balance_transactions')
-      .first();
-    const patch = {
-      last_sync_at: new Date().toISOString(),
-      ...(newestCreated > watermark
-        ? { last_created_at: new Date(newestCreated * 1000).toISOString(), cursor: new Date(newestCreated * 1000).toISOString() }
-        : {}),
-    };
-    if (existing) {
-      await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
-    } else {
-      await db('stripe_sync_state').insert({ sync_type: 'balance_transactions', ...patch });
+  // Persist watermark + last-run stamp ONLY when pagination fully exhausted:
+  // pages arrive newest-first, so a truncated run has processed the newest
+  // slice while the OLDEST part of the range is still unfetched — advancing
+  // the watermark (or stamping last_sync_at, which the P&L coverage check
+  // treats as proof of completeness) would skip that gap forever and label
+  // incomplete figures final. A truncated run persists nothing and reports
+  // has_more so the operator/coverage keep saying "not done".
+  if (hasMore) {
+    logger.warn(`[stripe-banking] Balance-transaction sync hit the ${MAX_PAGES}-page safety cap — sync state NOT advanced; rows upserted so far are kept (idempotent)`);
+  } else {
+    try {
+      const existing = await db('stripe_sync_state')
+        .where('sync_type', 'balance_transactions')
+        .first();
+      const patch = {
+        last_sync_at: new Date().toISOString(),
+        ...(newestCreated > watermark
+          ? { last_created_at: new Date(newestCreated * 1000).toISOString(), cursor: new Date(newestCreated * 1000).toISOString() }
+          : {}),
+      };
+      if (existing) {
+        await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
+      } else {
+        await db('stripe_sync_state').insert({ sync_type: 'balance_transactions', ...patch });
+      }
+    } catch (err) {
+      logger.warn('[stripe-banking] Could not update balance-transaction sync state:', err.message);
     }
-  } catch (err) {
-    logger.warn('[stripe-banking] Could not update balance-transaction sync state:', err.message);
   }
 
   if (upserted > 0) logger.info(`[stripe-banking] Balance-transaction sync upserted ${upserted} row(s)`);
@@ -508,11 +520,21 @@ async function syncPayoutTransactions(stripePayoutId) {
     const totalFees = txnInserts.reduce((s, r) => s + (Number(r.fee) || 0), 0);
     const txnCount = txnInserts.length;
 
-    // Atomic swap: delete + insert + update payout inside a single DB transaction
+    // Atomic swap: delete + upsert + update payout inside one DB transaction.
+    // The insert is an UPSERT on stripe_txn_id (unique index): the global
+    // balance sync may already hold these rows with payout_id NULL — a plain
+    // insert would conflict, and the delete-by-payout_id above can't see
+    // unlinked rows. The full merge here (payout_id included) RESTORES the
+    // payout linkage for automatic payouts.
     await db.transaction(async (trx) => {
       await trx('stripe_payout_transactions').where('payout_id', payout.id).del();
       if (txnInserts.length) {
-        await trx('stripe_payout_transactions').insert(txnInserts);
+        for (const row of txnInserts) {
+          await trx('stripe_payout_transactions')
+            .insert(row)
+            .onConflict('stripe_txn_id')
+            .merge();
+        }
       }
       await trx('stripe_payouts')
         .where('id', payout.id)
