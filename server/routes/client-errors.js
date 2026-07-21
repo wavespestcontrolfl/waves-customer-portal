@@ -23,6 +23,18 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
+// A GLOBAL ceiling (one shared bucket) on top of the per-IP limit: distributed
+// callers could otherwise bypass the per-IP cap and exhaust the Sentry event
+// quota, hiding real errors. Client crashes are rare, so 60/min across everyone
+// is generous; excess is dropped before it reaches Sentry.
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: false,
+  legacyHeaders: false,
+  keyGenerator: () => 'global',
+});
+
 // A JS error name. Identifier-shape checks still let attacker PII through (a
 // person's name is identifier-shaped), so this is a strict allowlist of standard
 // + common web error names; anything else collapses to "Error".
@@ -66,18 +78,23 @@ const routeRoot = (value) => {
 // componentStack is intentionally NOT accepted: React component names are
 // unbounded, so on a public endpoint an attacker could inject a person's name as
 // a fake "component". Only the three allowlisted/transformed fields are kept.
-router.post('/', limiter, (req, res) => {
+router.post('/', globalLimiter, limiter, (req, res) => {
   try {
     const { name, context, route } = req.body || {};
-    const err = new Error(errorName(name));
-    err.name = errorName(name);
+    const name_ = errorName(name);
+    const context_ = contextLabel(context);
+    const route_ = routeRoot(route);
+    const err = new Error(name_);
+    err.name = name_;
     Sentry.captureException(err, {
+      // Every report is constructed at this one line, so without an explicit
+      // fingerprint Sentry's default grouping collapses all client errors into a
+      // single issue. Group by the bounded (name, context, route) instead so
+      // distinct failure classes stay actionable.
+      fingerprint: ['client-error', name_, context_ || 'none', route_ || 'none'],
       tags: { source: 'client' },
       contexts: {
-        client_error: {
-          context: contextLabel(context),
-          route: routeRoot(route),
-        },
+        client_error: { context: context_, route: route_ },
       },
     });
   } catch {

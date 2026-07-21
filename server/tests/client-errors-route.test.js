@@ -37,6 +37,19 @@ describe('POST /api/client-errors', () => {
     expect(error.name).toBe('TypeError');
     expect(captureContext.tags).toEqual({ source: 'client' });
     expect(ctxOf()).toEqual({ context: 'PageErrorBoundary', route: 'admin' });
+    // Explicit fingerprint so distinct (name, context, route) classes don't all
+    // collapse into one Sentry issue via the shared synthetic stack.
+    expect(captureContext.fingerprint).toEqual(['client-error', 'TypeError', 'PageErrorBoundary', 'admin']);
+  });
+
+  test('distinct failure classes get distinct fingerprints', async () => {
+    await post({ name: 'TypeError', context: 'banking:payout', route: '/admin/x' });
+    const fpA = mockCapture.mock.calls[0][1].fingerprint;
+    mockCapture.mockClear();
+    await post({ name: 'RangeError', context: 'PageErrorBoundary', route: '/report/t' });
+    const fpB = mockCapture.mock.calls[0][1].fingerprint;
+    expect(fpA).toEqual(['client-error', 'TypeError', 'banking:payout', 'admin']);
+    expect(fpB).toEqual(['client-error', 'RangeError', 'PageErrorBoundary', 'report']);
   });
 
   test('componentStack is never accepted (unbounded → could carry PII)', async () => {
