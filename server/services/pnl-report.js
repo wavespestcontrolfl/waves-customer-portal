@@ -230,11 +230,13 @@ function assemblePnl({
   const countedMileage = 0; // never auto-applied — see note above
 
   const byCategory = new Map();
+  let nonDeductibleExpenses = 0; // book-to-tax adjustment (e.g. 50% meals)
   for (const row of opexRows) {
     const name = row.category || 'Uncategorized';
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
     prev.amount = round2(prev.amount + (parseFloat(row.total) || 0));
     byCategory.set(name, prev);
+    nonDeductibleExpenses = round2(nonDeductibleExpenses + (parseFloat(row.non_deductible) || 0));
   }
   // Merchant processing fees from the synced Stripe ledger — revenue above is
   // gross charges (incl. card surcharges), so without this line netIncome
@@ -288,6 +290,14 @@ function assemblePnl({
     },
     netIncome,
     netMargin: totalRevenue > 0 ? netIncome / totalRevenue : 0,
+    // Book-to-tax bridge: the P&L above is BOOK (actual spend). Taxable income
+    // adds back the non-deductible portion of expenses (e.g. the disallowed
+    // 50% of business meals), so it's ≥ book net income. Exposed separately so
+    // the accounting figures stay true to actual spend.
+    taxAdjustments: {
+      nonDeductibleExpenses: round2(nonDeductibleExpenses),
+      taxableNetIncome: round2(netIncome + nonDeductibleExpenses),
+    },
   };
 }
 
@@ -555,17 +565,16 @@ async function buildPnlReport(db, startDate, endDate) {
   const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets,
     financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
-    // TAX reporting sums the DEDUCTIBLE amount, not gross spend: partial
-    // categories (meals 50%, partial-business vehicle use) carry a lower
-    // tax_deductible_amount, and deducting the full amount overstates the
-    // deduction / understates taxable income. NULL tax_deductible_amount falls
-    // back to the full amount (assumed fully deductible until a policy lowers
-    // it). Same COALESCE on both the COGS and opex aggregations.
+    // The P&L is BOOK accounting — actual spend (expenses.amount) drives opex,
+    // net income, and margins. The deductible amount (lower for partial
+    // categories like meals 50%) is tracked SEPARATELY as a book-to-tax
+    // adjustment (deductions.nonDeductibleExpenses / taxableNetIncome below);
+    // folding it into opex would understate expenses and inflate net income.
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
       .whereIn('expense_categories.name', COGS_CATEGORIES)
-      .select(db.raw("COALESCE(SUM(COALESCE(expenses.tax_deductible_amount, expenses.amount))::text, '0') as total"))
+      .select(db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
     db('expenses')
@@ -580,7 +589,10 @@ async function buildPnlReport(db, startDate, endDate) {
       .select(
         'expense_categories.name as category',
         'expense_categories.irs_line',
-        db.raw('SUM(COALESCE(expenses.tax_deductible_amount, expenses.amount)) as total'),
+        db.raw('SUM(expenses.amount) as total'),
+        // Non-deductible portion of this category (e.g. the disallowed 50% of
+        // meals) — summed across categories into the tax adjustment.
+        db.raw('SUM(expenses.amount - COALESCE(expenses.tax_deductible_amount, expenses.amount)) as non_deductible'),
       )
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
       .catch(missingTableOnly([])),

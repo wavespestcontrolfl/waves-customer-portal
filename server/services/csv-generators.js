@@ -157,8 +157,16 @@ function pnlToCSV(pnlData) {
   lines.push(row(['  Depreciation', (pnlData.deductions?.depreciation || 0).toFixed(2)]));
   lines.push(row(['Total Deductions', (pnlData.deductions?.total || 0).toFixed(2)]));
   lines.push(row(['', '']));
-  lines.push(row(['NET INCOME', (pnlData.netIncome || 0).toFixed(2)]));
+  lines.push(row(['NET INCOME (book)', (pnlData.netIncome || 0).toFixed(2)]));
   lines.push(row(['Net Margin', ((pnlData.netMargin || 0) * 100).toFixed(1) + '%']));
+  // Book-to-tax bridge: the figures above are actual spend; taxable income
+  // adds back non-deductible portions (e.g. the disallowed 50% of meals).
+  const adj = pnlData.taxAdjustments;
+  if (adj && (adj.nonDeductibleExpenses || 0) !== 0) {
+    lines.push(row(['', '']));
+    lines.push(row(['  Add back: non-deductible expenses', (adj.nonDeductibleExpenses || 0).toFixed(2)]));
+    lines.push(row(['TAXABLE NET INCOME', (adj.taxableNetIncome || 0).toFixed(2)]));
+  }
   if (pnlData.coverage?.note) {
     lines.push(row(['', '']));
     lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));

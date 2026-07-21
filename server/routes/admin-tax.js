@@ -720,6 +720,7 @@ const MILEAGE_PURPOSES = ['business', 'personal', 'unclassified'];
 async function classifyTrips(ids, purpose) {
   let updated = 0;
   let deductionTotal = 0;
+  let skippedNoRate = 0;
   const summaryKeys = new Set();
   // ALL the row updates commit together or not at all — up to 500 rows updated
   // one at a time would otherwise leave deductions half-applied (and summaries
@@ -731,6 +732,14 @@ async function classifyTrips(ids, purpose) {
     for (const row of rows) {
       const tripDay = dateCellStr(row.trip_date);
       const rate = mileageService.getIrsRate(tripDay);
+      // REFUSE to book a business trip with no verified IRS rate (a date past
+      // the rate horizon → rate 0). Persisting $0 would look "reviewed" and
+      // never self-heal when the rate is added (reports sum persisted values),
+      // so leave it UNCLASSIFIED for re-review once the table is extended.
+      if (purpose === 'business' && !(rate > 0)) {
+        skippedNoRate++;
+        continue;
+      }
       const miles = parseFloat(row.distance_miles) || 0;
       const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
       await trx('mileage_log').where({ id: row.id }).update({
@@ -771,7 +780,7 @@ async function classifyTrips(ids, purpose) {
       logger.warn(`[tax] mileage monthly summary recompute failed for ${equipmentId} ${month}: ${err.message}`);
     }
   }
-  return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100 };
+  return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100, skippedNoRate };
 }
 
 // PUT /mileage/:id — reclassify one trip
@@ -782,6 +791,13 @@ router.put('/mileage/:id', async (req, res, next) => {
       return res.status(400).json({ error: `purpose must be one of: ${MILEAGE_PURPOSES.join(', ')}` });
     }
     const result = await classifyTrips([req.params.id], purpose);
+    // A business trip past the IRS-rate horizon is refused, not "not found".
+    if (!result.updated && result.skippedNoRate) {
+      return res.status(422).json({
+        error: 'No verified IRS mileage rate for this trip’s date yet — left unclassified. Add the published rate, then reclassify.',
+        ...result,
+      });
+    }
     if (!result.updated) return res.status(404).json({ error: 'Trip not found' });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
