@@ -11,6 +11,7 @@ import React, {
 import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
+  applyServerTermiteBondPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1308,13 +1309,17 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
+        fetchConfigRow("termite_bond"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
-      return lawnRow.ok && pestRow.ok;
+      // Bond rates are save-validated against the live DB values, so the
+      // fallback preview must price from them too (pre-push P1 on #2915).
+      if (bondRow.ok) applyServerTermiteBondPricingConfig(bondRow.data);
+      return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
     return run;

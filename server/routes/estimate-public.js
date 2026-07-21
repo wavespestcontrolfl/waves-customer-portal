@@ -8414,6 +8414,22 @@ router.put('/:token/accept', async (req, res, next) => {
         // price_locked_at; its only writers are the two accept flows.
         .whereNull('price_locked_at')
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
+        // Freshness compare-and-swap (pre-push P0 on #2915): acceptedUpdates
+        // was built from this handler's earlier estimate read — a bond-term
+        // switch (or any estimate_data mutation) committed since would be
+        // silently clobbered here and the customer converted/billed at the
+        // OLD amount. A moved updated_at makes this 0-row → the existing 409
+        // → the page reloads fresh totals and re-accepts. Millisecond
+        // truncation on both sides (pg µs vs node ms — raw equality would
+        // 409 every accept); two same-ms writes are beyond clock resolution.
+        .modify((q) => {
+          if (estimate.updated_at) {
+            q.andWhere(trx.raw(
+              "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+              [estimate.updated_at],
+            ));
+          }
+        })
         .update(acceptedUpdates);
       if (!acceptedCount) {
         const err = new Error('Estimate is no longer active');
@@ -10237,6 +10253,19 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
+      // write — an accept, a preference toggle, another bond switch — makes
+      // this update 0-row and the caller reloads server truth. Millisecond
+      // truncation on BOTH sides: pg stores microseconds, node Date carries
+      // ms, and raw equality would spuriously fail on every row.
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
       .update({
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
