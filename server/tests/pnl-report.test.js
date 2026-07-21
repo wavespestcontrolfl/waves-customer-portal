@@ -174,15 +174,15 @@ describe('assemblePnl', () => {
       opexRows: [{ category: 'Rent', irs_line: '20b', total: '1000' }],
       mileageDeduction: 700,
       depreciationTotal: 300,
-      // Mileage only reaches `deductions` under an explicit standard-mileage
-      // election; unelected fails closed (covered in the line-9 suite below).
-      vehicleMethod: 'standard_mileage',
     });
     expect(out.cogs.total).toBe(1000);
     expect(out.grossProfit).toBe(9000);
-    expect(out.deductions.total).toBe(1000);
-    expect(out.netIncome).toBe(7000);
-    expect(out.netMargin).toBeCloseTo(0.7, 5);
+    // Deductions = depreciation only. Mileage is never auto-counted (actual-
+    // expenses basis); it's disclosed in vehicleDeduction for manual use.
+    expect(out.deductions.total).toBe(300);
+    expect(out.vehicleDeduction.standardMileageComputed).toBe(700);
+    expect(out.netIncome).toBe(7700); // 9000 gross − 1000 opex − 300 depreciation
+    expect(out.netMargin).toBeCloseTo(0.77, 5);
   });
 });
 
@@ -313,8 +313,11 @@ describe('getPeriodRange', () => {
   });
 });
 
-describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () => {
-  // Both sides of line 9 present, so every branch has something to drop.
+describe('assemblePnl — vehicle deduction (actual-expenses basis only)', () => {
+  // The P&L can only cleanly compute the actual-expenses basis: it deducts
+  // every recorded cost and NEVER the standard mileage rate (actual vehicle
+  // costs can't be isolated from shared categories to compute a clean
+  // standard-mileage figure). The mileage is always disclosed, never counted.
   const inputs = {
     serviceRevenue: 10000,
     opexRows: [
@@ -322,51 +325,51 @@ describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () =>
       { category: 'Insurance', irs_line: '15', total: '600.00' },
     ],
     mileageDeduction: 3300,
+    depreciationTotal: 3200,
   };
 
-  test('unelected FAILS CLOSED: keeps actual vehicle expenses, drops mileage', () => {
-    const out = assemblePnl(inputs);
-    expect(out.vehicleDeduction.elected).toBe(false);
-    expect(out.vehicleDeduction.method).toBeNull();
-    // Recorded cash stays as opex; the computed deduction does not count.
-    expect(out.operatingExpenses.total).toBe(3000);
-    expect(out.deductions.mileage).toBe(0);
-    expect(out.deductions.total).toBe(0);
-    // The dropped amount is disclosed, not silently missing.
-    expect(out.vehicleDeduction.excludedMileage).toBe(3300);
-    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(0);
-    expect(out.netIncome).toBe(7000);
-  });
-
-  test('standard_mileage counts mileage and excludes Vehicle Expenses opex', () => {
-    const out = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage' });
-    expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')).toBeUndefined();
-    expect(out.operatingExpenses.total).toBe(600); // insurance only
-    expect(out.deductions.mileage).toBe(3300);
-    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(2400);
-    expect(out.vehicleDeduction.excludedMileage).toBe(0);
-    expect(out.netIncome).toBe(6100);
-  });
-
-  test('actual_expenses counts Vehicle Expenses opex and excludes mileage', () => {
-    const out = assemblePnl({ ...inputs, vehicleMethod: 'actual_expenses' });
-    expect(out.operatingExpenses.total).toBe(3000);
-    expect(out.deductions.mileage).toBe(0);
-    expect(out.vehicleDeduction.excludedMileage).toBe(3300);
-    expect(out.netIncome).toBe(7000);
-  });
-
-  test('line 9 is never deducted twice under any election', () => {
+  test('mileage is NEVER counted, under ANY election', () => {
     for (const vehicleMethod of [null, 'standard_mileage', 'actual_expenses']) {
       const out = assemblePnl({ ...inputs, vehicleMethod });
-      const vehOpex = out.operatingExpenses.categories
-        .find(c => c.name === 'Vehicle Expenses')?.amount || 0;
-      // At most ONE side of line 9 may carry value.
-      expect(Math.min(vehOpex, out.deductions.mileage)).toBe(0);
+      expect(out.deductions.mileage).toBe(0);
+      expect(out.vehicleDeduction.countedMileage).toBe(0);
+      // ...but it's always disclosed for manual/CPA use.
+      expect(out.vehicleDeduction.standardMileageComputed).toBe(3300);
+      expect(out.vehicleDeduction.basis).toBe('actual_expenses');
     }
   });
 
-  test('unrecognized method strings fall back to unelected, never to a deduction', () => {
+  test('all recorded costs (vehicle expenses + depreciation) always flow', () => {
+    for (const vehicleMethod of [null, 'standard_mileage', 'actual_expenses']) {
+      const out = assemblePnl({ ...inputs, vehicleMethod });
+      // Vehicle Expenses opex is kept (never excluded) — actual basis.
+      expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')?.amount).toBe(2400);
+      expect(out.operatingExpenses.total).toBe(3000);
+      expect(out.deductions.depreciation).toBe(3200); // full depreciation always kept
+      expect(out.netIncome).toBe(3800); // 10000 - 3000 opex - 3200 depreciation
+    }
+  });
+
+  test('never overstates: the rate is never added beside actual costs', () => {
+    // The dangerous direction (mileage + actual vehicle costs) is structurally
+    // impossible — mileage never enters the total.
+    const out = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage' });
+    expect(out.deductions.total).toBe(3200); // depreciation only; no mileage
+  });
+
+  test('election metadata is reported; barred flag surfaced', () => {
+    const elected = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage', vehicleMileageBarred: true });
+    expect(elected.vehicleDeduction.method).toBe('standard_mileage');
+    expect(elected.vehicleDeduction.elected).toBe(true);
+    expect(elected.vehicleDeduction.barred).toBe(true);
+
+    const unelected = assemblePnl({ ...inputs });
+    expect(unelected.vehicleDeduction.method).toBeNull();
+    expect(unelected.vehicleDeduction.elected).toBe(false);
+    expect(unelected.vehicleDeduction.barred).toBe(false);
+  });
+
+  test('unrecognized method strings fall back to unelected', () => {
     for (const bad of ['STANDARD_MILEAGE', 'mileage', '', 'actual', 0, true, {}]) {
       const out = assemblePnl({ ...inputs, vehicleMethod: bad });
       expect(out.vehicleDeduction.method).toBeNull();
@@ -374,92 +377,10 @@ describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () =>
     }
   });
 
-  test('election is inert when neither side has value', () => {
+  test('no mileage → nothing to disclose', () => {
     const out = assemblePnl({ serviceRevenue: 500, vehicleMethod: 'standard_mileage' });
+    expect(out.vehicleDeduction.standardMileageComputed).toBe(0);
     expect(out.deductions.total).toBe(0);
-    expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(0);
     expect(out.netIncome).toBe(500);
-  });
-
-  // The standard mileage rate embeds a depreciation allowance; a vehicle's
-  // separate MACRS/§179 depreciation must NOT be deducted beside it.
-  describe('vehicle depreciation under standard mileage', () => {
-    const withDepr = {
-      serviceRevenue: 10000,
-      mileageDeduction: 3300,
-      depreciationTotal: 11200,     // $8k equipment + $3.2k vehicle, say
-      vehicleDepreciation: 3200,
-    };
-
-    test('standard_mileage excludes the vehicle depreciation portion', () => {
-      const out = assemblePnl({ ...withDepr, vehicleMethod: 'standard_mileage' });
-      // Only non-vehicle depreciation survives beside the mileage rate.
-      expect(out.deductions.depreciation).toBe(8000);
-      expect(out.deductions.mileage).toBe(3300);
-      expect(out.deductions.total).toBe(11300);
-      expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(3200);
-    });
-
-    test('actual_expenses and unelected keep FULL depreciation', () => {
-      for (const vehicleMethod of ['actual_expenses', null]) {
-        const out = assemblePnl({ ...withDepr, vehicleMethod });
-        expect(out.deductions.depreciation).toBe(11200);
-        expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(0);
-      }
-    });
-
-    test('vehicle depreciation is never deducted alongside standard mileage', () => {
-      const out = assemblePnl({ ...withDepr, vehicleMethod: 'standard_mileage' });
-      // counted depreciation + excluded vehicle depreciation == the raw total,
-      // and the excluded slice is exactly the vehicle portion.
-      expect(out.deductions.depreciation + out.vehicleDeduction.excludedVehicleDepreciation)
-        .toBe(11200);
-    });
-  });
-
-  // A MACRS/§179 vehicle is barred from the standard mileage rate (Pub 463).
-  // Electing it anyway must NOT inflate the total — fail closed to actual
-  // expenses (mileage excluded, opex + depreciation kept), warning alongside.
-  describe('barred standard-mileage election fails closed', () => {
-    const barred = {
-      serviceRevenue: 10000,
-      opexRows: [{ category: 'Vehicle Expenses', irs_line: '9', total: '2400.00' }],
-      mileageDeduction: 3300,
-      depreciationTotal: 3200,
-      vehicleDepreciation: 3200,
-      vehicleMethod: 'standard_mileage',
-      vehicleMileageBarred: true,
-    };
-
-    test('excludes the barred mileage from the total', () => {
-      const out = assemblePnl(barred);
-      expect(out.deductions.mileage).toBe(0);
-      expect(out.vehicleDeduction.excludedMileage).toBe(3300);
-      expect(out.vehicleDeduction.barred).toBe(true);
-    });
-
-    test('keeps Vehicle Expenses opex and vehicle depreciation (actual basis)', () => {
-      const out = assemblePnl(barred);
-      // Fell back to actual expenses: opex + depreciation both survive.
-      expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')?.amount)
-        .toBe(2400);
-      expect(out.deductions.depreciation).toBe(3200);
-      expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(0);
-    });
-
-    test('an UNBARRED standard-mileage election still counts mileage', () => {
-      const out = assemblePnl({ ...barred, vehicleMileageBarred: false });
-      expect(out.deductions.mileage).toBe(3300);
-      expect(out.vehicleDeduction.barred).toBe(false);
-    });
-
-    test('barred flag only bites a standard-mileage election, not actual/unelected', () => {
-      for (const vehicleMethod of ['actual_expenses', null]) {
-        const out = assemblePnl({ ...barred, vehicleMethod });
-        // Not standard mileage, so being "barred" is irrelevant and never true.
-        expect(out.vehicleDeduction.barred).toBe(false);
-        expect(out.deductions.depreciation).toBe(3200); // full depreciation kept
-      }
-    });
   });
 });

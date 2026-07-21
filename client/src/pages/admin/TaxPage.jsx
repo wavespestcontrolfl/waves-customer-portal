@@ -3179,8 +3179,8 @@ function PnlTab() {
             </div>
           )}{" "}
           {pnl.vehicleDeduction &&
-            !pnl.vehicleDeduction.elected &&
-            pnl.vehicleDeduction.excludedMileage > 0 && (
+            pnl.vehicleDeduction.standardMileageComputed > 0 &&
+            !pnl.vehicleDeduction.methodConflict && (
               <div
                 style={{
                   marginTop: 6,
@@ -3192,11 +3192,12 @@ function PnlTab() {
                   lineHeight: 1.45,
                 }}
               >
-                {fmtM(pnl.vehicleDeduction.excludedMileage)} of classified
-                mileage is excluded until you elect a vehicle deduction method
-                above. Standard mileage and actual vehicle expenses are the same
-                Schedule&nbsp;C line and can&apos;t both be deducted — choose one
-                once your CPA confirms it.
+                This P&amp;L deducts actual vehicle costs. Standard mileage for
+                the period would be{" "}
+                {fmtM(pnl.vehicleDeduction.standardMileageComputed)} — it is not
+                added here (Schedule&nbsp;C line 9 allows actual expenses OR
+                mileage, not both). Apply it with your CPA in place of the actual
+                vehicle costs only if you use the standard method.
               </div>
             )}{" "}
           {pnl.vehicleDeduction?.methodConflict && (

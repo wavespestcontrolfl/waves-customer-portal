@@ -164,28 +164,21 @@ function pnlToCSV(pnlData) {
     lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));
   }
   // Vehicle deduction election — disclose any classified mileage excluded
-  // because no method is elected, and any Pub 463 conflict, so the CPA sees
-  // the dropped figure rather than a silently-absent one.
+  // so the CPA sees the standard-mileage figure that was NOT applied (the P&L
+  // is on the actual-expenses basis), plus any method note.
   const veh = pnlData.vehicleDeduction;
-  if (veh && !veh.elected && veh.excludedMileage > 0) {
+  if (veh && veh.standardMileageComputed > 0) {
     lines.push(row(['', '']));
     lines.push(row(['VEHICLE DEDUCTION NOTE',
-      `${veh.excludedMileage.toFixed(2)} of classified standard mileage is `
-      + 'EXCLUDED pending a vehicle deduction method election (standard mileage '
-      + 'vs. actual expenses — same Schedule C line 9). Actual vehicle expenses, '
-      + 'if any, remain in Operating Expenses above.']));
-  }
-  if (veh?.excludedVehicleDepreciation > 0) {
-    lines.push(row(['', '']));
-    lines.push(row(['VEHICLE DEPRECIATION NOTE',
-      `${veh.excludedVehicleDepreciation.toFixed(2)} of vehicle depreciation is `
-      + 'EXCLUDED because standard mileage is elected — the rate already '
-      + 'includes a depreciation allowance, so it cannot also be deducted '
-      + 'separately.']));
+      'This P&L deducts ACTUAL vehicle costs (all recorded expenses; no '
+      + `standard mileage rate). Standard mileage for the period would be `
+      + `${veh.standardMileageComputed.toFixed(2)} — apply it with your CPA IN `
+      + 'PLACE OF the actual vehicle costs only if you elect the standard '
+      + 'method (Schedule C line 9 allows one, not both).']));
   }
   if (veh?.methodConflict?.note) {
     lines.push(row(['', '']));
-    lines.push(row(['VEHICLE METHOD CONFLICT', veh.methodConflict.note]));
+    lines.push(row(['VEHICLE METHOD NOTE', veh.methodConflict.note]));
   }
   return lines.join('\n');
 }

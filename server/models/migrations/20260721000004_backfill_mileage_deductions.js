@@ -81,7 +81,21 @@ exports.up = async function up(knex) {
         AND classification_method IS DISTINCT FROM 'manual_review'
     `);
 
-    // 1. Operator-classified business trips → date-effective rate + deduction.
+    // 0b. NORMALIZE is_business from purpose. The old manual-entry route stored
+    //     purpose ('personal'/'commute') but left is_business at its schema
+    //     default of TRUE — so a preserved manual PERSONAL trip would still be
+    //     is_business=true and get a deduction in step 1. purpose is the
+    //     operator's classification; is_business must equal (purpose='business').
+    //     Idempotent (only touches rows that disagree).
+    await trx.raw(`
+      UPDATE mileage_log
+      SET is_business = (purpose = 'business'),
+          updated_at = now()
+      WHERE trip_date >= ${TABLE_FLOOR}
+        AND is_business IS DISTINCT FROM (purpose = 'business')
+    `);
+
+    // 1. Business trips (now == purpose='business') → date-effective rate.
     await trx.raw(`
       UPDATE mileage_log
       SET irs_rate = (${RATE_CASE}),

@@ -36,36 +36,29 @@
  *                  within the window (same proration everywhere, including the
  *                  tax package, which previously summed full-year amounts).
  *
- * VEHICLE METHOD ELECTION — standard mileage and actual vehicle expenses are
- * the SAME Schedule C line 9 ("Car and truck expenses"): the `Vehicle
- * Expenses` category carries irs_line '9' and mileage_log.deduction_amount is
- * that same line by another route. The IRS lets you deduct one, never both.
- * company_financials.vehicle_deduction_method elects which side counts:
+ * VEHICLE (Schedule C line 9) — the P&L computes the ACTUAL-EXPENSES basis
+ * ONLY: it deducts every recorded cost and NEVER the standard mileage rate.
+ * Standard mileage and actual expenses are mutually exclusive on line 9, and
+ * computing the standard-mileage basis would require removing ALL actual
+ * vehicle costs — but those are spread across shared categories (auto
+ * insurance under Insurance, van upkeep under Repairs & Maintenance, tags
+ * under Taxes & Licenses) that can't be isolated from non-vehicle costs
+ * without per-line attribution the data model doesn't have. Counting the rate
+ * beside them would double-deduct, so the P&L never does.
  *
- *   'standard_mileage' — mileage deduction counts; Vehicle Expenses opex AND
- *                        any vehicle MACRS/§179 depreciation are excluded (the
- *                        rate already embeds depreciation — deducting it beside
- *                        the rate double-counts). Both are still reported.
- *   'actual_expenses'  — Vehicle Expenses opex counts; mileage is excluded.
- *   NULL (unelected)   — FAIL CLOSED: keep actual vehicle expenses (real
- *                        recorded cash) and EXCLUDE the computed mileage
- *                        deduction. Understating a deduction is the safe
- *                        direction; manufacturing one is not.
- *
- * Every branch reports what it excluded in `vehicleDeduction`, so the number
- * dropped is always visible rather than silently missing — same disclosure
- * posture as the coverage note below. NULL is deliberately not treated as
- * standard mileage: a vehicle depreciated under MACRS/§179 is BARRED from the
- * standard mileage rate for its remaining life (Pub 463), and prod's register
- * carries the van on MACRS — so defaulting would invent an unclaimable
- * deduction.
- *
- * A barred election is not merely warned about: when vehicleMileageBarred is
- * set, a 'standard_mileage' election FAILS CLOSED to the actual-expenses
- * basis (mileage excluded, Vehicle Expenses opex + vehicle depreciation kept)
- * so the total never includes a deduction the code knows is disallowed.
- * buildPnlReport still attaches `methodConflict` explaining it and pointing to
- * the actual-expenses election.
+ * The mileage figure is always EXCLUDED from the total and DISCLOSED
+ * (vehicleDeduction.standardMileageComputed) for the operator/CPA to apply
+ * manually IN PLACE OF the actual vehicle costs if they elect the standard
+ * method. company_financials.vehicle_deduction_method and the barred flag
+ * drive that DISCLOSURE only — never the computation:
+ *   'actual_expenses' / NULL — actual basis, no extra note.
+ *   'standard_mileage'       — actual basis + a note that the P&L reflects
+ *                              actual costs and the disclosed mileage must be
+ *                              applied manually instead.
+ *   MACRS/§179 vehicle held  — a stronger note: standard mileage is barred
+ *                              outright (Pub 463), so actual is the only option.
+ * Never overstates: the dangerous direction (rate + untracked actual costs) is
+ * structurally impossible because the rate is never added here.
  *
  * assemblePnl() is pure (no I/O) and unit-tested; buildPnlReport() runs the
  * queries and feeds it.
@@ -74,10 +67,6 @@
 const { etParts, etDateString } = require('../utils/datetime-et');
 
 const COGS_CATEGORIES = ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'];
-// Schedule C line 9 category — the actual-expenses side of the vehicle
-// election. Matched by NAME because that's the seeded identity
-// (20260401000069_tax_intelligence.js) and what the categorizer assigns.
-const VEHICLE_EXPENSE_CATEGORY = 'Vehicle Expenses';
 const VEHICLE_METHODS = ['standard_mileage', 'actual_expenses'];
 // Depreciation methods that disqualify a vehicle from the standard mileage
 // rate for the rest of its life (Pub 463).
@@ -218,7 +207,6 @@ function assemblePnl({
   processingFees = 0,
   mileageDeduction = 0,
   depreciationTotal = 0,
-  vehicleDepreciation = 0,
   vehicleMethod = null,
   vehicleMileageBarred = false,
 } = {}) {
@@ -227,29 +215,23 @@ function assemblePnl({
   const labor = round2(laborCost);
   const materials = round2(materialsCost);
 
-  // ── Schedule C line 9: exactly one side of the vehicle election counts ──
-  // Unelected (NULL) fails closed to the actual-expenses side: recorded cash
-  // stays, the computed mileage figure is dropped. See the module header.
+  // ── Schedule C line 9 (vehicle): the P&L computes the ACTUAL-EXPENSES basis
+  // ONLY — it deducts every recorded cost and NEVER the standard mileage rate.
+  // Standard mileage would require removing all actual vehicle costs, but those
+  // are spread across shared categories (auto insurance under Insurance, van
+  // upkeep under Repairs & Maintenance, tags under Taxes & Licenses) that can't
+  // be isolated from non-vehicle costs — so counting the rate beside them would
+  // double-deduct. The mileage figure is therefore always EXCLUDED here and
+  // DISCLOSED (vehicleDeduction.standardMileageComputed) for the operator/CPA
+  // to apply manually IN PLACE OF the actual vehicle costs if they elect the
+  // standard method. `method` and the barred flag drive that disclosure only.
   const method = VEHICLE_METHODS.includes(vehicleMethod) ? vehicleMethod : null;
-  // A standard-mileage election is HONORED only when it's actually allowed. If
-  // a held vehicle took MACRS/§179 the rate is barred (Pub 463), so we FAIL
-  // CLOSED to the actual-expenses basis — keep Vehicle Expenses opex and
-  // vehicle depreciation, EXCLUDE the mileage — rather than count a deduction
-  // the code knows is disallowed. A warning alone would leave the total wrong.
-  const useStandardMileage = method === 'standard_mileage' && !vehicleMileageBarred;
   const rawMileage = round2(Number(mileageDeduction) || 0);
-  const countedMileage = useStandardMileage ? rawMileage : 0;
+  const countedMileage = 0; // never auto-applied — see note above
 
   const byCategory = new Map();
-  let excludedVehicleExpenses = 0;
   for (const row of opexRows) {
     const name = row.category || 'Uncategorized';
-    // Drop the actual-expenses side ONLY when standard mileage is elected —
-    // never on NULL, or an unelected P&L would lose both sides of line 9.
-    if (useStandardMileage && name === VEHICLE_EXPENSE_CATEGORY) {
-      excludedVehicleExpenses = round2(excludedVehicleExpenses + (parseFloat(row.total) || 0));
-      continue;
-    }
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
     prev.amount = round2(prev.amount + (parseFloat(row.total) || 0));
     byCategory.set(name, prev);
@@ -271,15 +253,12 @@ function assemblePnl({
   const totalRevenue = round2(revenue + other);
   const cogsTotal = round2(labor + materials);
   const grossProfit = round2(totalRevenue - cogsTotal);
-  // The standard mileage rate ALREADY embeds a depreciation component, so a
-  // vehicle's separate MACRS/§179 depreciation can't also be deducted under
-  // that election — subtract the vehicle portion from counted depreciation
-  // (it's excluded, not lost: reported in vehicleDeduction). Every other
-  // election keeps full depreciation (actual expenses / unelected both do).
-  const rawDepreciation = round2(Number(depreciationTotal) || 0);
-  const vehDepr = round2(Number(vehicleDepreciation) || 0);
-  const excludedVehicleDepreciation = useStandardMileage ? vehDepr : 0;
-  const countedDepreciation = round2(rawDepreciation - excludedVehicleDepreciation);
+  // Full depreciation always flows (actual-expenses basis). Under a standard-
+  // mileage election a vehicle's depreciation would be embedded in the rate
+  // instead, but since the P&L never applies that rate here, keeping the
+  // vehicle's actual depreciation is consistent — the mileage figure the
+  // operator would use instead is disclosed below.
+  const countedDepreciation = round2(Number(depreciationTotal) || 0);
   const deductionsTotal = round2(countedMileage + countedDepreciation);
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
@@ -290,22 +269,22 @@ function assemblePnl({
     grossMargin: totalRevenue > 0 ? grossProfit / totalRevenue : 0,
     operatingExpenses: { categories: opexCategories, total: opexTotal },
     deductions: {
-      mileage: countedMileage,
+      mileage: countedMileage,             // always 0 — see note
       depreciation: countedDepreciation,
       total: deductionsTotal,
     },
-    // What line 9 actually did, always reported — an excluded amount is
-    // disclosed, never silently missing.
+    // The P&L is on the actual-expenses basis. Always disclose the standard
+    // mileage figure that was NOT applied, so it's visible, never silently
+    // missing. buildPnlReport attaches a methodConflict note when the operator
+    // elected standard mileage (and, more strongly, when a MACRS/§179 vehicle
+    // bars it outright).
     vehicleDeduction: {
       method,                       // null = unelected
       elected: method !== null,
-      // The election was set but NOT applied because it's disallowed — the
-      // P&L fell back to actual-expenses treatment (mileage excluded).
+      basis: 'actual_expenses',     // the only basis the P&L can compute cleanly
       barred: method === 'standard_mileage' && vehicleMileageBarred,
-      countedMileage,
-      excludedMileage: useStandardMileage ? 0 : rawMileage,
-      excludedVehicleExpenses,
-      excludedVehicleDepreciation,
+      countedMileage,               // 0
+      standardMileageComputed: rawMileage, // disclosed for manual/CPA use
     },
     netIncome,
     netMargin: totalRevenue > 0 ? netIncome / totalRevenue : 0,
@@ -714,36 +693,37 @@ async function buildPnlReport(db, startDate, endDate) {
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
     depreciationTotal: prorateDepreciation(assets, startDate, endDate),
-    // Vehicle depreciation, prorated the same way — assemblePnl removes it
-    // from counted depreciation under a standard-mileage election so the
-    // rate's built-in depreciation component isn't deducted twice.
-    vehicleDepreciation: prorateDepreciation(
-      (assets || []).filter((a) => a.asset_category === 'vehicle'),
-      startDate, endDate,
-    ),
     vehicleMethod,
     // A held vehicle on MACRS/§179 is barred from the standard mileage rate
-    // (Pub 463) — assemblePnl fails closed on this so a barred election never
-    // inflates the total, only warns.
+    // (Pub 463). The P&L never applies the rate regardless; this only sharpens
+    // the disclosure below.
     vehicleMileageBarred: (barredVehicles || []).length > 0,
   });
 
-  // Pub 463 conflict: standard mileage elected while a held vehicle carries
-  // MACRS/§179 depreciation, which disqualifies that vehicle from the rate.
-  // The mileage is ALREADY excluded from the total above (fail-closed); this
-  // explains why and tells the operator to switch the election.
-  if (vehicleMethod === 'standard_mileage' && (barredVehicles || []).length > 0) {
+  // Disclosure when standard mileage is elected — the P&L is on the actual-
+  // expenses basis (the disclosed mileage figure is NOT in the total), because
+  // actual vehicle costs can't be isolated from shared categories to compute a
+  // clean standard-mileage basis. A held MACRS/§179 vehicle makes it stronger:
+  // standard mileage is barred outright (Pub 463).
+  if (vehicleMethod === 'standard_mileage') {
+    const barred = (barredVehicles || []).length > 0;
     report.vehicleDeduction.methodConflict = {
-      reason: 'depreciation_bars_standard_mileage',
-      vehicles: barredVehicles.map((v) => ({
+      reason: barred ? 'depreciation_bars_standard_mileage' : 'standard_mileage_not_auto_computed',
+      vehicles: (barredVehicles || []).map((v) => ({
         name: v.name,
         method: v.section_179_elected ? 'section_179' : v.depreciation_method,
       })),
-      note: 'Standard mileage is elected, but these vehicles were depreciated '
-        + 'under MACRS/§179 — IRS Pub 463 bars the standard mileage rate for a '
-        + 'vehicle for the rest of its life once that depreciation is claimed. '
-        + 'The mileage deduction has been EXCLUDED from this P&L; switch the '
-        + 'election to actual expenses (with your CPA) to use vehicle costs.',
+      note: barred
+        ? 'Standard mileage is elected, but a held vehicle was depreciated under '
+          + 'MACRS/§179 — IRS Pub 463 bars the standard mileage rate for that '
+          + 'vehicle for the rest of its life. This P&L deducts ACTUAL vehicle '
+          + 'costs; keep the actual-expenses method with your CPA.'
+        : 'Standard mileage is elected, but this P&L deducts ACTUAL vehicle '
+          + 'costs — the system can\'t separate actual vehicle expenses (auto '
+          + 'insurance, van repairs, registration) from shared categories to '
+          + 'compute a clean standard-mileage figure. Your standard mileage '
+          + 'amount is disclosed separately; apply it with your CPA IN PLACE OF '
+          + 'the actual vehicle costs if you use that method.',
     };
   }
 
@@ -834,7 +814,6 @@ module.exports = {
   dateCellStr,
   missingTableOnly,
   COGS_CATEGORIES,
-  VEHICLE_EXPENSE_CATEGORY,
   VEHICLE_METHODS,
   MILEAGE_BARRING_METHODS,
   DEFAULT_LOADED_LABOR_RATE,
