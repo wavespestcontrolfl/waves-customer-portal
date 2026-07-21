@@ -5,6 +5,7 @@ import {
 } from "../../../../components/dashboard/charts";
 import DashboardSection from "../DashboardSection";
 import ActionInbox from "../ActionInbox";
+import StaleVisitsCard from "../StaleVisitsCard";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import { completionVerdict } from "../scorecard-metrics";
@@ -15,6 +16,7 @@ export default function TodaySection({
   alerts,
   alertsStale,
   today,
+  staleVisits,
   kpis,
   kpisLoading,
   kpisError,
@@ -29,6 +31,7 @@ export default function TodaySection({
       about="Live operations for the current day: the Action Inbox ranks what to fix first (stale leads, expiring estimates, at-risk recurring revenue), Today's Completion tracks the schedule as it happens, and the tiles show service execution for the selected period. Start here each morning — clear the inbox, then check the other tabs."
     >
       <ActionInbox alerts={alerts} stale={alertsStale} />
+      <StaleVisitsCard data={staleVisits} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
           title="Today's Completion"

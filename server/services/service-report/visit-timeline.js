@@ -1,4 +1,5 @@
 const { parseETDateTime } = require('../../utils/datetime-et');
+const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 const VISIT_TIMELINE_CONFIG_KEY = 'service_reports.visit_timeline';
 const VISIT_TIMELINE_TIME_ZONE = 'America/New_York';
@@ -346,6 +347,20 @@ function buildVisitTimeline({
       config: resolvedConfig,
     }));
   }
+  // Backdated quiet closeout (structured.backfill): unless the operator's
+  // typed duration anchored a REAL end (real on-site start + typed minutes →
+  // completed = start + duration), the completion instant is the day-scale
+  // ET-noon convention (PR #2897 fix round 9) — honest about the DAY, not a
+  // wall-clock. Rendering it exact printed a literal "12:00 PM" on the
+  // public report, which could even sit before a real afternoon check-in
+  // event. Day-only shapes render the completion the way the timeline
+  // already renders an unknown-time completion (the pre-round-9 NULL path):
+  // no occurredAt → no displayTime, medium confidence — the event itself
+  // stays (sorted by sortOrder, so it still follows the on-site event), and
+  // the line-specific copy keeps rendering because the completion is real.
+  const backfillTypedMinutes = minutesFromElapsed(structured.timeOnSite) || null;
+  const backfillDayOnlyCompletion = structured.backfill === true
+    && !(backfillTypedMinutes && onSiteAt);
   if (resolvedConfig.showServiceCompleted && completedReport) {
     events.push(buildTimelineEvent({
       id: 'service_completed',
@@ -354,10 +369,10 @@ function buildVisitTimeline({
       customerDescription: completedAt
         ? (SERVICE_COMPLETED_DESCRIPTIONS[normalizedLine] || SERVICE_COMPLETED_DESCRIPTIONS.default)
         : 'The service was marked complete.',
-      occurredAt: completedAt,
+      occurredAt: backfillDayOnlyCompletion ? null : completedAt,
       source: 'service_report',
       sortOrder: 3,
-      confidence: completedAt ? 'high' : 'medium',
+      confidence: completedAt && !backfillDayOnlyCompletion ? 'high' : 'medium',
       config: resolvedConfig,
     }));
   }
@@ -394,7 +409,19 @@ function buildVisitTimeline({
     });
   }
 
-  const rawDurationMinutes = minutesBetween(onSiteAt, completedAt);
+  // Backdated quiet closeout (structured.backfill — the durable marker the
+  // completion freezes; same read job-costing / pricing-reality-check /
+  // estimate-actuals key their guards off): the record keeps its real stale
+  // arrival as history while scheduled_services.completed_at carries only a
+  // day-scale service-day instant (ET noon, PR #2897 fix round 9), so the
+  // onSite→completed pair would fabricate an on-site duration on this
+  // CUSTOMER-facing report. For marked records the only duration shown is
+  // the operator's typed statement (backfillTypedMinutes above — for the
+  // typed shape the pair equals it by construction anyway); absent that,
+  // the existing timing note covers the honest unknown.
+  const rawDurationMinutes = structured.backfill === true
+    ? backfillTypedMinutes
+    : minutesBetween(onSiteAt, completedAt);
   const durationMinutes = rawDurationMinutes != null
     && rawDurationMinutes >= resolvedConfig.minimumDurationMinutes
     ? rawDurationMinutes

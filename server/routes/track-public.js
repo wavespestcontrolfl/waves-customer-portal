@@ -198,17 +198,24 @@ async function ensureEnRouteDestinationGeocoded(service) {
   }
 }
 
+// Invoice statuses that mean "the office has not sent this yet" — the exact
+// set the send paths' finalize CASE flips to 'sent' (invoice.js). A
+// backfill review invoice parks in these until the reviewer acts.
+const UNSENT_INVOICE_STATUSES = new Set(['draft', 'scheduled', 'sending']);
+
 async function buildSummary(service) {
   // Invoice: linked by scheduled_service_id (added 20260420000002).
   let invoiceToken = null;
+  let invoiceStatus = null;
   try {
     const invoice = await db('invoices')
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
-      .first('token', 'payer_id');
+      .first('token', 'payer_id', 'status');
     // Third-party Bill-To: a payer-billed invoice is the payer's to pay — never
     // expose its token / pay page on the homeowner's public tracking link.
     invoiceToken = invoice && !invoice.payer_id ? (invoice.token || null) : null;
+    invoiceStatus = invoice ? String(invoice.status || '').toLowerCase() : null;
   } catch (err) {
     logger.warn(`[track-public] invoice lookup failed: ${err.message}`);
   }
@@ -220,15 +227,16 @@ async function buildSummary(service) {
   let serviceReportToken = null;
   let photos = [];
   let suppressCustomerArtifacts = false;
+  // Non-auto_send delivery postures (typed shadow/internal-only and
+  // disabled consultations) never hand the customer report artifacts — not
+  // even on the token-scoped tracking page. Hoisted: the backfill invoice
+  // guard below reads the same parsed notes.
+  let trackNotes = {};
   try {
     const record = await db('service_records')
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
       .first('id', 'report_view_token', 'structured_notes');
-    // Non-auto_send delivery postures (typed shadow/internal-only and
-    // disabled consultations) never hand the customer report artifacts — not
-    // even on the token-scoped tracking page.
-    let trackNotes = {};
     try {
       trackNotes = typeof record?.structured_notes === 'string'
         ? JSON.parse(record.structured_notes)
@@ -263,6 +271,24 @@ async function buildSummary(service) {
     }
   } catch (err) {
     logger.warn(`[track-public] service_records lookup failed: ${err.message}`);
+  }
+
+  // Backdated quiet closeout (structured_notes.backfill — the durable marker
+  // the completion freezes; same read job-costing keys its untrusted-span
+  // policy off). Its completion invoice is minted as an UNREVIEWED draft at
+  // face value — deposits/prepaid/account credit deliberately unapplied, no
+  // pay link ever sent — for the OFFICE to reconcile. A customer reopening
+  // an old /track/:token must not find a Pay button on that draft and pay
+  // the unreviewed amount before review (Codex P1, PR #2897 fix round 9).
+  // Suppressed only while the invoice is still UNSENT (draft/scheduled/
+  // mid-send): the moment the reviewer finalizes a send — the send paths
+  // flip exactly these statuses to 'sent' (then viewed/overdue/paid) — the
+  // normal pay surface resumes here too. Non-backfill visits are untouched:
+  // a live completion's fresh draft is intentionally payable (its pay link
+  // goes out in the completion SMS).
+  if (invoiceToken && trackNotes.backfill === true
+    && UNSENT_INVOICE_STATUSES.has(invoiceStatus)) {
+    invoiceToken = null;
   }
 
   // Review request — most recent for this customer; TrackPage uses the

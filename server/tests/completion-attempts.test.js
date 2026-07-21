@@ -1,6 +1,9 @@
 const {
   claimCompletionAttempt,
   hashCompletionRequest,
+  requestHashMatches,
+  resumeHashMatches,
+  coreHashSegment,
   markCompletionAttemptFailed,
   markCompletionAttemptSideEffectsPending,
   markCompletionAttemptSucceeded,
@@ -642,8 +645,154 @@ describe('completion attempts', () => {
     expect(hashCompletionRequest({ a: 1, b: 'x' })).toBe(hashCompletionRequest({ a: 1, b: 'x' }));
     expect(hashCompletionRequest({ a: 1, b: { c: 2, d: 3 } }))
       .toBe(hashCompletionRequest({ b: { d: 3, c: 2 }, a: 1 }));
-    expect(hashCompletionRequest({ notes: 'done', timeOnSite: 10 }))
-      .toBe(hashCompletionRequest({ notes: 'done', timeOnSite: 25 }));
     expect(hashCompletionRequest({ a: 1 })).not.toBe(hashCompletionRequest({ a: 2 }));
+  });
+
+  test('mode fields (backfill/timeOnSite) split the FULL hash but never the CORE segment (Codex P1, fix round 10)', () => {
+    // Round 6 stripped `backfill` (and earlier `timeOnSite`) from EVERY
+    // hash, so a same-key retry after a PRE-commit failure could flip
+    // loud↔quiet or the typed duration while passing the idempotency check.
+    // They now hash into a second MODE segment: pre-commit comparisons use
+    // the full composite; only the committed-record resume claim
+    // (claimSideEffectsRun) matches on the core.
+    const base = { notes: 'done', visitOutcome: 'routine' };
+    const flagged = hashCompletionRequest({ ...base, backfill: true, timeOnSite: 45 });
+    const flagless = hashCompletionRequest(base);
+    const retimed = hashCompletionRequest({ ...base, backfill: true, timeOnSite: 25 });
+    expect(flagged).not.toBe(flagless);
+    expect(flagged).not.toBe(retimed);
+    expect(coreHashSegment(flagged)).toBe(coreHashSegment(flagless));
+    expect(coreHashSegment(flagged)).toBe(coreHashSegment(retimed));
+    // Same-intent normalizations do NOT split even the full hash: an
+    // omitted flag ≡ explicit false; omitted duration ≡ null.
+    expect(hashCompletionRequest({ ...base, backfill: false })).toBe(flagless);
+    expect(hashCompletionRequest({ ...base, timeOnSite: null })).toBe(flagless);
+    // NORMAL completions post the panel's auto-elapsed timer as timeOnSite —
+    // it ticks every second, so it never enters the hash (fix round 13): a
+    // transient pre-commit failure must retry cleanly on the next tick, not
+    // 409 idempotency_key_mismatch. Only a backfill's operator-TYPED
+    // minutes bind pre-commit (the `retimed` split above).
+    expect(hashCompletionRequest({ ...base, timeOnSite: 61 }))
+      .toBe(hashCompletionRequest({ ...base, timeOnSite: 62 }));
+    expect(hashCompletionRequest({ ...base, timeOnSite: 61 })).toBe(flagless);
+    // Matcher semantics: strict wants the full composite; resume wants core.
+    expect(requestHashMatches(flagged, flagless)).toBe(false);
+    expect(requestHashMatches(flagged, flagged)).toBe(true);
+    expect(resumeHashMatches(flagged, flagless)).toBe(true);
+    expect(resumeHashMatches(flagged, hashCompletionRequest({ notes: 'other' }))).toBe(false);
+    // Null tolerance (legacy rows without a stored hash) is preserved.
+    expect(requestHashMatches(null, flagged)).toBe(true);
+    expect(resumeHashMatches(undefined, flagged)).toBe(true);
+  });
+
+  test('legacy single-segment stored hashes keep matching across the deploy (core-projection compatibility)', () => {
+    // Attempts stored before round 10 carry a single-segment hash whose
+    // projection equals today's CORE exactly. Both matchers must treat a
+    // separator-free stored value as core-only so an in-flight retry does
+    // not 409 on the format change alone.
+    const body = { notes: 'done', backfill: true, timeOnSite: 45 };
+    const legacyStored = coreHashSegment(hashCompletionRequest(body));
+    expect(legacyStored).not.toContain(':');
+    expect(requestHashMatches(legacyStored, hashCompletionRequest(body))).toBe(true);
+    // Legacy rows cannot enforce the mode segment they never stored — a
+    // flipped mode still matches them (pre-round-10 behavior), but a real
+    // payload change does not.
+    expect(requestHashMatches(legacyStored, hashCompletionRequest({ notes: 'done' }))).toBe(true);
+    expect(requestHashMatches(legacyStored, hashCompletionRequest({ notes: 'other' }))).toBe(false);
+    expect(resumeHashMatches(legacyStored, hashCompletionRequest(body))).toBe(true);
+  });
+
+  test('pre-commit same-key retry may NOT flip the mode: failed attempt + flagless retry → idempotency_key_mismatch (Codex P1, fix round 10)', () => {
+    // The exact reported hole: a completion attempt FAILS before any record
+    // commits, then the same key retries WITHOUT the backfill flag (or with
+    // a different typed duration). No committed record exists, so the body
+    // is the only truth — the retry must 409, never re-run under a flipped
+    // loud/quiet + duration contract.
+    const committedBody = { notes: 'done', visitOutcome: 'routine', backfill: true, timeOnSite: 45 };
+    const storedHash = hashCompletionRequest(committedBody);
+    const retryHash = hashCompletionRequest({ notes: 'done', visitOutcome: 'routine' });
+
+    const run = async (existingStatus) => {
+      const knex = makeKnex([
+        noPriorSuccess(),
+        noResumableCompletion(),
+        noCompletedRecord(),
+        noPriorSnapshotAttempt(),
+        { insertError: uniqueViolation() },
+        { first: { id: 'attempt-1', status: existingStatus, request_hash: storedHash, updated_at: new Date() } },
+      ]);
+      return claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: retryHash,
+      }, knex);
+    };
+
+    return (async () => {
+      for (const status of ['failed', 'pending']) {
+        const result = await run(status);
+        expect(result.action).toBe('conflict');
+        expect(result.status).toBe(409);
+        expect(result.payload.code).toBe('idempotency_key_mismatch');
+      }
+      // A BACKFILL retry that changes the operator-TYPED minutes pre-commit
+      // is equally a different payload — 409.
+      const typedFlipKnex = makeKnex([
+        noPriorSuccess(),
+        noResumableCompletion(),
+        noCompletedRecord(),
+        noPriorSnapshotAttempt(),
+        { insertError: uniqueViolation() },
+        { first: { id: 'attempt-1', status: 'failed', request_hash: storedHash, updated_at: new Date() } },
+      ]);
+      const typedFlip = await claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', backfill: true, timeOnSite: 60 }),
+      }, typedFlipKnex);
+      expect(typedFlip.payload.code).toBe('idempotency_key_mismatch');
+      // A NORMAL completion's retry after a pre-commit failure carries the
+      // panel's NEXT timer tick — that is noise, not a payload change: the
+      // failed row resets to pending and the retry proceeds (fix round 13;
+      // pre-fix this 409'd idempotency_key_mismatch on the next tick).
+      const normalStored = hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', timeOnSite: 61 });
+      const retryRow = { id: 'attempt-1', status: 'pending' };
+      const tickKnex = makeKnex([
+        noPriorSuccess(),
+        noResumableCompletion(),
+        noCompletedRecord(),
+        noPriorSnapshotAttempt(),
+        { insertError: uniqueViolation() },
+        { first: { id: 'attempt-1', status: 'failed', request_hash: normalStored, updated_at: new Date() } },
+        { returning: [retryRow] },
+      ]);
+      const tickRetry = await claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: hashCompletionRequest({ notes: 'done', visitOutcome: 'routine', timeOnSite: 62 }),
+      }, tickKnex);
+      expect(tickRetry).toEqual({ action: 'proceed', attempt: retryRow });
+      // The same flagless retry against a COMMITTED record (side-effects
+      // resume) is the round-6 recovery case and still resumes — the frozen
+      // structured_notes are authoritative for the mode there.
+      const pending = {
+        id: 'attempt-1',
+        status: 'side_effects_pending',
+        service_record_id: 'record-1',
+        request_hash: storedHash,
+      };
+      const claimed = { ...pending, status: 'side_effects_running' };
+      const knex = makeKnex([
+        noPriorSuccess(),
+        { first: pending },
+        { returning: [claimed] },
+      ]);
+      const resumed = await claimCompletionAttempt({
+        serviceId: 'svc-1',
+        idempotencyKey: 'key-1',
+        requestHash: retryHash,
+      }, knex);
+      expect(resumed).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1' });
+    })();
   });
 });

@@ -18,6 +18,17 @@ function suppressedTypedReport(structuredNotes) {
   return Boolean(mode) && mode !== 'auto_send';
 }
 
+// A backfilled (backdated quiet) closeout forbids every customer contact —
+// including approving a recap days later. structured_notes.backfill is the
+// durable marker the completion route froze; refusing on it here covers
+// pending recap rows that already existed before the quiet closeout, not
+// just the (also gated) completion-time enqueue.
+function backfilledCompletion(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+  return Boolean(notes && typeof notes === 'object' && notes.backfill === true);
+}
+
 async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   const recap = await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first().catch(() => null);
   if (!recap) return { ok: false, reason: 'no_recap' };
@@ -39,6 +50,10 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
     .first();
   if (!service) return { ok: false, reason: 'no_service' };
   if (suppressedTypedReport(service.structured_notes)) return { ok: false, reason: 'suppressed_report' };
+  if (backfilledCompletion(service.structured_notes)) {
+    logger.info(`[recap-delivery] recap send refused for scheduled service ${scheduledServiceId}: backfilled quiet closeout — no customer contact`);
+    return { ok: false, reason: 'backfill_quiet_closeout' };
+  }
   if (!service.phone) return { ok: false, reason: 'no_phone' };
 
   const token = service.report_view_token || await ensureReportToken(service.id, knex);

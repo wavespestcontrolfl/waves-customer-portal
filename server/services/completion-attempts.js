@@ -15,14 +15,87 @@ function isUniqueViolation(err) {
   return err?.code === '23505';
 }
 
-function hashCompletionRequest(body) {
-  // completionTelemetry carries per-attempt timestamps (submitClickedAt) —
-  // including it would make every legitimate retry an
-  // idempotency_key_mismatch for typed completions.
-  const { idempotencyKey, timeOnSite, completionTelemetry, ...stableBody } = body || {};
-  return crypto.createHash('sha256')
+// Two-segment request hash: `<core>:<mode>` (Codex P1, PR #2897 fix round
+// 10 — narrowing the fix-round-6 exclusion).
+//
+// completionTelemetry carries per-attempt timestamps (submitClickedAt) —
+// including it anywhere would make every legitimate retry an
+// idempotency_key_mismatch for typed completions. idempotencyKey is the
+// key itself.
+//
+// `backfill` and `timeOnSite` are completion-MODE fields with a split
+// authority story:
+//  - PRE-commit (pending/failed/succeeded same-key retries) the BODY is the
+//    only truth there is, and both fields are consequential — `backfill`
+//    flips the loud↔quiet contract (customer sends, charges, dating) and
+//    `timeOnSite` feeds the persisted duration and costed labor. Round 6
+//    stripped `backfill` (and, earlier, `timeOnSite`) from EVERY hash, so a
+//    same-key retry after a PRE-commit failure could flip them while
+//    passing the idempotency check. They now hash into the MODE segment,
+//    and the pre-commit comparison sites match on the FULL composite.
+//    `timeOnSite` binds ONLY under backfill (Codex P2, fix round 13): a
+//    backfill's value is the operator's TYPED minutes — stable, and worth
+//    pinning pre-commit — but a NORMAL completion posts the panel's
+//    auto-elapsed timer, ticking every second, so hashing it turned any
+//    transient pre-commit failure into idempotency_key_mismatch on the
+//    very next tick instead of a retry. Normal completions keep the
+//    pre-round-10 exclusion; their duration is recomputed server-side from
+//    lifecycle stamps anyway.
+//  - POST-commit (a committed service record exists) the frozen
+//    structured_notes are authoritative for both — admin-dispatch re-derives
+//    mode and duration from the record on resume and the body has no vote —
+//    so a crash-resumed retry that legally disagrees (flagless fresh panel
+//    mount, auto-elapsed timer) must NOT strand the committed completion on
+//    completion_resume_payload_mismatch. claimSideEffectsRun (the only
+//    committed-record claim) therefore matches on the CORE segment alone.
+//
+// Legacy rows: attempts stored before this round carry a single-segment
+// hash whose projection equals today's CORE exactly (the old exclusion
+// set). Both matchers treat a separator-free stored hash as core-only, so
+// in-flight attempts across the deploy keep matching.
+function completionRequestHashSegments(body) {
+  const { idempotencyKey, timeOnSite, completionTelemetry, backfill, ...stableBody } = body || {};
+  const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');
+  // Normalized so an omitted flag and an explicit false (same intent) hash
+  // identically, and undefined/null duration unify; a non-backfill body's
+  // duration is timer noise and never enters the hash (see above).
+  const mode = crypto.createHash('sha256')
+    .update(JSON.stringify(sortObjectKeys({
+      backfill: backfill === true,
+      timeOnSite: backfill === true ? (timeOnSite ?? null) : null,
+    })))
+    .digest('hex');
+  return { core, mode };
+}
+
+function hashCompletionRequest(body) {
+  const { core, mode } = completionRequestHashSegments(body);
+  return `${core}:${mode}`;
+}
+
+function coreHashSegment(hash) {
+  return String(hash || '').split(':')[0];
+}
+
+// PRE-commit sites (pending / failed / succeeded-replay): the full
+// composite must match — a same-key retry may not flip the completion mode
+// or the typed duration. Null/absent on either side keeps the existing
+// tolerant behavior (legacy rows without a stored hash never 409 on it).
+function requestHashMatches(storedHash, incomingHash) {
+  if (!storedHash || !incomingHash) return true;
+  if (!String(storedHash).includes(':')) {
+    return storedHash === coreHashSegment(incomingHash);
+  }
+  return storedHash === incomingHash;
+}
+
+// POST-commit resume (claimSideEffectsRun): the committed record's frozen
+// structured_notes own the mode fields — only the CORE payload must agree.
+function resumeHashMatches(storedHash, incomingHash) {
+  if (!storedHash || !incomingHash) return true;
+  return coreHashSegment(storedHash) === coreHashSegment(incomingHash);
 }
 
 function sortObjectKeys(value) {
@@ -47,7 +120,11 @@ function sideEffectsRunningPayload() {
 
 async function claimSideEffectsRun(row, requestHash, knex = db) {
   if (!row?.service_record_id) return null;
-  if (row.request_hash && requestHash && row.request_hash !== requestHash) {
+  // Core-only match: the committed record exists (service_record_id), so
+  // the frozen structured_notes are authoritative for backfill/timeOnSite
+  // and the retry body legally disagrees on them (see the hash contract
+  // above). Everything else in the payload must still match.
+  if (!resumeHashMatches(row.request_hash, requestHash)) {
     return {
       action: 'conflict',
       status: 409,
@@ -96,8 +173,11 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     .first();
   if (priorSuccess) {
     if (priorSuccess.idempotency_key === idempotencyKey && priorSuccess.response) {
-      // Same client retry after success — replay stored response.
-      if (priorSuccess.request_hash && requestHash && priorSuccess.request_hash !== requestHash) {
+      // Same client retry after success — replay stored response. Full-hash
+      // strict (mode fields included): the mismatch permit lives ONLY in
+      // claimSideEffectsRun; a replay never re-runs anything, so strictness
+      // costs nothing and keeps one rule for every non-resume site.
+      if (!requestHashMatches(priorSuccess.request_hash, requestHash)) {
         return {
           action: 'conflict',
           status: 409,
@@ -275,8 +355,14 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     // recorded request_hash and the new payload doesn't match it, the
     // client is reusing the key with different data. Reject before
     // replaying a stale response or rerunning under a different body.
-    const hashMismatch =
-      existing.request_hash && requestHash && existing.request_hash !== requestHash;
+    // FULL composite (mode segment included): these are the PRE-commit
+    // states — no committed record exists, the body is the only truth, and
+    // a retry that flips `backfill`/`timeOnSite` after a pre-commit failure
+    // would re-run the completion under a different loud/quiet + duration
+    // contract while passing the check (Codex P1, fix round 10). The
+    // committed-resume states route through claimSideEffectsRun above,
+    // which permits exactly that mode disagreement.
+    const hashMismatch = !requestHashMatches(existing.request_hash, requestHash);
 
     if (existing.status === 'succeeded' && existing.response) {
       if (hashMismatch) {
@@ -445,6 +531,43 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
   });
 }
 
+// Release a post-commit side-effects claim so the NEXT retry resumes
+// IMMEDIATELY (Codex P0, PR #2897 fix round: the typed one-time backfill
+// review-invoice mint is a REQUIRED side effect — see admin-dispatch's
+// backfillTypedOneTimeMintRequired — and its failure must leave the attempt
+// resumable, never finalized succeeded). 'side_effects_pending' is the
+// machinery's explicit resumable-at-side-effects state: claimSideEffectsRun
+// claims it with NO stale-window gate, unlike a stranded
+// 'side_effects_running' row which 409s (completion_side_effects_running)
+// for STALE_SIDE_EFFECTS_MS before a retry can take over. Conditional on the
+// running status so it can never flip back an attempt another path already
+// finalized; failures are swallowed (the caller is already surfacing the
+// side-effect error — at worst the row stays 'side_effects_running' and the
+// stale-window reclaim recovers it, still never a false success).
+async function releaseCompletionAttemptForResume(attempt, err, knex = db) {
+  if (!attempt?.id) return false;
+  try {
+    const [released] = await knex('service_completion_attempts')
+      .where({ id: attempt.id, status: 'side_effects_running' })
+      .update({
+        status: 'side_effects_pending',
+        error: err?.message || String(err || 'Completion side effect failed'),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!released) {
+      logger.warn(
+        `[completion-attempts] release-for-resume found attempt ${attempt.id} not in side_effects_running — leaving it untouched`
+      );
+      return false;
+    }
+    return true;
+  } catch (updateErr) {
+    logger.error(`[completion-attempts] release-for-resume failed for attempt ${attempt.id}: ${updateErr.message}`);
+    return false;
+  }
+}
+
 // Volatile fields that exist on the snapshot for audit purposes but
 // MUST NOT influence the preview→submit handshake hash. Without this
 // canonicalization, the resolver-side hash (preview at T=0) and the
@@ -546,9 +669,20 @@ async function storeResolvedSnapshot(
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  // Exported for the contract tests: the pre-commit strict matcher, the
+  // committed-resume core matcher, and the segment reader they share.
+  requestHashMatches,
+  resumeHashMatches,
+  coreHashSegment,
   hashResolvedSnapshot,
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,
   markCompletionAttemptSideEffectsPending,
+  releaseCompletionAttemptForResume,
   storeResolvedSnapshot,
+  // Exported so the completion route can ECHO the real retry horizon when a
+  // release-for-resume does not apply (the attempt then stays
+  // side_effects_running until this window reclaims it) — the client copy
+  // must never promise an immediate retry the claim would 409.
+  STALE_SIDE_EFFECTS_MS,
 };

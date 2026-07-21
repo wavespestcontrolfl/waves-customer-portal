@@ -64,12 +64,34 @@ function deltaPct(estimated, actual) {
   return Math.round(((act - est) / est) * 10000) / 100;
 }
 
+// Durable backfill marker (structured_notes.backfill, frozen by the
+// completion transaction — the same read job-costing and
+// pricing-reality-check key their untrusted-span policies off).
+function isBackfilledRecord(serviceRecord) {
+  const notes = serviceRecord?.structured_notes;
+  if (!notes) return false;
+  try {
+    const parsed = typeof notes === 'string' ? JSON.parse(notes) : notes;
+    return parsed?.backfill === true;
+  } catch {
+    return false;
+  }
+}
+
 // Observed time on site, most precise source first: the dispatch tracker's
 // computed actual_duration_minutes, then arrival→completion from the
 // appointment lifecycle, then the service report's started/ended span.
+// Backdated quiet closeouts (structured_notes.backfill) skip the span
+// fallbacks: the row keeps its real stale start as history while the
+// duration policies strip the end stamps and completed_at carries only a
+// day-scale service-day instant (ET noon, PR #2897 fix round 9) — pairing
+// those at read time would book a fabricated duration into the estimate
+// accuracy ledger. The persisted actual_duration_minutes IS trusted (the
+// backfill policy writes it only from the operator's typed duration).
 function actualDurationMinutes(scheduledService, serviceRecord) {
   const tracked = positiveNumber(scheduledService?.actual_duration_minutes);
   if (tracked) return Math.round(tracked);
+  if (isBackfilledRecord(serviceRecord)) return null;
 
   const spans = [
     [scheduledService?.arrived_at, scheduledService?.completed_at],
@@ -126,7 +148,7 @@ async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {
     .where('sr.service_date', '>=', db.raw(`(now() at time zone 'America/New_York')::date - ?::int`, [rescanDays]))
     .select(
       'sr.id as service_record_id', 'sr.customer_id', 'sr.service_line', 'sr.service_date',
-      'sr.started_at', 'sr.ended_at',
+      'sr.started_at', 'sr.ended_at', 'sr.structured_notes',
       'ss.id as scheduled_service_id', 'ss.estimated_duration_minutes',
       'ss.actual_duration_minutes', 'ss.arrived_at', 'ss.completed_at',
       'e.id as estimate_id', 'e.estimate_data',
@@ -156,6 +178,7 @@ async function reconcileEstimateActuals({ rescanDays = DEFAULT_RESCAN_DAYS } = {
           service_date: row.service_date,
           started_at: row.started_at,
           ended_at: row.ended_at,
+          structured_notes: row.structured_notes,
         },
         scheduledService: {
           id: row.scheduled_service_id,

@@ -88,9 +88,11 @@ const {
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
 const {
+  finiteDate,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const { minutesFromElapsed } = require('../utils/duration-minutes');
 const {
   INVENTORY_UNITS,
   baseQuantityUnit,
@@ -543,6 +545,283 @@ function toETNoonServiceDate(value) {
 
 function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
+}
+
+// Backdated quiet completion (stale-visit backlog closeout). `backfill: true`
+// on POST /:serviceId/complete stamps the completion's date fields from the
+// row's own scheduled_date instead of today, and forces every customer-facing
+// send off (completion SMS, report email, review ask, payer AP email) — the
+// work happened days ago; a "we just finished" text today would be a lie.
+// Only valid for a genuinely past-dated row (ET calendar-date compare):
+// today's visits complete through the normal path so the 6PM checker's and
+// same-day semantics stay untouched.
+// ADMIN-ONLY: backfill is a financial/comms override (suppresses charges and
+// every customer send), so the office authorizes it — the route itself is
+// requireTechOrAdmin, and a technician token must not be able to quietly
+// close out a visit. `role` is req.techRole; anything but 'admin' fail-closes
+// to 403 (Codex P1 on the fix round). Errors carry `status` so the call site
+// returns 403 for the authz failure vs 400 for the date validation.
+function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(), role } = {}) {
+  if (backfill !== true) return { active: false };
+  if (role !== 'admin') {
+    return {
+      active: false,
+      status: 403,
+      error: {
+        error: 'Backdated closeout is an office override — admin login required',
+        code: 'backfill_admin_only',
+      },
+    };
+  }
+  const serviceDate = scheduledDate ? serviceDateOnly(scheduledDate) : null;
+  if (!serviceDate || serviceDate >= today) {
+    return {
+      active: false,
+      error: {
+        error: 'backfill is only valid for a visit whose scheduled date is in the past',
+        code: 'backfill_not_past',
+      },
+    };
+  }
+  return { active: true, serviceDate };
+}
+
+// Backfill duration policy (Codex P1, fix round): a stale row's lifecycle
+// timestamps are artifacts of the forgotten closeout — a check-in from
+// days/weeks ago against an office checkout stamped today — so the shared
+// helper's elapsed-math fallback would book that whole span as
+// service_time_minutes/actual_duration_minutes and pollute every time
+// metric downstream. Under backfill the ONLY trusted duration is the
+// operator's explicit timeOnSite from the completion body; absent that, the
+// duration keys are stripped so the columns stay unknown (NULL) instead of
+// carrying a fabricated interval. Mutates and returns the updates object
+// built by buildCompletionLifecycleUpdates. Pure for testability (_test).
+//
+// "Explicit" is itself validated (Codex P1, PR #2897): the pre-fix panel
+// auto-submitted its running elapsed — the stale span again, relabeled as
+// operator input — so a provided value only counts within a workday cap.
+// Out of range degrades to absent (columns stay NULL), never a 400: the
+// backlog closeout must still land.
+const BACKFILL_MAX_TIME_ON_SITE_MINUTES = 720; // 12h — no single visit exceeds a workday
+
+// Sanitized operator minutes for a backfill completion: a positive duration
+// within the workday cap, else null ("absent"). The SINGLE source for both
+// the persisted service duration (applyBackfillDurationPolicy) and the
+// job-costing explicitLaborMinutes forward — the two must never disagree.
+function backfillTimeOnSiteMinutes(timeOnSite) {
+  const minutes = minutesFromElapsed(timeOnSite);
+  return minutes > 0 && minutes <= BACKFILL_MAX_TIME_ON_SITE_MINUTES ? minutes : null;
+}
+
+// The start fields buildCompletionLifecycleUpdates back-derives from a typed
+// duration when the row carries no start of its own (inferredStart =
+// completion instant − duration; service-duration-capture.js). Enumerated so
+// the backfill policy strips exactly what the helper fabricates — no more.
+const BACKFILL_INFERRED_START_FIELDS = ['actual_start_time', 'check_in_time', 'arrived_at'];
+
+// The end fields the completion path stamps with the closeout instant: on the
+// scheduled_services row via buildCompletionLifecycleUpdates, and on the
+// service_records report row via buildServiceRecordCompletionTimingFields
+// (which additionally stamps ended_at/completed_at). Enumerated per surface
+// so the policies below strip exactly the closeout-instant stamps — no more.
+const BACKFILL_LIFECYCLE_END_FIELDS = ['actual_end_time', 'check_out_time'];
+const BACKFILL_RECORD_END_FIELDS = ['ended_at', 'completed_at', 'actual_end_time', 'check_out_time'];
+
+// True when the scheduled_services row itself carries a real start timestamp
+// — a stale check-in is history; anything else on those fields is an
+// artifact the policies strip.
+function backfillRowHasRealStart(service = {}) {
+  return BACKFILL_INFERRED_START_FIELDS.some((field) => finiteDate(service?.[field]));
+}
+
+// `service` is the pre-update scheduled_services row — the policy needs it to
+// tell a row-backed start timestamp from one the helper inferred.
+function applyBackfillDurationPolicy(lifecycleUpdates, timeOnSite, service = {}) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
+  if (explicitMinutes) {
+    lifecycleUpdates.service_time_minutes = explicitMinutes;
+    lifecycleUpdates.actual_duration_minutes = explicitMinutes;
+  } else {
+    delete lifecycleUpdates.service_time_minutes;
+    delete lifecycleUpdates.actual_duration_minutes;
+    // Keep backfilled on-site durations unknown (Codex P1, PR #2897 fix
+    // round): stripping the duration KEYS above is not enough when the row
+    // carries a real stale check-in — the helper still stamps today's
+    // closeout instant into actual_end_time/check_out_time, and every
+    // start→end reader (service-report metrics-band computeOnSiteMin,
+    // pricing-reality-check resolveActualMinutes) re-derives the weeks-long
+    // span AT READ TIME from the kept start against today's end whenever
+    // structured_notes.timeOnSite is null. With no typed duration the
+    // visit's end is genuinely unknown, so drop the end stamps too: the
+    // stale check-in stays untouched (historical truth), the start→end pair
+    // on these columns never completes, and the duration reads as unknown.
+    // (The tracker's completed_at DOES carry a day-scale service-day
+    // instant since fix round 9 — billing recovery needs it — so the pair
+    // readers that can see completed_at guard on the durable
+    // structured_notes.backfill marker; see backfillCompletionEndInstant.)
+    // The closeout instant itself is still on the audit trail
+    // (service_record/attempt-row created_at, job_status_history). A row
+    // with no start of its own keeps the end stamps — no start anywhere
+    // means no pair to poison, and the stamp records when the closeout
+    // happened.
+    if (backfillRowHasRealStart(service)) {
+      for (const field of BACKFILL_LIFECYCLE_END_FIELDS) delete lifecycleUpdates[field];
+    }
+  }
+  // No fabricated arrivals (Codex P1, PR #2897): with a typed duration and a
+  // never-started stale row (pending/confirmed — no start timestamps), the
+  // shared helper infers actual_start_time/check_in_time/arrived_at =
+  // closeout instant − duration, i.e. the backdated visit would record
+  // arriving TODAY — on the scheduled_services row and, through
+  // buildServiceRecordCompletionTimingFields, on the service_records report
+  // row. Keep a start field only when the ROW itself carries a real
+  // timestamp for it (checked per field, so the strip stays correct even if
+  // the helper ever starts echoing row values through): stale-but-real
+  // timestamps are historical truth and stay untouched; inferred ones are
+  // dropped and the arrival stays unknown. The typed duration still lands
+  // above — the duration is the operator's statement, the arrival instant
+  // is not.
+  for (const field of BACKFILL_INFERRED_START_FIELDS) {
+    if (!finiteDate(service?.[field])) delete lifecycleUpdates[field];
+  }
+  return lifecycleUpdates;
+}
+
+// service_records leg of the duration policy (Codex P1, PR #2897 fix round):
+// buildServiceRecordCompletionTimingFields copies the row's real stale
+// check-in into started_at/arrived_at/... AND stamps every end field with the
+// closeout instant — re-creating on the report row the exact start→end pair
+// the lifecycle leg above refuses to complete. metrics-band's
+// computeOnSiteMin (service report "time on site") and pricing-reality-check
+// both fall back to that pair when structured_notes.timeOnSite is null, so a
+// blank typed duration would read as days-or-weeks on site. Same predicate as
+// the lifecycle leg: a typed duration keeps everything (readers prefer it);
+// no row-backed start keeps the end stamps (no pair to poison). Mutates and
+// returns the fields object. Pure for testability (_test).
+function applyBackfillRecordTimingPolicy(timingFields, timeOnSite, service = {}) {
+  if (backfillTimeOnSiteMinutes(timeOnSite)) return timingFields;
+  if (!backfillRowHasRealStart(service)) return timingFields;
+  for (const field of BACKFILL_RECORD_END_FIELDS) delete timingFields[field];
+  return timingFields;
+}
+
+// Single backfill end-instant rule (Codex P2 ×3, PR #2897 fix round 4): every
+// end/completion stamp a backfill closeout KEEPS — scheduled_services
+// actual_end_time/check_out_time, the service_records end fields, and the
+// tracker's completed_at — carries the visit's backdated service day, never
+// the closeout wall-clock. Day-scale readers key "when did the visit end" off
+// these columns: the termite-bond sync (lifecycle-email-sweeps prefers
+// actual_end_time/check_out_time/completed_at over scheduled_date, so a
+// today-stamped end started bond terms + renewal notices on the closeout
+// date), pricing-reality-check (its lookback COALESCE and month bucketing
+// pulled weeks-old backfills into the CURRENT window/month), and billing
+// recovery's completed_at aging. The record layer already dates service_date
+// to the visit day; this extends the same posture to the instants. The
+// closeout wall-clock stays on the audit trail (record/attempt created_at,
+// job_status_history).
+//
+// The instant, per row shape:
+//  - real row-backed start + typed duration → start + duration (the pair then
+//    equals the operator's statement exactly — the one honest end).
+//  - everything else → ET noon of the service day (same backdated-instant
+//    convention the lawn-protocol completion already uses via
+//    toETNoonServiceDate): one honest low-resolution "the visit ended on its
+//    day" instant. Round 7 returned NULL for the real-start+blank-duration
+//    shape so no instant could complete a fabricated pair against the kept
+//    stale start — but a NULL completed_at also made a priced backfill
+//    INVISIBLE to Billing Recovery's leak window (ss.completed_at >= now()-
+//    window, admin-billing-recovery.js), i.e. an uninvoiced backfill
+//    vanished from the exact workbench meant to catch it (Codex P1, fix
+//    round 9). The resolution: day-scale readers (billing recovery aging,
+//    termite-bond sync, month bucketing, comms context) get the honest
+//    service-day instant; the SUB-DAY pair readers that round 7 was
+//    protecting (pricing-reality-check resolveActualMinutes, estimate-
+//    actuals, the report visit-timeline duration) now guard on the durable
+//    structured_notes.backfill marker instead — the same read-side policy
+//    job-costing already applies — so a backfilled row's kept stale start
+//    can never pair against this instant into a fabricated duration. The
+//    lifecycle/record END-FIELD strips for this shape stay exactly as they
+//    were (applyBackfillDurationPolicy / applyBackfillRecordTimingPolicy):
+//    only the tracker's completed_at carries the day-scale instant.
+function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
+  const realStart = BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+  if (realStart && explicitMinutes) {
+    return new Date(realStart.getTime() + explicitMinutes * 60000);
+  }
+  return toETNoonServiceDate(serviceDate);
+}
+
+// Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
+// completion transaction commits, the record's structured_notes freeze IS the
+// completion — and the request hash carries `backfill`/`timeOnSite` in a
+// separate MODE segment that ONLY the committed-record resume claim ignores
+// (completion-attempts claimSideEffectsRun, fix round 10 — pre-commit
+// retries match on the full composite), so a resumed retry's body may
+// legally disagree with what was committed (a flagless retry of a backfill,
+// a still-checked checkbox against a normal completion, the panel's
+// auto-elapsed timer instead of the typed duration). On the side-effect
+// resume path the body therefore has NO vote:
+//  - MODE re-derives from the frozen flag in BOTH directions. A flagless
+//    retry of a committed backfill stays QUIET (the original hazard), and a
+//    flagged retry of a committed NORMAL completion stays LOUD — the
+//    transaction committed a normal completion, so going quiet on resume
+//    would silently skip the remaining sends/charges of a visit that was
+//    never backfilled.
+//  - DURATION is the frozen structured_notes.timeOnSite (`?? null` keeps the
+//    unknown-duration shape) — never recomputed from the retry body, which
+//    typically carries the panel's running elapsed, i.e. the stale span the
+//    workday cap exists to reject. The frozen value was sanitized at commit
+//    for a backfill; downstream consumers (backfillCompletionEndInstant,
+//    job-costing's explicitLaborMinutes) re-run the cap regardless.
+//  - REQUIRED-MINT POSTURE (Codex P0, fix round 8; broadened to every mint
+//    branch round 9) is the frozen structured_notes.backfillMintRequired —
+//    never recomputed from the LIVE billing state (typed profile, scheduler
+//    create_invoice_on_complete flag, billing_mode/tier/rate), all mutable
+//    DB state the request hash cannot pin (state edited between a released
+//    required-mint failure and the retry → a live recomputation would flip
+//    the posture false and finalize the closeout succeeded with no invoice:
+//    lost AR). Strict boolean true only, and only under the frozen backfill
+//    mode — a normal completion's record can never smuggle a mint
+//    requirement in.
+//  - REQUIRED-MINT MONEY (Codex P0, fix round 10): the frozen
+//    backfillMintAmountCents / backfillMintTaxRate stamped beside the
+//    posture. Only the posture was frozen in round 8, and the amount
+//    recomputed live — so clearing the visit's price after a released
+//    required-mint failure flipped the amount guard false and the retry
+//    finalized WITHOUT the required invoice, while editing it minted the
+//    WRONG amount. Restored only under the frozen backfill mode with the
+//    posture TRUE (the freeze never stamps them otherwise), and validated
+//    hard: cents must be a positive integer (dollars = cents/100), the tax
+//    rate a finite fraction below 1 — anything else restores null, and the
+//    route's mint block fail-closes a required resume whose frozen amount
+//    is missing rather than minting a recomputed number.
+// bodyDisagreed reports a mismatch for the route to log. Pure for
+// testability (_test).
+function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = false } = {}) {
+  const frozen = frozenStructuredNotes || {};
+  const isBackfillCompletion = frozen.backfill === true;
+  const backfillMintRequired = isBackfillCompletion && frozen.backfillMintRequired === true;
+  const frozenCents = frozen.backfillMintAmountCents;
+  const backfillMintAmount = backfillMintRequired
+    && Number.isInteger(frozenCents) && frozenCents > 0
+    ? frozenCents / 100
+    : null;
+  const frozenTaxRate = frozen.backfillMintTaxRate;
+  const backfillMintTaxRate = backfillMintRequired
+    && Number.isFinite(frozenTaxRate) && frozenTaxRate >= 0 && frozenTaxRate < 1
+    ? frozenTaxRate
+    : null;
+  return {
+    isBackfillCompletion,
+    effectiveTimeOnSite: frozen.timeOnSite ?? null,
+    backfillMintRequired,
+    backfillMintAmount,
+    backfillMintTaxRate,
+    bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
+  };
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = []) {
@@ -2405,6 +2684,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formStartedAt,
       invoiceAlreadySent = false,
       includePayLink = true,
+      backfill = false,             // backdated quiet completion of a stale past-dated visit — see backfillCompletionPlan
+
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
       treeShrubCompletion = null,
@@ -2581,6 +2862,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: `This job is now scheduled for ${serviceDateOnly(svc.scheduled_date)} — it was rescheduled while this page was open. Refresh and try again.`,
         code: 'future_scheduled_date',
       });
+    }
+
+    // Backdated quiet completion — validated against the row's own
+    // scheduled_date (past days only). `let`: on a crash-resumed retry the
+    // body flag has no vote — the frozen structured_notes decide the mode in
+    // BOTH directions below (frozenResumeCompletionState), before any
+    // send/invoice decision reads it. A disagreeing retry only reaches the
+    // resume claim because claimSideEffectsRun matches on the hash's CORE
+    // segment — `backfill` lives in the mode segment that only the
+    // COMMITTED-record resume ignores (Codex P2 fix round, narrowed round
+    // 10: pre-commit same-key retries match the full composite, so the flag
+    // can't flip loud↔quiet before a record exists) — hashed everywhere,
+    // the mismatch 409'd completion_resume_payload_mismatch and stranded
+    // the committed completion before the re-derivation could run.
+    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: req.techRole });
+    if (backfillPlan.error) {
+      return res.status(backfillPlan.status || 400).json(backfillPlan.error);
+    }
+    let isBackfillCompletion = backfillPlan.active;
+    // Backfill trusts a supplied timeOnSite only as sanitized minutes
+    // (positive, ≤ the workday cap) — a pre-fix panel auto-submits its
+    // running elapsed, i.e. the stale span itself. Sanitized ONCE here so
+    // every consumer — the duration policy, the structured_notes stamp
+    // (which feeds the report's on-site metric), and the job-costing labor
+    // forward — reads the same value or the same absence. Out-of-range
+    // degrades to unknown with a log line, never a 400. `let`: on a
+    // crash-resumed retry the body value has no vote either — the frozen
+    // structured_notes stamp wins (frozenResumeCompletionState below; the
+    // hash excludes timeOnSite, so a retry can legally carry the panel's
+    // auto-elapsed instead of the committed typed duration).
+    let effectiveTimeOnSite = isBackfillCompletion
+      ? backfillTimeOnSiteMinutes(timeOnSite)
+      : timeOnSite;
+    if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
+      logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
 
     // No-show is terminal and non-completable. A completion/recap sheet
@@ -2947,6 +3263,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
     let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+    // Backfill = quiet by contract: no completion SMS / report email / review
+    // ask regardless of the operator toggles or the delivery posture.
+    // (Re-forced after the frozen-posture re-derivation below, which could
+    // otherwise un-suppress an auto_send profile on resume.)
+    if (isBackfillCompletion) {
+      suppressTypedCustomerComms = true;
+      effectiveSendCompletionSms = false;
+    }
     // Internal-only consultation (e.g. Waves Assessment): advisory walkthrough,
     // not a treatment. Beyond suppressing delivery, it must NOT feed the
     // customer-report findings / Pest Pressure pipeline, and its suppression
@@ -3121,6 +3445,146 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Typed one-time billing profile — the exact population the billing
+    // pre-gate below governs. Hoisted to a named flag because a backfill
+    // completion skips the gate and must reach the same billing outcome
+    // through the in-transaction invoice decision instead
+    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input).
+    const typedOneTimeBillingProfile = !!typedFindingsType
+      && !isIncompleteVisit
+      && !recapReviewOnly
+      && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+      && svc.followup_included !== true;
+    // Hoisted here (from the invoice block below) so the commit-time
+    // REQUIRED-mint posture can read the same authorities the invoice
+    // decision reads — one derivation each, no drift.
+    const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    // inspection_only / customer_declined = no application performed —
+    // nothing bills for the visit (mirrors referralVisitPerformed;
+    // 'incomplete' returns early below). Shared by the auto-invoice gate AND
+    // the auto-charge block: an existing open invoice (pre-minted /
+    // recovery) must not be auto-charged either when nothing was performed
+    // (Codex round-9 P1).
+    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
+    // Billing-lane classification + the completion invoice amount — hoisted
+    // from the invoice block below for the same one-derivation reason (fix
+    // round 9): the commit-time posture must read the EXACT inputs the mint
+    // decision's branches read, or the two drift. Estimate-flow customers
+    // bill PER VISIT (owner ruling 2026-07-09); annual-prepay customers
+    // settle covered visits via prepaid stamps (Codex round-5 P1); callbacks
+    // never fall back to the monthly rate, and per-application precedence is
+    // explicit visit price → acceptance fee → nothing (see
+    // completionInvoiceAmount in billing-lane.js).
+    const perApplicationBilling = svc.cust_billing_mode === 'per_application';
+    const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
+    const explicitMembershipLane = svc.cust_billing_mode === 'monthly_membership';
+    const explicitPerVisitLane = ['per_visit', 'one_time'].includes(svc.cust_billing_mode);
+    const invoiceAmount = completionInvoiceAmount({
+      estimatedPrice: svc.estimated_price,
+      isCallback: svc.is_callback,
+      perApplicationBilling,
+      perApplicationFee: svc.cust_per_application_fee,
+      monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode,
+    });
+    // The mint's TAX basis derives from an input (property_type), not from
+    // the amount — hoisted for the same single-derivation reason: the
+    // commit-time money freeze below and createFromService must read one
+    // value (fix round 10).
+    const completionInvoiceTaxRate = svc.property_type === 'commercial' ? 0.07 : 0;
+    // Third-party Bill-To + membership dues coverage — hoisted from the
+    // invoice block below (fix round 12): dues coverage is a COMMIT-TIME
+    // business suppressor, and the frozen posture must read the REAL value
+    // (a covered visit owes no mint — freezing required=true would let a
+    // crash-resume after a dues/autopay change surprise-bill covered
+    // membership work). Every input here is knowable at the freeze point:
+    // svc-loaded aliases plus two plain reads (payer resolution;
+    // payment_methods for the chargeable autopay method) on rows the
+    // completion transaction never writes. A payer-billed visit is owed by
+    // the payer's AP inbox, so the customer's autopay/prepay must neither
+    // suppress the AP invoice nor be credited against it — payer resolves
+    // FIRST so every coverage gate can exclude payer visits; resolveForInvoice
+    // never throws (falls back to self-pay), and any lookup error keeps the
+    // existing self-pay flow.
+    let visitIsPayerBilled = false;
+    try {
+      const PayerService = require('../services/payer');
+      const resolvedPayer = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      visitIsPayerBilled = !!resolvedPayer?.payerId;
+    } catch (e) {
+      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
+    }
+    const customerAutopayActive = await customerOnAutopay({
+      id: svc.customer_id,
+      autopay_enabled: svc.cust_autopay_enabled,
+      autopay_paused_until: svc.cust_autopay_paused_until,
+      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
+      ach_status: svc.cust_ach_status,
+    });
+    const autopayCoversVisit = membershipDuesCoverVisit({
+      visitIsPayerBilled,
+      perApplicationBilling,
+      annualPrepayBilling,
+      customerAutopayActive,
+      hasVisitPrice,
+      isRecurring: svc.is_recurring,
+      waveguardTier: svc.cust_waveguard_tier,
+      monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode,
+    });
+    // Commit-time REQUIRED-mint posture (Codex P0, fix round 8; broadened
+    // fix round 9). The posture reads MUTABLE billing state — the typed
+    // profile (completionProfile.billingType via typedOneTimeBillingProfile),
+    // the scheduler's create_invoice_on_complete flag, the customer's
+    // billing_mode/tier/rate — none of which the request hash can pin. This
+    // value, derived while that state is what the operator saw, is FROZEN
+    // into structured_notes inside the completion transaction (next to
+    // backfill/timeOnSite); a resumed retry reads the frozen posture back
+    // instead of recomputing, so an edit between a released required-mint
+    // failure and the retry can neither drop the owed mint nor invent a new
+    // one. Broadened (Codex P1, fix round 9): the posture is now the FULL
+    // will-mint decision at commit — every backfill shape the mint decision
+    // would bill (typed one-time, scheduler-flag, monthly-rate/tier,
+    // explicit lanes, gated priced visits) freezes REQUIRED, so a transient
+    // mint failure on ANY expected mint fail-closes instead of finalizing
+    // an unbilled closeout through the non-blocking catch. Dues coverage
+    // participates as a real input (fix round 12): a covered visit freezes
+    // NOT-required — no mint was ever owed for it.
+    const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({
+      isBackfillCompletion,
+      recapReviewOnly,
+      autopayCoversVisit,
+      createInvoiceOnComplete: svc.create_invoice_on_complete,
+      waveguardTier: svc.cust_waveguard_tier,
+      explicitMembership: explicitMembershipLane,
+      explicitPerVisitLane,
+      perApplicationBilling,
+      annualPrepayBilling,
+      hasVisitPrice,
+      invoiceAmount,
+      autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+      serviceType: svc.service_type,
+      isCallback: svc.is_callback,
+      visitPerformed,
+      typedOneTimeBilling: typedOneTimeBillingProfile,
+    });
+    // The EFFECTIVE posture the invoice decision and the fail-closed catch
+    // read: first run = the live commit-time derivation above; the resume
+    // block overwrites it with the FROZEN structured_notes posture before
+    // any consumer runs.
+    let backfillReviewMintRequired = backfillMintRequiredAtCommit;
+    // The required mint's FROZEN money (Codex P0, fix round 10): null on
+    // first run — the live derivations above ARE the commit values the
+    // freeze stamps — and populated from the frozen structured_notes on
+    // resume. The mint block prefers these whenever the effective posture is
+    // REQUIRED, so a price cleared/edited (or property_type flipped) between
+    // a released mint failure and the retry can neither skip the owed
+    // invoice via the amount guard nor mint a different amount.
+    let backfillFrozenMintAmount = null;
+    let backfillFrozenMintTaxRate = null;
     // Billing pre-gate for typed one-time completions — ports the project
     // flow's enforcement (resolveProjectCompletionBilling) so a one-time
     // specialty job can't complete unbilled, and fires BEFORE any customer
@@ -3130,13 +3594,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Bypasses: $0 visits resolve as not_billable inside the resolver, and
     // included follow-up appointments (followup_included, set by the
     // schedule-followup endpoint) skip the gate entirely.
+    // Backfill bypass (Codex P1, PR #2897): the 409 here detours the client
+    // into the checkout/payment flow — the exact payment interaction the
+    // quiet backdated closeout forbids — which made a stale typed one-time
+    // visit impossible to close quietly at all. The backfill plan was
+    // already validated well above this gate (admin-only 403 + past-date at
+    // intake), so skip the detour and let the in-transaction backfill
+    // invoice policy mint the DRAFT review invoice instead: same amount
+    // basis the resolver reads (the row's own estimated_price first —
+    // completionInvoiceAmount), left open and uncharged, and no payment
+    // sheet (invoicePaymentActionRequired is forced false under backfill).
     if (
       claim.action === 'proceed'
-      && typedFindingsType
-      && !isIncompleteVisit
-      && !recapReviewOnly
-      && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
-      && svc.followup_included !== true
+      && typedOneTimeBillingProfile
+      && !isBackfillCompletion
     ) {
       // Money-correctness guard — FAIL CLOSED on lookup errors (pre-push
       // Codex P0). A transient DB failure must not let a one-time service
@@ -3485,6 +3956,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           useServiceReportV1,
           isIncompleteVisit,
           productCount: Array.isArray(products) ? products.length : 0,
+          // Backfill: today's weather is not the scheduled day's weather —
+          // the record (and the FDACS ledger rows that copy its conditions)
+          // stays honestly unknown. See the helper's comment.
+          isBackfillCompletion,
         })
           ? await fetchApplicationConditions({
             latitude: svc.customer_latitude,
@@ -3555,14 +4030,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
         await db.transaction(async (trx) => {
           const completionEndedAt = new Date();
-          const completionServiceDate = etDateString(completionEndedAt);
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
+          // Backfill: the service happened on its scheduled day — stamp the
+          // record (and everything keyed off it: activity-score dates, the
+          // completion invoice's service linkage) with that date, not today.
+          const completionServiceDate = isBackfillCompletion
+            ? backfillPlan.serviceDate
+            : etDateString(completionEndedAt);
+          // …and the end INSTANTS the closeout keeps carry that day too
+          // (Codex P2, PR #2897 fix round 4): a wall-clock end stamp made
+          // termite bonds start their term on the closeout date and let
+          // weeks-old backfills into pricing-reality-check's current
+          // window/month. completionEndedAt stays the wall-clock instant for
+          // the audit surfaces (attempt rows, job_status_history); the
+          // lifecycle/record stamps get the backdated instant — or, for a
+          // real stale check-in with no typed duration, keep the wall clock
+          // only as the policies' input, which then strips those rows' end
+          // stamps entirely (the end is genuinely unknown; see
+          // backfillCompletionEndInstant / applyBackfillDurationPolicy /
+          // applyBackfillRecordTimingPolicy).
+          const backfillEndedAt = isBackfillCompletion
+            ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
+            : null;
+          const completionLifecycleAt = backfillEndedAt || completionEndedAt;
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
+          // Backfill: never derive a duration from the stale on-row
+          // timestamps (a weeks-old check-in against today's checkout), and
+          // never let a typed duration back-derive a today-dated arrival for
+          // a row that has no start of its own — sanitized timeOnSite or
+          // unknown; row-backed start timestamps or none. See
+          // applyBackfillDurationPolicy.
+          if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite, svc);
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
             // (stripe-webhook.js) also suppresses it for a billed assessment.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion) ? false : requestReview !== false,
+            // Backfill completions freeze it off for the same reason: a
+            // review ask days after the visit (or from the later payment)
+            // must never fire from a quiet backlog closeout.
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -3571,9 +4077,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
-            timeOnSite: timeOnSite || null,
+            timeOnSite: effectiveTimeOnSite || null,
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
+            // Backfill frozen on the record: a crash-resumed retry may lack
+            // the body flag, and the quiet/backdate posture must survive it.
+            ...(isBackfillCompletion ? { backfill: true } : {}),
+            // REQUIRED-mint posture frozen at commit (Codex P0, fix round
+            // 8): derived from the LIVE billing profile above — the profile
+            // the operator saw — and stamped in the SAME transaction as the
+            // record, so no committed backfill can exist unfrozen. A resumed
+            // retry enforces THIS posture; it never recomputes from the
+            // by-then-mutable profile (edited/removed → a live
+            // recomputation would silently finalize the closeout with the
+            // owed invoice unminted).
+            ...(isBackfillCompletion && backfillMintRequiredAtCommit ? {
+              backfillMintRequired: true,
+              // The required mint's MONEY is frozen beside the posture
+              // (Codex P0, fix round 10): amount and tax basis recompute
+              // from MUTABLE visit/customer billing fields, so a post-commit
+              // edit would otherwise make a released-failure retry mint the
+              // WRONG amount — or, with the price cleared, skip the required
+              // mint at the amount guard and finalize the closeout unbilled.
+              // Integer cents so jsonb round-trips exactly; stamped ONLY on
+              // the required-mint shape to keep the notes lean.
+              backfillMintAmountCents: Math.round(Number(invoiceAmount) * 100),
+              backfillMintTaxRate: completionInvoiceTaxRate,
+            } : {}),
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
@@ -3759,12 +4289,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
-          Object.assign(recordInsert, buildServiceRecordCompletionTimingFields({
+          const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
             lifecycleUpdates,
-            completedAt: completionEndedAt,
+            // Backfill: the report row's end stamps carry the backdated
+            // service-day instant (same rule as the lifecycle leg above);
+            // the strip policy below then removes them entirely for the
+            // unknown-end shape.
+            completedAt: completionLifecycleAt,
             serviceRecordCols,
-          }));
+          });
+          // Backfill: the report row must not pair the kept real check-in
+          // with today's closeout stamp when no duration was typed — the
+          // start→end fallback readers would book the stale span. See
+          // applyBackfillRecordTimingPolicy.
+          if (isBackfillCompletion) applyBackfillRecordTimingPolicy(recordTimingFields, effectiveTimeOnSite, svc);
+          Object.assign(recordInsert, recordTimingFields);
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
@@ -4193,7 +4733,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // IDs were intentionally cleared to null — don't let the protocol
             // completion re-derive the stale assigned system from the plan.
             calibrationCleared: waveguardCalibrationCleared,
-            serviceDate: completionEndedAt,
+            // Backfilled closeouts recheck from the recorded application day,
+            // not the office-entry day (recheck_due_date derives from this).
+            serviceDate: isBackfillCompletion
+              ? toETNoonServiceDate(completionServiceDate)
+              : completionEndedAt,
           });
           if (protocolCompletion) {
             record.structured_notes = {
@@ -4283,7 +4827,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
           });
         }
-        await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
+        // Empty-update guard (Codex P2, PR #2897 fix round 4): for a
+        // backfilled real-stale-check-in row with a blank typed duration the
+        // duration policy strips EVERY key the lifecycle helper produced —
+        // exactly the shape the closeout UI allows — and knex throws on
+        // .update({}), failing the whole closeout. Nothing downstream needs
+        // this row-touch when there is nothing to write: transitionJobStatus
+        // below owns the status flip and bumps updated_at on the same row.
+        if (Object.keys(scheduledServiceUpdate).length) {
+          await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
+        }
 
         // 5. Status flip via the canonical sole-writer.
         await transitionJobStatus({
@@ -4372,6 +4925,85 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // execution we can now run best-effort follow-up alerts and tracking;
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
+
+    // Backfill survives resume via its own structured_notes freeze — and the
+    // freeze decides in BOTH directions (Codex P2 ×2, PR #2897 fix round 5):
+    // on the side-effect resume path the committed record alone sets the
+    // completion MODE (a flagless retry of a committed backfill stays quiet;
+    // a flagged retry of a committed NORMAL completion stays loud) and the
+    // typed DURATION (the retry body typically carries the panel's
+    // auto-elapsed timer, never the committed typed value). Re-derived HERE —
+    // the first post-commit step — so the tracker end-instant + markComplete
+    // below (whose markComplete must honor the duration policy via
+    // untrustedLifecycleSpan, Codex P1, PR #2897 fix round 3), the backfill
+    // review-invoice override in shouldAutoInvoiceCompletion, and every later
+    // backfill money/comms gate read the same committed truth on a resumed
+    // retry; the customer-comms re-force stays below, after the
+    // frozen-delivery re-derivation it must override. A disagreeing retry
+    // reaches this line only because the committed-record resume claim
+    // (claimSideEffectsRun) matches the hash's CORE segment — `backfill` and
+    // `timeOnSite` hash into the mode segment it alone ignores (Codex P2,
+    // PR #2897 fix round; narrowed round 10 so pre-commit retries still
+    // match the full composite) — hashed there too, the retry 409'd
+    // (completion_resume_payload_mismatch) before this line. First-run keeps
+    // the request-derived values — the freeze is written FROM them inside the
+    // transaction above.
+    if (resumingCommittedCompletion) {
+      const frozenResume = frozenResumeCompletionState(
+        parseJsonObject(record.structured_notes),
+        { requestBackfill: isBackfillCompletion },
+      );
+      if (frozenResume.bodyDisagreed) {
+        logger.warn(`[completion] resume of service ${svc.id}: retry body says backfill=${isBackfillCompletion} but the committed record froze backfill=${frozenResume.isBackfillCompletion} — the frozen mode wins`);
+        if (!frozenResume.isBackfillCompletion) {
+          // The stray body flag quieted the comms posture at intake; the
+          // committed completion is NORMAL, so restore the posture it ran
+          // under. The frozen-delivery re-derivation below still applies on
+          // top (typed completions), and the backfill re-force after it no
+          // longer fires — every read of these flags sits below both.
+          suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
+          effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+        }
+      }
+      // The FROZEN required-mint posture replaces the commit-time live
+      // derivation for every consumer below (invoice decision + fail-closed
+      // catch) — the billing profile may have changed since commit, and the
+      // committed posture is the money truth (Codex P0, fix round 8).
+      backfillReviewMintRequired = frozenResume.backfillMintRequired;
+      // …and so does the frozen mint MONEY (Codex P0, fix round 10): the
+      // amount/tax the operator's commit derived, validated by the helper —
+      // null when absent/invalid, which the mint block fail-closes on for a
+      // required resume instead of recomputing from mutated billing state.
+      backfillFrozenMintAmount = frozenResume.backfillMintAmount;
+      backfillFrozenMintTaxRate = frozenResume.backfillMintTaxRate;
+      isBackfillCompletion = frozenResume.isBackfillCompletion;
+      effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
+    }
+
+    // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
+    // end-instant rule the transaction applied to the kept lifecycle stamps,
+    // for markComplete's completed_at below — a wall-clock completed_at
+    // re-fed the closeout date to every scheduled_services reader the
+    // stripped end stamps were protecting (pricing-reality-check's lookback
+    // COALESCE + minutesBetween(arrived_at, completed_at) fallback, the
+    // termite-bond sync's third preference, billing recovery's aging).
+    // Deterministic across crash-resume: svc's row-backed starts and
+    // scheduled_date are stable, and on resume effectiveTimeOnSite IS the
+    // frozen typed duration (block above) — never the retry's elapsed timer
+    // (Codex P2, fix round 5). The unknown-end shape (real stale check-in,
+    // blank duration) now stamps ET noon of the service day too (fix round
+    // 9): round 7's NULL kept the fabricated pair impossible but also hid a
+    // priced-but-uninvoiced backfill from Billing Recovery's completed_at
+    // window; the sub-day pair readers guard on the durable
+    // structured_notes.backfill marker instead (see
+    // backfillCompletionEndInstant's comment).
+    const backfillTrackerCompletedAt = isBackfillCompletion
+      ? backfillCompletionEndInstant(
+        serviceDateOnly(svc.scheduled_date),
+        effectiveTimeOnSite,
+        svc,
+      )
+      : null;
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
@@ -4563,6 +5195,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: req.technicianId,
+        // Backfill: markComplete's own UPDATE rebuilds lifecycle fields from
+        // the row — today's end stamps plus a stale-start→now duration —
+        // which would re-pollute, AFTER the transaction, exactly the columns
+        // applyBackfillDurationPolicy stripped (or set from the typed
+        // duration), and job-costing's durable guard would then read the
+        // rebuilt service_time_minutes as explicit labor. The flag keeps the
+        // tracker to its own bookkeeping (track_state/updated_at), and
+        // completed_at comes from the backdated end-instant rule (or stays
+        // NULL for the unknown-end shape); the policy's persisted values
+        // survive.
+        untrustedLifecycleSpan: isBackfillCompletion,
+        completedAt: backfillTrackerCompletedAt,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -4799,39 +5443,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     //     generate an invoice and send a single combined SMS (report + pay link),
     //     unless the visit is already covered by prepay/paid invoice/autopay.
     //   - Otherwise send the plain service-complete SMS (report link only).
-    const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
-    // Estimate-flow customers bill PER VISIT (owner ruling 2026-07-09):
-    // completion collects the exact per-application fee stamped at acceptance
-    // — auto-charged to the saved autopay card further below, invoiced
-    // otherwise. The monthly-membership model (autopayCoversVisit suppression
-    // + the 8AM cron) never applies to them.
-    const perApplicationBilling = svc.cust_billing_mode === 'per_application';
-    // inspection_only / customer_declined = no application performed —
-    // nothing bills for the visit (mirrors referralVisitPerformed;
-    // 'incomplete' returned earlier). Shared by the auto-invoice gate AND
-    // the auto-charge block below: an existing open invoice (pre-minted /
-    // recovery) must not be auto-charged either when nothing was performed
-    // (Codex round-9 P1).
-    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
-    // Annual-prepay customers settle covered visits via prepaid stamps; an
-    // UNCOVERED visit (expired term awaiting renewal) is owned by the
-    // renewal flow — never billed here and never suppressed as
-    // membership-dues-covered (Codex round-5 P1).
-    const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
-    // Callbacks (re-services) are free by definition for recurring/WaveGuard
-    // customers — they must NOT fall back to the customer's monthly_rate, or a
-    // no-charge re-service would bill a full month's dues. Honour an explicit
-    // positive price if the operator set one; otherwise the visit is $0.
-    // Per-application precedence: explicit visit price → acceptance fee →
-    // nothing (never monthly_rate — see completionInvoiceAmount).
-    const invoiceAmount = completionInvoiceAmount({
-      estimatedPrice: svc.estimated_price,
-      isCallback: svc.is_callback,
-      perApplicationBilling,
-      perApplicationFee: svc.cust_per_application_fee,
-      monthlyRate: svc.cust_monthly_rate,
-      billingMode: svc.cust_billing_mode,
-    });
+    // (hasVisitPrice + visitPerformed + the billing-lane classification +
+    // invoiceAmount are hoisted above the completion transaction — the
+    // commit-time required-mint posture freezes off the exact derivations
+    // this block reads; deriving them twice is the drift the fix-round-9
+    // broadening exists to prevent.)
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
@@ -4847,42 +5463,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !(invoiceAmount > 0) && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] ${svc.cust_billing_mode} visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (monthly-rate fallback suppressed for explicit non-monthly lanes) — invoice manually`);
     }
-    // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
-    // so the service customer's autopay/prepay must neither suppress the AP
-    // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
-    // (applyPrepaidCreditToInvoice). Resolve the effective payer up front —
-    // BEFORE autopay coverage is computed — so every coverage gate can exclude
-    // payer visits. resolveForInvoice never throws (it falls back to self-pay),
-    // and we keep the existing self-pay flow on any lookup error.
-    let visitIsPayerBilled = false;
-    try {
-      const PayerService = require('../services/payer');
-      const resolvedPayer = await PayerService.resolveForInvoice({
-        customerId: svc.customer_id,
-        scheduledServiceId: svc.id,
-      });
-      visitIsPayerBilled = !!resolvedPayer?.payerId;
-    } catch (e) {
-      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
-    }
-    const customerAutopayActive = await customerOnAutopay({
-      id: svc.customer_id,
-      autopay_enabled: svc.cust_autopay_enabled,
-      autopay_paused_until: svc.cust_autopay_paused_until,
-      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
-      ach_status: svc.cust_ach_status,
-    });
-    const autopayCoversVisit = membershipDuesCoverVisit({
-      visitIsPayerBilled,
-      perApplicationBilling,
-      annualPrepayBilling,
-      customerAutopayActive,
-      hasVisitPrice,
-      isRecurring: svc.is_recurring,
-      waveguardTier: svc.cust_waveguard_tier,
-      monthlyRate: svc.cust_monthly_rate,
-      billingMode: svc.cust_billing_mode,
-    });
+    // (visitIsPayerBilled + customerAutopayActive + autopayCoversVisit are
+    // hoisted above the completion transaction — fix round 12: dues coverage
+    // is a commit-time business suppressor the frozen posture must read, so
+    // the freeze and this block share one derivation, exactly like the
+    // billing-lane classification and the invoice amount.)
     // A priced recurring visit suppressed by membership coverage is logged +
     // parked for office review AFTER the invoice checks below — see the
     // shouldInvoice block (an already-paid / pre-minted / existing invoice
@@ -4982,6 +5567,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first();
       }
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
+    // Required-mint money authority (Codex P0, fix round 10): on a resume
+    // whose frozen posture is REQUIRED, the FROZEN amount/tax are the money
+    // truth — the live derivations read by-now-mutable billing fields, and
+    // a price cleared after a released mint failure would flip the amount
+    // guard false and finalize the closeout without its required invoice
+    // (lost AR), while an edited price/property_type would mint the wrong
+    // money. First runs keep the live values (identical to what the freeze
+    // just stamped in this same request). A required resume MISSING its
+    // frozen amount (pre-round-10 record, corrupt notes) deliberately keeps
+    // the live value HERE so the decision still reaches the mint block —
+    // which then refuses to mint the unverifiable amount and fail-closes
+    // through the existing release/503 catch.
+    const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null
+      ? backfillFrozenMintAmount
+      : invoiceAmount;
+    const mintInvoiceTaxRate = backfillReviewMintRequired && backfillFrozenMintTaxRate != null
+      ? backfillFrozenMintTaxRate
+      : completionInvoiceTaxRate;
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
@@ -4996,18 +5599,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       existingCompletionInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
-      explicitMembership: svc.cust_billing_mode === 'monthly_membership',
-      explicitPerVisitLane: ['per_visit', 'one_time'].includes(svc.cust_billing_mode),
+      explicitMembership: explicitMembershipLane,
+      explicitPerVisitLane,
       perApplicationBilling,
       annualPrepayBilling,
       hasVisitPrice,
-      invoiceAmount,
+      // The frozen amount on a required resume, the live derivation
+      // otherwise — guard and mint read the SAME number (fix round 10).
+      invoiceAmount: mintInvoiceAmount,
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
       serviceType: svc.service_type,
       isCallback: svc.is_callback,
       // inspection_only / customer_declined = no application performed
       // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
       visitPerformed,
+      // REQUIRED-mint posture: the live commit-time derivation on first run
+      // (identical to what the typed backfill branch would recompute), the
+      // FROZEN structured_notes posture on resume — the branch honors it in
+      // both directions so a mutated billing profile can neither drop the
+      // owed mint nor invent one (Codex P0, fix round 8).
+      backfillMintRequired: backfillReviewMintRequired,
+      // Typed one-time completions bypass the billing pre-gate under
+      // backfill — this mint is what stands in for the checkout detour, so
+      // the helper needs to know the visit belongs to that gated population.
+      typedOneTimeBilling: typedOneTimeBillingProfile,
+      // Backfill review-invoice override: an out-of-band prepaid_amount must
+      // not suppress the promised open invoice; the annual-prepay leg keeps
+      // suppressing (see the helper's comment). isBackfillCompletion is
+      // resume-safe here — re-derived from the structured_notes freeze above.
+      isBackfillCompletion,
+      annualPrepayCovered,
     });
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
@@ -5076,6 +5697,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
       }
     }
+    // Backfill (re-derived from the structured_notes freeze above, before the
+    // invoice decision) re-forces quiet AFTER the frozen-delivery
+    // re-derivation — an auto_send posture must not un-suppress a backdated
+    // closeout.
+    if (isBackfillCompletion) {
+      suppressTypedCustomerComms = true;
+      effectiveSendCompletionSms = false;
+    }
     if (resumingCommittedCompletion && shouldRejectPhotoCaptionBannedCopy({
       captionBannedViolations,
       isInternalOnlyCompletion,
@@ -5120,15 +5749,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
     // failure here never blocks completion; the tech approves before it ever sends.
+    // Backfill closeouts skip the enqueue entirely: the pending row is inert on
+    // its own, but it feeds the success overlay's "Approve & send" card — an
+    // operator-reachable "today's visit" text days after the fact — so this
+    // rail is gated like the other customer-contact rails. Recap delivery also
+    // refuses the structured_notes.backfill marker as defense in depth.
     if (process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
-      try {
-        const { enqueueRecap } = require('../services/service-report/recap-pipeline');
-        // Keyed on the scheduled-service id so pre-completion captures match the render.
-        // force=true re-renders even if a pre-completion Generate already failed (no
-        // service_records row existed yet) — now it does.
-        await enqueueRecap(record.scheduled_service_id, { force: true });
-      } catch (err) {
-        logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
+      if (isBackfillCompletion) {
+        logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
+      } else {
+        try {
+          const { enqueueRecap } = require('../services/service-report/recap-pipeline');
+          // Keyed on the scheduled-service id so pre-completion captures match the render.
+          // force=true re-renders even if a pre-completion Generate already failed (no
+          // service_records row existed yet) — now it does.
+          await enqueueRecap(record.scheduled_service_id, { force: true });
+        } catch (err) {
+          logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
+        }
       }
     }
     let reportSmsUrl = reportUrl;
@@ -5182,6 +5820,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const prepaidCents = (svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
         && svc.prepaid_amount != null) ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+      // Backfill closeouts leave the completion invoice EXACTLY as minted for
+      // office review (Codex P1, fix round): applying the out-of-band
+      // prepayment here reduces the total, inserts a payments row, and can
+      // flip the invoice paid — invoice mutation the quiet path promises not
+      // to make, even for money the operator already collected. The operator
+      // applies the recorded prepayment while reviewing the open invoice.
+      if (isBackfillCompletion) {
+        logger.info(`[dispatch] backfill completion: prepaid credit NOT auto-applied for visit ${svc.id} — invoice ${invoiceRow.invoice_number || invoiceRow.id} left open for review (prepaid_amount $${Number(svc.prepaid_amount).toFixed(2)}${svc.prepaid_method ? ` via ${svc.prepaid_method}` : ''} on file)`);
+        return invoiceRow;
+      }
       // Third-party Bill-To: never credit the homeowner's prepaid amount against
       // a payer-billed invoice — that money isn't owed by the payer. The invoice
       // row is the source of truth (createFromService auto-resolves a default
@@ -5293,14 +5941,101 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (shouldInvoice) {
       try {
+        // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
+        // fix round 10): reaching here without it (a record committed
+        // before the money freeze existed, or corrupt notes) means the only
+        // available number is a live recomputation from mutable billing
+        // state — refuse, and take the fail-closed release/503 path in the
+        // catch below rather than finalize with the wrong money.
+        if (backfillReviewMintRequired && resumingCommittedCompletion
+          && backfillFrozenMintAmount == null) {
+          throw new Error('required backfill mint amount missing from the frozen structured_notes — refusing to mint a recomputed amount');
+        }
         const InvoiceService = require('../services/invoice');
         invoice = await InvoiceService.createFromService(record.id, {
-          amount: invoiceAmount,
+          // The frozen money on a required resume — the exact number the
+          // decision's amount guard just passed (mintInvoiceAmount /
+          // mintInvoiceTaxRate are one derivation, fix round 10).
+          amount: mintInvoiceAmount,
           description: svc.service_type,
-          taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
-          useScheduledReplay: true,
-          dueDate: serviceDateOnly(record.service_date),
+          taxRate: mintInvoiceTaxRate,
+          // Frozen-money mints bypass scheduled replay (Codex P0, fix round
+          // 11): with the flag on, createFromService REBUILDS the line items
+          // from the CURRENT scheduled-service row + add-ons + stored line
+          // discounts (buildScheduledServiceInvoiceLines) and the amount
+          // param degrades to a fallback — so a post-commit price/add-on/
+          // discount edit changed the minted total despite the round-10
+          // freeze, and even the FIRST run could mint a replay total (gross
+          // − stored discounts) different from the cents it had just frozen,
+          // leaving a resume to re-mint a different number than run one.
+          // Every backfill mint is a REQUIRED mint (the round-9 posture
+          // governs every branch: posture false never reaches this block),
+          // so under backfill the mint is a single line at the frozen
+          // amount, BOTH first run and resume — one code path, no
+          // first-run-vs-resume divergence; subtotal ≡ the frozen cents and
+          // total ≡ cents + tax at the frozen rate by construction (no
+          // discount inputs, deposit credit + accrual skipped below;
+          // create()'s residential-never-taxed policy can only ever zero
+          // the tax, never move the subtotal). The single line keeps the
+          // reviewer-facing label (service type); line-level fidelity is
+          // deliberately traded for provable money — the reviewer edits or
+          // void+re-creates for itemization. Live completions keep replay.
+          useScheduledReplay: !isBackfillCompletion,
+          // Backfill: record.service_date is the backdated visit day — using
+          // it here would mint the invoice instantly overdue and light up the
+          // dunning/overdue surfaces for a quiet backlog closeout. Due today
+          // instead: the exact net terms a normal same-day completion gets.
+          dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          // Backfill: createFromService otherwise rolls an accepted
+          // estimate's unapplied deposit forward into this invoice
+          // (consumeDepositCredit + a credit line that reduces or zeroes the
+          // total) — deposit-ledger movement and invoice mutation the quiet
+          // path leaves to the reviewer, exactly like the prepaid/account-
+          // credit/auto-charge rails gated off below (Codex P1, PR #2897
+          // fix round). The invoice mints at face value; the deposit stays
+          // on the estimate's ledger for the reviewer to apply.
+          skipDepositCredit: isBackfillCompletion,
+          // Statement accrual is a billing side effect too (Codex P1, PR
+          // #2897 fix round 5): for a payer-billed NET15/NET30 visit under
+          // GATE_PAYER_STATEMENTS, create() otherwise attaches this invoice
+          // to the payer's OPEN monthly statement and recomputes the
+          // statement total — landing the quiet review-only closeout on a
+          // consolidated bill before anyone has looked at it. Mint it
+          // UNATTACHED instead (still payer-billed: payer_id / PO /
+          // snapshot all stamp normally, so it stays individually sendable);
+          // where it bills is the reviewer's call (breadcrumb below).
+          skipAccrual: isBackfillCompletion,
         });
+        // Point the reviewer at the money the skip left behind — the same
+        // breadcrumb the prepaid skip logs (applyPrepaidCreditToInvoice).
+        if (isBackfillCompletion && svc.source_estimate_id) {
+          try {
+            const { pendingDepositCredit } = require('../services/estimate-deposits');
+            const unappliedDeposit = await pendingDepositCredit(svc.source_estimate_id);
+            if (unappliedDeposit?.amount > 0) {
+              logger.info(`[dispatch] backfill completion: estimate deposit NOT auto-applied for visit ${svc.id} — $${Number(unappliedDeposit.amount).toFixed(2)} unapplied deposit credit on estimate ${svc.source_estimate_id}; invoice ${invoice.invoice_number || invoice.id} left open for review`);
+            }
+          } catch (e) { logger.warn(`[dispatch] backfill deposit-credit review log failed: ${e.message}`); }
+        }
+        // Statement-accrual breadcrumb — same reviewer contract as the
+        // deposit/prepaid skips above. Attachment happens ONLY at create
+        // (invoice.js stamps payer_statement_id on the insert; no
+        // attach-existing-invoice path exists anywhere), so the operator's
+        // route to consolidate this invoice after review is void + re-create
+        // (the fresh mint accrues to the open statement), or send it
+        // individually to the AP — an unattached payer invoice is the
+        // supported individual shape.
+        if (isBackfillCompletion && invoice?.payer_id && !invoice.payer_statement_id) {
+          try {
+            const { isEnabled } = require('../config/feature-gates');
+            if (isEnabled('payerStatements')) {
+              const payerRow = await db('payers').where({ id: invoice.payer_id }).first('payment_terms');
+              if (['net15', 'net30'].includes(payerRow?.payment_terms)) {
+                logger.info(`[dispatch] backfill completion: payer-statement accrual SKIPPED for visit ${svc.id} — ${payerRow.payment_terms} invoice ${invoice.invoice_number || invoice.id} minted OFF the payer's open statement for review; to bill it on the monthly statement, void + re-create it (attach happens only at create), or send it individually to the AP`);
+              }
+            }
+          } catch (e) { logger.warn(`[dispatch] backfill accrual-skip review log failed: ${e.message}`); }
+        }
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
         payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
@@ -5308,6 +6043,52 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           codePrefix: invoiceShortCodePrefix(invoice),
         });
       } catch (invErr) {
+        // Fail-closed leg of the backfill review-invoice promise (Codex P0,
+        // PR #2897 fix rounds 7-8; broadened round 9). The typed one-time
+        // pre-transaction billing gate this population skipped was
+        // FAIL-CLOSED (a lookup error 503'd, completion_billing_check_
+        // failed) — the promise that justified the bypass is that the mint
+        // above stands in for it — and every OTHER backfill shape whose
+        // mint the decision billed (scheduler flag, monthly-rate/tier,
+        // explicit lanes, priced-visits gate) carries the same promise: the
+        // quiet closeout's open review invoice. So when the frozen posture
+        // says the mint was EXPECTED and NO invoice row exists (a partial
+        // createFromService that did insert one converges on resume via the
+        // existing-invoice suppressors), the completion must NOT finalize
+        // succeeded: release the attempt's side-effects claim back to
+        // 'side_effects_pending' — the machinery's immediately-resumable
+        // state — and 503 with a retry instruction. The service_record
+        // transaction is already committed, so the retry re-enters via the
+        // resume claim: the frozen structured_notes (backfill mode +
+        // REQUIRED-mint posture) and the hash-pinned body drive the same
+        // shouldInvoice decision again, and the mint retries. Every
+        // NON-required shape (live completions above all) keeps the
+        // non-blocking behavior below exactly.
+        // The posture here is the ROUTE-LEVEL effective value: the
+        // commit-time live derivation on first run, the FROZEN
+        // structured_notes posture on resume (fix round 8) — never a fresh
+        // recomputation from the by-now-mutable billing profile.
+        if (backfillReviewMintRequired && !invoice?.id) {
+          logger.error(`[dispatch] backfill REQUIRED review-invoice mint FAILED for ${svc.id} — closeout NOT finalized: ${invErr.message}`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          if (!released) {
+            // The conditional flip found the attempt not in
+            // side_effects_running (finalized-attempt race, or the release
+            // UPDATE itself failed). Never force it — but never promise an
+            // immediate retry either: the retry claims 409
+            // completion_side_effects_running until the stale window
+            // reclaims the row (Codex P1, fix round 8).
+            logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+          }
+          return res.status(503).json({
+            error: released
+              ? 'The review invoice could not be created — the closeout is saved but NOT finalized. Retry the closeout to mint the invoice.'
+              : `The review invoice could not be created — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'backfill_invoice_mint_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          });
+        }
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
       }
     } else if (preMintedInvoice) {
@@ -5380,7 +6161,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // not payer-billed). Applies PARTIAL credit (the charge/verify paths now price
     // amount due), reducing what the customer pays; fully-covered → prepaid. The
     // helper also fail-closes on a live PaymentIntent. Gated + best-effort.
-    if (invoice?.id && !alreadyPaid && !invoice.payer_id
+    // Backfill closeouts never auto-consume account credit: the invoice must
+    // land open and untouched for operator review (Codex P1, stale-sweep
+    // lane) — silently draining a referral credit into a days-old backdated
+    // bill (possibly flipping it prepaid) is a money movement the quiet path
+    // promises not to make. The operator applies credit deliberately if it
+    // belongs on the bill.
+    if (!isBackfillCompletion
+      && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
@@ -5427,7 +6215,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // actually delivers, the completion SMS goes report-only.
     let autoChargedReceiptPending = false;
     let paymentFailedSmsContext = null;
-    if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+    // Backfill closeouts never move money automatically: the visit is days
+    // old and an off-session charge (plus the receipt/decline texts it can
+    // spawn) would hit the customer with zero fresh context. Skipping the
+    // whole rail leaves the exact no-chargeable-method posture — invoice
+    // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
+    // untouched — for explicit operator collection.
+    if (isBackfillCompletion && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid
+      && customerAutopayActive) {
+      logger.info(`[dispatch] backfill completion: per-application auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
+    }
+    if (!isBackfillCompletion
+      && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -5659,6 +6458,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ status: 'charge_review', updated_at: db.fn.now() })
             .catch((e) => logger.error(`[admin-dispatch] failed to park card hold for payment reconciliation: ${e.message}`));
         }
+      } else if (isBackfillCompletion) {
+        // Backfill closeouts never move money automatically: skip the hold
+        // charge entirely, leaving any live hold 'held' — un-charged and
+        // reviewable, the same posture the hold service's own withheld-for-
+        // review paths use — and bell the office so it doesn't sit silent
+        // (holds don't surface on the unpaid-invoice feeds).
+        try {
+          const CardHolds = require('../services/estimate-card-holds');
+          const liveHold = await CardHolds.heldCardForScheduledService(svc.id);
+          if (liveHold) {
+            logger.warn(`[dispatch] backfill completion: card-hold charge skipped for visit ${svc.id} — hold left held for operator review`);
+            await require('../services/notification-service').notifyAdmin(
+              'billing',
+              'Card hold not charged — backfilled completion',
+              'A stale visit was closed out as a backdated backfill, so its saved-card hold was NOT charged. Review the visit and charge or release the hold manually.',
+              {
+                link: liveHold.customer_id ? `/admin/customers/${liveHold.customer_id}` : '/admin/dispatch',
+                metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, holdId: liveHold.id, source: 'backfill_completion' },
+              },
+            );
+          }
+        } catch (e) { logger.warn(`[dispatch] backfill card-hold review alert failed: ${e.message}`); }
       } else try {
         const CardHolds = require('../services/estimate-card-holds');
         const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });
@@ -5839,6 +6660,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // return early in this handler — it records the alert and continues — so
     // it belongs here too, matching the referral-credit non-performed guard
     // (Codex P2 #2588 r2 + r5).
+    // Backfill closeouts stay on the quiet path here too: the mint still runs
+    // (pure data setup — card row / promoter enroll / short link), but
+    // suppressIssuedEmail keeps the card.issued email from firing off a
+    // days-old visit; it sends on the next real completion instead.
     const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
     if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
       try {
@@ -5847,6 +6672,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
+          suppressIssuedEmail: isBackfillCompletion,
+          // The card's public "First visit" date must show the day the visit
+          // happened — for a backfill that's the backdated service day the
+          // record already carries, not the office closeout instant.
+          firstVisitAt: isBackfillCompletion ? toETNoonServiceDate(record.service_date) : null,
         }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
       } catch (e) {
         logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);
@@ -5879,7 +6709,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
-      && !invoice.payer_id) {
+      && !invoice.payer_id
+      // Backfill closeouts are quiet end-to-end — a declined backlog charge
+      // parks on the admin payment-failed bell instead of texting the
+      // customer about a visit from days/weeks ago.
+      && !isBackfillCompletion) {
       try {
         const { formatCardLine, invoiceAmountDue } = require('../services/invoice-helpers');
         const attempted = Number(paymentFailedSmsContext.attemptedAmount);
@@ -6456,6 +7290,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: req.technicianId,
+        // Same backfill contract as the first markComplete above: normally
+        // idempotent by now, but when that call failed this one performs the
+        // real flip — it must honor the duration policy AND the backdated
+        // completed_at stamp too.
+        untrustedLifecycleSpan: isBackfillCompletion,
+        completedAt: backfillTrackerCompletedAt,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -6511,15 +7351,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
     }
 
-    // Job costing (non-blocking, fire-and-forget)
-    if (!resumingCommittedCompletion) {
-      try {
-        const JobCosting = require('../services/job-costing');
-        void JobCosting.calculateJobCost(svc.id).catch(e =>
-          logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
-        );
-      } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
-    }
+    // Job costing (non-blocking, fire-and-forget). Runs on FIRST RUN and on
+    // RESUME (Codex P2, PR #2897 fix round 13): the required-mint throw can
+    // 503 out of the mint try AFTER the record committed but BEFORE this
+    // line, so a resumed retry that then succeeds would finalize with no
+    // job_costs row / service_records financials until a manual recalc. The
+    // !resumingCommittedCompletion guard here was born as part of a batch
+    // wrap with the genuinely once-only side effects (activity log,
+    // job_complete notification — 8bfd069bd); costing itself needs no
+    // once-only protection: calculateJobCost is an idempotent UPSERT that
+    // re-derives everything from persisted state (five other callers invoke
+    // it repeatedly — manual recalc, expenses CRUD, billing-recovery,
+    // projects, the financials backfill), and its durable
+    // structured_notes.backfill guard re-derives the untrusted-span policy
+    // on every run, so a resume recomputes the same values a completed
+    // first run wrote. The opts are resume-safe too: isBackfillCompletion /
+    // effectiveTimeOnSite are the frozen re-derivations by this point.
+    try {
+      const JobCosting = require('../services/job-costing');
+      // Backfill: the row's actual_start/actual_end pair now spans a stale
+      // check-in (days/weeks back) to today's office closeout, and the
+      // tech-window time_entries fallback would scoop every job clocked in
+      // between — either way weeks of labor booked to one visit. Labor may
+      // only come from entries tied to THIS job or the operator's explicit
+      // timeOnSite — never elapsed math over the stale span (same rule as
+      // service_time_minutes via applyBackfillDurationPolicy). Forwarded
+      // through the same workday-capped sanitizer the duration policy
+      // uses (idempotent on the already-sanitized effectiveTimeOnSite),
+      // so persisted duration and costed labor can never disagree.
+      void JobCosting.calculateJobCost(svc.id, undefined, isBackfillCompletion
+        ? { untrustedLifecycleSpan: true, explicitLaborMinutes: backfillTimeOnSiteMinutes(effectiveTimeOnSite) }
+        : {}).catch(e =>
+        logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
+      );
+    } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
     // Follow-up suggestion for typed completions (profiles followup_policy /
     // default_followup_days). Cockroach only suggests for German — matched on
@@ -6603,7 +7468,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
       || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
         .includes(String(invoice?.status || '').toLowerCase());
-    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered) {
+    // Backfill closeouts skip the automatic payer AP send too — the invoice
+    // stays unfinalized for the operator to review and send by hand (same
+    // recovery path as a failed AP send below).
+    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
       try {
         const InvoiceEmail = require('../services/invoice-email');
         const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
@@ -6636,6 +7504,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // for "no-bill completion", redundant with the !!invoice/suppress checks)
     // would strand that invoice with neither a pay link nor an in-person prompt.
     const invoicePaymentActionRequired = !!invoice
+      // Backfill closeouts leave the invoice for office review by contract —
+      // the mobile client opens the in-person payment sheet on this flag, and
+      // a backdated cleanup must not prompt anyone to collect on the spot.
+      && !isBackfillCompletion
       && !paymentCollectionSuppressed
       // Collectible statuses only — 'processing' (an in-flight ACH autopay
       // debit, incl. the per-application completion charge and the orphaned-
@@ -6657,9 +7529,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // inspection-only, customer-declined, or incomplete outcome must not earn
     // the reward or burn the single-use guard. The helper re-confirms THIS
     // visit is recurring + handles idempotency itself; never blocks completion.
-    const referralVisitPerformed = visitOutcome !== 'inspection_only'
+    // Backfill exclusion: crediting a referral posts real $25 account credits
+    // to BOTH parties and texts/emails the referrer. A backdated cleanup of a
+    // months-old row must not move money or contact anyone — and the reward is
+    // single-use, so firing it here would also burn the guard on a visit
+    // nobody is announcing. The referral stays claimable on a real completion.
+    const closedDealVisitPerformed = visitOutcome !== 'inspection_only'
       && visitOutcome !== 'customer_declined'
       && !isIncompleteVisit;
+    const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;
     if (referralVisitPerformed) {
       try {
         const referralEngine = require('../services/referral-engine');
@@ -6667,9 +7545,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }
-      // Same closed-deal signal as the referral credit above, and gated by the
-      // same performed-visit guard: convert the originating lead to won if it's
-      // still open. Best-effort + idempotent; only matches never-converted leads.
+    }
+    // Same closed-deal signal as the referral credit, and gated by the same
+    // performed-visit guard — but NOT by the backfill guard. Converting the
+    // originating lead is a pure data write (lead-estimate-link resolves the
+    // lead and calls leadAttribution.markConverted; no SMS, email, or money
+    // anywhere in that path), so it does not violate the quiet-path contract.
+    // It must NOT be deferred either: a stale-sweep closeout is the LAST
+    // completion these rows will ever get, so suppressing it would strand the
+    // originating lead 'open' forever with no later completion to convert it —
+    // permanently understating won-deal attribution. Best-effort + idempotent;
+    // only matches never-converted leads.
+    if (closedDealVisitPerformed) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
@@ -8539,8 +9426,20 @@ function shouldCaptureApplicationConditions({
   useServiceReportV1,
   isIncompleteVisit,
   productCount,
+  isBackfillCompletion = false,
 }) {
   if (!hasConditionsColumn) return false;
+  // Backdated closeout: NEVER capture (Codex P1, PR #2897 fix round). The
+  // fetch is CURRENT FAWN/Open-Meteo weather at office-closeout time, but a
+  // backfilled record is dated to the scheduled day — and service_records.
+  // conditions is copied verbatim into the FDACS application ledger
+  // (compliance.js → property_application_history.weather_conditions/
+  // wind_speed_mph), so a week-old treatment would carry today's wind and
+  // sky as its application-day conditions on a state-auditable record.
+  // Absent conditions are an honest unknown for a past day; no historical
+  // re-fetch — the capture exists to record what was observed at
+  // application time, not a reconstruction.
+  if (isBackfillCompletion) return false;
   if (useServiceReportV1 && !isIncompleteVisit) return true;
   return Number(productCount) > 0;
 }
@@ -8567,6 +9466,121 @@ function completionSavedCardFallbackPolicy({
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
 
+// REQUIRED-mint predicate for the typed one-time backfill bypass (Codex P0,
+// PR #2897 fix round). The population whose fail-closed billing pre-gate
+// (completion_billing_required, 409 → checkout detour) is bypassed under
+// backfill on the promise that shouldAutoInvoiceCompletion's backfill branch
+// mints the open review invoice instead: typed one-time profile
+// (typedOneTimeBillingProfile at the route), the row's own price
+// (hasVisitPrice — the resolver's amount basis), performed, non-callback,
+// non-always-free work. For exactly this population the mint is REQUIRED —
+// a transient mint failure must NOT let the completion finalize succeeded
+// with no invoice (lost AR, no retry path; the old pre-gate was
+// fail-closed). ONE function decides both the mint (the backfill branch in
+// shouldAutoInvoiceCompletion delegates here) and the fail-closed
+// enforcement (the route's invoice catch), so the two can never drift.
+function backfillTypedOneTimeMintRequired({
+  isBackfillCompletion = false,
+  typedOneTimeBilling = false,
+  hasVisitPrice = false,
+  visitPerformed = true,
+  isCallback = false,
+  serviceType,
+}) {
+  return Boolean(
+    isBackfillCompletion && typedOneTimeBilling && hasVisitPrice
+    && visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType),
+  );
+}
+
+// Commit-time REQUIRED-mint posture for a backfill closeout (Codex P1, PR
+// #2897 fix round 9) — the value the route freezes into structured_notes
+// and the invoice catch fail-closes on. Round 8's predicate covered only
+// the typed one-time population, but the mint decision also bills backfills
+// through its OTHER branches — the scheduler's create_invoice_on_complete
+// flag, the monthly-rate/tier and explicit-membership branches, the
+// explicit per-visit/per-application lanes, the priced-visits gate — and
+// resolveProjectCompletionBilling treats those amounts (row price OR the
+// cioc-gated monthly-rate fallback) as REQUIRED just the same. A transient
+// mint failure on any of them fell through the NON-BLOCKING catch and
+// finalized an unbilled closeout: the exact P0 shape the fail-closed leg
+// exists to stop. So the posture IS the will-mint decision at commit:
+// shouldAutoInvoiceCompletion itself, evaluated on the same commit-time
+// branch inputs the real decision reads.
+//
+// Suppressor taxonomy (Codex P2, fix round 12) — two kinds, two treatments:
+//  - SETTLE-STATE suppressors stay NEUTRALIZED: already-paid, pre-minted,
+//    existing invoice, the out-of-band prepaid amount, and annual-prepay
+//    coverage. These describe whether a settlement artifact EXISTS — their
+//    absence at enforcement time means the mint FAILED, never that it was
+//    unowed; at mint time an existing settlement IS the promise kept (the
+//    decision's own suppressor gate still wins ahead of the frozen posture
+//    on every run, and the catch only fires on an attempted-and-failed
+//    mint). Annual-prepay coverage additionally REVALIDATES by design — a
+//    refunded term must bill again on resume, so freezing it would wrongly
+//    pin a since-refunded settlement.
+//  - COMMIT-TIME BUSINESS suppressors PARTICIPATE with their real values:
+//    recapReviewOnly (no invoice ever mints on that path) and
+//    autopayCoversVisit (membership dues cover the visit). Dues coverage is
+//    a business rule about the visit itself, fully knowable at the freeze
+//    point (the route hoists the payer + autopay derivations above the
+//    transaction) — a covered visit owes NO mint, so it must freeze
+//    required=false. Forcing it false froze required=true for covered
+//    membership work; live suppression hid the divergence on run one, but a
+//    crash before succeed plus a dues/autopay change before the retry made
+//    the resume honor frozen TRUE and surprise-bill a visit that was
+//    covered when it completed.
+// Delegating to the real decision function keeps frozen-required ≡
+// will-mint-at-commit (settle-state-free) for every input combination BY
+// CONSTRUCTION — the lattice test pins the equivalence so the two can
+// never drift.
+function backfillExpectedMintAtCommit({
+  isBackfillCompletion = false,
+  recapReviewOnly = false,
+  autopayCoversVisit = false,
+  createInvoiceOnComplete = false,
+  waveguardTier = null,
+  explicitMembership = false,
+  explicitPerVisitLane = false,
+  perApplicationBilling = false,
+  annualPrepayBilling = false,
+  hasVisitPrice = false,
+  invoiceAmount = 0,
+  autoInvoicePricedVisits = false,
+  serviceType,
+  isCallback = false,
+  visitPerformed = true,
+  typedOneTimeBilling = false,
+}) {
+  if (isBackfillCompletion !== true) return false;
+  return shouldAutoInvoiceCompletion({
+    // Commit-time business suppressors participate (see taxonomy above);
+    // settle-state suppressors are neutralized.
+    recapReviewOnly,
+    autopayCoversVisit,
+    alreadyPaid: false,
+    prepaidCovered: false,
+    preMintedInvoice: null,
+    existingCompletionInvoice: null,
+    annualPrepayCovered: false,
+    createInvoiceOnComplete,
+    waveguardTier,
+    explicitMembership,
+    explicitPerVisitLane,
+    perApplicationBilling,
+    annualPrepayBilling,
+    hasVisitPrice,
+    invoiceAmount,
+    autoInvoicePricedVisits,
+    serviceType,
+    isCallback,
+    visitPerformed,
+    typedOneTimeBilling,
+    backfillMintRequired: null,
+    isBackfillCompletion: true,
+  });
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -8586,11 +9600,65 @@ function shouldAutoInvoiceCompletion({
   serviceType,
   isCallback,
   visitPerformed = true,
+  typedOneTimeBilling = false,
+  // Committed required-mint posture (Codex P0, fix round 8): null = decide
+  // live (legacy callers / first run recomputes below — identical result);
+  // boolean = the posture GOVERNS the typed backfill branch in both
+  // directions (route passes the commit-time derivation on first run and
+  // the frozen structured_notes posture on resume).
+  backfillMintRequired = null,
+  isBackfillCompletion = false,
+  annualPrepayCovered = false,
 }) {
-  if (recapReviewOnly || alreadyPaid || prepaidCovered || autopayCoversVisit
+  // Backfill review-invoice override (Codex P1, stale-sweep lane): a
+  // backdated quiet closeout PROMISES the operator an open invoice to
+  // reconcile against. An out-of-band prepaid_amount (cash/Zelle recorded on
+  // the visit) that fully covers the bill normally suppresses invoicing via
+  // prepaidCovered — correct live, where applyPrepaidCreditToInvoice would
+  // immediately credit the fresh invoice back down. Under backfill that
+  // crediting rail is gated OFF, so suppressing here would mint NOTHING: the
+  // recorded prepayment would have no invoice to reconcile against and the
+  // completion would be absent from invoice/payment accounting entirely.
+  // Mint the invoice anyway; the gated prepaid rail leaves it open with the
+  // amount unapplied (its skip-log points review at the recorded amount).
+  // ONLY the out-of-band leg is overridden: annual-prepay coverage
+  // (annualPrepayCovered — the other input into the composite prepaidCovered
+  // flag) still suppresses under backfill, because that money is genuinely
+  // settled on the annual prepay invoice — its own paper trail, settled
+  // non-cash via settleInvoiceAsAnnualPrepayCovered — and a fresh collectible
+  // invoice would double-bill covered plan work. Autopay dues coverage rides
+  // its own flag (autopayCoversVisit) and, like every other suppressor
+  // (alreadyPaid / pre-minted / existing invoice), is untouched.
+  const effectivePrepaidCovered = isBackfillCompletion ? annualPrepayCovered : prepaidCovered;
+  if (recapReviewOnly || alreadyPaid || effectivePrepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
+  // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
+  // every branch, Codex P1 fix round 9): under backfill a supplied boolean
+  // posture GOVERNS the whole decision, in both directions, ahead of every
+  // live branch below. TRUE mints even when the live inputs no longer agree
+  // — the billing profile, scheduler flag, tier and lane are all mutable DB
+  // state, and an edit between the commit (or a released required-mint
+  // failure) and the resume must not drop the owed review invoice. FALSE
+  // declines even when a live branch would now bill — the completion
+  // committed as not-required, and state flipped since commit (a cioc flag
+  // set, a profile made one_time, a price added) must not surprise-bill the
+  // resumed quiet closeout. Sitting BELOW the suppressors keeps the round-8
+  // convergence — an invoice/payment already in place IS the promise kept —
+  // but ABOVE the amount guard (Codex P0, fix round 10): invoiceAmount is
+  // live-derived from mutable billing fields, and a price cleared after a
+  // released required-mint failure flipped the guard false and finalized
+  // the closeout WITHOUT its required invoice. A $0 mint still can't
+  // happen: the route feeds a REQUIRED decision the FROZEN commit-time
+  // amount (positive by construction — the posture only freezes true when
+  // this same amount guard passed at commit), and a required resume whose
+  // frozen amount is missing fail-closes at the mint instead of minting a
+  // recomputed number. First runs pass the commit-time derivation
+  // (backfillExpectedMintAtCommit) here, so governed-vs-live can't disagree
+  // on run one either; null = legacy callers decide live below.
+  if (isBackfillCompletion && backfillMintRequired === true) return true;
+  if (isBackfillCompletion && backfillMintRequired != null) return false;
   if (!(Number(invoiceAmount) > 0)) return false;
   // Explicit scheduler flag stays the strongest signal (operator intent).
   if (createInvoiceOnComplete) return true;
@@ -8633,6 +9701,43 @@ function shouldAutoInvoiceCompletion({
   // lingering tier bill a callback/always-free visit these lanes exempt.
   if (explicitPerVisitLane) {
     return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
+  }
+  // Backfill bypass of the typed one-time billing pre-gate (Codex P1, PR
+  // #2897): live, a typed one-time completion with no invoice on file 409s
+  // (completion_billing_required) into the checkout detour, so this function
+  // only ever decided those visits with an invoice/coverage already in place
+  // — every such state is a suppressor above. A backdated closeout skips the
+  // detour by design (no payment interaction on the quiet path), so the
+  // promised open review invoice must mint HERE. Same population the gate
+  // covers (typed profile billingType one_time, not an included follow-up —
+  // the caller's typedOneTimeBillingProfile), same amount basis the gate's
+  // resolver reads: the row's own estimated_price (hasVisitPrice —
+  // completionInvoiceAmount puts it first), NEVER the legacy monthly-rate
+  // fallback, which the resolver only bills behind the scheduler flag
+  // (createInvoiceOnComplete already returned true above). Unpriced visits
+  // fall through exactly as a live not_billable resolution would. Performed,
+  // non-callback, non-always-free work only — the same exclusions every
+  // explicit lane applies (a return either way, so a lingering tier can't
+  // bill an exempt visit) — and the suppressors above (existing/pre-minted
+  // invoice incl. the estimate first-application invoice, already-paid,
+  // annual-prepay coverage, autopay dues) still win, so already-billed work
+  // never double-mints.
+  // (Frozen-posture authority now sits ABOVE, right after the suppressors —
+  // fix round 9 broadened it to govern every branch, so it must run before
+  // the scheduler-flag/tier/lane branches, not just this typed one.)
+  if (isBackfillCompletion && typedOneTimeBilling && hasVisitPrice) {
+    // Live path (first run / legacy callers, posture null): delegated to
+    // the shared typed-population predicate (defined above) — a return
+    // either way, never a fall-through, so a lingering tier can't bill the
+    // exempt visit.
+    return backfillTypedOneTimeMintRequired({
+      isBackfillCompletion,
+      typedOneTimeBilling,
+      hasVisitPrice,
+      visitPerformed,
+      isCallback,
+      serviceType,
+    });
   }
   // An explicit monthly_membership lane stands in for the tier here just as
   // it does in the coverage predicate: a tier-less explicit member whose
@@ -8809,9 +9914,21 @@ module.exports._test = {
   serviceReportEmailEligible,
   membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,
+  backfillTypedOneTimeMintRequired,
+  backfillExpectedMintAtCommit,
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
+  backfillCompletionPlan,
+  applyBackfillDurationPolicy,
+  applyBackfillRecordTimingPolicy,
+  backfillCompletionEndInstant,
+  backfillTimeOnSiteMinutes,
+  frozenResumeCompletionState,
+  BACKFILL_MAX_TIME_ON_SITE_MINUTES,
+  BACKFILL_INFERRED_START_FIELDS,
+  BACKFILL_LIFECYCLE_END_FIELDS,
+  BACKFILL_RECORD_END_FIELDS,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
 };

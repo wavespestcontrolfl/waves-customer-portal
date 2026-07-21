@@ -1161,6 +1161,9 @@ export default function DispatchPageV2({
     // tabs (e.g. /admin/dispatch?tab=protocols) doesn't render the week
     // calendar instead of the requested panel.
     if (isControlled && controlledActiveTab !== "board") return "day";
+    // A ?date= deep link (e.g. the dashboard's Stale Visits card) targets one
+    // specific day — open Day view on it instead of the default week grid.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(searchParams.get("date") || "")) return "day";
     if (typeof window === "undefined") return "week";
     return window.matchMedia("(max-width: 767px)").matches ? "day" : "week";
   });
@@ -1174,7 +1177,14 @@ export default function DispatchPageV2({
       setViewMode("day");
     }
   }, [isControlled, controlledActiveTab, viewMode]);
-  const [date, setDate] = useState(formatDateISO(new Date()));
+  // Initial-load only (like ?customer=): a valid ?date= deep link opens the
+  // schedule on that day; navigating afterward doesn't rewrite the URL.
+  const [date, setDate] = useState(() => {
+    const linkedDate = searchParams.get("date");
+    return /^\d{4}-\d{2}-\d{2}$/.test(linkedDate || "")
+      ? linkedDate
+      : formatDateISO(new Date());
+  });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

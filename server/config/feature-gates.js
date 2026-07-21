@@ -825,6 +825,11 @@ const gates = {
   // Admin-notification-only; no customer contact.
   wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
 
+  // Stale-visit sweep — nightly admin bell for past-dated appointments still
+  // sitting in an open status (pending/confirmed/en_route/on_site).
+  // Detection-only: never mutates the rows, no customer contact.
+  staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+
   // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
   // outlook) to the customer portal's visit-tracker payload so the tracker
   // can show a "42% chance of rain — your tech may adjust timing" caption.

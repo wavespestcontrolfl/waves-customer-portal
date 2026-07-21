@@ -254,6 +254,24 @@ function resolveQuotedMinutes(row) {
   return firstPositiveNumber(fromEstimate, row.estimated_duration_minutes);
 }
 
+// Backdated quiet closeout marker (structured_notes.backfill — frozen by the
+// completion transaction; the same durable read job-costing keys its
+// untrusted-span policy off). A backfilled row's lifecycle timestamps are
+// artifacts of the forgotten closeout: the duration policies strip its end
+// stamps, but the row KEEPS its real stale start (historical truth) and —
+// since PR #2897 fix round 9 — a day-scale completed_at (ET noon of the
+// service day, so Billing Recovery's completed_at window can see the visit).
+// Pairing that kept start against the noon instant (or any surviving stamp)
+// at read time would fabricate an on-site duration, so for marked rows the
+// minutesBetween fallback rungs are skipped entirely: the only trusted
+// durations are operator/clock statements, which all live in the persisted
+// tier (service_time_minutes / actual_duration_minutes from the typed
+// duration, summed time_entry_minutes, structured timeOnSite). A marked row
+// with none of those reads as missing_actual — the honest unknown.
+function isBackfilledServiceRecordRow(row) {
+  return parseJson(row.service_record_structured_notes)?.backfill === true;
+}
+
 function resolveActualMinutes(row) {
   const persisted = firstPositiveNumber(
     row.service_time_minutes,
@@ -262,6 +280,7 @@ function resolveActualMinutes(row) {
     serviceRecordTimeOnSiteMinutes(row),
   );
   if (persisted != null) return persisted;
+  if (isBackfilledServiceRecordRow(row)) return null;
 
   return firstPositiveNumber(
     minutesBetween(row.actual_start_time, row.actual_end_time),
@@ -273,16 +292,22 @@ function resolveActualMinutes(row) {
 }
 
 function hasInvalidActualDuration(row) {
-  return [
-    row.service_time_minutes,
-    row.actual_duration_minutes,
-    row.time_entry_minutes,
+  // Backfilled rows: judge only the persisted statements — a fabricated
+  // negative pair (stale start after the noon instant) must not reclassify
+  // the honest unknown as invalid_duration.
+  const pairs = isBackfilledServiceRecordRow(row) ? [] : [
     minutesBetween(row.actual_start_time, row.actual_end_time),
     minutesBetween(row.check_in_time, row.check_out_time),
     minutesBetween(row.arrived_at, row.completed_at),
     minutesBetween(row.time_entry_clock_in, row.time_entry_clock_out),
-    serviceRecordTimeOnSiteMinutes(row),
     minutesBetween(row.service_record_started_at, row.service_record_ended_at),
+  ];
+  return [
+    row.service_time_minutes,
+    row.actual_duration_minutes,
+    row.time_entry_minutes,
+    serviceRecordTimeOnSiteMinutes(row),
+    ...pairs,
   ].some((value) => {
     const n = finiteNumber(value);
     return n != null && n <= 0;

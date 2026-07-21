@@ -22,8 +22,11 @@ function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   return chain;
 }
 
-function installSummaryDb({ record = null, photos = [], reviewRequest = null } = {}) {
+function installSummaryDb({ record = null, photos = [], reviewRequest = null, invoice = null } = {}) {
   mockDb.mockImplementation((table) => {
+    if (table === 'invoices') {
+      return makeQuery({ firstResult: invoice });
+    }
     if (table === 'service_records') {
       return makeQuery({ firstResult: record });
     }
@@ -186,5 +189,91 @@ describe('public track token expiry', () => {
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('review_requests');
     expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
+  });
+
+  // Backdated quiet closeout (PR #2897 fix round 9, Codex P1): the review
+  // invoice is minted as an UNREVIEWED draft at face value — deposits/
+  // prepaid/credit deliberately unapplied — so an old /track/:token must not
+  // hand the customer its /pay/:token until the office has sent it.
+  const backfillRecord = {
+    id: 'record-bf',
+    report_view_token: 'report-token',
+    structured_notes: JSON.stringify({ backfill: true, typedReportDelivery: 'auto_send' }),
+  };
+
+  test('suppresses the pay link for a backfilled visit while the review invoice is an unsent draft', async () => {
+    installSummaryDb({
+      record: backfillRecord,
+      invoice: { token: 'inv-token', payer_id: null, status: 'draft' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-bf',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.invoiceToken).toBeNull();
+    // The rest of the completed summary is untouched — only the pay surface
+    // waits for review.
+    expect(summary.serviceReportToken).toBe('report-token');
+  });
+
+  test('a queued or mid-send backfill invoice stays suppressed; a SENT one resumes the normal pay surface', async () => {
+    for (const status of ['scheduled', 'sending']) {
+      installSummaryDb({
+        record: backfillRecord,
+        invoice: { token: 'inv-token', payer_id: null, status },
+      });
+      const summary = await trackPublicRouter._test.buildSummary({
+        id: 'scheduled-bf', customer_id: 'customer-1', completed_at: '2026-05-05T12:00:00.000Z',
+      });
+      expect(summary.invoiceToken).toBeNull();
+    }
+    // Reviewer finalized a send (draft/scheduled/sending → sent, then
+    // viewed/overdue as the customer interacts, or a payment path takes it
+    // further) — the tracking page shows the pay link again.
+    for (const status of ['sent', 'viewed', 'overdue', 'paid']) {
+      installSummaryDb({
+        record: backfillRecord,
+        invoice: { token: 'inv-token', payer_id: null, status },
+      });
+      const summary = await trackPublicRouter._test.buildSummary({
+        id: 'scheduled-bf', customer_id: 'customer-1', completed_at: '2026-05-05T12:00:00.000Z',
+      });
+      expect(summary.invoiceToken).toBe('inv-token');
+    }
+  });
+
+  test('non-backfill completions still expose their fresh draft invoice (live pay-link flow unchanged)', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-live',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      invoice: { token: 'inv-token', payer_id: null, status: 'draft' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-live',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.invoiceToken).toBe('inv-token');
+  });
+
+  test('the payer-billed guard still wins for backfills — a payer invoice never surfaces regardless of status', async () => {
+    installSummaryDb({
+      record: backfillRecord,
+      invoice: { token: 'inv-token', payer_id: 'payer-1', status: 'sent' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-bf', customer_id: 'customer-1', completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.invoiceToken).toBeNull();
   });
 });

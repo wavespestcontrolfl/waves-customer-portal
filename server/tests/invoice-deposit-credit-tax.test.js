@@ -40,6 +40,20 @@ jest.mock('../services/invoice-followups', () => ({
   stopSequence: jest.fn(),
   rescheduleForInvoiceEdit: (...args) => mockRescheduleForInvoiceEdit(...args),
 }));
+// Payer Phase 2 surface (skipAccrual coverage below): gate defaults OFF —
+// matching prod and every pre-existing test in this file — and the accrual
+// describe flips it on per-test. The statements service is mocked so accrual
+// is observable as calls, not table traffic.
+const mockIsGateEnabled = jest.fn(() => false);
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (...args) => mockIsGateEnabled(...args),
+}));
+const mockGetOrCreateOpenStatement = jest.fn();
+const mockRollupStatement = jest.fn();
+jest.mock('../services/payer-statements', () => ({
+  getOrCreateOpenStatement: (...args) => mockGetOrCreateOpenStatement(...args),
+  rollupStatement: (...args) => mockRollupStatement(...args),
+}));
 
 const db = require('../models/db');
 // The send-progress snapshot passes db.raw(...) aggregate columns into
@@ -332,6 +346,39 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
   });
 
+  it('skipDepositCredit (backfill review invoices) leaves the ledger untouched — full-value invoice, no reads, no consumption, no alert (Codex P1, PR #2897 fix round)', async () => {
+    // The backdated quiet closeout's contract is an invoice the reviewer
+    // finds EXACTLY as minted: the deposit roll-forward moves deposit-ledger
+    // money and reduces/zeroes the total, so the completion route opts out
+    // and the unapplied balance stays on the estimate for a deliberate
+    // application during review.
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 }); // would-be credit — must never be read
+
+    const inv = await InvoiceService.createFromService('sr-1', {
+      amount: 250, description: 'Rodent exclusion', skipDepositCredit: true,
+    });
+
+    expect(mockPendingDepositCredit).not.toHaveBeenCalled();
+    expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    const row = getInsertedInvoice();
+    expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
+    expect(row.total).toBe(250);
+    expect(inv.total).toBe(250);
+  });
+
+  it('the opt-out defaults OFF — the pre-change caller shape still rolls the deposit forward', async () => {
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
+    mockConsumeDepositCredit.mockResolvedValue(99);
+
+    await InvoiceService.createFromService('sr-1', { amount: 250, description: 'Rodent exclusion' });
+
+    expect(getInsertedInvoice().total).toBe(151);
+    expect(mockConsumeDepositCredit).toHaveBeenCalled();
+  });
+
   it('an allocation mismatch never blocks visit invoicing — falls back to an uncredited invoice and alerts', async () => {
     const { getInsertedInvoice } = setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
@@ -344,6 +391,326 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
     expect(row.total).toBe(250);
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+});
+
+describe('createFromService — frozen-money backfill mints bypass scheduled replay (Codex P0, PR #2897 fix round 11)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // The backfill route freezes the required mint's amount+tax at commit
+  // (round 10) — but passed them alongside useScheduledReplay: true, and the
+  // replay path REBUILDS line items from the CURRENT scheduled-service row /
+  // add-ons / stored discounts, degrading the frozen amount to a fallback.
+  // These tests drive the REAL createFromService both ways: replay honors
+  // current-row edits (the hazard), and the frozen path (replay off,
+  // explicit amount, skipDepositCredit) provably mints subtotal ≡ the
+  // frozen cents without ever reading the scheduled row.
+  function setupReplayDb({ customer, scheduledRow, addons = [] }) {
+    let insertedInvoice = null;
+    const tableCalls = [];
+    db.mockImplementation((table) => {
+      tableCalls.push(table);
+      if (table === 'service_records') {
+        const q = {
+          where: jest.fn(() => q),
+          andWhere: jest.fn(() => q),
+          leftJoin: jest.fn(() => q),
+          select: jest.fn(() => q),
+          first: jest.fn(async () => ({
+            id: 'sr-1', customer_id: 'cust-1', scheduled_service_id: 'ss-1',
+            service_type: 'Bed Bug Treatment', technician_id: null,
+            service_date: '2026-06-12', tech_name: null,
+          })),
+        };
+        return q;
+      }
+      if (table === 'service_products' || table === 'service_photos') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          select: jest.fn(async () => []),
+        };
+        return q;
+      }
+      if (table === 'scheduled_services') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
+        return q;
+      }
+      if (table === 'scheduled_service_addons') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => Promise.resolve(addons)),
+        };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => customer) };
+        return q;
+      }
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => null),
+          insert: jest.fn((data) => {
+            insertedInvoice = data;
+            return { returning: jest.fn(async () => [{ id: 'invoice-1', ...data }]) };
+          }),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    return {
+      getInsertedInvoice: () => insertedInvoice,
+      getTableCalls: () => tableCalls,
+    };
+  }
+
+  // The post-commit-edited row: price 350 → 899 after the completion froze
+  // 35000 cents. source_estimate_id null keeps the roll-forward inert for
+  // the replay-ON control (the frozen path skips it via skipDepositCredit).
+  const EDITED_SCHEDULED_ROW = {
+    id: 'ss-1',
+    service_type: 'Bed Bug Treatment',
+    estimated_price: 899,
+    primary_line_price: 899,
+    source_estimate_id: null,
+  };
+
+  it('the hazard is real: scheduled replay mints the EDITED current price — the frozen amount degrades to a fallback', async () => {
+    const { getInsertedInvoice } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+      scheduledRow: EDITED_SCHEDULED_ROW,
+    });
+
+    await InvoiceService.createFromService('sr-1', {
+      amount: 350, // the round-10 frozen amount
+      description: 'Bed Bug Treatment',
+      taxRate: 0,
+      useScheduledReplay: true, // the pre-fix backfill caller shape
+      skipDepositCredit: true,
+    });
+
+    const row = getInsertedInvoice();
+    const lines = JSON.parse(row.line_items);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].amount).toBe(899);
+    expect(row.total).toBe(899); // NOT the frozen 350 — the P0
+  });
+
+  it('frozen path (replay off): a post-commit price-edit resume mints EXACTLY the frozen total, without reading the scheduled row at all', async () => {
+    const { getInsertedInvoice, getTableCalls } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'commercial' },
+      scheduledRow: EDITED_SCHEDULED_ROW, // edited to 899 — must never be consulted
+      addons: [{ id: 'addon-1', service_name: 'Attic add-on', base_price: 50 }],
+    });
+
+    const inv = await InvoiceService.createFromService('sr-1', {
+      amount: 350, // frozen cents / 100
+      description: 'Bed Bug Treatment',
+      taxRate: 0.07, // frozen tax basis
+      useScheduledReplay: false, // the fix: !isBackfillCompletion
+      skipDepositCredit: true,
+      skipAccrual: true,
+    });
+
+    const row = getInsertedInvoice();
+    const lines = JSON.parse(row.line_items);
+    // Single line at the frozen amount, labeled for the reviewer.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      description: 'Bed Bug Treatment',
+      quantity: 1,
+      unit_price: 350,
+      amount: 350,
+    });
+    // Subtotal ≡ frozen cents; total ≡ cents + tax at the frozen rate — no
+    // discount lines, no adjustment lines, no deposit credit.
+    expect(row.subtotal).toBe(350);
+    expect(row.tax_rate).toBe(0.07);
+    expect(row.tax_amount).toBe(24.5);
+    expect(row.total).toBe(374.5);
+    expect(inv.total).toBe(374.5);
+    // Provably atomic BY CONSTRUCTION: the replay builder never ran — its
+    // add-ons read is unique to it and absent (the builder always reads
+    // add-ons once it has the scheduled row, which this mock serves), and
+    // the minted lines are exactly the one frozen line above. The lone
+    // scheduled_services touch left in the flow is payer RESOLUTION
+    // (self-pay/payer columns — no pricing), which cannot move the total.
+    expect(getTableCalls()).not.toContain('scheduled_service_addons');
+  });
+
+  it('frozen path under the residential policy: tax zeroes (never up), the subtotal stays the frozen cents', async () => {
+    // create() forces rate 0 for non-commercial customers regardless of the
+    // caller's taxRate (operator policy: residential never sees tax). A
+    // property flipped commercial→residential post-commit therefore mints
+    // LESS than frozen+tax — policy beats freeze, and only ever downward;
+    // the frozen subtotal itself cannot move.
+    const { getInsertedInvoice } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+      scheduledRow: EDITED_SCHEDULED_ROW,
+    });
+
+    await InvoiceService.createFromService('sr-1', {
+      amount: 350,
+      description: 'Bed Bug Treatment',
+      taxRate: 0.07, // frozen commercial basis, customer now residential
+      useScheduledReplay: false,
+      skipDepositCredit: true,
+    });
+
+    const row = getInsertedInvoice();
+    expect(row.subtotal).toBe(350);
+    expect(row.tax_amount).toBe(0);
+    expect(row.total).toBe(350);
+  });
+});
+
+describe('createFromService — payer-statement accrual opt-out (skipAccrual, Codex P1, PR #2897 fix round 5)', () => {
+  // The backdated backfill closeout mints a review-only invoice. For a
+  // payer-billed NET15/NET30 visit under GATE_PAYER_STATEMENTS, create()
+  // otherwise attaches that invoice to the payer's OPEN monthly statement and
+  // rolls the statement up — the unreviewed closeout lands on a consolidated
+  // bill. skipAccrual (threaded createFromService → create) mints it
+  // UNATTACHED: no statement get-or-create, no payer_statement_id stamp, no
+  // rollup — while payer_id/snapshot still stamp (it stays the payer's
+  // individually-sendable invoice for the reviewer).
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Statements lane armed: the exact population whose invoice would accrue.
+    mockIsGateEnabled.mockImplementation((gate) => gate === 'payerStatements');
+    mockGetOrCreateOpenStatement.mockResolvedValue({ id: 501, status: 'open' });
+  });
+  afterAll(() => {
+    // Never leak the gate into the later describes — everything else in this
+    // file runs the prod-default gate-off/self-pay shape.
+    mockIsGateEnabled.mockImplementation(() => false);
+  });
+
+  // setupServiceDb plus the payer spine resolveForInvoice walks (per-job
+  // payer on the scheduled service + the payers row). The transaction hands
+  // create() a REAL distinct trx object: a NET-terms accrual re-enters
+  // create() with { database: trx } and insertInvoiceRow savepoints on it —
+  // passing `db` itself through would re-trigger the preflight forever.
+  function setupPayerDb({ sourceEstimateId = null } = {}) {
+    let insertedInvoice = null;
+    const handler = (table) => {
+      if (table === 'service_records') {
+        const q = {
+          where: jest.fn(() => q),
+          andWhere: jest.fn(() => q),
+          leftJoin: jest.fn(() => q),
+          select: jest.fn(() => q),
+          first: jest.fn(async () => ({
+            id: 'sr-1', customer_id: 'cust-1', scheduled_service_id: 'ss-1',
+            service_type: 'One-Time Pest Treatment', technician_id: null,
+            service_date: '2026-06-12', tech_name: null,
+          })),
+        };
+        return q;
+      }
+      if (table === 'service_products' || table === 'service_photos') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          select: jest.fn(async () => []),
+        };
+        return q;
+      }
+      if (table === 'scheduled_services') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => ({
+            payer_id: 9, po_number: null, self_pay_override: false,
+            source_estimate_id: sourceEstimateId,
+          })),
+        };
+        return q;
+      }
+      if (table === 'payers') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => ({
+            id: 9, active: true, payment_terms: 'net30', tax_exempt: false,
+            company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com',
+          })),
+        };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => ({ id: 'cust-1', property_type: 'residential', payer_id: 9 })),
+        };
+        return q;
+      }
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => null),
+          insert: jest.fn((data) => {
+            insertedInvoice = data;
+            return { returning: jest.fn(async () => [{ id: 'invoice-1', ...data }]) };
+          }),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    };
+    db.mockImplementation(handler);
+    db.transaction = jest.fn(async (fn) => {
+      const trx = (table) => handler(table);
+      trx.transaction = async (inner) => inner(trx); // insertInvoiceRow savepoint
+      return fn(trx);
+    });
+    return { getInsertedInvoice: () => insertedInvoice };
+  }
+
+  it('default unchanged: the NET-terms payer completion invoice still accrues — attached at insert, statement rolled up', async () => {
+    const { getInsertedInvoice } = setupPayerDb();
+    const inv = await InvoiceService.createFromService('sr-1', { amount: 250, description: 'Quarterly service' });
+    expect(mockGetOrCreateOpenStatement).toHaveBeenCalledWith(
+      expect.objectContaining({ payerId: 9, termsSnapshot: 'net30' }),
+    );
+    const row = getInsertedInvoice();
+    expect(row.payer_statement_id).toBe(501);
+    expect(row.payer_id).toBe(9);
+    expect(mockRollupStatement).toHaveBeenCalledWith(501, expect.anything());
+    expect(inv.payer_statement_id).toBe(501);
+  });
+
+  it('skipAccrual mints the same invoice UNATTACHED — statement never touched, rollup never runs, still payer-billed at face value', async () => {
+    const { getInsertedInvoice } = setupPayerDb();
+    const inv = await InvoiceService.createFromService('sr-1', {
+      amount: 250, description: 'Quarterly service', skipAccrual: true,
+    });
+    expect(mockGetOrCreateOpenStatement).not.toHaveBeenCalled();
+    expect(mockRollupStatement).not.toHaveBeenCalled();
+    const row = getInsertedInvoice();
+    expect(row.payer_statement_id).toBeUndefined(); // never stamped
+    expect(row.payer_id).toBe(9);                   // still the payer's invoice — individually sendable for review
+    expect(inv.payer_statement_id).toBeUndefined();
+    expect(row.total).toBe(250);                    // face value, untouched
+  });
+
+  it('the backfill mint shape composes: skipAccrual + skipDepositCredit leave statement AND deposit ledger untouched', async () => {
+    const { getInsertedInvoice } = setupPayerDb({ sourceEstimateId: 'est-1' });
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 }); // would-be credit — must never be read
+    await InvoiceService.createFromService('sr-1', {
+      amount: 250, description: 'Quarterly service',
+      skipDepositCredit: true, skipAccrual: true,
+    });
+    expect(mockGetOrCreateOpenStatement).not.toHaveBeenCalled();
+    expect(mockRollupStatement).not.toHaveBeenCalled();
+    expect(mockPendingDepositCredit).not.toHaveBeenCalled();
+    expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
+    const row = getInsertedInvoice();
+    expect(row.payer_statement_id).toBeUndefined();
+    expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
+    expect(row.total).toBe(250);
   });
 });
 

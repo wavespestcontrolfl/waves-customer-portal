@@ -1570,7 +1570,25 @@ const InvoiceService = {
    */
   async createFromService(
     serviceRecordId,
-    { amount, description, taxRate, useScheduledReplay = false, dueDate },
+    {
+      amount,
+      description,
+      taxRate,
+      useScheduledReplay = false,
+      dueDate,
+      skipDepositCredit = false,
+      // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
+      // create(), which owns the option (see its comment). The backdated
+      // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
+      // payer visit under the payerStatements gate, create() would otherwise
+      // attach it to the payer's OPEN monthly statement and roll the
+      // statement total up, i.e. the unreviewed invoice lands on a
+      // consolidated bill before anyone looks at it. With the opt-out the
+      // invoice stays a plain payer invoice (payer_id / PO / snapshot
+      // intact, individually sendable). Attachment happens only at create,
+      // so a reviewer who wants it consolidated voids + re-creates it.
+      skipAccrual = false,
+    },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
@@ -1609,6 +1627,7 @@ const InvoiceService = {
       trustedStoredDiscountSources: scheduledInvoice
         ? ["scheduled_service"]
         : [],
+      skipAccrual,
     };
 
     // Estimate-deposit roll-forward: when this service traces back to an
@@ -1622,8 +1641,18 @@ const InvoiceService = {
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
     // machinery failures NEVER block visit invoicing — fall back to the
     // plain create and alert for manual reconciliation.
+    //
+    // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
+    // contract is an UNTOUCHED invoice for operator review — the backdated
+    // backfill closeout — opt out entirely. The ledger is neither read nor
+    // consumed, no credit line is added, and the invoice mints at face
+    // value; the unapplied balance stays on the estimate for the reviewer
+    // to apply deliberately. (The consume path is pure ledger math — no
+    // receipt or customer notification — but it moves deposit money and
+    // reduces/zeroes the invoice, which is exactly the mutation the review
+    // contract forbids.)
     let sourceEstimateId = null;
-    if (sr.scheduled_service_id) {
+    if (!skipDepositCredit && sr.scheduled_service_id) {
       try {
         const ss = await db("scheduled_services")
           .where({ id: sr.scheduled_service_id })

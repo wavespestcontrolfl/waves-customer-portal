@@ -652,15 +652,93 @@ export function completionPreferencesNeedDraft({
   includePayLink = true,
   requestReview = true,
   clientPestRating = null,
+  backfillCloseout = false,
+  backfillCloseoutDefault = false,
+  backfillTimeOnSite = "",
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
-    || clientPestRating != null;
+    || clientPestRating != null
+    // The backdated-closeout choices are quiet/loud state: losing a checked
+    // box across a reload turns the SAME submit into a LOUD completion
+    // (sends + collection rails), and the ≥7-days default is CHECKED, so it
+    // is drift from the panel default — either direction — that needs a
+    // draft. Typed minutes ride along like any other text field.
+    || backfillCloseout !== backfillCloseoutDefault
+    || String(backfillTimeOnSite || "").trim() !== "";
 }
 
 export function normalizeCompletionDetourPhotos(photos) {
   return Array.isArray(photos) ? photos : [];
+}
+
+// timeOnSite fragment of the completion POST body. The panel's running
+// `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
+// row that's days or weeks — and the server books any submitted timeOnSite
+// as explicit operator input (persisted service duration + job-costing
+// labor). Under a backdated closeout only an operator-TYPED positive number
+// of minutes may travel; blank/invalid omits the key so the duration stays
+// unknown. Non-backfill submits keep today's auto-elapsed exactly.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
+  if (!backfill) return { timeOnSite: elapsed };
+  const minutes = Math.round(Number(typedMinutes));
+  return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
+}
+
+// Restore leg of the draft snapshot for the backdated-closeout choices. A
+// draft that predates these fields restores the panel default (missing ≠
+// false: for a ≥7-days-stale visit the default is CHECKED, and restoring
+// false would turn the same submit LOUD — sends + collection rails).
+// Eligibility is NOT re-checked here: every consumer (backfillQuietCloseout,
+// the submit body, the checkbox render) already gates on backfillEligible,
+// so a value restored onto a no-longer-eligible panel is inert by
+// construction.
+export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = false) {
+  return {
+    backfillCloseout:
+      typeof savedDraft?.backfillCloseout === "boolean"
+        ? savedDraft.backfillCloseout
+        : backfillCloseoutDefault,
+    backfillTimeOnSite:
+      typeof savedDraft?.backfillTimeOnSite === "string"
+        ? savedDraft.backfillTimeOnSite
+        : "",
+  };
+}
+
+// Why the review ask will not go out for this completion, or null when it
+// follows the operator's toggle. "backfill" mirrors the server forcing
+// requestReview=false under a backdated quiet closeout — with the reason set,
+// the review checkbox shows the suppressed state and the custom-review-time
+// validation never blocks a submit the server would silence anyway.
+export function completionReviewSuppressionReason({
+  isIncompleteVisit = false,
+  backfillQuietCloseout = false,
+  visitOutcome = "completed",
+  customerConcernInteraction = false,
+  willInvoice = false,
+} = {}) {
+  if (isIncompleteVisit) return "incomplete";
+  if (backfillQuietCloseout) return "backfill";
+  if (visitOutcome === "customer_declined") return "customer_declined";
+  if (visitOutcome === "customer_concern" || customerConcernInteraction) {
+    return "customer_concern";
+  }
+  return willInvoice ? "invoice_created" : null;
+}
+
+export function completionWillReview({
+  oneTimeRecapOnly = false,
+  requestReview = true,
+  willInvoice = false,
+  reviewSuppressionReason = null,
+} = {}) {
+  return (
+    (oneTimeRecapOnly || !!requestReview) &&
+    !willInvoice &&
+    !reviewSuppressionReason
+  );
 }
 
 function completionDraftKey(serviceId) {
@@ -7794,6 +7872,46 @@ export function CompletionPanel({
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
+  // Backdated closeout ("backfill") of a past-dated visit: the server records
+  // the completion to the visit's scheduled day, sends NO customer messages
+  // (SMS / report email / review ask), and skips the automatic charge rails.
+  // Only offered when the scheduled date is before today (ET). Defaults ON at
+  // ≥7 days past (stale-backlog cleanup from the dashboard card); OFF at 1–6
+  // days past — a next-morning closeout of yesterday's visit is a normal
+  // completion and must not silently go quiet.
+  // Backfill is admin-only server-side (it suppresses comms and the charge
+  // rails), and this panel is shared with technician users — so a tech must
+  // never see it defaulted on, or every stale closeout 403s until they find
+  // the checkbox. Same reasoning as the prepay CTA below.
+  const panelIsAdmin = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
+    catch { return false; }
+  })();
+  const backfillScheduledDate = String(
+    service.scheduledDate || service.scheduled_date || service.date || "",
+  ).split("T")[0];
+  const backfillDaysPast = /^\d{4}-\d{2}-\d{2}$/.test(backfillScheduledDate)
+    ? Math.round(
+        (Date.parse(etDateString()) - Date.parse(backfillScheduledDate)) /
+          86400000,
+      )
+    : 0;
+  const backfillEligible = panelIsAdmin && backfillDaysPast >= 1;
+  const backfillCloseoutDefault = panelIsAdmin && backfillDaysPast >= 7;
+  const [backfillCloseout, setBackfillCloseout] = useState(
+    backfillCloseoutDefault,
+  );
+  // Operator-typed minutes for a backdated closeout. Starts EMPTY on
+  // purpose: the running `elapsed` spans the whole stale gap, so backfill
+  // must never inherit it — blank submits no timeOnSite and the duration
+  // stays unknown (see completionTimeOnSiteBody).
+  const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
+  // A backdated quiet closeout suppresses every customer send server-side —
+  // the client-side flags must agree, or the success overlay and CTA
+  // sub-label claim sends for a completion that texted nobody. Derived here,
+  // above the recap/review state, so recap eligibility and the review
+  // suppression chain can fold it in.
+  const backfillQuietCloseout = backfillEligible && backfillCloseout;
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -7816,11 +7934,7 @@ export function CompletionPanel({
   // flags endpoint also serve technician users, so gate the CTA on the admin role
   // exactly like the Customer 360 prepay buttons — otherwise a tech hits a 403
   // after filling the modal.
-  const prepayIsAdmin = (() => {
-    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
-    catch { return false; }
-  })();
-  const showPrepayCta = prepayAtCompletionFlag && prepayIsAdmin;
+  const showPrepayCta = prepayAtCompletionFlag && panelIsAdmin;
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
@@ -8329,7 +8443,15 @@ export function CompletionPanel({
   const chipServiceLine = closeoutChipLine(serviceTypeForArea, serviceLineForCloseout);
   const observationChips = observationChipsForLine(chipServiceLine);
   const recommendationChips = recommendationChipsForLine(chipServiceLine);
-  const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
+  // Under a backdated quiet closeout the server never enqueues the recap
+  // render and recap delivery refuses the send — so hide the capture/approve
+  // cards and let the success overlay auto-close instead of holding it open
+  // for a recap that will never exist.
+  const recapEligible =
+    pestRecapFlag &&
+    pestRecapReady &&
+    serviceLineForCloseout === "pest" &&
+    !backfillQuietCloseout;
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
@@ -8444,21 +8566,27 @@ export function CompletionPanel({
     ? "Service Complete + Invoice"
     : "Service Complete";
   const isIncompleteVisit = visitOutcome === "incomplete";
-  const reviewSuppressionReason = isIncompleteVisit
-    ? "incomplete"
-    : visitOutcome === "customer_declined"
-      ? "customer_declined"
-      : visitOutcome === "customer_concern" ||
-          isCustomerConcernInteraction(customerInteraction)
-        ? "customer_concern"
-        : willInvoice
-          ? "invoice_created"
-          : null;
-  const willReview =
-    (oneTimeRecapOnly || !!requestReview) &&
-    !willInvoice &&
-    !reviewSuppressionReason;
-  const effectiveSendSms = !isIncompleteVisit && (oneTimeRecapOnly || sendSms);
+  // Backfill rides the suppression chain (reason "backfill"): willReview goes
+  // false while the backdate checkbox is active, so the review checkbox shows
+  // "Review request suppressed", the timing selector hides, and the
+  // custom-review-time validation cannot block a submit whose review the
+  // server forces off anyway.
+  const reviewSuppressionReason = completionReviewSuppressionReason({
+    isIncompleteVisit,
+    backfillQuietCloseout,
+    visitOutcome,
+    customerConcernInteraction:
+      isCustomerConcernInteraction(customerInteraction),
+    willInvoice,
+  });
+  const willReview = completionWillReview({
+    oneTimeRecapOnly,
+    requestReview,
+    willInvoice,
+    reviewSuppressionReason,
+  });
+  const effectiveSendSms =
+    !isIncompleteVisit && !backfillQuietCloseout && (oneTimeRecapOnly || sendSms);
   const reviewSendsWithCompletionSms =
     willReview &&
     effectiveSendSms &&
@@ -8980,6 +9108,9 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        backfillCloseout,
+        backfillCloseoutDefault,
+        backfillTimeOnSite,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -9007,6 +9138,12 @@ export function CompletionPanel({
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
+        // Backdated-closeout choices: the checked box is what keeps this
+        // submit QUIET (no sends, no collection rails) and the typed minutes
+        // are operator input — both must survive the billing-409 detour and
+        // any panel reload, or the restored submit silently turns LOUD.
+        backfillCloseout,
+        backfillTimeOnSite,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -9101,6 +9238,8 @@ export function CompletionPanel({
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
+    backfillCloseout,
+    backfillTimeOnSite,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -9168,6 +9307,16 @@ export function CompletionPanel({
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
+    // draft without the fields falls back to the panel default. Consumers all
+    // gate on backfillEligible, so this stays inert if the visit is somehow
+    // no longer past-dated.
+    const restoredBackfill = restoredBackfillChoices(
+      savedDraft,
+      backfillCloseoutDefault,
+    );
+    setBackfillCloseout(restoredBackfill.backfillCloseout);
+    setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
@@ -10298,6 +10447,10 @@ export function CompletionPanel({
             }
           : null,
         oneTimeRecapOnly,
+        // Backdated quiet closeout — only ever posted for a past-dated visit
+        // (the server 400s otherwise); the flag overrides the SMS/review
+        // toggles server-side.
+        ...(backfillEligible && backfillCloseout ? { backfill: true } : {}),
         sendCompletionSms: effectiveSendSms,
         // Only meaningful when an invoice/pay link would be texted; mirror the
         // sub-toggle's visibility (invoice + SMS being sent) so a stale false
@@ -10309,7 +10462,13 @@ export function CompletionPanel({
         reviewScheduledFor: oneTimeRecapOnly
           ? null
           : selectedReviewScheduledFor,
-        timeOnSite: elapsed,
+        // Backfill: never the auto-elapsed (it spans the stale gap) — only
+        // what the operator typed, or nothing. See completionTimeOnSiteBody.
+        ...completionTimeOnSiteBody({
+          backfill: backfillEligible && backfillCloseout,
+          typedMinutes: backfillTimeOnSite,
+          elapsed,
+        }),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
@@ -12721,6 +12880,97 @@ export function CompletionPanel({
                   One-time recap + review only (no invoice)
                 </span>{" "}
               </label>{" "}
+              {backfillEligible && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${backfillCloseout ? M.ink : M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={backfillCloseout}
+                    onChange={(e) => setBackfillCloseout(e.target.checked)}
+                    style={{
+                      width: 18,
+                      height: 18,
+                      accentColor: M.ink,
+                      marginTop: 1,
+                    }}
+                  />{" "}
+                  <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                    Backdated closeout — {backfillDaysPast} day
+                    {backfillDaysPast === 1 ? "" : "s"} past its date
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 14,
+                        color: M.ink3,
+                        marginTop: 2,
+                      }}
+                    >
+                      {backfillCloseout
+                        ? "Records to the visit day, sends no customer messages, and skips auto-charge."
+                        : "Unchecked: completes as today with the normal customer messages."}
+                    </span>
+                  </span>{" "}
+                </label>
+              )}{" "}
+              {backfillEligible && backfillCloseout && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                      marginBottom: 8,
+                    }}
+                  >
+                    Time on site (minutes)
+                  </span>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={backfillTimeOnSite}
+                    onChange={(e) => setBackfillTimeOnSite(e.target.value)}
+                    placeholder="Unknown"
+                    style={mInput}
+                  />{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 6,
+                    }}
+                  >
+                    The running timer spans the missed days and is not
+                    submitted — leave blank to record no duration.
+                  </span>{" "}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -14696,6 +14946,63 @@ export function CompletionPanel({
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
           </label>{" "}
+          {backfillEligible && (
+            <label
+              style={{
+                ...checkboxRow,
+                alignItems: "flex-start",
+                fontSize: 14,
+                borderColor: backfillCloseout ? D.teal : checkboxRow.borderColor,
+              }}
+            >
+              {" "}
+              <input
+                type="checkbox"
+                checked={backfillCloseout}
+                onChange={(e) => setBackfillCloseout(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />{" "}
+              <span>
+                Backdated closeout — {backfillDaysPast} day
+                {backfillDaysPast === 1 ? "" : "s"} past its date
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 14,
+                    color: D.muted,
+                    marginTop: 2,
+                  }}
+                >
+                  {backfillCloseout
+                    ? "Records to the visit day, sends no customer messages, and skips auto-charge."
+                    : "Unchecked: completes as today with the normal customer messages."}
+                </span>
+              </span>{" "}
+            </label>
+          )}{" "}
+          {backfillEligible && backfillCloseout && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 4 }}>
+                Time on site (minutes)
+              </div>{" "}
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="720"
+                step="1"
+                value={backfillTimeOnSite}
+                onChange={(e) => setBackfillTimeOnSite(e.target.value)}
+                placeholder="Unknown"
+                style={{ ...inputStyle, fontSize: 14, marginBottom: 4 }}
+              />{" "}
+              <div style={{ fontSize: 14, color: D.muted }}>
+                The running timer spans the missed days and is not submitted —
+                leave blank to record no duration.
+              </div>{" "}
+            </div>
+          )}{" "}
           <label style={checkboxRow}>
             {" "}
             <input

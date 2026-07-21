@@ -25,6 +25,7 @@ const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require(
 const { ensureCustomerGeocoded } = require('./geocoder');
 const { stampedAddressDiverges } = require('./stamped-address');
 const {
+  finiteDate,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -595,6 +596,36 @@ async function markOnProperty(serviceId, opts = {}) {
  * Flip to 'complete'. Admin-dispatch's PUT /:id/status (status='completed')
  * and POST /:id/complete both route through here so the customer-visible
  * state machine stays canonical.
+ *
+ * opts.untrustedLifecycleSpan (backdated quiet closeouts — admin-dispatch
+ * `backfill: true`): skip the buildCompletionLifecycleUpdates rebuild. On a
+ * stale row that helper would stamp NOW into actual_end_time/check_out_time
+ * and book the stale-start→now gap as service_time_minutes/
+ * actual_duration_minutes — re-polluting, AFTER the completion transaction,
+ * exactly the columns applyBackfillDurationPolicy stripped (or set from the
+ * operator's typed duration). Job-costing's durable untrusted-span guard
+ * prefers persisted service_time_minutes as explicit labor, so the rebuilt
+ * span would also book weeks of labor. Under the flag the tracker writes
+ * only its own bookkeeping — the track_state flip, updated_at — and every
+ * lifecycle timing/duration column keeps whatever the policy persisted.
+ *
+ * completed_at under the flag comes from opts.completedAt — the caller's
+ * backdated service-day end instant (admin-dispatch's
+ * backfillCompletionEndInstant) — because day-scale readers treat the column
+ * as "when the visit completed", not tracker bookkeeping: a NOW stamp fed
+ * the closeout date into pricing-reality-check's lookback COALESCE and its
+ * minutesBetween(arrived_at, completed_at) fallback (Codex P2, PR #2897 fix
+ * round 4), the termite-bond sync's third preference, and billing
+ * recovery's aging. Since fix round 9 the backfill caller supplies an
+ * instant for EVERY shape (ET noon of the service day when the end is not
+ * operator-stated) — a NULL completed_at hid priced-but-uninvoiced
+ * backfills from Billing Recovery's completed_at window, and the sub-day
+ * pair readers now guard on the record's durable structured_notes.backfill
+ * marker instead. The no-instant contract is kept defensively: a null/
+ * invalid opts.completedAt still writes NOTHING rather than falling back
+ * to the wall clock (legacy pre-tracking rows already carry NULL
+ * completed_at and every reader falls back via COALESCE/scheduled_date).
+ * Default (every non-backfill caller) is unchanged: completed_at = now.
  */
 async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
@@ -611,13 +642,16 @@ async function markComplete(serviceId, opts = {}) {
   }
 
   const now = new Date();
+  // Untrusted span: caller-supplied backdated instant or nothing (see the
+  // function comment). Normal path: the wall clock, as always.
+  const completedAtStamp = opts.untrustedLifecycleSpan ? finiteDate(opts.completedAt) : now;
   const updated = await db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
     .update({
       track_state: 'complete',
-      completed_at: now,
-      ...buildCompletionLifecycleUpdates(svc, now),
+      ...(completedAtStamp ? { completed_at: completedAtStamp } : {}),
+      ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
       updated_at: now,
     });
   if (updated === 0) {
@@ -635,11 +669,11 @@ async function markComplete(serviceId, opts = {}) {
       logger.error(`[track-transitions] tech_status complete clear failed: ${err.message}`);
     }
   }
-  emitCustomerTrackRefresh(svc, 'complete', now);
+  emitCustomerTrackRefresh(svc, 'complete', completedAtStamp || now);
   return {
     ok: true,
     state: 'complete',
-    completedAt: now,
+    completedAt: completedAtStamp || null,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
   };
 }
