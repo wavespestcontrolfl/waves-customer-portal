@@ -380,4 +380,40 @@ describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () =>
     expect(out.vehicleDeduction.excludedVehicleExpenses).toBe(0);
     expect(out.netIncome).toBe(500);
   });
+
+  // The standard mileage rate embeds a depreciation allowance; a vehicle's
+  // separate MACRS/§179 depreciation must NOT be deducted beside it.
+  describe('vehicle depreciation under standard mileage', () => {
+    const withDepr = {
+      serviceRevenue: 10000,
+      mileageDeduction: 3300,
+      depreciationTotal: 11200,     // $8k equipment + $3.2k vehicle, say
+      vehicleDepreciation: 3200,
+    };
+
+    test('standard_mileage excludes the vehicle depreciation portion', () => {
+      const out = assemblePnl({ ...withDepr, vehicleMethod: 'standard_mileage' });
+      // Only non-vehicle depreciation survives beside the mileage rate.
+      expect(out.deductions.depreciation).toBe(8000);
+      expect(out.deductions.mileage).toBe(3300);
+      expect(out.deductions.total).toBe(11300);
+      expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(3200);
+    });
+
+    test('actual_expenses and unelected keep FULL depreciation', () => {
+      for (const vehicleMethod of ['actual_expenses', null]) {
+        const out = assemblePnl({ ...withDepr, vehicleMethod });
+        expect(out.deductions.depreciation).toBe(11200);
+        expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(0);
+      }
+    });
+
+    test('vehicle depreciation is never deducted alongside standard mileage', () => {
+      const out = assemblePnl({ ...withDepr, vehicleMethod: 'standard_mileage' });
+      // counted depreciation + excluded vehicle depreciation == the raw total,
+      // and the excluded slice is exactly the vehicle portion.
+      expect(out.deductions.depreciation + out.vehicleDeduction.excludedVehicleDepreciation)
+        .toBe(11200);
+    });
+  });
 });

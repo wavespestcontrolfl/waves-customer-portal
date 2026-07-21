@@ -2857,6 +2857,7 @@ function PnlTab() {
   const [period, setPeriod] = useState("mtd");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
+  const [savingMethod, setSavingMethod] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2875,6 +2876,36 @@ function PnlTab() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Elect (or un-elect) the vehicle deduction method. Persisted on
+  // company_financials via the canonical revenue-settings writer; a confirm
+  // guards the change because it moves real deduction dollars.
+  const setVehicleMethod = async (value) => {
+    const method = value === "" ? null : value;
+    const labels = {
+      standard_mileage: "Standard mileage",
+      actual_expenses: "Actual vehicle expenses",
+      null: "Not elected",
+    };
+    if (
+      !window.confirm(
+        `Set the vehicle deduction method to "${labels[method]}"? This changes which side of Schedule C line 9 is deducted. Confirm with your CPA first.`,
+      )
+    ) {
+      return;
+    }
+    setSavingMethod(true);
+    try {
+      await adminFetch("/admin/revenue/settings", {
+        method: "PUT",
+        body: JSON.stringify({ vehicleDeductionMethod: method }),
+      });
+      await load();
+    } catch (e) {
+      alert(`Could not save election: ${e.message || e}`);
+    }
+    setSavingMethod(false);
+  };
 
   const downloadPnl = async () => {
     try {
@@ -3126,6 +3157,30 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow label="Total Deductions" value={pnl.deductions?.total} bold />{" "}
+          {pnl.vehicleDeduction && (
+            <div
+              style={{
+                marginTop: 8,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12,
+                color: D.muted,
+              }}
+            >
+              <span>Vehicle deduction method (Schedule&nbsp;C line 9):</span>
+              <select
+                value={pnl.vehicleDeduction.method || ""}
+                disabled={savingMethod}
+                onChange={(e) => setVehicleMethod(e.target.value)}
+                style={{ ...inputStyle, minWidth: 180, opacity: savingMethod ? 0.5 : 1 }}
+              >
+                <option value="">Not elected</option>
+                <option value="standard_mileage">Standard mileage</option>
+                <option value="actual_expenses">Actual vehicle expenses</option>
+              </select>
+            </div>
+          )}{" "}
           {pnl.vehicleDeduction &&
             !pnl.vehicleDeduction.elected &&
             pnl.vehicleDeduction.excludedMileage > 0 && (
@@ -3141,10 +3196,10 @@ function PnlTab() {
                 }}
               >
                 {fmtM(pnl.vehicleDeduction.excludedMileage)} of classified
-                mileage is excluded until you elect a vehicle deduction method.
-                Standard mileage and actual vehicle expenses are the same
-                Schedule&nbsp;C line and can&apos;t both be deducted — set the
-                election in Financial Settings once your CPA confirms it.
+                mileage is excluded until you elect a vehicle deduction method
+                above. Standard mileage and actual vehicle expenses are the same
+                Schedule&nbsp;C line and can&apos;t both be deducted — choose one
+                once your CPA confirms it.
               </div>
             )}{" "}
           {pnl.vehicleDeduction?.methodConflict && (

@@ -841,7 +841,18 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
           if (partial !== null) {
             update.tax_deductible_amount = partial;
           }
-          await db('expenses').where({ id: exp.id }).update(update);
+          // Re-assert still-uncategorized: the model calls run serially, so an
+          // operator could categorize this row mid-batch — a bare id UPDATE
+          // would clobber that manual choice with a stale AI pick. A zero-row
+          // update means someone got there first; skip it.
+          const changed = await db('expenses')
+            .where({ id: exp.id })
+            .whereNull('category_id')
+            .update(update);
+          if (!changed) {
+            results.push({ id: exp.id, description: exp.description, applied: false, error: 'already categorized' });
+            continue;
+          }
           results.push({ id: exp.id, description: exp.description, category: ai.categoryName, reasoning: ai.reasoning, applied: true });
         } else {
           results.push({ id: exp.id, description: exp.description, applied: false, error: 'no matching category' });

@@ -42,8 +42,10 @@
  * that same line by another route. The IRS lets you deduct one, never both.
  * company_financials.vehicle_deduction_method elects which side counts:
  *
- *   'standard_mileage' — mileage deduction counts; Vehicle Expenses opex is
- *                        excluded (still reported, as `excluded`).
+ *   'standard_mileage' — mileage deduction counts; Vehicle Expenses opex AND
+ *                        any vehicle MACRS/§179 depreciation are excluded (the
+ *                        rate already embeds depreciation — deducting it beside
+ *                        the rate double-counts). Both are still reported.
  *   'actual_expenses'  — Vehicle Expenses opex counts; mileage is excluded.
  *   NULL (unelected)   — FAIL CLOSED: keep actual vehicle expenses (real
  *                        recorded cash) and EXCLUDE the computed mileage
@@ -209,6 +211,7 @@ function assemblePnl({
   processingFees = 0,
   mileageDeduction = 0,
   depreciationTotal = 0,
+  vehicleDepreciation = 0,
   vehicleMethod = null,
 } = {}) {
   const revenue = round2(serviceRevenue);
@@ -255,7 +258,16 @@ function assemblePnl({
   const totalRevenue = round2(revenue + other);
   const cogsTotal = round2(labor + materials);
   const grossProfit = round2(totalRevenue - cogsTotal);
-  const deductionsTotal = round2(countedMileage + (Number(depreciationTotal) || 0));
+  // The standard mileage rate ALREADY embeds a depreciation component, so a
+  // vehicle's separate MACRS/§179 depreciation can't also be deducted under
+  // that election — subtract the vehicle portion from counted depreciation
+  // (it's excluded, not lost: reported in vehicleDeduction). Every other
+  // election keeps full depreciation (actual expenses / unelected both do).
+  const rawDepreciation = round2(Number(depreciationTotal) || 0);
+  const vehDepr = round2(Number(vehicleDepreciation) || 0);
+  const excludedVehicleDepreciation = useStandardMileage ? vehDepr : 0;
+  const countedDepreciation = round2(rawDepreciation - excludedVehicleDepreciation);
+  const deductionsTotal = round2(countedMileage + countedDepreciation);
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
   return {
@@ -266,7 +278,7 @@ function assemblePnl({
     operatingExpenses: { categories: opexCategories, total: opexTotal },
     deductions: {
       mileage: countedMileage,
-      depreciation: round2(depreciationTotal),
+      depreciation: countedDepreciation,
       total: deductionsTotal,
     },
     // What line 9 actually did, always reported — an excluded amount is
@@ -277,6 +289,7 @@ function assemblePnl({
       countedMileage,
       excludedMileage: useStandardMileage ? 0 : rawMileage,
       excludedVehicleExpenses,
+      excludedVehicleDepreciation,
     },
     netIncome,
     netMargin: totalRevenue > 0 ? netIncome / totalRevenue : 0,
@@ -603,6 +616,10 @@ async function buildPnlReport(db, startDate, endDate) {
       .select(
         'annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date',
         'depreciation_method', 'section_179_elected', 'section_179_amount', 'purchase_cost',
+        // Needed to split VEHICLE depreciation out under a standard-mileage
+        // election — the rate already embeds a depreciation component, so
+        // deducting a vehicle's MACRS/§179 beside it double-counts.
+        'asset_category',
       )
       .catch(missingTableOnly([])),
     // The vehicle-method election (newest financials row, same accessor every
@@ -646,6 +663,13 @@ async function buildPnlReport(db, startDate, endDate) {
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
     depreciationTotal: prorateDepreciation(assets, startDate, endDate),
+    // Vehicle depreciation, prorated the same way — assemblePnl removes it
+    // from counted depreciation under a standard-mileage election so the
+    // rate's built-in depreciation component isn't deducted twice.
+    vehicleDepreciation: prorateDepreciation(
+      (assets || []).filter((a) => a.asset_category === 'vehicle'),
+      startDate, endDate,
+    ),
     vehicleMethod,
   });
 

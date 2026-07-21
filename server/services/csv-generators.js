@@ -175,6 +175,14 @@ function pnlToCSV(pnlData) {
       + 'vs. actual expenses — same Schedule C line 9). Actual vehicle expenses, '
       + 'if any, remain in Operating Expenses above.']));
   }
+  if (veh?.excludedVehicleDepreciation > 0) {
+    lines.push(row(['', '']));
+    lines.push(row(['VEHICLE DEPRECIATION NOTE',
+      `${veh.excludedVehicleDepreciation.toFixed(2)} of vehicle depreciation is `
+      + 'EXCLUDED because standard mileage is elected — the rate already '
+      + 'includes a depreciation allowance, so it cannot also be deducted '
+      + 'separately.']));
+  }
   if (veh?.methodConflict?.note) {
     lines.push(row(['', '']));
     lines.push(row(['VEHICLE METHOD CONFLICT', veh.methodConflict.note]));

@@ -31,20 +31,25 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 }
 
 /**
- * IRS standard business mileage rate, DATE-effective — the IRS changes the
- * rate mid-year (2026: $0.725 through June 30, $0.76 from July 1), so a
- * year-keyed map wrote materially wrong deductions for H2 trips. Accepts a
- * 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass the trip
- * date); a bare year number resolves at that year's OPENING rate and is
+ * IRS standard business mileage rate, DATE-effective. The IRS normally sets
+ * ONE rate per calendar year, but has occasionally changed it mid-year when
+ * fuel prices spiked (2011, 2022) — the date-effective table exists to model
+ * those splits authoritatively rather than assume a single annual rate.
+ * Accepts a 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass the
+ * trip date); a bare year number resolves at that year's OPENING rate and is
  * reserved for year-granularity report displays.
- * ⚠️ 2026 values entered 2026-07-21 — CPA-confirm before relying on them
- * for filing, and extend the table when the IRS publishes new rates.
+ *
+ * 2026: a SINGLE rate of 72.5¢ applies all year — the IRS set no mid-year
+ * increase (IR / Notice 2026-10: "72.5 cents per mile driven for business
+ * use ... Beginning Jan. 1, 2026", up 2.5¢ from 2025's 70¢). A prior 76¢
+ * "July 1" entry here was NOT an IRS figure and overstated every H2 2026
+ * deduction; it has been removed. Add a mid-year row ONLY against a real IRS
+ * notice, and verify each rate against irs.gov before relying on it.
  */
 const IRS_MILEAGE_RATE_TABLE = [
-  { from: '2024-01-01', rate: 0.67 },
-  { from: '2025-01-01', rate: 0.70 },
-  { from: '2026-01-01', rate: 0.725 },
-  { from: '2026-07-01', rate: 0.76 },
+  { from: '2024-01-01', rate: 0.67 },  // Notice 2024-08
+  { from: '2025-01-01', rate: 0.70 },  // Notice 2025-05
+  { from: '2026-01-01', rate: 0.725 }, // Notice 2026-10
 ];
 
 function getIrsRate(tripDate) {
