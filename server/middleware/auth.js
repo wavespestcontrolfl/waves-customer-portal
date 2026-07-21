@@ -62,9 +62,51 @@ async function insertRefreshRecord(
   return { refreshToken, familyId, jti, expiresAt };
 }
 
+/**
+ * Customers created by paths that skip the account layer (public estimate
+ * accept, self-book, lead webhooks, call pipeline) have account_id NULL and
+ * no customer_accounts row, so the refresh-session insert's NOT NULL FK on
+ * account_id rejects their login AFTER Twilio approves the SMS code.
+ * Adopt the customer as their own account — the same self-adoption the
+ * 20260504000008 backfill applied to then-existing customers — before
+ * minting the session. Only the customerId-fallback case can be missing a
+ * row: a non-null customers.account_id is itself an FK onto customer_accounts.
+ */
+async function ensureSelfAccountRow(trx, customerId, accountId) {
+  if (String(accountId) !== String(customerId)) return;
+  const existing = await trx('customer_accounts').where({ id: accountId }).first('id');
+  if (existing) return;
+  const customer = await trx('customers').where({ id: customerId }).first();
+  if (!customer) return;
+  await trx('customer_accounts')
+    .insert({
+      id: customer.id,
+      first_name: customer.first_name || 'Customer',
+      last_name: customer.last_name || null,
+      email: customer.email || null,
+      phone: customer.phone || null,
+      company_name: customer.company_name || null,
+    })
+    .onConflict('id')
+    .ignore();
+  await trx('customers')
+    .where({ id: customerId })
+    .whereNull('account_id')
+    .update({
+      account_id: customer.id,
+      is_primary_profile: true,
+      profile_label: customer.profile_label || 'Primary',
+    });
+  logger.info(`[auth] adopted account-less customer ${customerId} as own account at login`);
+}
+
 /** Create a durable, revocable refresh-token family for a login session. */
 async function createRefreshSession(customerId, accountId = null) {
-  return db.transaction((trx) => insertRefreshRecord(trx, customerId, accountId || customerId));
+  return db.transaction(async (trx) => {
+    const resolvedAccountId = accountId || customerId;
+    await ensureSelfAccountRow(trx, customerId, resolvedAccountId);
+    return insertRefreshRecord(trx, customerId, resolvedAccountId);
+  });
 }
 
 /**
