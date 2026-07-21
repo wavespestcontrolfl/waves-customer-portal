@@ -102,6 +102,21 @@ describe('assemblePnl', () => {
     expect(out.grossProfit).toBe(440);
   });
 
+  test('synced Stripe fees reduce net income as their own opex category', () => {
+    const out = assemblePnl({
+      serviceRevenue: 1000,
+      opexRows: [{ category: 'Insurance', irs_line: '15', total: '100' }],
+      processingFees: 29.32,
+    });
+    const feeCat = out.operatingExpenses.categories.find(c => c.name === 'Stripe Processing Fees (synced)');
+    expect(feeCat?.amount).toBe(29.32);
+    expect(out.operatingExpenses.total).toBe(129.32);
+    expect(out.netIncome).toBe(870.68);
+    // Zero fees add no synthetic category.
+    const none = assemblePnl({ serviceRevenue: 100 });
+    expect(none.operatingExpenses.categories).toHaveLength(0);
+  });
+
   test('empty period yields zeros with zero margins, not NaN', () => {
     const out = assemblePnl({});
     expect(out.revenue.total).toBe(0);

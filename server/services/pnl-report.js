@@ -24,9 +24,12 @@
  *                  COGS labor, matching job-costing.js's entry_type='job'
  *                  scoping.
  *   materials    — expenses in the COGS categories.
- *   opex         — every other expense INCLUDING uncategorized ones. The old
- *                  whereNotIn(name) dropped NULL-category rows entirely (SQL
- *                  NOT IN + NULL), which in prod was 137/137 expenses.
+ *   opex         — every other expense INCLUDING uncategorized ones (the old
+ *                  whereNotIn(name) dropped NULL-category rows entirely — in
+ *                  prod that was 137/137 expenses), PLUS synced Stripe
+ *                  processing fees as their own category (revenue is gross
+ *                  charges; never hand-enter Stripe fees in expenses or
+ *                  they'd double-count).
  *   mileage      — mileage_log.deduction_amount in the window.
  *   depreciation — per-asset annual_depreciation prorated by days in service
  *                  within the window (same proration everywhere, including the
@@ -143,6 +146,7 @@ function assemblePnl({
   laborCost = 0,
   materialsCost = 0,
   opexRows = [],
+  processingFees = 0,
   mileageDeduction = 0,
   depreciationTotal = 0,
 } = {}) {
@@ -157,6 +161,17 @@ function assemblePnl({
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
     prev.amount = round2(prev.amount + (parseFloat(row.total) || 0));
     byCategory.set(name, prev);
+  }
+  // Merchant processing fees from the synced Stripe ledger — revenue above is
+  // gross charges (incl. card surcharges), so without this line netIncome
+  // overstates by every synced fee. Rendered as its own opex category. NOTE:
+  // if fees are ever ALSO logged manually in `expenses`, that would
+  // double-count — the ledger is the source of truth; don't hand-enter them.
+  const fees = round2(processingFees);
+  if (fees !== 0) {
+    byCategory.set('Stripe Processing Fees (synced)', {
+      name: 'Stripe Processing Fees (synced)', irsLine: null, amount: fees,
+    });
   }
   const opexCategories = Array.from(byCategory.values()).sort((a, b) => b.amount - a.amount);
   const opexTotal = round2(opexCategories.reduce((s, c) => s + c.amount, 0));
@@ -234,18 +249,35 @@ function missingTableOnly(fallback) {
  *   same table.
  * Exported so /revenue/reconcile reports the same revenue basis.
  */
+/**
+ * Stripe balance-transaction types that move refund money. 'refund' (card),
+ * 'payment_refund' (bank/local methods), and the *_failure variants —
+ * bounced refunds that RETURN funds to the merchant as positive amounts,
+ * which SUM(-amount) correctly nets back out.
+ */
+const REFUND_TXN_TYPES = ['refund', 'payment_refund', 'refund_failure', 'payment_failure_refund'];
+
 async function paidRevenueForWindow(db, startDate, endDate) {
   const etWindow = (qb, column) => qb
     .whereRaw(`${column} >= ?::timestamp AT TIME ZONE 'America/New_York'`, [`${startDate}T00:00:00`])
     .whereRaw(`${column} < (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'`, [`${endDate}T00:00:00`]);
 
-  const [ledger, invoiceGaps, deposits, refunded] = await Promise.all([
+  const [ledger, invoiceGaps, refundedGapReceipts, deposits, refunded] = await Promise.all([
+    // Genuine receipts only: the full-refund webhook inserts a MARKER row
+    // (metadata.source='invoice_refund', payment_date = the REFUND day) for
+    // gap invoices so receipt PDFs/emails have something to read — that row
+    // is not cash-in on its stamped date and is re-dated below instead.
     db('payments')
       .whereIn('status', ['paid', 'refunded'])
+      .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
       .whereBetween('payment_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
+    // Paid-Stripe-invoice gap rows (no payments row for the PI) — same shape
+    // and credit netting as the dashboard's paidRevenueTotal. The not-exists
+    // guard ignores refund markers so a PARTIALLY refunded gap invoice keeps
+    // its receipt here (the ledger below subtracts the partial refund).
     etWindow(
       db('invoices as i')
         .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
@@ -253,11 +285,28 @@ async function paidRevenueForWindow(db, startDate, endDate) {
         .whereNotExists(function gapGuard() {
           this.select(db.raw('1'))
             .from('payments as p')
-            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id')
+            .whereRaw("COALESCE(p.metadata->>'source', '') <> 'invoice_refund'");
         }),
       'i.paid_at',
     )
       .select(db.raw('COALESCE(SUM(GREATEST(i.total - COALESCE(i.credit_applied, 0), 0))::text, \'0\') as total'))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+    // FULLY refunded gap invoices: the invoice flips to 'refunded' (and its
+    // credit_applied is zeroed), so the gap query above no longer sees the
+    // original receipt. The marker's amount IS the cash actually charged —
+    // recognize it in the period the invoice was PAID (falling back to the
+    // marker's own date for pre-settlement refunds, where the refund ledger
+    // nets it to zero in the same window — correct: no net cash moved).
+    db('payments as m')
+      .whereRaw("m.metadata->>'source' = 'invoice_refund'")
+      .leftJoin('invoices as gi', 'gi.stripe_payment_intent_id', 'm.stripe_payment_intent_id')
+      .whereRaw(
+        "DATE(COALESCE(gi.paid_at AT TIME ZONE 'America/New_York', m.payment_date::timestamp)) BETWEEN ?::date AND ?::date",
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(m.amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
     etWindow(
@@ -268,7 +317,7 @@ async function paidRevenueForWindow(db, startDate, endDate) {
       .first()
       .catch(missingTableOnly({ total: '0' })),
     db('stripe_payout_transactions')
-      .where('type', 'refund')
+      .whereIn('type', REFUND_TXN_TYPES)
       .whereRaw(
         "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
         [startDate, endDate],
@@ -281,6 +330,7 @@ async function paidRevenueForWindow(db, startDate, endDate) {
   return round2(
     parseFloat(ledger?.total || 0)
     + parseFloat(invoiceGaps?.total || 0)
+    + parseFloat(refundedGapReceipts?.total || 0)
     + parseFloat(deposits?.total || 0)
     - parseFloat(refunded?.total || 0),
   );
@@ -334,7 +384,7 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, laborRows, rateRows, matRow, opexRows, mileageRow, assets] = await Promise.all([
+  const [serviceRevenue, laborRows, rateRows, matRow, opexRows, feeRow, mileageRow, assets] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
     db('time_entry_daily_summary')
       .whereBetween('work_date', [startDate, endDate])
@@ -367,6 +417,17 @@ async function buildPnlReport(db, startDate, endDate) {
       .sum('expenses.amount as total')
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
       .catch(missingTableOnly([])),
+    // Synced Stripe fees for the window (ET days). All balance-transaction
+    // types: charge fees positive, refund fee-reversals negative — the sum
+    // is the net merchant cost. Same source the Banking cash-flow uses.
+    db('stripe_payout_transactions')
+      .whereRaw(
+        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(fee)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
     db('mileage_log')
       .whereBetween('trip_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(deduction_amount)::text, '0') as total"))
@@ -395,6 +456,7 @@ async function buildPnlReport(db, startDate, endDate) {
     laborCost,
     materialsCost: parseFloat(matRow?.total || 0),
     opexRows,
+    processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
     depreciationTotal: prorateDepreciation(assets, startDate, endDate),
   });
