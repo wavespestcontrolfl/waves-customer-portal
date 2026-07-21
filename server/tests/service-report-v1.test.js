@@ -1546,6 +1546,55 @@ describe('service report v1', () => {
     ]);
   });
 
+  test('visit timeline never derives a duration from a backfilled record\'s pair — operator statement or the timing note (PR #2897 fix round 9)', () => {
+    // Backdated quiet closeout: the record keeps its real stale arrival as
+    // history while scheduled_services.completed_at carries only ET noon of
+    // the service day (written so Billing Recovery's leak window sees the
+    // visit). Pairing them would print a fabricated "time on site" on the
+    // customer report. structured.backfill is the durable marker the
+    // completion froze.
+    const showDuration = { showDuration: true };
+    const blankDurationBackfill = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        arrived_at: '2026-06-20T14:00:00.000Z', // 10:00 ET, kept stale start
+        scheduled_completed_at: '2026-06-20T16:00:00.000Z', // noon EDT service-day instant
+      },
+      structured: { backfill: true, timeOnSite: null },
+      serviceLine: 'pest',
+      config: showDuration,
+    });
+    expect(blankDurationBackfill.durationMinutes).toBeNull();
+    expect(blankDurationBackfill.timingNote)
+      .toBe('Exact on-site duration was not available for this visit.');
+    // The typed shape shows exactly the operator's statement.
+    const typedBackfill = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        arrived_at: '2026-06-20T14:00:00.000Z',
+        scheduled_completed_at: '2026-06-20T14:45:00.000Z',
+      },
+      structured: { backfill: true, timeOnSite: 45 },
+      serviceLine: 'pest',
+      config: showDuration,
+    });
+    expect(typedBackfill.durationMinutes).toBe(45);
+    // Non-backfill reports keep the pair-derived duration exactly.
+    const liveReport = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        arrived_at: '2026-06-20T14:00:00.000Z',
+        completed_at: '2026-06-20T14:30:00.000Z',
+      },
+      serviceLine: 'pest',
+      config: showDuration,
+    });
+    expect(liveReport.durationMinutes).toBe(30);
+  });
+
   test('visit timeline adds Service completed for completed reports even when Bouncie has no completion event', () => {
     const timeline = buildVisitTimeline({
       service: {

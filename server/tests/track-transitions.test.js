@@ -476,19 +476,20 @@ describe('track-transitions lifecycle side effects', () => {
     });
   });
 
-  test('markComplete under untrustedLifecycleSpan with NO completedAt writes track_state/updated_at ONLY (unknown-end backfill)', async () => {
+  test('markComplete under untrustedLifecycleSpan with NO completedAt writes track_state/updated_at ONLY (defensive no-instant contract)', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
-    // The unknown-end backfill shape: a stale check-in weeks back, blank
-    // typed duration — the completion transaction stripped the end stamps
-    // (any end would complete a fabricated pair against the kept real
-    // start), and the caller passes NO completedAt. The default rebuild
-    // would stamp today's end aliases and book the stale-start→now gap
-    // (weeks) as service_time_minutes; a completed_at stamp — even the old
-    // wall-clock bookkeeping one — would re-feed the pair to
-    // pricing-reality-check's minutesBetween(arrived_at, completed_at)
-    // fallback and its lookback COALESCE (Codex P2, fix round 4). The
-    // column stays NULL — the state legacy pre-tracking rows already
-    // occupy.
+    // The tracker's contract when the caller supplies no instant: write
+    // NOTHING to completed_at — never a wall-clock fallback. (Since PR
+    // #2897 fix round 9 the backfill route derives an instant for EVERY
+    // shape — ET noon of the service day when the end is not operator-
+    // stated, so Billing Recovery's completed_at window sees the visit —
+    // but the tracker keeps this leg fail-safe: a null/invalid
+    // opts.completedAt must not resurrect the wall-clock stamp that fed
+    // the closeout date into pricing-reality-check's lookback COALESCE
+    // and its minutesBetween(arrived_at, completed_at) fallback, Codex
+    // P2 fix round 4.) The default rebuild would also stamp today's end
+    // aliases and book the stale-start→now gap (weeks) as
+    // service_time_minutes — equally suppressed under the flag.
     const staleStart = new Date('2026-06-20T14:00:00.000Z');
     const svc = {
       id: 'job-bf',

@@ -1,4 +1,5 @@
 const { parseETDateTime } = require('../../utils/datetime-et');
+const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 const VISIT_TIMELINE_CONFIG_KEY = 'service_reports.visit_timeline';
 const VISIT_TIMELINE_TIME_ZONE = 'America/New_York';
@@ -394,7 +395,19 @@ function buildVisitTimeline({
     });
   }
 
-  const rawDurationMinutes = minutesBetween(onSiteAt, completedAt);
+  // Backdated quiet closeout (structured.backfill — the durable marker the
+  // completion freezes; same read job-costing / pricing-reality-check /
+  // estimate-actuals key their guards off): the record keeps its real stale
+  // arrival as history while scheduled_services.completed_at carries only a
+  // day-scale service-day instant (ET noon, PR #2897 fix round 9), so the
+  // onSite→completed pair would fabricate an on-site duration on this
+  // CUSTOMER-facing report. For marked records the only duration shown is
+  // the operator's typed statement (structured timeOnSite — for the typed
+  // shape the pair equals it by construction anyway); absent that, the
+  // existing timing note covers the honest unknown.
+  const rawDurationMinutes = structured.backfill === true
+    ? (minutesFromElapsed(structured.timeOnSite) || null)
+    : minutesBetween(onSiteAt, completedAt);
   const durationMinutes = rawDurationMinutes != null
     && rawDurationMinutes >= resolvedConfig.minimumDurationMinutes
     ? rawDurationMinutes

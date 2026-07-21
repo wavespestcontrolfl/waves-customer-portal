@@ -83,6 +83,39 @@ describe('actualDurationMinutes', () => {
       { arrived_at: '2026-06-01T14:00:00Z', completed_at: '2026-06-10T14:00:00Z' }, {},
     )).toBeNull();
   });
+
+  it('backfilled records (structured_notes.backfill) skip the span fallbacks — the noon-of-service-day completed_at must not fabricate a duration (PR #2897 fix round 9)', () => {
+    // The backdated quiet closeout keeps the real stale arrival as history
+    // and writes only a DAY-scale completed_at (ET noon of the service day,
+    // so Billing Recovery's leak window sees the visit). Pairing them would
+    // book a fabricated ~2h duration into the estimate-accuracy ledger.
+    const backfilledRecord = { structured_notes: JSON.stringify({ backfill: true, timeOnSite: null }) };
+    expect(actualDurationMinutes(
+      { arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      backfilledRecord,
+    )).toBeNull();
+    // The record-side span is equally untrusted for marked rows.
+    expect(actualDurationMinutes(
+      {},
+      { ...backfilledRecord, started_at: '2026-06-10T14:00:00Z', ended_at: '2026-06-10T16:00:00Z' },
+    )).toBeNull();
+    // The tracked column IS trusted — the backfill policy writes it only
+    // from the operator's typed duration.
+    expect(actualDurationMinutes(
+      { actual_duration_minutes: 45, arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      backfilledRecord,
+    )).toBe(45);
+    // Object-shaped structured_notes (jsonb column) and non-backfill rows
+    // keep the existing behavior.
+    expect(actualDurationMinutes(
+      { arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      { structured_notes: { backfill: true } },
+    )).toBeNull();
+    expect(actualDurationMinutes(
+      { arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      { structured_notes: JSON.stringify({ timeOnSite: 30 }) },
+    )).toBe(120);
+  });
 });
 
 describe('buildActualsRow', () => {

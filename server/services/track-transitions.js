@@ -616,12 +616,16 @@ async function markOnProperty(serviceId, opts = {}) {
  * the closeout date into pricing-reality-check's lookback COALESCE and its
  * minutesBetween(arrived_at, completed_at) fallback (Codex P2, PR #2897 fix
  * round 4), the termite-bond sync's third preference, and billing
- * recovery's aging. No opts.completedAt (the end is genuinely unknown —
- * blank typed duration against a kept real stale check-in) leaves the
- * column NULL rather than completing a fabricated pair: legacy
- * pre-tracking rows already carry NULL completed_at and every reader falls
- * back (COALESCE / scheduled_date). Default (every non-backfill caller) is
- * unchanged: completed_at = now.
+ * recovery's aging. Since fix round 9 the backfill caller supplies an
+ * instant for EVERY shape (ET noon of the service day when the end is not
+ * operator-stated) — a NULL completed_at hid priced-but-uninvoiced
+ * backfills from Billing Recovery's completed_at window, and the sub-day
+ * pair readers now guard on the record's durable structured_notes.backfill
+ * marker instead. The no-instant contract is kept defensively: a null/
+ * invalid opts.completedAt still writes NOTHING rather than falling back
+ * to the wall clock (legacy pre-tracking rows already carry NULL
+ * completed_at and every reader falls back via COALESCE/scheduled_date).
+ * Default (every non-backfill caller) is unchanged: completed_at = now.
  */
 async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
