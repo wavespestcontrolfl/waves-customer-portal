@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -30,6 +31,7 @@ export default function AdminLoginPage() {
   const [searchParams] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -107,9 +109,16 @@ export default function AdminLoginPage() {
             onFocus={e => e.target.style.borderColor = D.teal} onBlur={e => e.target.style.borderColor = D.border} />
 
           <label htmlFor="staff-password" style={{ display: 'block', color: D.text, fontSize: 14, marginBottom: 6 }}>Password</label>
-          <input id="staff-password" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" required
-            style={{ width: '100%', padding: '14px 16px', borderRadius: 10, border: `2px solid ${D.border}`, fontSize: 16, fontFamily: ADMIN_FONT, color: D.white, background: D.bg, outline: 'none', boxSizing: 'border-box' }}
-            onFocus={e => e.target.style.borderColor = D.teal} onBlur={e => e.target.style.borderColor = D.border} />
+          <div style={{ position: 'relative' }}>
+            <input id="staff-password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" required
+              style={{ width: '100%', padding: '14px 48px 14px 16px', borderRadius: 10, border: `2px solid ${D.border}`, fontSize: 16, fontFamily: ADMIN_FONT, color: D.white, background: D.bg, outline: 'none', boxSizing: 'border-box' }}
+              onFocus={e => e.target.style.borderColor = D.teal} onBlur={e => e.target.style.borderColor = D.border} />
+            <button type="button" onClick={() => setShowPassword(s => !s)}
+              aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword}
+              style={{ position: 'absolute', top: 0, right: 0, height: '100%', width: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: D.muted }}>
+              {showPassword ? <EyeOff size={20} aria-hidden /> : <Eye size={20} aria-hidden />}
+            </button>
+          </div>
 
           {error && <div role="alert" style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, background: '#7f1d1d', color: '#fca5a5', fontSize: 14 }}>{error}</div>}
 
