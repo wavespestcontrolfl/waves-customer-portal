@@ -66,10 +66,28 @@ const ROUTE_ROOTS = new Set([
   'receipt', 'track', 'contract', 'card', 'prep', 'rate', 'recap', 'review',
   'secure', 'reschedule', 'price-change', 'service-outlines', 'book', 'login',
 ]);
-// A page-name segment: lowercase letters + hyphens, NO digits — so admin/tech
-// page names (banking, dashboard, service-outlines) are kept but any tokenized
-// or injected tail (digits, mixed case, PANs) is dropped.
-const PAGE_SEG_RE = /^[a-z][a-z-]{0,30}$/;
+// Known admin/tech page names (the second path segment). A shape check (e.g.
+// "lowercase letters + hyphens") is NOT safe on a public endpoint: an attacker
+// can POST route=/admin/adambenetti or /tech/main-street — an identifier-shaped
+// person-name or address that would then persist in Sentry as PII and spawn an
+// unbounded set of fingerprints. So the segment must be a strict allowlist of
+// real page names; anything else drops to the root. Sourced from ADMIN_NAV_ITEMS
+// (client/src/config/adminNavigation.js) and the tech route set — a new page not
+// yet listed here simply reports as its root (safe degradation), so update this
+// when a page is added if per-page fingerprint granularity is wanted.
+const PAGE_SEGMENTS = new Set([
+  // admin
+  'agent-estimate', 'agents', 'banking', 'billing-recovery', 'blog',
+  'communications', 'compliance', 'contracts', 'customers', 'dashboard',
+  'dispatch', 'email', 'equipment', 'inventory', 'invoices', 'knowledge',
+  'lawn-assessments', 'more', 'newsletter', 'payers', 'pipeline', 'ppc',
+  'price-match', 'pricing-logic', 'projects', 'referrals', 'reviews',
+  'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
+  'timetracking', 'tool-health',
+  // tech
+  'field-lead', 'notifications', 'services', 'treatment', 'route', 'estimator',
+  'protocols', 'recap', 'home', 'lawn-diagnostic', 'social-post',
+]);
 const routeLabel = (value) => {
   const path = String(value || '');
   if (!path.startsWith('/')) return undefined;
@@ -77,9 +95,10 @@ const routeLabel = (value) => {
   const first = segs[0];
   if (!first) return '/';
   // admin/tech carry no path tokens — keep a safe page segment so distinct pages
-  // (/admin/banking vs /admin/dashboard) fingerprint separately.
+  // (/admin/banking vs /admin/dashboard) fingerprint separately, but ONLY when
+  // that segment is a known page name (attacker text collapses to the root).
   if (first === 'admin' || first === 'tech') {
-    return segs[1] && PAGE_SEG_RE.test(segs[1]) ? `${first}/${segs[1]}` : first;
+    return segs[1] && PAGE_SEGMENTS.has(segs[1]) ? `${first}/${segs[1]}` : first;
   }
   return ROUTE_ROOTS.has(first) ? first : 'other';
 };

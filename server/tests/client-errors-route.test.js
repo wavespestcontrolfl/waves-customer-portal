@@ -42,13 +42,15 @@ describe('POST /api/client-errors', () => {
     expect(captureContext.fingerprint).toEqual(['client-error', 'TypeError', 'PageErrorBoundary', 'admin/banking']);
   });
 
-  test('admin/tech keep a safe page segment so pages fingerprint separately', async () => {
+  test('admin/tech keep only an ALLOWLISTED page segment; attacker text drops to root', async () => {
     for (const [route, expected] of [
-      ['/admin/banking', 'admin/banking'],
+      ['/admin/banking', 'admin/banking'], // known admin page kept
       ['/admin/dashboard', 'admin/dashboard'],
-      ['/tech/route', 'tech/route'],
+      ['/tech/route', 'tech/route'], // known tech page kept
       ['/admin/4242424242424242', 'admin'], // injected digit tail dropped
       ['/admin/a4242424242', 'admin'], // mixed with digits dropped
+      ['/admin/adambenetti', 'admin'], // identifier-shaped person name → not allowlisted → root
+      ['/tech/main-street', 'tech'], // identifier-shaped address → not allowlisted → root
     ]) {
       mockCapture.mockClear();
       await post({ name: 'E', route });
@@ -62,7 +64,7 @@ describe('POST /api/client-errors', () => {
     mockCapture.mockClear();
     await post({ name: 'RangeError', context: 'PageErrorBoundary', route: '/report/t' });
     const fpB = mockCapture.mock.calls[0][1].fingerprint;
-    expect(fpA).toEqual(['client-error', 'TypeError', 'banking:payout', 'admin/x']);
+    expect(fpA).toEqual(['client-error', 'TypeError', 'banking:payout', 'admin']);
     expect(fpB).toEqual(['client-error', 'RangeError', 'PageErrorBoundary', 'report']);
   });
 
