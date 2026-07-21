@@ -2168,9 +2168,15 @@ function MileageTab() {
         method: "POST",
         body: JSON.stringify({ ids, purpose }),
       });
-      alert(
-        `${r.updated} trip${r.updated === 1 ? "" : "s"} marked ${purpose}${purpose === "business" ? ` — ${fmtM(r.deductionTotal)} in deductions` : ""}`,
-      );
+      let msg = `${r.updated} trip${r.updated === 1 ? "" : "s"} marked ${purpose}${purpose === "business" ? ` — ${fmtM(r.deductionTotal)} in deductions` : ""}`;
+      // Surface the honest edges the server reports, rather than a bare success.
+      if (r.skippedNoRate) {
+        msg += `\n\n⚠ ${r.skippedNoRate} trip${r.skippedNoRate === 1 ? "" : "s"} left UNCLASSIFIED — no verified IRS rate for their date yet. Add the published rate, then reclassify.`;
+      }
+      if (r.summaryRecomputeFailures) {
+        msg += `\n\n⚠ Mileage summaries for ${r.summaryRecomputeFailures} day/month bucket${r.summaryRecomputeFailures === 1 ? "" : "s"} could not be recomputed — dashboards may be briefly stale (the classification itself is saved). Re-run Sync to repair.`;
+      }
+      alert(msg);
       load();
     } catch (e) {
       alert(`Classification failed: ${e.message}`);

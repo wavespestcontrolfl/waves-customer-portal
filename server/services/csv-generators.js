@@ -60,15 +60,23 @@ function expensesToCSV(expenses) {
 }
 
 function mileageToCSV(trips) {
-  const headers = ['Date', 'Start Location', 'End Location', 'Business Miles', 'Purpose', 'IRS Rate', 'Deduction Amount'];
+  // 'Miles' is the trip's total distance; 'Business Miles' is populated ONLY
+  // for a confirmed business trip (is_business === true). Under the manual-
+  // review policy most synced trips are personal/unclassified, so labeling
+  // every distance as business would misrepresent unsubstantiated mileage to
+  // the CPA. Deduction/rate are already 0 for non-business rows.
+  const headers = ['Date', 'Start Location', 'End Location', 'Miles', 'Business Miles', 'Purpose', 'IRS Rate', 'Deduction Amount'];
   const lines = [row(headers)];
   for (const t of trips) {
+    const miles = t.distance_miles != null ? parseFloat(t.distance_miles) : null;
+    const isBusiness = t.is_business === true;
     lines.push(row([
       t.trip_date || t.date || '',
       t.start_address || t.start_location || '',
       t.end_address || t.end_location || '',
-      t.distance_miles != null ? parseFloat(t.distance_miles).toFixed(1) : '',
-      t.purpose || 'business',
+      miles != null ? miles.toFixed(1) : '',
+      isBusiness && miles != null ? miles.toFixed(1) : '',
+      t.purpose || 'unclassified',
       t.irs_rate != null ? parseFloat(t.irs_rate).toFixed(2) : '',
       t.deduction_amount != null ? parseFloat(t.deduction_amount).toFixed(2) : '',
     ]));
