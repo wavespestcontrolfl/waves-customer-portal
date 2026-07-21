@@ -23,10 +23,11 @@ const {
   dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
   REFUND_TXN_TYPES,
+  DISPUTE_TXN_TYPES,
 } = require('../services/pnl-report');
 
-describe('REFUND_TXN_TYPES', () => {
-  test('nets refunds and bounced-refund reversals, never failed-payment reversals', () => {
+describe('outflow transaction type sets', () => {
+  test('refunds net card/bank refunds and bounced-refund reversals, never failed-payment reversals', () => {
     expect(REFUND_TXN_TYPES).toEqual(expect.arrayContaining(['refund', 'payment_refund', 'refund_failure']));
     // payment_failure_refund reverses a PENDING ACH payment whose payments
     // row is status='failed' and was never counted as a receipt — including
@@ -34,6 +35,20 @@ describe('REFUND_TXN_TYPES', () => {
     // subtraction, can drive revenue negative). Regression for the round-3
     // pre-push P0.
     expect(REFUND_TXN_TYPES).not.toContain('payment_failure_refund');
+  });
+
+  test('disputes net via adjustment/payment_reversal — open subtracts, won adds back, lost stays', () => {
+    // SUM(-amount) semantics over Stripe's dispute carriers: dispute.created
+    // posts a NEGATIVE adjustment (subtract), a won dispute posts a POSITIVE
+    // one (net back to zero), a lost dispute posts nothing further (stays
+    // subtracted). ACH-debit disputes ride payment_reversal. Deposit
+    // chargebacks are covered because deposit receipts stay on the received
+    // side and the loss shows here in its own period.
+    expect(DISPUTE_TXN_TYPES).toEqual(['adjustment', 'payment_reversal']);
+    const sumNegated = (rows) => rows.reduce((s, r) => s - r.amount, 0);
+    expect(sumNegated([{ amount: -150 }])).toBe(150); // open: revenue down
+    expect(sumNegated([{ amount: -150 }, { amount: 150 }])).toBe(0); // won
+    expect(sumNegated([{ amount: -150 }])).toBe(150); // lost: no reversal row
   });
 });
 

@@ -283,6 +283,17 @@ function missingTableOnly(fallback) {
  */
 const REFUND_TXN_TYPES = ['refund', 'payment_refund', 'refund_failure'];
 
+/**
+ * Dispute/chargeback balance movements. Stripe carries the dispute
+ * withdrawal as a NEGATIVE 'adjustment' when the dispute opens and a
+ * POSITIVE one if it's won (lost = no further transaction), and uses
+ * 'payment_reversal' for ACH-debit disputes. SUM(-amount) therefore
+ * subtracts on open, adds back on win, and stays subtracted on loss —
+ * covering deposit chargebacks too (the deposit's receipt stays on the
+ * received side; the loss shows here in its own period).
+ */
+const DISPUTE_TXN_TYPES = ['adjustment', 'payment_reversal'];
+
 async function paidRevenueForWindow(db, startDate, endDate) {
   const etWindow = (qb, column) => qb
     .whereRaw(`${column} >= ?::timestamp AT TIME ZONE 'America/New_York'`, [`${startDate}T00:00:00`])
@@ -293,8 +304,12 @@ async function paidRevenueForWindow(db, startDate, endDate) {
     // (metadata.source='invoice_refund', payment_date = the REFUND day) for
     // gap invoices so receipt PDFs/emails have something to read — that row
     // is not cash-in on its stamped date and is re-dated below instead.
+    // 'disputed' stays a receipt: the cash arrived in this period; the
+    // chargeback withdrawal is a dispute balance transaction netted in ITS
+    // period (DISPUTE_TXN_TYPES) — excluding disputed rows here would erase
+    // the original receipt retroactively.
     db('payments')
-      .whereIn('status', ['paid', 'refunded'])
+      .whereIn('status', ['paid', 'refunded', 'disputed'])
       .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
       .whereBetween('payment_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
@@ -342,8 +357,10 @@ async function paidRevenueForWindow(db, startDate, endDate) {
       .select(db.raw("COALESCE(SUM(amount + COALESCE(card_surcharge, 0))::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
+    // Refunds AND dispute movements — every outflow against counted cash,
+    // in the period it occurred.
     db('stripe_payout_transactions')
-      .whereIn('type', REFUND_TXN_TYPES)
+      .whereIn('type', [...REFUND_TXN_TYPES, ...DISPUTE_TXN_TYPES])
       .whereRaw(
         "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
         [startDate, endDate],
@@ -502,4 +519,5 @@ module.exports = {
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
   REFUND_TXN_TYPES,
+  DISPUTE_TXN_TYPES,
 };

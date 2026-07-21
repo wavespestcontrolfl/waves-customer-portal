@@ -7,7 +7,7 @@ const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, REFUND_TXN_TYPES,
+  prorateAssetDepreciation, REFUND_TXN_TYPES, DISPUTE_TXN_TYPES,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1091,7 +1091,7 @@ router.get('/export/tax-package', async (req, res, next) => {
         .leftJoin('customers', 'payments.customer_id', 'customers.id')
         .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
         .orderBy('payments.payment_date', 'desc');
-    } catch { /* */ }
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // pnl.csv revenue also counts estimate-deposit cash and paid-Stripe-
     // invoice gap rows (no payments row) — map both into transactions.csv so
@@ -1171,13 +1171,13 @@ router.get('/export/tax-package', async (req, res, next) => {
         processor: 'stripe',
       })));
       payments.sort((a, b) => String(b.payment_date || '').localeCompare(String(a.payment_date || '')));
-    } catch { /* tables may not exist in dev */ }
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     let expenses = [];
-    try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch { /* */ }
+    try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     let trips = [];
-    try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch { /* */ }
+    try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // Refund ledger for the same window (ET days) — pnl.csv nets these, so
     // the package must include the rows that explain the outflow (a refund
@@ -1185,10 +1185,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     let refunds = [];
     try {
       refunds = await db('stripe_payout_transactions')
-        // Same type set pnl.csv nets (REFUND_TXN_TYPES) — card refunds,
-        // bank/local-method refunds, and bounced-refund reversals — so every
-        // refund figure in the P&L has a supporting row here.
-        .whereIn('type', REFUND_TXN_TYPES)
+        // Same type set pnl.csv nets — refunds (card, bank/local-method,
+        // bounced-refund reversals) AND dispute movements — so every outflow
+        // figure in the P&L has a supporting row here.
+        .whereIn('type', [...REFUND_TXN_TYPES, ...DISPUTE_TXN_TYPES])
         .whereRaw(
           "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
           [sd, ed],
@@ -1198,7 +1198,7 @@ router.get('/export/tax-package', async (req, res, next) => {
           db.raw("TO_CHAR(created_at_stripe AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as refund_date_et"),
         )
         .orderBy('created_at_stripe', 'desc');
-    } catch { /* table may not exist in dev */ }
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // Same predicate as the P&L builder: active assets PLUS disposed ones,
     // so depreciation.csv lists every asset whose prorated depreciation
@@ -1218,7 +1218,7 @@ router.get('/export/tax-package', async (req, res, next) => {
         ...e,
         period_depreciation: prorateAssetDepreciation(e, sd, ed),
       }));
-    } catch { /* */ }
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // Labor detail. The summary table stores MINUTES (work_date keyed), not a
     // cost column — the old query filtered a nonexistent `date` column, so
@@ -1260,7 +1260,7 @@ router.get('/export/tax-package', async (req, res, next) => {
           total_cost: (jobHours * dayRate).toFixed(2),
         };
       });
-    } catch { /* table may not exist in dev */ }
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // P&L from the shared builder — identical numbers to GET /pnl and
     // /export/pnl. (The old inline version had $0 revenue via a dead query,
