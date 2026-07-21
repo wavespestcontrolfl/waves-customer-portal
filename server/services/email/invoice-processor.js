@@ -107,28 +107,27 @@ async function processVendorInvoice(email, classification) {
   if (amount > 0) {
     try {
       const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
-      let categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
+      // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
+      // AI categorization here would run on UNTRUSTED emailed invoice text
+      // (prompt-injectable, and its pick flows straight into the P&L / tax
+      // export), so its result is stored as a SUGGESTION only — the expense
+      // lands UNCATEGORIZED for the operator to confirm via the Expenses tab's
+      // (operator-triggered) auto-categorize. Full deductible amount until then.
+      const categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
 
-      // No vendor-domain mapping (the common case — every prod expense was
-      // landing category_id NULL this way): fall back to the same AI
-      // categorizer the admin POST /expenses route uses. Best-effort — a
-      // categorizer failure must never block recording the expense.
+      let aiSuggestionNote = '';
       if (!categoryRow) {
         try {
           const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
-          // Fetch the FULL row so the partial-deduction policy below keys off
-          // the canonical name (the model's echoed name can differ in case).
-          if (ai?.categoryId) {
-            categoryRow = await db('expense_categories').where({ id: ai.categoryId }).first();
-          }
+          if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
         }
       }
 
-      // Server-owned partial-deduction policy applied to the FINAL matched
-      // category, whichever path resolved it — a meals vendor mapped by
-      // DOMAIN must still land at 50%, not just an AI-matched one.
+      // Server-owned partial-deduction policy — only for a DETERMINISTIC
+      // (vendor-domain) category match. Uncategorized stays fully deductible
+      // until the operator confirms a category.
       let deductibleAmount = amount;
       if (categoryRow?.name) {
         const partial = categoryDeductibleAmount(categoryRow.name, amount);
@@ -144,7 +143,7 @@ async function processVendorInvoice(email, classification) {
         expense_date: invoiceDate,
         tax_year: taxYear,
         payment_method: 'invoice',
-        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.`,
+        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
       }).returning('*');
 
       await db('emails').where({ id: email.id }).update({

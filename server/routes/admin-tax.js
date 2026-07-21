@@ -782,12 +782,14 @@ async function classifyTrips(ids, purpose) {
   // commits — derived state, best-effort, and a recompute failure must not roll
   // back the now-durable classification. (The monthly cron only regenerates the
   // PREVIOUS month, so an older trip's month would otherwise stay stale.)
+  let summaryRecomputeFailures = 0;
   const monthKeys = new Set();
   for (const key of summaryKeys) {
     const [equipmentId, day] = key.split('|');
     try {
       await mileageService.computeDailySummary(equipmentId, day);
     } catch (err) {
+      summaryRecomputeFailures++;
       logger.warn(`[tax] mileage daily summary recompute failed for ${equipmentId} ${day}: ${err.message}`);
     }
     monthKeys.add(`${equipmentId}|${day.slice(0, 7)}`);
@@ -797,10 +799,18 @@ async function classifyTrips(ids, purpose) {
     try {
       await mileageService.computeMonthlySummary(equipmentId, `${month}-01`);
     } catch (err) {
+      summaryRecomputeFailures++;
       logger.warn(`[tax] mileage monthly summary recompute failed for ${equipmentId} ${month}: ${err.message}`);
     }
   }
-  return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100, skippedNoRate };
+  return {
+    updated,
+    deductionTotal: Math.round(deductionTotal * 100) / 100,
+    skippedNoRate,
+    // Surfaced so the caller/UI knows dashboards may be briefly stale — the
+    // classification itself is durable; only the derived summaries lagged.
+    summaryRecomputeFailures,
+  };
 }
 
 // PUT /mileage/:id — reclassify one trip

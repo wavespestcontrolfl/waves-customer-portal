@@ -84,13 +84,21 @@ router.put('/trips/:id', async (req, res, next) => {
     const updates = { updated_at: db.fn.now() };
 
     if (is_business !== undefined) {
+      // Recalculate deduction at the trip's date-effective rate.
+      const irsRate = mileageService.getIrsRate(trip.trip_date);
+      // REFUSE a business classification with no verified rate (date past the
+      // horizon → 0): persisting $0 would look reviewed and never self-heal
+      // when the rate is added (reports sum persisted values). Same guard as
+      // classifyTrips / the manual-entry route.
+      if (is_business && !(irsRate > 0)) {
+        return res.status(422).json({
+          error: 'No verified IRS mileage rate for this trip’s date yet — add the published rate before classifying it business.',
+        });
+      }
       updates.is_business = is_business;
       updates.purpose = is_business ? 'business' : 'personal';
       updates.classification_method = 'manual';
       updates.classification_notes = notes || (is_business ? 'Manually classified as business' : 'Manually classified as personal');
-
-      // Recalculate deduction
-      const irsRate = mileageService.getIrsRate(trip.trip_date);
       updates.deduction_amount = is_business
         ? parseFloat((parseFloat(trip.distance_miles) * irsRate).toFixed(2))
         : 0;
