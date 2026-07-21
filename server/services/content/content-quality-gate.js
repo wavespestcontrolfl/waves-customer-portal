@@ -292,13 +292,17 @@ const DANGLING_META_ENDINGS = new Set([
 ]);
 
 function checkMetaDescriptionComplete(draft) {
-  // Refresh drafts of service/location pages carry the camelCase
-  // `metaDescription` variant — publishRefresh treats both casings as
-  // editable, so the completeness gate must inspect both too.
-  const m = (draft.meta_description || draft.metaDescription
-    || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  // Two meta contracts. snake_case meta_description is the BLOG contract —
+  // complete sentences, full check. camelCase metaDescription is the
+  // service/location refresh casing, where snippet-style metas without
+  // terminal punctuation are legitimate — only authored TRUNCATION
+  // (ellipsis) is a hard fail there.
+  const blogMeta = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  const refreshMeta = (draft.metaDescription || draft.frontmatter?.metaDescription || '').trim();
+  const m = blogMeta || refreshMeta;
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
+  if (!blogMeta) return { ok: true, reason: 'refresh_meta_snippet_style_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
   const beforePunct = core.replace(/[.!?]+$/, '').trim();

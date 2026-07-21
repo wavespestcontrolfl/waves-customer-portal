@@ -1491,9 +1491,60 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
-  test('refresh drafts skip the internal-route gate (legacy live links preserved)', () => {
+  test('refresh without a prior body skips the internal-route gate (quality gate blocks that publish anyway)', () => {
     const r = guardrails.evaluate({ body: 'Old page links to [legacy](/some-2019-era-page/).' }, { isRefresh: true });
     expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('refresh grandfathers prior-body links/components but gates writer additions (Codex round 3)', () => {
+    const priorBody = 'Live page links to [legacy](/some-2019-era-page/) and embeds <WhyTrustUs />.';
+    const preserved = guardrails.evaluate({
+      body: 'Refreshed copy keeps [legacy](/some-2019-era-page/) and <WhyTrustUs /> intact.',
+    }, { isRefresh: true, priorBody });
+    expect(preserved.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE' || f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
+    const addedLink = guardrails.evaluate({
+      body: 'Refreshed copy keeps [legacy](/some-2019-era-page/) but adds [fleas](/pest-library/fleas/).',
+    }, { isRefresh: true, priorBody });
+    expect(addedLink.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const addedComponent = guardrails.evaluate({
+      body: 'Refreshed copy adds <DataCallout stat="7" />.',
+    }, { isRefresh: true, priorBody });
+    expect(addedComponent.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+  });
+
+  test('autolinks and bare hub URLs are policed (Codex round 3)', () => {
+    for (const body of [
+      'See <https://www.wavespestcontrol.com/pest-library/fleas/> for details.',
+      'More at https://www.wavespestcontrol.com/pest-library/fleas/ today.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+  });
+
+  test('angle-bracketed reference destinations normalize cleanly (Codex round 3)', () => {
+    const r = guardrails.evaluate({ body: 'Get a [quote][q].\n\n[q]: </pest-control-quote/>\n' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('city-service links restrict to published page cities, not the dispatch footprint (Codex round 3)', () => {
+    const blocked = guardrails.evaluate({ body: '[Oneco pest control](/pest-control-oneco-fl/)' }, {});
+    expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
+  test('underscore component identifiers are caught (Codex round 3)', () => {
+    const r = guardrails.evaluate({ body: 'Note: <Pro_Tip title="x" /> here.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+  });
+
+  test('passive off-footprint claims are caught (Codex round 3)', () => {
+    for (const body of [
+      'Tampa homes are covered by our technicians every quarter.',
+      'Naples homes are serviced by our team.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
   });
 
   test('drift guard: every content-brief-builder SERVICE_HUB_LINKS target is allowlisted', () => {

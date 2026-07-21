@@ -523,18 +523,26 @@ const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
 // A PascalCase JSX opening tag — the shape MDX treats as a component
 // invocation. Member expressions (<ComparisonTable.Row>) are captured WHOLE
 // so an invented subcomponent of a safe root can never slip through — the
-// dotted name is not in the closed set. Closing tags (</X>) reuse the same
-// name and need no extra scan.
-const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*)\b/g;
+// dotted name is not in the closed set. Underscores are legal JSX identifier
+// characters (<Pro_Tip> is a component, and an undefined one). Closing tags
+// (</X>) reuse the same name and need no extra scan.
+const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\b/g;
 
-function uncatalogedComponentFinding(body) {
-  const text = String(body || '');
+function collectComponentNames(text) {
+  const names = new Set();
   const re = new RegExp(JSX_COMPONENT_TAG_RE.source, JSX_COMPONENT_TAG_RE.flags);
   let m;
-  while ((m = re.exec(text)) !== null) {
-    if (!SAFE_MDX_COMPONENT_SET.has(m[1])) {
-      return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${m[1]}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')}) — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
-    }
+  while ((m = re.exec(String(text || ''))) !== null) names.add(m[1]);
+  return names;
+}
+
+// exemptComponents: refresh grandfathering — names already present in the
+// live prior body are preserved-legacy, not writer inventions.
+function uncatalogedComponentFinding(body, exemptComponents = null) {
+  for (const name of collectComponentNames(body)) {
+    if (SAFE_MDX_COMPONENT_SET.has(name)) continue;
+    if (exemptComponents && exemptComponents.has(name)) continue;
+    return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${name}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')}) — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
   }
   return null;
 }
@@ -587,7 +595,7 @@ function outOfAreaCities() {
 // factual reference, not a service claim.
 // Third-person brand claims ("Waves Pest Control is now serving …") assert
 // operation exactly like "we serve".
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in))\b/i;
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
@@ -713,19 +721,15 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
 // link, not a pass.
 const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
 
-// City slugs a generated city-service link may target — the same canonical
-// footprint the off-footprint text gate uses. Fail-closed fallback: the
-// staffed-market slugs.
-function footprintCitySlugs() {
-  let footprint = null;
-  try {
-    ({ CITY_TO_LOCATION: footprint } = require('../../config/locations'));
-  } catch { footprint = null; }
-  if (!footprint) {
-    return new Set(['bradenton', 'lakewood-ranch', 'sarasota', 'venice', 'north-port', 'palmetto', 'parrish', 'port-charlotte']);
-  }
-  return new Set(Object.keys(footprint).map((c) => c.replace(/\s+/g, '-')));
-}
+// City slugs a generated city-service link may target — the cities that
+// actually HAVE published city-service pages (astro-publisher SERVICE_AREAS),
+// NOT the broader CITY_TO_LOCATION dispatch footprint: service-area towns
+// like Oneco or Gibsonton route to an office but have no /pest-control-*-fl/
+// page, so a link there is dead even though the town is served.
+const PAGE_CITY_SLUGS = new Set([
+  'bradenton', 'lakewood-ranch', 'sarasota', 'venice',
+  'north-port', 'palmetto', 'parrish', 'port-charlotte',
+]);
 
 function normalizeInternalPath(dest) {
   let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
@@ -739,13 +743,15 @@ function normalizeInternalPath(dest) {
 // reference links render exactly like inline ones and shipped a dead
 // destination would be just as dead. (Absolute URLs are the external gate's
 // job.)
-const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/\S*)/gim;
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)/gim;
 
-// Absolute URLs on the HUB host are the same dead-route class spelled
-// long-form — "https://www.wavespestcontrol.com/pest-library/fleas/" must be
-// policed as "/pest-library/fleas/", not waved through by the external
-// gate's host allowlist. Other hosts stay the external gate's job.
-const ABSOLUTE_DEST_RE = /\]\(\s*<?\s*(https?:\/\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](https?:\/\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(https?:\/\/\S*)/gim;
+// EVERY absolute URL in the text — markdown destinations, href/src,
+// reference definitions, CommonMark autolinks (<https://…>), and bare GFM
+// URLs. Hub-host matches are the dead-route class spelled long-form
+// ("https://www.wavespestcontrol.com/pest-library/fleas/" must be policed
+// as "/pest-library/fleas/", not waved through by the external gate's host
+// allowlist). Other hosts stay the external gate's job.
+const HUB_URL_CANDIDATE_RE = /https?:\/\/[^\s)\]>"'`]+/g;
 
 function hubHostSet() {
   try {
@@ -757,7 +763,35 @@ function hubHostSet() {
   }
 }
 
-function internalRouteFinding(body, allowedInternalLinks = []) {
+// Every internal-route candidate in the text, normalized. Shared by the
+// gate and by the refresh grandfathering pass over the prior live body.
+function collectInternalDestinations(text) {
+  const s = String(text || '');
+  const dests = [];
+  let m;
+  const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
+  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3]);
+  const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
+  const hubHosts = hubHostSet();
+  while ((m = abs.exec(s)) !== null) {
+    try {
+      const u = new URL(m[0]);
+      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+    } catch { /* malformed URL — the external gate owns it */ }
+  }
+  const normalized = [];
+  for (const dest of dests) {
+    // Anchor-only and in-repo image references are not routes.
+    if (dest.startsWith('/images/')) continue;
+    const norm = normalizeInternalPath(dest);
+    if (norm) normalized.push({ dest, norm });
+  }
+  return normalized;
+}
+
+// exemptRoutes: refresh grandfathering — normalized routes already present
+// in the live prior body are preserved-legacy, not writer inventions.
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = null) {
   const text = String(body || '');
   if (!text) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
@@ -765,27 +799,11 @@ function internalRouteFinding(body, allowedInternalLinks = []) {
     const norm = normalizeInternalPath(link);
     if (norm) allowed.add(norm);
   }
-  const dests = [];
-  let m;
-  const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
-  while ((m = rel.exec(text)) !== null) dests.push(m[1] || m[2] || m[3]);
-  const abs = new RegExp(ABSOLUTE_DEST_RE.source, ABSOLUTE_DEST_RE.flags);
-  const hubHosts = hubHostSet();
-  while ((m = abs.exec(text)) !== null) {
-    const raw = m[1] || m[2] || m[3];
-    try {
-      const u = new URL(raw);
-      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
-    } catch { /* malformed URL — the external gate owns it */ }
-  }
-  for (const dest of dests) {
-    // Anchor-only and in-repo image references are not routes.
-    if (dest.startsWith('/images/')) continue;
-    const norm = normalizeInternalPath(dest);
-    if (!norm) continue;
+  for (const { dest, norm } of collectInternalDestinations(text)) {
     if (allowed.has(norm)) continue;
+    if (exemptRoutes && exemptRoutes.has(norm)) continue;
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
-    if (citySlug && footprintCitySlugs().has(citySlug)) continue;
+    if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
   }
   return null;
@@ -1183,7 +1201,7 @@ function preventionPromiseFinding(text) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -1203,6 +1221,12 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     .map(String)
     .join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
+
+  // Refresh grandfathering surface: what the live prior body already
+  // carried. Built once here; consumed by the two structure gates below.
+  const refreshPriorBody = isRefresh && typeof priorBody === 'string' && priorBody.trim() ? priorBody : null;
+  const refreshExemptComponents = refreshPriorBody ? collectComponentNames(refreshPriorBody) : null;
+  const refreshExemptRoutes = refreshPriorBody ? new Set(collectInternalDestinations(refreshPriorBody).map((d) => d.norm)) : null;
 
   const findings = [
     // Price must cover everything that ships: body AND meta.
@@ -1232,17 +1256,20 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // ships (body AND meta) on every lane — neither has a legitimate form.
     citationResidueFinding(publishableText),
     offFootprintCityFinding(publishableText),
-    // Component + internal-route allowlists are body-structure policies for
-    // NEW content; refresh drafts of legacy live pages are exempt (see the
-    // isRefresh option doc above). Routes surfaced to the writer by
-    // check_existing_content ride on the draft payload
+    // Component + internal-route allowlists are body-structure policies.
+    // Refresh drafts GRANDFATHER what the live prior body already carried
+    // (legacy links/components the refresh merely preserves must not park
+    // it) but writer ADDITIONS are gated exactly like new content. Without
+    // a prior body the gates skip — the quality gate's improvement_over_
+    // prior check independently refuses to publish such a refresh. Routes
+    // surfaced by check_existing_content ride on the draft payload
     // (checked_existing_routes) so the stored-draft revalidation grants the
     // same allowance the original run did.
-    isRefresh ? null : uncatalogedComponentFinding(body),
-    isRefresh ? null : internalRouteFinding(body, [
+    (isRefresh && !refreshPriorBody) ? null : uncatalogedComponentFinding(body, refreshExemptComponents),
+    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ]),
+    ], refreshExemptRoutes),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');

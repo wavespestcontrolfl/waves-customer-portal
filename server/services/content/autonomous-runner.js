@@ -2787,6 +2787,23 @@ class AutonomousRunner {
       ...(Array.isArray(briefLinks) ? briefLinks : []),
       ...(curatedHubLink ? [curatedHubLink] : []),
     ];
+    const isRefresh = brief.action_type === 'refresh_existing_page';
+    // Refresh drafts rewrite an EXISTING live body. The structure gates
+    // grandfather what that prior body already carried but police writer
+    // ADDITIONS — so the prior body itself is part of the guard options.
+    // Load failure → null → the gates skip (the quality gate's
+    // improvement_over_prior check independently refuses such a publish).
+    let priorBody = null;
+    if (isRefresh) {
+      const publisher = getAstroPublisher();
+      if (publisher?.loadExistingPageBody) {
+        try {
+          priorBody = (await publisher.loadExistingPageBody(brief.target_url || opp.page_url))?.body || null;
+        } catch (err) {
+          logger.warn(`[autonomous-runner] prior-body load for refresh guardrails failed: ${err.message}`);
+        }
+      }
+    }
     return {
       service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
       primaryKeyword: brief.target_keyword || null,
@@ -2795,10 +2812,8 @@ class AutonomousRunner {
       requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
       operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
       allowedInternalLinks,
-      // Refresh drafts rewrite an EXISTING live body — the component/internal-
-      // route structure checks skip (legacy links/components the refresh merely
-      // preserves must not park it); citation/off-footprint still apply.
-      isRefresh: brief.action_type === 'refresh_existing_page',
+      isRefresh,
+      priorBody,
     };
   }
 

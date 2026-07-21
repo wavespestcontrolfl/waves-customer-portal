@@ -1230,12 +1230,14 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
 // A generation/vision-derived alt is produced AFTER the draft's guardrails
 // scan, so run it through the same policy before it lands in frontmatter —
 // prices, product names, brand tokens, footprint claims, citation residue.
-// Fail closed to the fallback (the already-scanned draft alt): a policy hit
-// or an evaluation error must never publish an unvetted string.
-function vetGeneratedAlt(generatedAlt, fallbackAlt) {
+// `domains` carries the draft's resolved target domains so the brand-token
+// leak guard applies with the same spoke context as the draft scan. Fail
+// closed to the fallback (the already-scanned draft alt): a policy hit or
+// an evaluation error must never publish an unvetted string.
+function vetGeneratedAlt(generatedAlt, fallbackAlt, domains = null) {
   if (!generatedAlt) return fallbackAlt || null;
   try {
-    const check = contentGuardrails.evaluate({ body: '', frontmatter: { hero_image_alt: String(generatedAlt) } }, {});
+    const check = contentGuardrails.evaluate({ body: '', frontmatter: { hero_image_alt: String(generatedAlt) } }, { domains });
     if (!check.pass) {
       logger.warn(`[astro-publisher] generated hero alt failed guardrails (${check.findings.map((f) => f.code).join(', ')}) — keeping the draft alt`);
       return fallbackAlt || null;
@@ -1472,7 +1474,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // AFTER the runner's guardrails scanned the draft, so vet it against the
   // same policy here — a violating alt falls back to the already-scanned
   // draft alt instead of bypassing the gates.
-  stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt));
+  stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt, Array.isArray(frontmatter.domains) ? frontmatter.domains : null));
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.

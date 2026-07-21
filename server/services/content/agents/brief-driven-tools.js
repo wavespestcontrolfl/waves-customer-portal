@@ -304,15 +304,17 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         } catch (pendingErr) {
           pendingAutonomous = [{ error: `autonomous_runs read failed: ${pendingErr.message}` }];
         }
-        // Every route surfaced here is a real live/in-flight page the writer
-        // may legitimately link (flat legacy slugs 301 to their canonical).
+        // Only LIVE pages become allowed link targets (flat legacy slugs 301
+        // to their canonical, so those are live too). draft/queued/wp_draft
+        // rows and PR-pending autonomous runs stay visible for DEDUPE but a
+        // link to them would be dead until they publish — excluded here.
         if (sessionId) {
           const seen = sessionCheckedRoutes.get(sessionId) || new Set();
           for (const row of matches) {
-            if (row.slug) seen.add(`/${String(row.slug).replace(/^\/+|\/+$/g, '')}/`);
+            if (row.slug && row.status === 'published') seen.add(`/${String(row.slug).replace(/^\/+|\/+$/g, '')}/`);
           }
           for (const row of pendingAutonomous) {
-            if (row.route) seen.add(`/${String(row.route).replace(/^\/+|\/+$/g, '')}/`);
+            if (row.route && row.outcome === 'completed_published') seen.add(`/${String(row.route).replace(/^\/+|\/+$/g, '')}/`);
           }
           sessionCheckedRoutes.set(sessionId, seen);
         }
