@@ -992,7 +992,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         customerId = existingCust.id;
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+        // Account layer: attach-or-create so the new lead profile is
+        // login-complete (portal refresh sessions FK customer_accounts).
+        // Lazy require: admin-customers is a route module (load-cycle risk).
+        const { ensureCustomerAccount } = require('./admin-customers');
+        const account = await ensureCustomerAccount(db, {
+          firstName: contactFirstName,
+          lastName: contactLastName,
+          phone: contactPhone,
+          email: emailLc,
+        });
         const [newCust] = await db('customers').insert(applyContactNormalization({
+          account_id: account.accountId,
+          is_primary_profile: !account.existingCustomer,
+          profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
           first_name: contactFirstName,
           last_name: contactLastName,
           email: emailLc,

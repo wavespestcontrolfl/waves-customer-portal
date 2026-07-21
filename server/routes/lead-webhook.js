@@ -380,7 +380,20 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // Create new customer
       const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
+      // Account layer: attach-or-create so the new lead profile is
+      // login-complete (portal refresh sessions FK customer_accounts).
+      // Lazy require: admin-customers is a route module (load-cycle risk).
+      const { ensureCustomerAccount } = require('./admin-customers');
+      const account = await ensureCustomerAccount(db, {
+        firstName,
+        lastName,
+        phone: phoneFormatted,
+        email: email || null,
+      });
       const [newCust] = await db('customers').insert({
+        account_id: account.accountId,
+        is_primary_profile: !account.existingCustomer,
+        profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address_line1: address || '',

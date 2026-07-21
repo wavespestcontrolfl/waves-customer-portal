@@ -319,7 +319,21 @@ async function resolveEstimateCustomer(database, estimate = {}) {
   }
 
   const name = splitName(estimate.customer_name);
+  // Account layer: attach-or-create so the new profile is login-complete
+  // (portal refresh sessions FK customer_accounts). A conflicted (ignored)
+  // insert below can strand a fresh account row — harmless grouping row.
+  // Lazy require: route module from a service (load-cycle risk).
+  const { ensureCustomerAccount } = require('../routes/admin-customers');
+  const account = await ensureCustomerAccount(database, {
+    firstName: name.first_name,
+    lastName: name.last_name,
+    phone: estimate.customer_phone,
+    email: estimate.customer_email || null,
+  });
   const [created] = await database('customers').insert(applyContactNormalization({
+    account_id: account.accountId,
+    is_primary_profile: !account.existingCustomer,
+    profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
     ...name,
     phone: estimate.customer_phone,
     email: estimate.customer_email || null,
