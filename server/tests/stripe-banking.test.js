@@ -249,8 +249,9 @@ describe('stripe banking service', () => {
 
     expect(result.has_more).toBe(true);
     expect(result.certified).toBe(false);
-    // Only the deep-page cursor persists — no last_sync_at, no watermark.
-    expect(syncStatePatch).toEqual({ sync_type: 'balance_transactions', cursor: 'txn_cap' });
+    // Only the deep-page cursor persists (with the pending high-watermark
+    // riding along for later promotion) — no last_sync_at, no watermark.
+    expect(syncStatePatch).toEqual({ sync_type: 'balance_transactions', cursor: 'txn_cap@1770000500' });
     expect(syncStatePatch.last_sync_at).toBeUndefined();
     expect(syncStatePatch.last_created_at).toBeUndefined();
   });
@@ -270,7 +271,15 @@ describe('stripe banking service', () => {
       expect.objectContaining({ starting_after: 'txn_resume' }),
     );
     expect(result.certified).toBe(false);
-    expect(syncStatePatch).toEqual({ cursor: null });
+    // The cursor clears and the high-watermark PROMOTES (the capped
+    // segments covered everything up to it) so the next fresh certifying
+    // pass starts there instead of re-walking history — but last_sync_at
+    // is NOT stamped: only a fresh cursor-free exhausted run certifies.
+    expect(syncStatePatch).toEqual({
+      cursor: null,
+      last_created_at: new Date(1769500000 * 1000).toISOString(),
+    });
+    expect(syncStatePatch.last_sync_at).toBeUndefined();
   });
 
   test('createInstantPayout validates available balance and upserts returned payout', async () => {

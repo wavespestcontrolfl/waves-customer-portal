@@ -280,6 +280,18 @@ async function syncPayouts(limit = 50) {
               failure_message: p.failure_message || null,
               synced_at: new Date().toISOString(),
             });
+          // An automatic payout that just transitioned to paid gets its
+          // per-payout transaction detail here — the watermark never
+          // revisits it, and the global sync leaves payout_id NULL, so this
+          // is the only path that fills transaction_count/fee_total for the
+          // common pending→paid flow.
+          if (p.status === 'paid' && p.automatic === true) {
+            try {
+              await syncPayoutTransactions(p.id);
+            } catch (err) {
+              logger.warn(`[stripe-banking] Post-refresh transaction sync failed for ${p.id}:`, err.message);
+            }
+          }
         } catch (err) {
           logger.warn(`[stripe-banking] Status refresh failed for ${row.stripe_payout_id}:`, err.message);
         }
@@ -404,6 +416,7 @@ async function syncBalanceTransactions(limit = 100) {
 
   let watermark = 0;
   let resumeCursor = null;
+  let pendingHighWatermark = 0;
   try {
     const syncState = await db('stripe_sync_state')
       .where('sync_type', 'balance_transactions')
@@ -411,11 +424,16 @@ async function syncBalanceTransactions(limit = 100) {
     if (syncState?.last_created_at) {
       watermark = Math.floor(new Date(syncState.last_created_at).getTime() / 1000);
     }
-    // A prior run that hit the page cap left a resume cursor (a Stripe txn
-    // id): continue paging DEEPER from it instead of refetching the same
-    // newest pages forever.
+    // A prior run that hit the page cap left a resume cursor
+    // ('txn_id@pendingHighWatermark'): continue paging DEEPER from it
+    // instead of refetching the same newest pages forever. The pending
+    // high-watermark is the newest timestamp the capped run saw — promoted
+    // to last_created_at once the tail completes, so a giant initial
+    // backfill converges instead of restarting from zero every time.
     if (syncState?.cursor && String(syncState.cursor).startsWith('txn_')) {
-      resumeCursor = String(syncState.cursor);
+      const [cur, pending] = String(syncState.cursor).split('@');
+      resumeCursor = cur;
+      pendingHighWatermark = parseInt(pending, 10) || 0;
     }
   } catch { /* table may not exist yet */ }
 
@@ -479,8 +497,12 @@ async function syncBalanceTransactions(limit = 100) {
     const existing = await db('stripe_sync_state')
       .where('sync_type', 'balance_transactions')
       .first();
+    // Highest timestamp seen across this run AND any prior capped segments.
+    const highWater = Math.max(newestCreated, pendingHighWatermark);
     const patch = hasMore
-      ? { cursor: startingAfter }
+      // Capped: save the deep-page cursor plus the pending high-watermark
+      // so the eventual tail completion can promote it.
+      ? { cursor: `${startingAfter}@${highWater}` }
       : certifies
         ? {
           last_sync_at: syncStartedAt.toISOString(),
@@ -489,7 +511,16 @@ async function syncBalanceTransactions(limit = 100) {
             ? { last_created_at: new Date(newestCreated * 1000).toISOString() }
             : {}),
         }
-        : { cursor: null };
+        // Resumed tail complete: clear the cursor and PROMOTE the pending
+        // high-watermark (the capped segments covered everything up to it),
+        // so the required fresh certifying pass starts from there instead
+        // of re-walking the whole history — without stamping last_sync_at.
+        : {
+          cursor: null,
+          ...(highWater > watermark
+            ? { last_created_at: new Date(highWater * 1000).toISOString() }
+            : {}),
+        };
     if (existing) {
       await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
     } else {
