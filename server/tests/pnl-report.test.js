@@ -114,6 +114,20 @@ describe('prorateDepreciation', () => {
     expect(total).toBe(31); // Dec 1–31 inclusive at $1/day
   });
 
+  test('disposal caps proration instead of deleting history', () => {
+    // Disposed Jan 31: January's depreciation survives in historical P&Ls.
+    const total = prorateDepreciation(
+      [{ annual_depreciation: '365', placed_in_service_date: '2025-01-01', disposal_date: '2026-01-31' }],
+      year.start, year.end,
+    );
+    expect(total).toBe(31);
+    // A pre-period disposal contributes nothing.
+    expect(prorateDepreciation(
+      [{ annual_depreciation: '365', placed_in_service_date: '2025-01-01', disposal_date: '2025-06-30' }],
+      year.start, year.end,
+    )).toBe(0);
+  });
+
   test('§179/bonus assets (annual NULL) and future assets contribute nothing', () => {
     const total = prorateDepreciation(
       [

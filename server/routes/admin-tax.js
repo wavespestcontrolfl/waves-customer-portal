@@ -5,7 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { buildPnlReport, getPeriodRange } = require('../services/pnl-report');
+const { buildPnlReport, getPeriodRange, paidRevenueForWindow } = require('../services/pnl-report');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -762,16 +762,12 @@ router.get('/revenue/reconcile', async (req, res, next) => {
     // never shift the month boundary.
     const endDate = new Date(Date.UTC(yr, mo, 0)).toISOString().split('T')[0];
 
-    // Real collected revenue for the month (payments ledger; payment_date is
-    // an ET-stamped DATE). The old read targeted a revenue_daily table that
-    // never existed, so this card showed $0/$0 every month.
-    const rev = await db('payments')
-      .where('status', 'paid')
-      .whereBetween('payment_date', [startDate, endDate])
-      .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
-      .first()
-      .catch(() => ({ total: '0' }));
-    const totalRevenue = parseFloat(rev?.total || 0);
+    // Real collected revenue for the month — same refund-netted cash basis
+    // as the P&L (paidRevenueForWindow), so the two surfaces can't disagree.
+    // The old read targeted a revenue_daily table that never existed, so
+    // this card showed $0/$0 every month. Errors propagate (except a
+    // missing table in dev) — a DB failure must be a 500, not a $0 report.
+    const totalRevenue = await paidRevenueForWindow(db, startDate, endDate);
 
     // Sales tax collected/owed are NOT computable from portal data: nothing
     // records tax_collected, and a liability figure requires the taxability
@@ -1087,14 +1083,22 @@ router.get('/export/tax-package', async (req, res, next) => {
     try {
       const finRow = await db('company_financials').orderBy('effective_date', 'desc').first().catch(() => null);
       const laborRate = Number(finRow?.loaded_labor_rate) || 35;
-      const rows = await db('time_entry_daily_summary').whereBetween('work_date', [sd, ed]).orderBy('work_date', 'desc');
+      const rows = await db('time_entry_daily_summary as s')
+        .leftJoin('technicians as t', 's.technician_id', 't.id')
+        .whereBetween('s.work_date', [sd, ed])
+        .orderBy('s.work_date', 'desc')
+        .select('s.*', 't.name as technician_name');
       laborSummaries = rows.map(r => {
         const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
-        const otHours = (parseFloat(r.overtime_minutes) || 0) / 60;
         return {
           date: typeof r.work_date === 'string' ? r.work_date.slice(0, 10) : etDateString(new Date(r.work_date)),
+          technician_name: r.technician_name || '',
+          // All job hours reported as regular (overtime_hours 0): the summary's
+          // overtime_minutes tracks SHIFT overtime, not job-time OT, and the
+          // owner-operator draws no OT premium — feeding it to laborToCSV would
+          // add a 1.5× pay line on top of hours already counted as regular.
           total_hours: jobHours.toFixed(2),
-          overtime_hours: otHours.toFixed(2),
+          overtime_hours: 0,
           jobs: r.job_count || 0,
           rate: laborRate,
           total_cost: (jobHours * laborRate).toFixed(2),

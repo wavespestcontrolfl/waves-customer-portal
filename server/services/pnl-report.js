@@ -10,12 +10,13 @@
  * time_entry_daily_summary.total_cost). 2026-07-20 financial-reporting audit.
  *
  * Data sources (verified against the live schema):
- *   revenue      — payments WHERE status='paid', windowed on payment_date
- *                  (a DATE stamped in ET at insert; NULL-free on paid rows).
- *                  Fully refunded payments flip to status='refunded' and drop
- *                  out of every period retroactively; partial refunds keep
- *                  status='paid' at the original amount. Cash-basis limitation,
- *                  documented rather than hidden.
+ *   revenue      — cash received in the window (payment_date, an ET-stamped
+ *                  DATE; statuses 'paid' + 'refunded' so a later refund can't
+ *                  erase the original receipt) MINUS refunds recognized in
+ *                  the window they occurred (refunded_at → ET day; covers
+ *                  partial refunds, which keep status='paid'). See
+ *                  paidRevenueForWindow. Disputes/chargebacks are not yet
+ *                  ledgered on payments and are out of scope here.
  *   labor        — time_entry_daily_summary.total_job_minutes × the loaded
  *                  labor rate from company_financials (the same rate per-visit
  *                  job costing uses; the summary table stores minutes, not
@@ -30,6 +31,13 @@
  *   depreciation — per-asset annual_depreciation prorated by days in service
  *                  within the window (same proration everywhere, including the
  *                  tax package, which previously summed full-year amounts).
+ *
+ * NOTE — standard-mileage vs actual vehicle expenses: both currently flow
+ * through (mileage as a deduction, any "Vehicle Expenses" category as opex).
+ * The IRS method election is an owner/CPA decision, parked with Adam; until
+ * it's made, every prod trip carries a $0 deduction (unclassified), so no
+ * double-count is live. When the mileage-classification lane ships, wire the
+ * elected method here and exclude the other side.
  *
  * assemblePnl() is pure (no I/O) and unit-tested; buildPnlReport() runs the
  * queries and feeds it.
@@ -96,10 +104,13 @@ function getPeriodRange(period, { start_date, end_date } = {}, now = new Date())
 }
 
 /**
- * Per-asset depreciation prorated to the window, respecting
- * placed_in_service_date. Pure. Section 179 / bonus assets carry
- * annual_depreciation NULL (their deduction was taken at purchase) and
- * contribute nothing here.
+ * Per-asset depreciation prorated to the window: from
+ * placed_in_service_date through disposal_date (when disposed), clamped to
+ * the period. Pure. Section 179 / bonus assets carry annual_depreciation
+ * NULL (their deduction was taken at purchase) and contribute nothing here.
+ * Disposal CAPS the window rather than excluding the asset — filtering
+ * disposed assets out (the old behavior) silently deleted their
+ * depreciation from every historical P&L the moment they were disposed.
  */
 function prorateDepreciation(assets, startDate, endDate) {
   const periodStart = new Date(startDate);
@@ -111,9 +122,11 @@ function prorateDepreciation(assets, startDate, endDate) {
     const inService = a.placed_in_service_date
       ? new Date(a.placed_in_service_date)
       : (a.purchase_date ? new Date(a.purchase_date) : null);
+    const disposed = a.disposal_date ? new Date(a.disposal_date) : null;
     const effStart = inService && inService > periodStart ? inService : periodStart;
-    if (effStart > periodEnd) continue;
-    const effDays = (periodEnd - effStart) / 86400000 + 1;
+    const effEnd = disposed && disposed < periodEnd ? disposed : periodEnd;
+    if (effStart > effEnd) continue;
+    const effDays = (effEnd - effStart) / 86400000 + 1;
     total += annual * (Math.max(0, effDays) / 365);
   }
   return round2(total);
@@ -191,20 +204,50 @@ function missingTableOnly(fallback) {
  * schema 2026-07-20. Individual sources still degrade to zero on a missing
  * TABLE (dev environments), but every other error propagates to the caller.
  */
+/**
+ * Cash received in the window minus cash refunded in the window.
+ * - Received: payments whose payment_date (ET-stamped DATE) falls in the
+ *   window, at FULL amount, including rows later flipped to
+ *   status='refunded' — the cash really arrived in that period. A
+ *   status='paid'-only filter made fully-refunded payments vanish
+ *   retroactively from their original month.
+ * - Refunded: refund_amount recognized in the period the refund happened
+ *   (refunded_at, converted to an ET calendar day — it's a timestamptz),
+ *   covering partial refunds too (those keep status='paid').
+ * Exported so /revenue/reconcile reports the same revenue basis.
+ */
+async function paidRevenueForWindow(db, startDate, endDate) {
+  const received = await db('payments')
+    .whereIn('status', ['paid', 'refunded'])
+    .whereBetween('payment_date', [startDate, endDate])
+    .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
+    .first()
+    .catch(missingTableOnly({ total: '0' }));
+  const refunded = await db('payments')
+    .whereNotNull('refunded_at')
+    .whereRaw(
+      "DATE(refunded_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+      [startDate, endDate],
+    )
+    .select(db.raw("COALESCE(SUM(refund_amount)::text, '0') as total"))
+    .first()
+    .catch(missingTableOnly({ total: '0' }));
+  return round2(parseFloat(received?.total || 0) - parseFloat(refunded?.total || 0));
+}
+
 async function buildPnlReport(db, startDate, endDate) {
-  const [revRow, laborRow, financialsRow, matRow, opexRows, mileageRow, assets] = await Promise.all([
-    db('payments')
-      .where('status', 'paid')
-      .whereBetween('payment_date', [startDate, endDate])
-      .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
-      .first()
-      .catch(missingTableOnly({ total: '0' })),
+  const [serviceRevenue, laborRow, financialsRow, matRow, opexRows, mileageRow, assets] = await Promise.all([
+    paidRevenueForWindow(db, startDate, endDate),
     db('time_entry_daily_summary')
       .whereBetween('work_date', [startDate, endDate])
       .select(db.raw("COALESCE(SUM(total_job_minutes)::text, '0') as minutes"))
       .first()
       .catch(missingTableOnly({ minutes: '0' })),
+    // The rate effective for the REPORT PERIOD — not today's. Taking the
+    // newest row unconditionally rewrote historical P&Ls every time the
+    // loaded rate changed.
     db('company_financials')
+      .where('effective_date', '<=', endDate)
       .orderBy('effective_date', 'desc')
       .first()
       .catch(missingTableOnly(null)),
@@ -233,16 +276,16 @@ async function buildPnlReport(db, startDate, endDate) {
       .select(db.raw("COALESCE(SUM(deduction_amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
+    // No active/disposed filter: disposal caps the proration window (see
+    // prorateDepreciation) instead of deleting the asset's history.
     db('equipment_register')
-      .where('active', true)
-      .where(function notDisposed() { this.whereNull('disposed').orWhere('disposed', false); })
       .whereNotNull('annual_depreciation')
-      .select('annual_depreciation', 'placed_in_service_date', 'purchase_date')
+      .select('annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date')
       .catch(missingTableOnly([])),
   ]);
 
   return assemblePnl({
-    serviceRevenue: parseFloat(revRow?.total || 0),
+    serviceRevenue,
     otherRevenue: 0,
     laborMinutes: parseFloat(laborRow?.minutes || 0),
     loadedLaborRate: Number(financialsRow?.loaded_labor_rate) || DEFAULT_LOADED_LABOR_RATE,
@@ -255,6 +298,7 @@ async function buildPnlReport(db, startDate, endDate) {
 
 module.exports = {
   buildPnlReport,
+  paidRevenueForWindow,
   assemblePnl,
   getPeriodRange,
   prorateDepreciation,
