@@ -182,7 +182,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
+Technician notes: ${notes || 'not specified'}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }

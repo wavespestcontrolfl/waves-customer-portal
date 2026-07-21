@@ -9654,6 +9654,9 @@ export function CompletionPanel({
           body: JSON.stringify({
             notes,
             visitOutcome,
+            // serviceId → server resolves the customer geocode for the
+            // season/weather/expectations prompt context.
+            serviceId: service.id || null,
             serviceType: service.serviceType,
             areasTreated: areasServiced,
             // Tech-chosen solutions feed the AI recap prompt on every line
@@ -9726,6 +9729,7 @@ export function CompletionPanel({
         body: JSON.stringify({
           notes,
           visitOutcome,
+          serviceId: service.id || null,
           serviceType: service.serviceType,
           areasTreated: areasServiced,
           products: selectedProducts.map((p) => ({

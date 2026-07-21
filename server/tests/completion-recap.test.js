@@ -58,6 +58,18 @@ describe('completion recap', () => {
     expect(capped).not.toContain('- P10');
   });
 
+  test('visit context (season/weather/expectations) rides the prompt when provided', () => {
+    const prompt = buildPrompt({
+      serviceType: 'Quarterly Pest Control',
+      visitOutcome: 'completed',
+      visitContext: 'Season: Wet season in Southwest Florida.\nWhat to expect for this service line: activity may briefly increase.',
+    });
+    expect(prompt).toContain('Visit context (season, weather, expectations');
+    expect(prompt).toContain('Wet season in Southwest Florida');
+    expect(prompt).toContain('do not copy verbatim');
+    expect(buildPrompt({ serviceType: 'Pest' })).not.toContain('Visit context');
+  });
+
   test('sms preview suppresses review placeholder when invoice is present', () => {
     const preview = composeCompletionSmsPreview({
       recap: 'Today we completed your service.',

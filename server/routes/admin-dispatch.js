@@ -13,6 +13,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
+const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
@@ -1745,7 +1746,20 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
 // POST /api/admin/dispatch/recap-preview
 router.post('/recap-preview', async (req, res, next) => {
   try {
-    const result = await CompletionRecap.generateRecap(req.body || {});
+    const body = req.body || {};
+    // Season/weather/expectations context (owner directive 2026-07-21).
+    // serviceId → customer geocode for the weather line; without it the
+    // season + what-to-expect context still applies. Best-effort only.
+    let visitContext = '';
+    try {
+      let customerId = null;
+      if (body.serviceId) {
+        const svcRow = await db('scheduled_services').where({ id: body.serviceId }).first('customer_id');
+        customerId = svcRow?.customer_id || null;
+      }
+      visitContext = await buildRecapVisitContext({ serviceType: body.serviceType, customerId });
+    } catch { /* context is polish — never block the draft */ }
+    const result = await CompletionRecap.generateRecap({ ...body, visitContext });
     res.json({
       recap: result.recap,
       source: result.source,
@@ -7833,7 +7847,7 @@ function findingsDraftProductLines(products) {
     .slice(0, 10);
 }
 
-function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [] }) {
+function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [], visitContext = '' }) {
   const fieldLines = (schema.fields || [])
     .map((field) => {
       const value = values?.[field.key];
@@ -7857,7 +7871,7 @@ Findings:
 ${fieldLines.length ? fieldLines.join('\n') : '[none recorded]'}
 Solutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):
 ${productLines.length ? productLines.join('\n') : '[none recorded]'}
-Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}
+Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}${String(visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(visitContext).trim()}` : ''}
 Recent customer communications:
 ${commsContext || '[not provided]'}
 
@@ -8136,6 +8150,14 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
         if (derived) draftValues.treatments_completed = derived;
       } catch { /* draft is polish — never block on derivation */ }
     }
+    // Season/weather/expectations context (owner directive 2026-07-21).
+    let visitContext = '';
+    try {
+      visitContext = await buildRecapVisitContext({
+        serviceType: svc.service_type,
+        customerId: svc.customer_id,
+      });
+    } catch { /* context is polish — never block the draft */ }
     const basePrompt = buildFindingsRecapPrompt({
       schema,
       values: draftValues,
@@ -8143,6 +8165,7 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
       serviceType: svc.service_type,
       commsContext,
       products: draftProducts,
+      visitContext,
     });
     // Sol first, Opus backup. The validator rejects empty or promissory copy,
     // causing the shared dispatcher to cross providers before returning.

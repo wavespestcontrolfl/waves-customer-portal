@@ -181,6 +181,17 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, pro
     }
   }
 
+  // Season/weather/expectations context (owner directive 2026-07-21).
+  let visitContext = '';
+  try {
+    const { buildRecapVisitContext } = require('./recap-visit-context');
+    visitContext = await buildRecapVisitContext({
+      serviceType: svc.service_type,
+      customerId: svc.customer_id,
+      knex,
+    });
+  } catch { /* context is polish — never block the draft */ }
+
   const { recap, source } = await generateRecap({
     serviceType: svc.service_type,
     technicianNotes,
@@ -190,6 +201,7 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, pro
     products,
     visitOutcome: 'completed',
     commsContext,
+    visitContext,
   });
   return { ok: true, recap, source };
 }
