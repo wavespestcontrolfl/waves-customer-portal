@@ -1014,9 +1014,14 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.termite_bond) {
       const tb = config.termite_bond;
-      if (tb.term_1yr) constants.TERMITE.bond['1yr'].quarterly = r(tb.term_1yr);
-      if (tb.term_5yr) constants.TERMITE.bond['5yr'].quarterly = r(tb.term_5yr);
-      if (tb.term_10yr) constants.TERMITE.bond['10yr'].quarterly = r(tb.term_10yr);
+      // Belt-and-suspenders with the admin route's termite_bond validation:
+      // only strictly-positive finite rates overwrite the runtime constants —
+      // a legacy/hand-edited row can never sync a negative or NaN warranty
+      // price (codex #2915 r2).
+      const positive = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
+      if (positive(tb.term_1yr)) constants.TERMITE.bond['1yr'].quarterly = r(tb.term_1yr);
+      if (positive(tb.term_5yr)) constants.TERMITE.bond['5yr'].quarterly = r(tb.term_5yr);
+      if (positive(tb.term_10yr)) constants.TERMITE.bond['10yr'].quarterly = r(tb.term_10yr);
     }
 
     // ── Rodent ───────────────────────────────────────────────

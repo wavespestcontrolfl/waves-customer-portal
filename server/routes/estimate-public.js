@@ -2686,11 +2686,20 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait', 'termite_bond']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
-      const key = recurringServiceKey(item);
-      if (!RECURRING_LINE_SERVICES.has(key)) return;
+      const rawKey = recurringServiceKey(item);
+      if (!RECURRING_LINE_SERVICES.has(rawKey)) return;
+      // Raw engine payloads ({ engineInputs, engineResult } — agent/engine
+      // drafts) carry the bond as service 'termite_bond' with bondTerm;
+      // normalize to the term-keyed service so route matching, the selector's
+      // selected-term detection, and the solo fold behave identically to
+      // mapped saves (codex #2915 r2).
+      const key = rawKey === 'termite_bond' && item.bondTerm
+        ? `termite_bond_${item.bondTerm}`
+        : rawKey;
+      const isBondLine = rawKey === 'termite_bond';
       const annual = key === 'lawn_care'
         ? firstPositiveNumber(item.annualBeforeDiscount, item.annual, item.ann)
         : firstPositiveNumber(item.annualAfterDiscount, item.annualAfterCredits, item.annual, item.ann);
@@ -2724,9 +2733,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         cadence: item.cadence || null,
         frequencyKey: item.cadence || null,
         estimatedDurationMinutes: firstPositiveNumber(item.estimatedDurationMinutes, item.estimated_duration_minutes) || null,
-        waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
-        waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
-        countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
+        ...(isBondLine ? { bondTerm: item.bondTerm || null, bondYears: item.bondYears || null } : {}),
+        // Bond riders are hard-coded out of tier counting and the bundle %
+        // discount — the raw engine line only carries discountable:false, so
+        // the generic !== false defaults below would tier-count it.
+        waveGuardDiscountEligible: isBondLine ? false : recurringServiceReceivesTierDiscount(item),
+        waveGuardTierEligible: isBondLine ? false : (item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false),
+        countsTowardWaveGuardTier: isBondLine ? false : (item.countsTowardWaveGuardTier !== false),
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
@@ -15152,16 +15165,21 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   // backing combo pricing (set by the v1 recompute path); otherwise sections
   // keep the legacy ladder so sliders never appear without priceable combos.
   const hasServiceCadenceCombos = Array.isArray(payload.serviceCadenceCombos) && payload.serviceCadenceCombos.length > 0;
-  const recurringKeys = Array.from(new Set(
+  const allRecurringKeys = Array.from(new Set(
     recurringServices
       .map(recurringServiceKey)
       .filter(Boolean)
-      // Termite bond lines are RIDERS (owner 2026-07-20): they render inside
-      // the termite section (bond selector + breakdown row), never as their
-      // own section card — and they must not flip a solo termite estimate
-      // into the multi-service split layout.
-      .filter((key) => !String(key).startsWith('termite_bond'))
   ));
+  // Termite bond lines are RIDERS (owner 2026-07-20): they render inside
+  // the termite section (bond selector + breakdown row), never as their
+  // own section card — and they must not flip a solo termite estimate
+  // into the multi-service split layout. SECTION enumeration uses the
+  // suppressed list; the split-reconciliation below must use the FULL list
+  // — the bond's monthly is inside frequency.monthly and its treatment row
+  // is in the row set, so dropping its key from the row-sum side would
+  // collapse every bond-carrying multi-service plan into the single bundle
+  // card and strand the selector (codex #2915 r2).
+  const recurringKeys = allRecurringKeys.filter((key) => !String(key).startsWith('termite_bond'));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
@@ -15220,7 +15238,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   }
 
   if (!isOneTimeOnly && recurringKeys.length > 1) {
-    if (canSplitRecurringSelectableLadder(frequencies, recurringKeys)) {
+    if (canSplitRecurringSelectableLadder(frequencies, allRecurringKeys)) {
       const hasRecurringPestSection = recurringKeys.includes('pest_control');
       const hasSelectableLadder = frequencies.filter((frequency) => frequency?.key).length > 1;
       const splitSections = recurringRows.map(([key, recurringService]) => {

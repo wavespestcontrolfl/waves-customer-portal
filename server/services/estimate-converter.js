@@ -651,9 +651,15 @@ function recurringLinesFromEngineResult(data = {}) {
       && Number(li.annual) > 0
     )
     .map((li) => {
-      if (li.name || li.label || li.displayName || li.serviceName || li.service_name) return li;
-      const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(li)];
-      return synthesized ? { ...li, name: synthesized } : li;
+      // Raw engine bond lines carry service 'termite_bond' + bondTerm —
+      // normalize to the term-keyed service so the combined bait+bond
+      // scheduling routes match exactly like mapped saves (codex #2915 r2).
+      const base = li.service === 'termite_bond' && li.bondTerm
+        ? { ...li, service: `termite_bond_${li.bondTerm}` }
+        : li;
+      if (base.name || base.label || base.displayName || base.serviceName || base.service_name) return base;
+      const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(base)];
+      return synthesized ? { ...base, name: synthesized } : base;
     });
 }
 
@@ -1877,16 +1883,29 @@ const EstimateConverter = {
         // rodent promotion above; all other remaining lines keep the
         // adjudicated 2026-06-12 semantic (owner decision).
         const promotedTermiteUnits = (remaining || [])
-          .filter((line) => recurringServiceKey(line) === 'termite_bait'
-            && visitsPerYearForRecurringService(line) === 4)
-          .map((line) => ({
-            service: {
-              name: line.name || line.serviceName || line.service_name || 'Termite Bait',
-              frequency: 'quarterly',
-              visitsPerYear: 4,
-            },
-            catalogServiceKey: 'termite_bait',
-          }));
+          .filter((line) => {
+            const key = String(recurringServiceKey(line) || '');
+            // Bond riders promote too (codex #2915 r2): when the pest route
+            // consumed the bait line, the bond stays in `remaining` — billed
+            // but otherwise never scheduled, so no visit ever carries
+            // "Termite Bond" and the lifecycle sync never mints the warranty.
+            return (key === 'termite_bait' || key.startsWith('termite_bond'))
+              && visitsPerYearForRecurringService(line) === 4;
+          })
+          .map((line) => {
+            const isBond = String(recurringServiceKey(line) || '').startsWith('termite_bond');
+            return {
+              service: {
+                name: line.name || line.serviceName || line.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
+                frequency: 'quarterly',
+                visitsPerYear: 4,
+              },
+              // Bond rows resolve their own catalog identity (internal-only
+              // billing-rider completion profile); bait resolves the station
+              // service.
+              catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
+            };
+          });
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.

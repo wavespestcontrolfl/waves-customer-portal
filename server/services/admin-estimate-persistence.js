@@ -678,6 +678,30 @@ function assertNoDarkTermiteBondPayload(estimateData) {
   }
 }
 
+// Client-priced saves can't server-recompute (the legacy builder ships no
+// replayable engineRequest), so a stale client bundle could persist
+// yesterday's bond rates after an admin edits pricing_config.termite_bond
+// (codex #2915 r2). The unconditional syncConstantsFromDB above has already
+// refreshed the live constants; fail the save closed on any mismatch —
+// never silently rewrite a line the operator saw priced.
+function assertLiveTermiteBondRates(estimateData) {
+  const lists = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services];
+  const bondRows = lists
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
+      || /termite bond/i.test(String(svc?.name || '')));
+  if (!bondRows.length) return;
+  const { TERMITE } = require('./pricing-engine/constants');
+  for (const row of bondRows) {
+    const term = row.bondTerm || String(row.service || '').replace(/^termite_bond_/, '');
+    const quarterly = Number(TERMITE.bond?.[term]?.quarterly);
+    const rowPerApp = Number(row.perTreatment ?? row.perApp);
+    if (!(quarterly > 0) || !(Math.abs(rowPerApp - quarterly) <= 0.005)) {
+      throw errorWithStatus('Termite bond rates have changed — recalculate the estimate before saving.', 422);
+    }
+  }
+}
+
 async function resolveEstimateWritePayload({
   database = db,
   body,
@@ -717,6 +741,7 @@ async function resolveEstimateWritePayload({
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
+  assertLiveTermiteBondRates(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -1225,6 +1250,7 @@ async function reviseAdminEstimate({
 }
 
 module.exports = {
+  assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,

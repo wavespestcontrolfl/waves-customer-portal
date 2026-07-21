@@ -220,6 +220,15 @@ function validatePricingConfigData(configKey, data, oldConfig) {
         return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
       }
     }
+  } else if (configKey === 'termite_bond') {
+    // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
+    // positive dollars — the db-bridge sync coerces and overwrites runtime
+    // constants, so a negative/NaN here would price negative warranties on
+    // every subsequent quote (codex #2915 r2). All three terms required so
+    // an admin edit can't silently orphan a term the estimator still offers.
+    for (const term of ['term_1yr', 'term_5yr', 'term_10yr']) {
+      if (!isPositive(data?.[term])) return fail(`termite_bond.${term} must be a positive $/quarter amount`);
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then

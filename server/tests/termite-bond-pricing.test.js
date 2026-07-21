@@ -357,3 +357,83 @@ describe('codex #2915 r1 hardening', () => {
     expect(() => assertNoDarkTermiteBondPayload(bondData)).not.toThrow();
   });
 });
+
+describe('codex #2915 r2 hardening', () => {
+  const EstimateConverter = require('../services/estimate-converter');
+  const { buildPricingBundle } = require('../routes/estimate-public');
+  const { assertLiveTermiteBondRates } = require('../services/admin-estimate-persistence');
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+
+  test('raw engine payloads ({engineInputs, engineResult}) admit the bond, term-keyed, tier-exempt (converter)', () => {
+    const engineResult = generateEstimate(termiteInput({ termiteBondTerm: '10yr' }));
+    const rows = EstimateConverter.recurringServicesFromEstimateData({
+      engineInputs: {},
+      engineResult,
+    });
+    const bond = rows.find((svc) => String(svc.service).startsWith('termite_bond'));
+    expect(bond).toBeTruthy();
+    expect(bond.service).toBe('termite_bond_10yr');
+    expect(bond.name).toBe('Termite Bond (10-Year Term)');
+  });
+
+  test('multi-service plan WITH a selected bond still splits — termite section carries the selector, bond gets no card', async () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate(translateV2CallToV1Input(PROFILE, ['PEST', 'TERMITE_BAIT'], {
+      pestFrequency: 'quarterly',
+      termiteBaitSystem: 'advance',
+      termiteBondTerm: '10yr',
+    })));
+    const estimate = {
+      id: 'estimate-split-bond',
+      status: 'sent',
+      monthly_total: mapped.recurring.monthlyTotal,
+      annual_total: mapped.recurring.annualAfterDiscount,
+      onetime_total: mapped.oneTime.total,
+      waveguard_tier: mapped.recurring.tier || 'Silver',
+      estimate_data: { inputs: { svcPest: true, svcTermiteBait: true }, result: mapped },
+    };
+    const bundle = await buildPricingBundle(estimate);
+    const keys = bundle.services.map((s) => s.key);
+    // The bond's monthly is inside the frequency totals — reconciliation must
+    // still split (no collapse to the single bundle card) and the bond must
+    // not mint its own card.
+    expect(keys).toContain('pest_control');
+    expect(keys).toContain('termite_bait');
+    expect(keys.some((k) => String(k).startsWith('termite_bond'))).toBe(false);
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite.bondOptions).toHaveLength(3);
+    expect(termite.selectedBondTerm).toBe('10yr');
+  });
+
+  test('reserved-branch promotion covers bond remainders (filter semantics)', () => {
+    // The promotion filter admits the whole termite family with explicit
+    // quarterly visits; pest+bait combine first, leaving exactly the bond.
+    const pestRow = { name: 'Pest Control', service: 'pest_control', mo: 36.67, perTreatment: 110, visitsPerYear: 4, frequency: 'quarterly' };
+    const baitRow = { name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35, perTreatment: 105, visitsPerYear: 4 };
+    const bondRow = { name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr', mo: 15, perTreatment: 45, visitsPerYear: 4 };
+    const { remaining } = EstimateConverter.combineRecurringServicesForScheduling(
+      [pestRow, baitRow, bondRow],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(remaining.map((r) => r.service)).toEqual(['termite_bond_10yr']);
+    // The same seeding license the promotion relies on:
+    expect(EstimateConverter.supportsConverterFollowUpSeeding(remaining[0], {}, 'quarterly')).toBe(true);
+  });
+
+  test('pricing-config termite_bond edits are validated strictly positive', () => {
+    expect(validatePricingConfigData('termite_bond', { term_1yr: 60, term_5yr: 54, term_10yr: 45 }).ok).toBe(true);
+    expect(validatePricingConfigData('termite_bond', { term_1yr: -60, term_5yr: 54, term_10yr: 45 }).ok).toBe(false);
+    expect(validatePricingConfigData('termite_bond', { term_1yr: 'sixty', term_5yr: 54, term_10yr: 45 }).ok).toBe(false);
+    expect(validatePricingConfigData('termite_bond', { term_5yr: 54, term_10yr: 45 }).ok).toBe(false);
+  });
+
+  test('client-priced saves fail closed when persisted bond rates drift from live constants', () => {
+    const data = mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteBondTerm: '10yr' })));
+    const estimateData = { result: data };
+    expect(() => assertLiveTermiteBondRates(estimateData)).not.toThrow();
+    const bond = data.recurring.services.find((svc) => String(svc.service).startsWith('termite_bond'));
+    bond.perTreatment = 40; // stale client bundle priced before an admin rate edit
+    let status;
+    try { assertLiveTermiteBondRates(estimateData); } catch (err) { status = err.statusCode || err.status; }
+    expect(status).toBe(422);
+  });
+});
