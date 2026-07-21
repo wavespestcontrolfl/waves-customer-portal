@@ -2482,22 +2482,43 @@ function RevenueTab() {
             value={fmtM(reconcile.taxOwed)}
             color={D.red}
           />{" "}
+          {/* Only render a verdict when BOTH figures exist — with either null
+              (tax collection isn't recorded in the portal) the old math
+              treated null as $0 and confidently declared "Over-collected". */}
           <StatCard
             label="Difference"
-            value={fmtM(
-              (reconcile.taxCollected || 0) - (reconcile.taxOwed || 0),
-            )}
+            value={
+              reconcile.taxCollected != null && reconcile.taxOwed != null
+                ? fmtM(reconcile.taxCollected - reconcile.taxOwed)
+                : "—"
+            }
             color={
-              (reconcile.taxCollected || 0) >= (reconcile.taxOwed || 0)
-                ? D.green
-                : D.red
+              reconcile.taxCollected != null && reconcile.taxOwed != null
+                ? reconcile.taxCollected >= reconcile.taxOwed
+                  ? D.green
+                  : D.red
+                : D.muted
             }
             sub={
-              (reconcile.taxCollected || 0) >= (reconcile.taxOwed || 0)
-                ? "Over-collected"
-                : "Under-collected"
+              reconcile.taxCollected != null && reconcile.taxOwed != null
+                ? reconcile.taxCollected >= reconcile.taxOwed
+                  ? "Over-collected"
+                  : "Under-collected"
+                : "Not recorded"
             }
           />{" "}
+        </div>
+      )}
+      {reconcile?.note && (
+        <div
+          style={{
+            fontSize: 12,
+            color: D.muted,
+            marginTop: -6,
+            marginBottom: 16,
+          }}
+        >
+          {reconcile.note}
         </div>
       )}
 
@@ -2694,7 +2715,22 @@ function PnlTab() {
           </div>{" "}
           <div style={{ fontSize: 11, color: D.muted }}>
             {pnl ? `${pnl.startDate} to ${pnl.endDate}` : "Select a period"}
-          </div>{" "}
+          </div>
+          {/* Coverage disclosure: refunds/disputes/fees come from the synced
+              payout ledger — when it lags the window, the figures are NOT
+              final and must say so instead of reading as complete. */}
+          {pnl?.coverage?.note && (
+            <div
+              style={{
+                fontSize: 12,
+                color: D.amber,
+                marginTop: 4,
+                maxWidth: 620,
+              }}
+            >
+              {pnl.coverage.note}
+            </div>
+          )}{" "}
         </div>{" "}
         <button
           onClick={downloadPnl}
@@ -3523,7 +3559,8 @@ export default function TaxPage() {
             <StatCard
               label="Tax Collected YTD"
               value={fmtM(d.ytdTaxCollected)}
-              color={D.green}
+              color={d.ytdTaxCollected != null ? D.green : D.muted}
+              sub={d.ytdTaxCollected == null ? "Not recorded" : undefined}
             />{" "}
             <StatCard
               label="Expenses YTD"

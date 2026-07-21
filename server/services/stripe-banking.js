@@ -254,7 +254,78 @@ async function syncPayouts(limit = 50) {
     }
 
     if (synced > 0) logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
-    return { synced, has_more: hasMore };
+
+    // Self-healing coverage pass — the watermark only moves FORWARD, so
+    // without this, historical paid payouts synced before the
+    // reporting_category column (or whose transaction sync failed) would
+    // keep an incomplete refund/dispute/fee ledger forever, silently
+    // overstating P&L revenue. Each run re-syncs a bounded batch of paid
+    // payouts that have no transaction rows or rows missing
+    // reporting_category (syncPayoutTransactions is a full delete+insert per
+    // payout, so a re-run fully refreshes them); repeated syncs converge.
+    let backfilled = 0;
+    try {
+      const BACKFILL_PER_RUN = 25;
+      // First, refresh payouts stuck in a non-terminal LOCAL status: the
+      // forward-only watermark never revisits a payout first observed as
+      // pending/in-transit, so without this its local row would stay
+      // non-paid forever and the paid-only selection below could never
+      // sync its transactions.
+      const nonTerminal = await db('stripe_payouts')
+        .whereNotIn('status', ['paid', 'canceled', 'failed'])
+        .orderBy('created_at_stripe', 'desc')
+        .limit(BACKFILL_PER_RUN)
+        .select('stripe_payout_id');
+      for (const row of nonTerminal) {
+        try {
+          const p = await stripe.payouts.retrieve(row.stripe_payout_id);
+          await db('stripe_payouts')
+            .where('stripe_payout_id', row.stripe_payout_id)
+            .update({
+              status: p.status,
+              arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
+              failure_message: p.failure_message || null,
+              synced_at: new Date().toISOString(),
+            });
+        } catch (err) {
+          logger.warn(`[stripe-banking] Status refresh failed for ${row.stripe_payout_id}:`, err.message);
+        }
+      }
+      // NULL category only marks a row stale when its TYPE is supposed to
+      // carry one — CATEGORYLESS_TXN_TYPES rows (e.g. payment_reversal) are
+      // complete as-is; treating them as stale would re-sync their payout on
+      // every run forever.
+      const { CATEGORYLESS_TXN_TYPES } = require('./pnl-report');
+      const stale = await db('stripe_payouts as sp')
+        .where('sp.status', 'paid')
+        .where(function needsResync() {
+          this.whereNull('sp.transaction_count')
+            .orWhere('sp.transaction_count', 0)
+            .orWhereExists(function preCategoryRows() {
+              this.select(db.raw('1'))
+                .from('stripe_payout_transactions as t')
+                .whereRaw('t.payout_id = sp.id')
+                .whereNull('t.reporting_category')
+                .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
+            });
+        })
+        .orderBy('sp.created_at_stripe', 'desc')
+        .limit(BACKFILL_PER_RUN)
+        .select('sp.stripe_payout_id');
+      for (const row of stale) {
+        try {
+          await syncPayoutTransactions(row.stripe_payout_id);
+          backfilled++;
+        } catch (err) {
+          logger.warn(`[stripe-banking] Backfill transaction sync failed for ${row.stripe_payout_id}:`, err.message);
+        }
+      }
+      if (backfilled > 0) logger.info(`[stripe-banking] Backfilled transaction detail for ${backfilled} historical payout(s)`);
+    } catch (err) {
+      logger.warn('[stripe-banking] Historical payout backfill pass failed:', err.message);
+    }
+
+    return { synced, backfilled, has_more: hasMore };
   } catch (err) {
     logger.error('[stripe-banking] syncPayouts failed:', err.message);
     throw err;
@@ -364,6 +435,10 @@ async function syncPayoutTransactions(stripePayoutId) {
         payout_id: payout.id,
         stripe_txn_id: txn.id,
         type: txn.type,
+        // Canonical classification — required to tell dispute movements
+        // (reporting_category dispute/dispute_reversal, carried under the
+        // umbrella type 'adjustment') apart from unrelated adjustments.
+        reporting_category: txn.reporting_category || null,
         amount: txn.amount / 100,
         fee: txn.fee / 100,
         net: txn.net / 100,

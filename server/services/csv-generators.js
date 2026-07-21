@@ -77,7 +77,11 @@ function mileageToCSV(trips) {
 }
 
 function depreciationToCSV(equipment) {
-  const headers = ['Asset Name', 'Category', 'Purchase Date', 'Cost Basis', 'Method', 'Useful Life', 'Annual Depreciation', 'Accumulated', 'Book Value', 'Section 179'];
+  // 'Depreciation (This Period)' is the asset's PRORATED amount for the
+  // export window (in-service through disposal, leap-year aware) — its
+  // column sum foots to pnl.csv's depreciation line, which the flat annual
+  // figure does not for mid-year in-service or disposed assets.
+  const headers = ['Asset Name', 'Category', 'Purchase Date', 'Cost Basis', 'Method', 'Useful Life', 'Annual Depreciation', 'Depreciation (This Period)', 'Accumulated', 'Book Value', 'Disposed', 'Section 179'];
   const lines = [row(headers)];
   for (const e of equipment) {
     lines.push(row([
@@ -88,8 +92,10 @@ function depreciationToCSV(equipment) {
       e.depreciation_method || '',
       e.useful_life_years != null ? `${e.useful_life_years} yrs` : '',
       e.annual_depreciation != null ? parseFloat(e.annual_depreciation).toFixed(2) : '',
+      e.period_depreciation != null ? parseFloat(e.period_depreciation).toFixed(2) : '',
       e.accumulated_depreciation != null ? parseFloat(e.accumulated_depreciation).toFixed(2) : '',
       e.current_book_value != null ? parseFloat(e.current_book_value).toFixed(2) : '',
+      e.disposal_date ? String(e.disposal_date).slice(0, 10) : (e.disposed ? 'Yes' : ''),
       e.section_179_elected ? `Yes ($${parseFloat(e.section_179_amount || 0).toFixed(2)})` : 'No',
     ]));
   }
@@ -153,6 +159,10 @@ function pnlToCSV(pnlData) {
   lines.push(row(['', '']));
   lines.push(row(['NET INCOME', (pnlData.netIncome || 0).toFixed(2)]));
   lines.push(row(['Net Margin', ((pnlData.netMargin || 0) * 100).toFixed(1) + '%']));
+  if (pnlData.coverage?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));
+  }
   return lines.join('\n');
 }
 
@@ -164,12 +174,23 @@ function generateReadme(year, pnlData) {
     ``,
     `This ZIP contains the following CSV files for your CPA:`,
     ``,
-    `  1. transactions.csv     — All payment transactions`,
-    `  2. expenses.csv         — Business expenses by Schedule C category`,
-    `  3. mileage.csv          — Business mileage log (IRS format)`,
-    `  4. depreciation.csv     — Equipment depreciation schedule`,
-    `  5. labor.csv            — Labor costs by technician`,
-    `  6. pnl.csv              — Profit & Loss statement`,
+    `  1. transactions.csv     — Every receipt the P&L counts (payments ledger,`,
+    `                            estimate deposits, and Stripe-paid invoices with`,
+    `                            no ledger row, each labeled by type)`,
+    `  2. refunds.csv          — Refund and dispute balance transactions netted`,
+    `                            against revenue, in the period each occurred`,
+    `  3. expenses.csv         — Business expenses by Schedule C category`,
+    `  4. mileage.csv          — Business mileage log (IRS format)`,
+    `  5. depreciation.csv     — Equipment depreciation schedule (the`,
+    `                            'Depreciation (This Period)' column foots to the`,
+    `                            P&L's depreciation line)`,
+    `  6. labor-timetracking-informational.csv`,
+    `                          — Owner time-tracking detail, INFORMATIONAL ONLY.`,
+    `                            The cost column is an internal job-costing`,
+    `                            estimate of the owner-operator's own time, which`,
+    `                            is NOT a deductible payroll expense and is NOT`,
+    `                            included in the P&L.`,
+    `  7. pnl.csv              — Profit & Loss statement`,
     ``,
     `Summary for ${year}:`,
   ];
@@ -180,6 +201,10 @@ function generateReadme(year, pnlData) {
     lines.push(`  Operating Exp:     $${(pnlData.operatingExpenses?.total || 0).toFixed(2)}`);
     lines.push(`  Deductions:        $${(pnlData.deductions?.total || 0).toFixed(2)}`);
     lines.push(`  Net Income:        $${(pnlData.netIncome || 0).toFixed(2)}`);
+    if (pnlData.coverage?.note) {
+      lines.push(``);
+      lines.push(`  COVERAGE NOTE: ${pnlData.coverage.note}`);
+    }
   }
   lines.push(``);
   lines.push(`Prepared for filing purposes. Consult your CPA for tax advice.`);
@@ -224,6 +249,34 @@ function geoGridToCSV(pins, meta = {}) {
   return lines.join('\n');
 }
 
+/**
+ * Refund balance transactions (stripe_payout_transactions type='refund').
+ * Ships in the tax package so the refund-netted pnl.csv is reconcilable:
+ * a refund landing in a later period than its payment appears here even
+ * though transactions.csv (payments by payment_date) has no row for it.
+ * Balance-transaction refund amounts are negative; export the outflow as
+ * a positive number.
+ */
+function refundsToCSV(refunds) {
+  // Amount is signed as it affects revenue: refunds negative (cash out),
+  // *_failure reversals positive (bounced refund returned to the merchant) —
+  // the column sums to the net refund figure pnl.csv subtracts.
+  const headers = ['Date (ET)', 'Type', 'Amount (± vs revenue)', 'Fee Reversed', 'Customer', 'Description', 'Stripe Txn ID'];
+  const lines = [row(headers)];
+  for (const r of refunds) {
+    lines.push(row([
+      r.refund_date_et || r.created_at_stripe || '',
+      r.reporting_category || r.type || '',
+      r.amount != null ? parseFloat(r.amount).toFixed(2) : '',
+      r.fee != null ? parseFloat(r.fee).toFixed(2) : '',
+      r.customer_name || '',
+      r.description || '',
+      r.stripe_txn_id || '',
+    ]));
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   transactionsToCSV,
   expensesToCSV,
@@ -231,6 +284,7 @@ module.exports = {
   depreciationToCSV,
   laborToCSV,
   pnlToCSV,
+  refundsToCSV,
   generateReadme,
   geoGridToCSV,
 };

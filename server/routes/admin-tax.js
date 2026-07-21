@@ -5,6 +5,11 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const {
+  buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
+  prorateAssetDepreciation, outflowTransactionsQuery,
+} = require('../services/pnl-report');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -16,14 +21,11 @@ router.get('/dashboard', async (req, res, next) => {
   try {
     const year = String(new Date().getFullYear());
 
-    // Tax collected YTD (from revenue tables)
-    let ytdTaxCollected = 0;
-    try {
-      const rev = await db('revenue_daily')
-        .where('date', '>=', `${year}-01-01`)
-        .sum('tax_collected as total').first();
-      ytdTaxCollected = parseFloat(rev?.total || 0);
-    } catch { /* table may not exist */ }
+    // Sales tax collected is NOT recorded anywhere in the portal (the old
+    // read targeted a revenue_daily table that never existed, so this was a
+    // permanent $0 masquerading as a real figure). null = "not recorded",
+    // which the client renders as "—" — never as a confident $0.
+    const ytdTaxCollected = null;
 
     // Expenses YTD
     const expenseStats = await db('expenses')
@@ -760,32 +762,32 @@ router.get('/revenue/reconcile', async (req, res, next) => {
     }
     const [yr, mo] = month.split('-').map(Number);
     const startDate = `${month}-01`;
-    const endDate = new Date(yr, mo, 0).toISOString().split('T')[0];
+    // Day 0 of the next month, built in UTC so the server's local zone can
+    // never shift the month boundary.
+    const endDate = new Date(Date.UTC(yr, mo, 0)).toISOString().split('T')[0];
 
-    let totalRevenue = 0, taxCollected = 0;
-    try {
-      const rev = await db('revenue_daily')
-        .whereBetween('date', [startDate, endDate])
-        .select(
-          db.raw('COALESCE(SUM(total_revenue), 0) as revenue'),
-          db.raw('COALESCE(SUM(tax_collected), 0) as tax'),
-        ).first();
-      totalRevenue = parseFloat(rev?.revenue || 0);
-      taxCollected = parseFloat(rev?.tax || 0);
-    } catch { /* table may not exist */ }
+    // Real collected revenue for the month — same refund-netted cash basis
+    // as the P&L (paidRevenueForWindow), so the two surfaces can't disagree.
+    // The old read targeted a revenue_daily table that never existed, so
+    // this card showed $0/$0 every month. Errors propagate (except a
+    // missing table in dev) — a DB failure must be a 500, not a $0 report.
+    const totalRevenue = await paidRevenueForWindow(db, startDate, endDate);
 
-    // Expected tax = revenue * blended 7% FL rate (state 6% + 1% surtax) on taxable revenue
-    const taxOwed = totalRevenue * 0.07;
-
+    // Sales tax collected/owed are NOT computable from portal data: nothing
+    // records tax_collected, and a liability figure requires the taxability
+    // determination per service + exemptions — an owner/CPA decision, not a
+    // flat rate. The old response fabricated taxOwed = 7% × ALL revenue.
+    // null = "not recorded"; the client renders "—" and skips the
+    // over/under-collected verdict rather than asserting one from fiction.
     res.json({
       month,
       startDate,
       endDate,
       totalRevenue,
-      taxCollected,
-      taxOwed,
-      difference: taxCollected - taxOwed,
-      note: 'Reconciliation assumes 7% blended FL rate on all revenue. For exact figures, factor in exempt customers and non-taxable services.',
+      taxCollected: null,
+      taxOwed: null,
+      difference: null,
+      note: 'Sales tax collection is not recorded in the portal, so collected/owed cannot be reconciled here. Revenue is the month\'s paid payments. Confirm taxability and any liability with your CPA.',
     });
   } catch (err) { next(err); }
 });
@@ -844,185 +846,16 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
 router.get('/pnl', async (req, res, next) => {
   try {
     const { period = 'mtd', start_date, end_date } = req.query;
-    const now = new Date();
-    // Use ET calendar for all period boundaries — server runs UTC.
-    const et = etParts(now);
-    const pad = (n) => String(n).padStart(2, '0');
-    let startDate, endDate;
-
-    switch (period) {
-      case 'monthly':
-      case 'mtd':
-        startDate = `${et.year}-${pad(et.month)}-01`;
-        endDate = etDateString(now);
-        break;
-      case 'last_month': {
-        const lmMonth = et.month === 1 ? 12 : et.month - 1;
-        const lmYear = et.month === 1 ? et.year - 1 : et.year;
-        startDate = `${lmYear}-${pad(lmMonth)}-01`;
-        // Last day of last month = day 0 of this ET month (JS handles as UTC, but day/month values are ET-derived).
-        const lmEnd = new Date(Date.UTC(et.year, et.month - 1, 0, 12, 0, 0));
-        const lmEndP = etParts(lmEnd);
-        endDate = `${lmEndP.year}-${pad(lmEndP.month)}-${pad(lmEndP.day)}`;
-        break;
-      }
-      case 'quarterly': {
-        const qMonth = Math.floor((et.month - 1) / 3) * 3 + 1;
-        startDate = `${et.year}-${pad(qMonth)}-01`;
-        endDate = etDateString(now);
-        break;
-      }
-      case 'ytd':
-        startDate = `${et.year}-01-01`;
-        endDate = etDateString(now);
-        break;
-      case 'annual':
-      case 'last_year':
-        startDate = `${et.year - 1}-01-01`;
-        endDate = `${et.year - 1}-12-31`;
-        break;
-      case 'custom':
-        startDate = start_date;
-        endDate = end_date;
-        break;
-      default:
-        startDate = `${et.year}-${pad(et.month)}-01`;
-        endDate = etDateString(now);
-    }
-
-    if (!startDate || !endDate) {
+    // Shared with /export/pnl and the tax package — one window resolver, one
+    // report builder, so the page and every export show the same numbers.
+    const range = getPeriodRange(period, { start_date, end_date });
+    if (!range) {
       return res.status(400).json({ error: 'start_date and end_date required for custom period' });
     }
+    const { startDate, endDate } = range;
 
-    // Revenue from payments
-    let serviceRevenue = 0, otherRevenue = 0;
-    try {
-      const rev = await db('payments')
-        .where('created_at', '>=', startDate)
-        .where('created_at', '<', db.raw("?::date + interval '1 day'", [endDate]))
-        .where('status', 'completed')
-        .select(
-          db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue"),
-          db.raw("COALESCE(SUM(CASE WHEN type = 'refund' THEN amount ELSE 0 END), 0) as refunds")
-        ).first();
-      serviceRevenue = parseFloat(rev?.revenue || 0) - parseFloat(rev?.refunds || 0);
-    } catch {
-      try {
-        const rev = await db('revenue_daily')
-          .where('date', '>=', startDate).where('date', '<=', endDate)
-          .sum('total_revenue as total').first();
-        serviceRevenue = parseFloat(rev?.total || 0);
-      } catch { /* tables may not exist */ }
-    }
-
-    // Labor costs from time_entry_daily_summary
-    let laborCost = 0;
-    try {
-      const labor = await db('time_entry_daily_summary')
-        .where('date', '>=', startDate).where('date', '<=', endDate)
-        .select(
-          db.raw('COALESCE(SUM(total_cost), 0) as total')
-        ).first();
-      laborCost = parseFloat(labor?.total || 0);
-    } catch { /* table may not exist */ }
-
-    // Materials / supplies expenses (COGS)
-    let materialsCost = 0;
-    try {
-      const mats = await db('expenses')
-        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
-        .where('expenses.expense_date', '>=', startDate)
-        .where('expenses.expense_date', '<=', endDate)
-        .whereIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'])
-        .sum('expenses.amount as total').first();
-      materialsCost = parseFloat(mats?.total || 0);
-    } catch { /* */ }
-
-    // Operating expenses by category (excluding COGS categories)
-    let opexCategories = [];
-    let opexTotal = 0;
-    try {
-      opexCategories = await db('expenses')
-        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
-        .where('expenses.expense_date', '>=', startDate)
-        .where('expenses.expense_date', '<=', endDate)
-        .whereNotIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'])
-        .select('expense_categories.name as category', 'expense_categories.irs_line')
-        .sum('expenses.amount as total')
-        .groupBy('expense_categories.name', 'expense_categories.irs_line')
-        .orderBy('total', 'desc');
-      opexTotal = opexCategories.reduce((s, c) => s + parseFloat(c.total || 0), 0);
-    } catch {
-      try {
-        const allExp = await db('expenses')
-          .where('expense_date', '>=', startDate).where('expense_date', '<=', endDate)
-          .sum('amount as total').first();
-        opexTotal = parseFloat(allExp?.total || 0) - materialsCost;
-      } catch { /* */ }
-    }
-
-    // Mileage deduction
-    let mileageDeduction = 0;
-    try {
-      const mil = await db('mileage_log')
-        .where('trip_date', '>=', startDate).where('trip_date', '<=', endDate)
-        .sum('deduction_amount as total').first();
-      mileageDeduction = parseFloat(mil?.total || 0);
-    } catch { /* */ }
-
-    // Depreciation — per-asset proration that respects placed_in_service_date
-    let depreciationTotal = 0;
-    try {
-      const assets = await db('equipment_register')
-        .where('active', true)
-        .where(function () { this.whereNull('disposed').orWhere('disposed', false); })
-        .whereNotNull('annual_depreciation');
-      const periodStart = new Date(startDate);
-      const periodEnd = new Date(endDate);
-      const periodDays = (periodEnd - periodStart) / 86400000 + 1;
-      for (const a of assets) {
-        const annual = parseFloat(a.annual_depreciation || 0);
-        if (!annual) continue;
-        const inService = a.placed_in_service_date ? new Date(a.placed_in_service_date) : (a.purchase_date ? new Date(a.purchase_date) : null);
-        const effStart = inService && inService > periodStart ? inService : periodStart;
-        if (effStart > periodEnd) continue;
-        const effDays = (periodEnd - effStart) / 86400000 + 1;
-        depreciationTotal += annual * (Math.max(0, effDays) / 365);
-      }
-      // Fallback: if no assets have annual_depreciation set, prorate total by period
-      if (depreciationTotal === 0) {
-        const depr = await db('equipment_register')
-          .where('active', true)
-          .where(function () { this.whereNull('disposed').orWhere('disposed', false); })
-          .sum('annual_depreciation as total').first();
-        depreciationTotal = parseFloat(depr?.total || 0) * (periodDays / 365);
-      }
-    } catch { /* */ }
-
-    const totalRevenue = serviceRevenue + otherRevenue;
-    const cogsTotal = laborCost + materialsCost;
-    const grossProfit = totalRevenue - cogsTotal;
-    const grossMargin = totalRevenue > 0 ? grossProfit / totalRevenue : 0;
-    const deductionsTotal = mileageDeduction + depreciationTotal;
-    const netIncome = grossProfit - opexTotal - deductionsTotal;
-    const netMargin = totalRevenue > 0 ? netIncome / totalRevenue : 0;
-
-    res.json({
-      period, startDate, endDate,
-      revenue: { serviceRevenue, otherRevenue, total: totalRevenue },
-      cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
-      grossProfit,
-      grossMargin,
-      operatingExpenses: {
-        categories: opexCategories.map(c => ({
-          name: c.category || 'Uncategorized', irsLine: c.irs_line, amount: parseFloat(c.total || 0),
-        })),
-        total: opexTotal,
-      },
-      deductions: { mileage: mileageDeduction, depreciation: depreciationTotal, total: deductionsTotal },
-      netIncome,
-      netMargin,
-    });
+    const report = await buildPnlReport(db, startDate, endDate);
+    res.json({ period, startDate, endDate, ...report });
   } catch (err) { next(err); }
 });
 
@@ -1036,7 +869,18 @@ router.get('/accounts-receivable', async (req, res, next) => {
     try {
       invoices = await db('invoices')
         .leftJoin('customers', 'invoices.customer_id', 'customers.id')
-        .whereIn('invoices.status', ['sent', 'overdue', 'unpaid', 'pending'])
+        // 'viewed' is what 'sent' becomes the moment the customer opens the
+        // invoice — omitting it made receivables VANISH from A/R on view
+        // ($1,374 across 5 invoices invisible at audit time). Deliberately
+        // excluded: draft/scheduled/sending (not yet receivable) and
+        // processing (ACH in flight settles on its own).
+        .whereIn('invoices.status', ['sent', 'viewed', 'overdue', 'unpaid', 'pending'])
+        // Third-party payer invoices are owed by the PAYER's AP inbox — this
+        // surface joins the service recipient's contact info and its Send
+        // Reminder button texts them, so a payer-billed invoice here would
+        // chase the homeowner for someone else's bill (mirrors the
+        // payments-reconcile payer guard).
+        .whereNull('invoices.payer_id')
         .select(
           'invoices.*',
           'customers.first_name', 'customers.last_name',
@@ -1061,7 +905,13 @@ router.get('/accounts-receivable', async (req, res, next) => {
     const now = new Date();
     let totalOutstanding = 0, current = 0, over30 = 0, over60 = 0, over90 = 0;
     const items = invoices.map(inv => {
-      const amount = parseFloat(inv.amount || inv.total || inv.amount_due || 0);
+      // Invoice rows carry `total`: net applied account/deposit credit so
+      // A/R totals (and the SMS reminder) ask for the COLLECTIBLE amount,
+      // matching every other receivable query. The payments-table fallback
+      // rows keep the raw-amount path.
+      const amount = inv.total != null
+        ? invoiceAmountDue(inv)
+        : parseFloat(inv.amount || inv.amount_due || 0);
       const dueDate = inv.due_date || inv.created_at;
       const daysOverdue = dueDate ? Math.max(0, Math.floor((now - new Date(dueDate)) / 86400000)) : 0;
       let bucket = 'current';
@@ -1170,14 +1020,30 @@ router.get('/export/mileage', async (req, res, next) => {
 
 router.get('/export/depreciation', async (req, res, next) => {
   try {
+    // Same shape as the tax-package schedule: the export covers a tax YEAR
+    // (?year=, default current ET year) and computes the per-asset
+    // 'Depreciation (This Period)' column with the same proration the P&L
+    // uses — the generator's header promises that column, so the standalone
+    // export must populate it too. Active-or-disposed matches the package.
+    const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts(new Date()).year);
+    const sd = `${year}-01-01`;
+    const ed = `${year}-12-31`;
     let equipment = [];
     try {
-      equipment = await db('equipment_register').where('active', true).orderBy('name');
-    } catch { /* */ }
+      equipment = await db('equipment_register')
+        .where(function activeOrDisposed() {
+          this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
+        })
+        .orderBy('name');
+      equipment = equipment.map(e => ({
+        ...e,
+        period_depreciation: prorateAssetDepreciation(e, sd, ed),
+      }));
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     const csvStr = csv.depreciationToCSV(equipment);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="waves-depreciation-${new Date().getFullYear()}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="waves-depreciation-${year}.csv"`);
     res.send(csvStr);
   } catch (err) { next(err); }
 });
@@ -1205,70 +1071,23 @@ router.get('/export/labor', async (req, res, next) => {
 
 router.get('/export/pnl', async (req, res, next) => {
   try {
-    // Reuse the /pnl endpoint logic by making an internal call
-    const period = req.query.period || 'ytd';
-    const params = new URLSearchParams({ period, ...req.query });
-    const pnlRes = await new Promise((resolve, reject) => {
-      const mockReq = { ...req, query: Object.fromEntries(params) };
-      const data = {};
-      const mockRes = { json: (d) => resolve(d), status: () => mockRes, setHeader: () => {} };
-      // Inline the P&L logic instead
-      reject(new Error('use_fetch'));
-    }).catch(async () => {
-      // Fetch P&L data via the same route handler logic
-      const url = `${req.protocol}://${req.get('host')}/api/admin/tax/pnl?${params}`;
-      const resp = await fetch(url, { headers: { Authorization: req.headers.authorization } });
-      return resp.json();
-    }).catch(async () => {
-      // Fallback: build P&L inline
-      const now = new Date();
-      const year = now.getFullYear();
-      const startDate = req.query.start_date || `${year}-01-01`;
-      const endDate = req.query.end_date || etDateString(now);
+    // Same window resolver + report builder as GET /pnl — the exported CSV
+    // is byte-for-byte the same numbers the page shows. (The old version
+    // HTTP-fetched its own endpoint and fell back to a divergent inline
+    // recomputation that ignored the period parameter.)
+    // ExportsTab sends bare start_date/end_date with no period — honor the
+    // picked range as a custom window instead of silently exporting YTD.
+    const period = req.query.period
+      || (req.query.start_date && req.query.end_date ? 'custom' : 'ytd');
+    const range = getPeriodRange(period, req.query);
+    if (!range) {
+      return res.status(400).json({ error: 'start_date and end_date required for custom period' });
+    }
+    const report = await buildPnlReport(db, range.startDate, range.endDate);
 
-      let serviceRevenue = 0;
-      try {
-        const rev = await db('payments').where('created_at', '>=', startDate).where('created_at', '<', db.raw("?::date + interval '1 day'", [endDate])).where('status', 'completed')
-          .select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first();
-        serviceRevenue = parseFloat(rev?.revenue || 0);
-      } catch { try { const rev = await db('revenue_daily').where('date', '>=', startDate).where('date', '<=', endDate).sum('total_revenue as total').first(); serviceRevenue = parseFloat(rev?.total || 0); } catch { /* */ } }
-
-      let laborCost = 0;
-      try { const l = await db('time_entry_daily_summary').where('date', '>=', startDate).where('date', '<=', endDate).sum('total_cost as total').first(); laborCost = parseFloat(l?.total || 0); } catch { /* */ }
-
-      let materialsCost = 0;
-      try { const m = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', startDate).where('expenses.expense_date', '<=', endDate).whereIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals']).sum('expenses.amount as total').first(); materialsCost = parseFloat(m?.total || 0); } catch { /* */ }
-
-      let opexCats = [];
-      try { opexCats = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', startDate).where('expenses.expense_date', '<=', endDate).whereNotIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals']).select('expense_categories.name as category').sum('expenses.amount as total').groupBy('expense_categories.name').orderBy('total', 'desc'); } catch { /* */ }
-      const opexTotal = opexCats.reduce((s, c) => s + parseFloat(c.total || 0), 0);
-
-      let mileageDed = 0;
-      try { const ml = await db('mileage_log').where('trip_date', '>=', startDate).where('trip_date', '<=', endDate).sum('deduction_amount as total').first(); mileageDed = parseFloat(ml?.total || 0); } catch { /* */ }
-
-      let depreciation = 0;
-      try { const dp = await db('equipment_register').where('active', true).where(function () { this.whereNull('disposed').orWhere('disposed', false); }).sum('annual_depreciation as total').first(); const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1; depreciation = parseFloat(dp?.total || 0) * (days / 365); } catch { /* */ }
-
-      const cogsTotal = laborCost + materialsCost;
-      const grossProfit = serviceRevenue - cogsTotal;
-      const deductionsTotal = mileageDed + depreciation;
-      const netIncome = grossProfit - opexTotal - deductionsTotal;
-
-      return {
-        revenue: { serviceRevenue, otherRevenue: 0, total: serviceRevenue },
-        cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
-        grossProfit,
-        grossMargin: serviceRevenue > 0 ? grossProfit / serviceRevenue : 0,
-        operatingExpenses: { categories: opexCats.map(c => ({ name: c.category || 'Uncategorized', amount: parseFloat(c.total || 0) })), total: opexTotal },
-        deductions: { mileage: mileageDed, depreciation, total: deductionsTotal },
-        netIncome,
-        netMargin: serviceRevenue > 0 ? netIncome / serviceRevenue : 0,
-      };
-    });
-
-    const csvStr = csv.pnlToCSV(pnlRes);
+    const csvStr = csv.pnlToCSV(report);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="waves-pnl-${req.query.period || 'ytd'}-${etDateString()}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="waves-pnl-${period}-${etDateString()}.csv"`);
     res.send(csvStr);
   } catch (err) { next(err); }
 });
@@ -1280,51 +1099,196 @@ router.get('/export/tax-package', async (req, res, next) => {
     const sd = `${year}-01-01`;
     const ed = `${year}-12-31`;
 
-    // Gather all data with fallbacks
+    // Gather all data with fallbacks. Transactions window on payment_date
+    // (ET-stamped DATE) so the dump covers the same calendar year as the P&L —
+    // a created_at window is UTC and shifts the year boundary by 4–5 ET hours.
+    // Full-refund MARKER rows (metadata.source='invoice_refund') are dated
+    // the REFUND day — exclude them here and append them re-dated to the
+    // invoice's paid period below, matching paidRevenueForWindow.
     let payments = [];
-    try { payments = await db('payments').where('created_at', '>=', sd).where('created_at', '<', db.raw("?::date + interval '1 day'", [ed])).leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.created_at', 'desc'); } catch { /* */ }
+    try {
+      payments = await db('payments')
+        .whereBetween('payment_date', [sd, ed])
+        // Same receipt predicate as the P&L builder: only cash that arrived
+        // (paid/refunded/disputed). Upcoming/processing/failed attempts are
+        // not receipts and must not appear beside income evidence.
+        .whereIn('payments.status', ['paid', 'refunded', 'disputed'])
+        .whereRaw("COALESCE(payments.metadata->>'source', '') <> 'invoice_refund'")
+        .leftJoin('customers', 'payments.customer_id', 'customers.id')
+        .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
+        .orderBy('payments.payment_date', 'desc');
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
+
+    // pnl.csv revenue also counts estimate-deposit cash and paid-Stripe-
+    // invoice gap rows (no payments row) — map both into transactions.csv so
+    // every receipt the P&L counts has a supporting transaction row.
+    try {
+      // Normalize DATE cells to YYYY-MM-DD so the combined date sort (and the
+      // CSV's date column) is stable across row sources.
+      payments = payments.map(p => ({ ...p, payment_date: dateCellStr(p.payment_date) || p.payment_date }));
+      const depositRows = await db('estimate_deposits as d')
+        .leftJoin('customers as c', 'd.customer_id', 'c.id')
+        .whereNotNull('d.received_at')
+        .whereRaw(
+          "DATE(d.received_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(d.received_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as payment_date"),
+          db.raw("(d.amount + COALESCE(d.card_surcharge, 0)) as amount"),
+          'd.status',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...depositRows.map(r => ({
+        ...r,
+        type: 'estimate_deposit',
+        description: 'Estimate deposit (deposits ledger — no payments row)',
+        processor: 'stripe',
+      })));
+      const gapRows = await db('invoices as i')
+        .leftJoin('customers as c', 'i.customer_id', 'c.id')
+        .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
+        .whereNotNull('i.stripe_payment_intent_id')
+        .whereNotExists(function gapGuard() {
+          this.select(db.raw('1'))
+            .from('payments as p')
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id')
+            .whereRaw("COALESCE(p.metadata->>'source', '') <> 'invoice_refund'");
+        })
+        .whereRaw(
+          "DATE(i.paid_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(i.paid_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as payment_date"),
+          db.raw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) as amount'),
+          'i.invoice_number',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...gapRows.map(r => ({
+        ...r,
+        type: 'invoice_paid',
+        status: 'paid',
+        description: `Invoice ${r.invoice_number} paid via Stripe (no payments-ledger row)`,
+        processor: 'stripe',
+      })));
+      // Fully refunded gap invoices: their receipt is the marker's amount,
+      // recognized in the invoice's PAID period (same effective-date rule as
+      // paidRevenueForWindow); the refund-day outflow lives in refunds.csv.
+      const markerRows = await db('payments as m')
+        .whereRaw("m.metadata->>'source' = 'invoice_refund'")
+        .leftJoin('invoices as gi', 'gi.stripe_payment_intent_id', 'm.stripe_payment_intent_id')
+        .leftJoin('customers as c', 'm.customer_id', 'c.id')
+        .whereRaw(
+          "DATE(COALESCE(gi.paid_at AT TIME ZONE 'America/New_York', m.payment_date::timestamp)) BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          db.raw("TO_CHAR(DATE(COALESCE(gi.paid_at AT TIME ZONE 'America/New_York', m.payment_date::timestamp)), 'YYYY-MM-DD') as payment_date"),
+          'm.amount',
+          'gi.invoice_number',
+          db.raw("COALESCE(c.first_name || ' ' || c.last_name, 'Unknown') as customer_name"),
+        );
+      payments.push(...markerRows.map(r => ({
+        ...r,
+        type: 'invoice_paid',
+        status: 'paid (later fully refunded)',
+        description: `Invoice ${r.invoice_number || ''} paid via Stripe — later fully refunded (outflow in refunds.csv)`,
+        processor: 'stripe',
+      })));
+      payments.sort((a, b) => String(b.payment_date || '').localeCompare(String(a.payment_date || '')));
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     let expenses = [];
-    try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch { /* */ }
+    try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     let trips = [];
-    try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch { /* */ }
+    try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
+    // Refund ledger for the same window (ET days) — pnl.csv nets these, so
+    // the package must include the rows that explain the outflow (a refund
+    // in a later period than its payment has no transactions.csv row).
+    let refunds = [];
+    try {
+      // The EXACT query the P&L nets (shared definition) — every outflow
+      // figure in pnl.csv has a supporting row here by construction.
+      refunds = await outflowTransactionsQuery(db, sd, ed)
+        .select(
+          'spt.*',
+          db.raw("TO_CHAR(spt.created_at_stripe AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as refund_date_et"),
+        )
+        .orderBy('spt.created_at_stripe', 'desc');
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
+
+    // Same predicate as the P&L builder: active assets PLUS disposed ones,
+    // so depreciation.csv lists every asset whose prorated depreciation
+    // appears in pnl.csv (a disposed-this-year asset previously showed in
+    // the P&L but was missing from the supporting schedule).
     let equipment = [];
-    try { equipment = await db('equipment_register').where('active', true).where(function () { this.whereNull('disposed').orWhere('disposed', false); }).orderBy('name'); } catch { /* */ }
+    try {
+      equipment = await db('equipment_register')
+        .where(function activeOrDisposed() {
+          this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
+        })
+        .orderBy('name');
+      // Per-asset depreciation for THIS package's year, same proration the
+      // P&L uses — the schedule's period column sums to pnl.csv's
+      // depreciation line by construction.
+      equipment = equipment.map(e => ({
+        ...e,
+        period_depreciation: prorateAssetDepreciation(e, sd, ed),
+      }));
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
+    // Time-tracking detail — INFORMATIONAL ONLY. The imputed cost column
+    // prices job minutes at the internal job-costing rate; the sole
+    // technician is the owner, whose own labor is NOT a deductible expense,
+    // so this schedule deliberately does NOT feed pnl.csv (its COGS labor
+    // line is real payroll/contract-labor spend only, which flows through
+    // expense categories). The summary table stores MINUTES (work_date
+    // keyed), not a cost column — the old query filtered a nonexistent
+    // `date` column, so this export had been empty since the feature
+    // shipped.
     let laborSummaries = [];
-    try { laborSummaries = await db('time_entry_daily_summary').where('date', '>=', sd).where('date', '<=', ed).orderBy('date', 'desc'); } catch { /* */ }
+    try {
+      // Effective-dated rates: each day costs at the rate in force that day
+      // (rateAsOf) — same basis as per-visit job costing.
+      const rateRows = await db('company_financials')
+        .where('effective_date', '<=', ed)
+        .orderBy('effective_date', 'asc')
+        .select('effective_date', 'loaded_labor_rate')
+        .catch(() => []);
+      const rows = await db('time_entry_daily_summary as s')
+        .leftJoin('technicians as t', 's.technician_id', 't.id')
+        .whereBetween('s.work_date', [sd, ed])
+        .orderBy('s.work_date', 'desc')
+        .select('s.*', 't.name as technician_name');
+      laborSummaries = rows.map(r => {
+        // dateCellStr: node-postgres DATE cells are local-midnight Dates —
+        // etDateString(new Date(...)) printed the previous calendar day.
+        const day = dateCellStr(r.work_date);
+        const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
+        const dayRate = rateAsOf(rateRows, day);
+        return {
+          date: day,
+          technician_name: r.technician_name || '',
+          // All job hours reported as regular (overtime_hours 0): the summary's
+          // overtime_minutes tracks SHIFT overtime, not job-time OT, and the
+          // owner-operator draws no OT premium — feeding it to laborToCSV would
+          // add a 1.5× pay line on top of hours already counted as regular.
+          total_hours: jobHours.toFixed(2),
+          overtime_hours: 0,
+          jobs: r.job_count || 0,
+          rate: dayRate,
+          total_cost: (jobHours * dayRate).toFixed(2),
+        };
+      });
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
-    // Build P&L data
-    let serviceRevenue = 0;
-    try { const rev = await db('payments').where('created_at', '>=', sd).where('created_at', '<', db.raw("?::date + interval '1 day'", [ed])).where('status', 'completed').select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first(); serviceRevenue = parseFloat(rev?.revenue || 0); } catch { /* */ }
-    const laborCost = laborSummaries.reduce((s, l) => s + parseFloat(l.total_cost || 0), 0);
-    const materialsCost = expenses.filter(e => ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name)).reduce((s, e) => s + parseFloat(e.amount || 0), 0);
-    const opexItems = expenses.filter(e => !['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name));
-    const opexByCategory = {};
-    opexItems.forEach(e => { const cat = e.category_name || 'Uncategorized'; opexByCategory[cat] = (opexByCategory[cat] || 0) + parseFloat(e.amount || 0); });
-    const opexTotal = Object.values(opexByCategory).reduce((s, v) => s + v, 0);
-    const mileageDed = trips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
-    const depreciation = equipment.reduce((s, e) => s + parseFloat(e.annual_depreciation || 0), 0);
-    const cogsTotal = laborCost + materialsCost;
-    const grossProfit = serviceRevenue - cogsTotal;
-    const deductionsTotal = mileageDed + depreciation;
-    const netIncome = grossProfit - opexTotal - deductionsTotal;
-
-    const pnlData = {
-      revenue: { serviceRevenue, otherRevenue: 0, total: serviceRevenue },
-      cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
-      grossProfit,
-      grossMargin: serviceRevenue > 0 ? grossProfit / serviceRevenue : 0,
-      operatingExpenses: {
-        categories: Object.entries(opexByCategory).map(([name, amount]) => ({ name, amount })),
-        total: opexTotal,
-      },
-      deductions: { mileage: mileageDed, depreciation, total: deductionsTotal },
-      netIncome,
-      netMargin: serviceRevenue > 0 ? netIncome / serviceRevenue : 0,
-    };
+    // P&L from the shared builder — identical numbers to GET /pnl and
+    // /export/pnl. (The old inline version had $0 revenue via a dead query,
+    // and full-year unprorated depreciation.)
+    const pnlData = await buildPnlReport(db, sd, ed);
 
     // Stream ZIP
     res.setHeader('Content-Type', 'application/zip');
@@ -1335,10 +1299,13 @@ router.get('/export/tax-package', async (req, res, next) => {
     archive.pipe(res);
 
     archive.append(csv.transactionsToCSV(payments), { name: 'transactions.csv' });
+    archive.append(csv.refundsToCSV(refunds), { name: 'refunds.csv' });
     archive.append(csv.expensesToCSV(expenses), { name: 'expenses.csv' });
     archive.append(csv.mileageToCSV(trips), { name: 'mileage.csv' });
     archive.append(csv.depreciationToCSV(equipment), { name: 'depreciation.csv' });
-    archive.append(csv.laborToCSV(laborSummaries), { name: 'labor.csv' });
+    // Renamed so a CPA can't mistake the imputed job-costing figures for a
+    // payroll expense schedule (owner labor is not deductible).
+    archive.append(csv.laborToCSV(laborSummaries), { name: 'labor-timetracking-informational.csv' });
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     archive.append(csv.generateReadme(year, pnlData), { name: 'README.txt' });
 

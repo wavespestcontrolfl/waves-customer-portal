@@ -604,7 +604,7 @@ router.post(
     try {
       switch (event.type) {
         case 'payment_intent.succeeded':
-          await handlePaymentIntentSucceeded(event.data.object);
+          await handlePaymentIntentSucceeded(event.data.object, event.created);
           break;
 
         case 'payment_intent.processing':
@@ -724,7 +724,7 @@ router.post(
 // on an already-paid statement is a no-op; processing/revert are conditional on
 // the statement's ACTIVE PI, so a stale/replaced PI's events match nothing. NOT
 // feature-gated — a confirmed money event must settle regardless of the flag.
-async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
+async function handleStatementPaymentIntentEvent(paymentIntent, eventType, eventCreated = null) {
   const statementId = Number(paymentIntent.metadata?.waves_statement_id);
   if (!Number.isInteger(statementId) || statementId <= 0) return;
   const piId = paymentIntent.id;
@@ -809,6 +809,11 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
         surchargeRateBps: rateBps,
         surchargePolicyVersion: policyVersion,
         cardFunding: funding,
+        // Stripe's event timestamp — the settlement moment. The payment row's
+        // payment_date buckets P&L revenue; stamping webhook delivery time
+        // let a delayed/retried event move statement cash across a period
+        // boundary.
+        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
       return true;
@@ -867,14 +872,19 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
   }
 }
 
-async function handlePaymentIntentSucceeded(paymentIntent) {
+// `eventCreated` is the Stripe event's unix-seconds timestamp — when Stripe
+// emitted payment_intent.succeeded, i.e. the settlement moment. Threaded
+// through so the ACH settlement-date restamp below can't drift onto the
+// webhook DELIVERY day when a retry crosses a month/year boundary (mirrors
+// handlePaymentIntentProcessing's initiatedAt).
+async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
 
   // P3: a payer-statement PI settles the consolidated statement (cascade), not an
   // invoice — route it before any invoice/tender logic and return.
   if (paymentIntent.metadata?.waves_statement_id) {
-    await handleStatementPaymentIntentEvent(paymentIntent, 'succeeded');
+    await handleStatementPaymentIntentEvent(paymentIntent, 'succeeded', eventCreated);
     return;
   }
 
@@ -882,7 +892,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // the deposit ledger BEFORE any invoice/tender logic runs against them.
   if (paymentIntent.metadata?.purpose === 'estimate_deposit') {
     const { handleDepositIntentSucceeded } = require('../services/estimate-deposits');
-    await handleDepositIntentSucceeded(paymentIntent);
+    await handleDepositIntentSucceeded(paymentIntent, eventCreated);
     return;
   }
 
@@ -1091,6 +1101,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     // the marker. Constant strings only — no request-derived input.
     description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
     metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
+    // Cash basis: the row was stamped with the INITIATION day when
+    // payment_intent.processing arrived; restamp to the SETTLEMENT day so
+    // revenue lands in the period the money actually cleared (an ACH
+    // initiated before a month/year end and settled after was reported in
+    // the wrong period). The settlement moment is the EVENT's timestamp,
+    // not this handler's run time — a delayed/retried webhook must not
+    // shift the date. Safe: this update is scoped to status='processing'
+    // rows below, so card payments (settled same-day) are never touched,
+    // and a replay matches 0 rows.
+    payment_date: etDateString(eventCreated ? new Date(eventCreated * 1000) : undefined),
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;
