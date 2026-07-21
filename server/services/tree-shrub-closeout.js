@@ -480,6 +480,14 @@ function deriveTreeShrubTreatments({ products = [], productRows = [] } = {}) {
     // /chelat/: foliar chelated-iron/micronutrient rows (LESCO Chelated Iron
     // Plus is filed Uncategorized) carry no other micronutrient marker.
     if (/micro[\s-]?nutrient|minor[\s-]?element|chelat/i.test(txt)) chips.add('Micronutrients');
+    // Method-based chip (codex P2 r6): the completion payload records the
+    // tech's application method per product, and soil_drench is an explicit
+    // selection (never a default) — a drenched systemic must surface the
+    // 'Soil drench' chip the narrative keys off. foliar_spray deliberately
+    // does NOT derive 'Foliar treatment': it is the T&S line-wide DEFAULT
+    // method, so deriving from it would stamp every report.
+    const method = text(ref.input?.applicationMethod ?? ref.input?.application_method);
+    if (method === 'soil_drench') chips.add('Soil drench');
     // The amendment chip requires a positively amendment-like product
     // (catalog: "Soil Amendment", "Espoma Organic Soil Acidifier",
     // CarbonPro-L biostimulant). It is NOT the catch-all for unclassified

@@ -5255,6 +5255,16 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
       }
     }
   }
+  // Mirrors the server rule (codex P2 r6): the chip's report sentence says
+  // "Your help with the recommendations above", so it needs a recorded
+  // recommendation now that the simplified T&S form no longer requires one.
+  if (
+    schemaType === "tree_shrub" &&
+    chip === "Customer action needed" &&
+    !String(values?.customer_recommendations ?? "").trim()
+  ) {
+    return `"Customer action needed" requires a recorded customer recommendation — add one or remove the chip`;
+  }
   return null;
 }
 

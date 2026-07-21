@@ -12,6 +12,7 @@ const {
   customerLabelForValue,
   findBannedCustomerCopy,
   nextStepRequiredForType,
+  validateNextStepChips,
   validateTypedFindings,
   buildTodaysResult,
   buildTypedReportSnapshot,
@@ -578,6 +579,34 @@ describe('companion context (combined visits — codex P2)', () => {
   });
 });
 
+describe('Customer action needed chip requires a recommendation (codex P2 r6)', () => {
+  test('chip beside empty customer_recommendations is rejected', () => {
+    const result = validateNextStepChips(
+      ['Customer action needed'], 'tree_shrub',
+      { plant_groups: 'Shrubs', landscape_condition: 'Good', customer_recommendations: '' },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/recorded customer recommendation/);
+  });
+
+  test('chip with a recorded recommendation passes', () => {
+    const result = validateNextStepChips(
+      ['Customer action needed'], 'tree_shrub',
+      { customer_recommendations: 'Adjust irrigation' },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.chips).toEqual(['Customer action needed']);
+  });
+
+  test('other chips stay valid without recommendations', () => {
+    const result = validateNextStepChips(
+      ['Continue Tree & Shrub program'], 'tree_shrub',
+      { customer_recommendations: '' },
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
   const cat = (over) => ({ id: 'p1', name: 'Product', category: '', ...over });
   const derive = (rows) => deriveTreeShrubTreatments({
@@ -654,6 +683,23 @@ describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
       cat({ id: 'b', name: 'Dominion 2L', category: 'insecticide' }),
     ]);
     expect(mixed).toBe('Insect treatment');
+  });
+
+  test('explicit soil_drench method derives the Soil drench chip; default foliar does not (codex P2 r6)', () => {
+    const rows = [cat({ name: 'Merit 2F', category: 'Insecticide', active_ingredient: 'Imidacloprid' })];
+    const drenched = deriveTreeShrubTreatments({
+      products: [{ productId: 'p1', applicationMethod: 'soil_drench' }],
+      productRows: rows,
+    });
+    expect(drenched).toContain('Soil drench');
+    expect(drenched).toContain('Insect treatment');
+    // foliar_spray is the T&S line-wide DEFAULT method — deriving from it
+    // would stamp every report, so it must add nothing.
+    const foliar = deriveTreeShrubTreatments({
+      products: [{ productId: 'p1', applicationMethod: 'foliar_spray' }],
+      productRows: rows,
+    });
+    expect(foliar).toBe('Insect treatment');
   });
 
   test('every derived chip is a legal treatments_completed option', () => {

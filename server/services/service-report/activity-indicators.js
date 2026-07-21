@@ -1392,6 +1392,16 @@ function validateNextStepChips(chips, projectType = null, values = null, context
       }
     }
   }
+  // The T&S simplification (owner directive 2026-07-21) made
+  // customer_recommendations optional, but the 'Customer action needed'
+  // sentence reads "Your help with the recommendations above" — beside an
+  // empty recommendations field that copy dangles in the immutable report
+  // (Codex P2 round 6). The chip requires a recorded recommendation.
+  if (values && projectType === 'tree_shrub'
+    && normalized.includes('Customer action needed')
+    && !String(values.customer_recommendations || '').trim()) {
+    return { ok: false, error: 'Next-step chip "Customer action needed" requires a recorded customer recommendation — add one or remove the chip' };
+  }
   return { ok: true, chips: normalized };
 }
 
