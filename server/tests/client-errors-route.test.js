@@ -1,0 +1,64 @@
+/**
+ * P2 (07-19 admin audit): there was no client-side error telemetry — React
+ * boundary crashes and admin handler failures only hit console/alert. This
+ * receiver forwards a client error to Sentry (server-side), tagged source=client,
+ * with every field truncated. Unauthenticated by design (an anonymous page can
+ * crash too) but rate-limited.
+ */
+
+const mockCapture = jest.fn();
+jest.mock('@sentry/node', () => ({ captureException: (...args) => mockCapture(...args) }));
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
+
+const express = require('express');
+const router = require('../routes/client-errors');
+
+let server;
+let baseUrl;
+beforeAll((done) => {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/client-errors', router);
+  server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
+});
+afterAll((done) => { server.close(done); });
+beforeEach(() => mockCapture.mockClear());
+
+const post = (body) => fetch(`${baseUrl}/api/client-errors`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
+
+describe('POST /api/client-errors', () => {
+  test('forwards to Sentry tagged source=client and returns 204', async () => {
+    const res = await post({ message: 'Boom', stack: 'at x', componentStack: 'in <App>', context: 'PageErrorBoundary', url: '/admin/banking' });
+    expect(res.status).toBe(204);
+    expect(mockCapture).toHaveBeenCalledTimes(1);
+
+    const [error, scopeFn] = mockCapture.mock.calls[0];
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('Boom');
+
+    const scope = { setTag: jest.fn(), setContext: jest.fn() };
+    scopeFn(scope);
+    expect(scope.setTag).toHaveBeenCalledWith('source', 'client');
+    expect(scope.setContext).toHaveBeenCalledWith('client_error', expect.objectContaining({
+      context: 'PageErrorBoundary', url: '/admin/banking',
+    }));
+  });
+
+  test('truncates oversized fields before forwarding', async () => {
+    const res = await post({ message: 'm'.repeat(2000), stack: 's'.repeat(9000) });
+    expect(res.status).toBe(204);
+    const [error, scopeFn] = mockCapture.mock.calls[0];
+    expect(error.message.length).toBe(500);
+    const scope = { setTag: jest.fn(), setContext: jest.fn() };
+    scopeFn(scope);
+    expect(scope.setContext.mock.calls[0][1].stack.length).toBe(4000);
+  });
+
+  test('a missing message still reports (never 500s)', async () => {
+    const res = await post({});
+    expect(res.status).toBe(204);
+    expect(mockCapture.mock.calls[0][0].message).toBe('Client error (no message)');
+  });
+});

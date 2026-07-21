@@ -2,6 +2,7 @@ import React, { Component, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
+import { reportError } from './lib/reportError';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -77,7 +78,10 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { console.error('[Page crash]', error, info.componentStack); }
+  componentDidCatch(error, info) {
+    console.error('[Page crash]', error, info.componentStack);
+    reportError(error, { context: 'PageErrorBoundary', componentStack: info.componentStack });
+  }
   render() {
     if (this.state.error) {
       if (this.props.customerGlass) {

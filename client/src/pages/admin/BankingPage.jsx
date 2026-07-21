@@ -21,6 +21,7 @@ import {
 import { etDateString } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
+import { reportError } from "../../lib/reportError";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -760,6 +761,7 @@ function ReconciliationTab() {
       });
       await load();
     } catch (e) {
+      reportError(e, "banking:reconcile");
       alert("Reconciliation failed: " + e.message);
     }
     setReconciling(null);
@@ -1013,6 +1015,7 @@ function ExportsTab() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (e) {
+      reportError(e, "banking:download");
       alert("Download failed: " + e.message);
     }
     setDownloading(false);
@@ -1304,6 +1307,7 @@ function PayoutModal({
       onSuccess();
       return;
     } catch (e) {
+      reportError(e, "banking:payout");
       alert("Payout failed: " + e.message);
     }
     setSubmitting(false);
