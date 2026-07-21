@@ -653,12 +653,12 @@ async function buildPnlReport(db, startDate, endDate) {
     // direction (never over-claiming) is deliberate if a second vehicle is
     // ever added — per-vehicle elections would be the enhancement then, and
     // mileage_log has no FK into equipment_register to attribute miles today.
-    // Period-effective: the election that was in force through the window END,
-    // not simply the newest row — rebuilding a prior year or older custom
-    // period must not apply a later election to it. No row on/before endDate
-    // (e.g. a pre-election historical period) → null → fail closed.
+    // GLOBAL preference (newest row), not period-effective. The election is
+    // now INFORMATIONAL — it never changes the P&L computation (always the
+    // actual-expenses basis), only the disclosure note — so reading the newest
+    // row is correct and, unlike a ≤endDate filter, doesn't silently discard a
+    // selection saved (stamped today) while viewing a historical period.
     db('company_financials')
-      .where('effective_date', '<=', endDate)
       .orderBy('effective_date', 'desc')
       .select('vehicle_deduction_method')
       .first()
