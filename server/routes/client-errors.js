@@ -64,7 +64,10 @@ const routeRoot = (value) => {
 const componentNames = (value) => {
   const matches = String(value || '').match(/\b(?:in|at) [A-Za-z][A-Za-z0-9]{0,50}/g);
   if (!matches) return undefined;
-  return matches.slice(0, 40).join('\n');
+  // componentStack is public/attacker-controlled too — drop any "component"
+  // carrying a long digit run (a PAN/SSN dressed up as a component name).
+  const safe = matches.filter((m) => !/\d{5,}/.test(m)).slice(0, 40);
+  return safe.length ? safe.join('\n') : undefined;
 };
 
 // POST /api/client-errors  { name, context, route, componentStack }

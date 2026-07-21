@@ -90,6 +90,13 @@ describe('POST /api/client-errors', () => {
     expect(stack).not.toMatch(/123-45-6789|4242/);
   });
 
+  test('componentStack drops a PAN-shaped "component" (digit-run guard)', async () => {
+    await post({ name: 'E', route: '/admin/x', componentStack: 'in A4242424242424242\n in BankingPage' });
+    const stack = ctxOf().componentStack;
+    expect(stack).toBe('in BankingPage');
+    expect(stack).not.toMatch(/4242/);
+  });
+
   test('a missing/empty body still returns 204 (never 500s)', async () => {
     const res = await post({});
     expect(res.status).toBe(204);
