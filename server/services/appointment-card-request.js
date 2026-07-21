@@ -79,6 +79,22 @@ function skip(reason, extra = {}) {
   return { requested: false, action: 'skipped', reason, ...extra };
 }
 
+// BOTH dark levers — the env gate AND the active secure_appointment_card
+// template. Admin surfaces use this to decide whether to OFFER the send
+// action at all (Codex #2921 P2): while the lane is dark, an offered
+// checkbox/button silently no-ops (gate_off / template_inactive land only
+// in the logs) and the office reads that as a sent link. Fail toward NOT
+// offering — a hidden option is recoverable, a phantom send is not.
+async function isSecureCardLaneReady() {
+  if (!isAppointmentCardRequestEnabled()) return false;
+  try {
+    return !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x' }));
+  } catch (err) {
+    logger.warn(`[appt-card-request] lane-ready template probe failed: ${err.message}`);
+    return false;
+  }
+}
+
 // " on Tue, Jul 21" — noon-anchored so the rendered weekday can't slip a
 // day across TZ seams, and rendered explicitly in ET (the business's
 // behavior timezone) rather than the server's locale default. '' when the
@@ -894,6 +910,7 @@ async function loadSecureCardPageData(token) {
 module.exports = {
   requestCardForAppointment,
   isAppointmentCardRequestEnabled,
+  isSecureCardLaneReady,
   loadSecureCardPageData,
   completeSecureCardCapture,
   completeSecureCardCaptureFromWebhook,

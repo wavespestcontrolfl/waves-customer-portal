@@ -507,7 +507,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Secure-card / Auto Pay setup text — OFF by default (owner call): the
   // office opts in per booking; server-side policy (payer exemption,
   // saved-card auto-secure, one-text-ever) still governs the actual send.
+  // The checkbox only renders while the lane is actually live (env gate +
+  // active SMS template) — offering it while the lane is dark would
+  // silently no-op and read as a sent link (Codex #2921 P2). Fetch
+  // failure keeps it hidden for the same reason.
   const [sendCardLink, setSendCardLink] = useState(false);
+  const [cardLinkAvailable, setCardLinkAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch('/admin/schedule/card-request-availability')
+      .then(r => { if (!cancelled) setCardLinkAvailable(!!r?.enabled); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
@@ -1130,7 +1142,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // across a retry after a partial failure) carries the card-link
           // flag — a lawn + tree&shrub booking split into two cadence
           // groups must not text the customer two secure links.
-          sendCardOnFileLink: sendCardLink && results.length === 0 && createdGroupKeysRef.current.size === 0 ? true : undefined,
+          sendCardOnFileLink: cardLinkAvailable && sendCardLink && results.length === 0 && createdGroupKeysRef.current.size === 0 ? true : undefined,
           isRecurring,
           recurringPattern: isRecurring ? group.cadence : undefined,
           // Send undefined for ongoing so the server's plannedCount fallback
@@ -2251,11 +2263,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
               <span style={{ fontSize: 13, color: D.text }}>Send confirmation SMS</span>
             </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
-              <input type="checkbox" checked={sendCardLink} onChange={e => setSendCardLink(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
-              <span style={{ fontSize: 13, color: D.text }}>Text card-on-file link (Auto Pay setup)</span>
-            </label>
-            {sendCardLink && (
+            {cardLinkAvailable && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
+                <input type="checkbox" checked={sendCardLink} onChange={e => setSendCardLink(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
+                <span style={{ fontSize: 13, color: D.text }}>Text card-on-file link (Auto Pay setup)</span>
+              </label>
+            )}
+            {cardLinkAvailable && sendCardLink && (
               <div style={{ fontSize: 12, color: D.muted, paddingLeft: 26 }}>
                 Texts a secure link to save a card — nothing charged today, Auto Pay enrolls on save.
                 Skipped automatically if a card is already on file or the visit bills a third-party payer.

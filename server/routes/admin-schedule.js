@@ -7321,6 +7321,19 @@ router.get('/:id/estimate-source', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/card-request-availability — are BOTH dark
+// levers of the secure-card lane on (env gate + active SMS template)?
+// The New Appointment modal hides its "Text card-on-file link" checkbox
+// on false (Codex #2921 P2: an offered option that silently no-ops while
+// the lane is dark reads as a sent link). No per-visit data — the
+// router-level requireTechOrAdmin gate is sufficient.
+router.get('/card-request-availability', async (req, res, next) => {
+  try {
+    const { isSecureCardLaneReady } = require('../services/appointment-card-request');
+    res.json({ enabled: await isSecureCardLaneReady() });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/:id/card-request — card-on-file / Auto Pay
 // secure-link state for one appointment, for the schedule editor's Cards
 // on file panel. Read-only rollup of the three sources of truth: the
@@ -7328,7 +7341,13 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 // customer's live Auto Pay state.
 router.get('/:id/card-request', async (req, res, next) => {
   try {
-    const { isAppointmentCardRequestEnabled } = require('../services/appointment-card-request');
+    // Same tech-scoping as the adjacent per-visit reads (/:id/wdo-brief,
+    // /:id/estimate-source): a technician JWT must not read another
+    // visit's card-link / Auto Pay state (Codex #2921 P1).
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    const { isSecureCardLaneReady } = require('../services/appointment-card-request');
     const visit = await db('scheduled_services')
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'card_link_sent_at');
@@ -7346,7 +7365,7 @@ router.get('/:id/card-request', async (req, res, next) => {
       }
     }
     res.json({
-      enabled: isAppointmentCardRequestEnabled(),
+      enabled: await isSecureCardLaneReady(),
       autopayActive,
       cardLinkSentAt: visit.card_link_sent_at || null,
       request: request

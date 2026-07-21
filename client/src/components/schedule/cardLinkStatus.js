@@ -11,9 +11,25 @@
 export function describeCardRequestState(data) {
   if (!data) return null;
   const reqStatus = data.request?.status;
-  if (reqStatus === 'completed') return { tone: 'good', text: 'Card secured — Auto Pay active' };
-  if (reqStatus === 'satisfied') return { tone: 'good', text: 'Auto Pay active — covered by saved card' };
-  if (data.autopayActive) return { tone: 'good', text: 'Auto Pay active' };
+  const requestDone = reqStatus === 'completed' || reqStatus === 'satisfied';
+  // The LIVE Auto Pay state decides "active", never the historical
+  // request row (Codex #2921 P2): a card captured through the link can
+  // later expire, be removed, or have Auto Pay paused — completion
+  // billing reads the current state, so this panel must too.
+  if (data.autopayActive) {
+    return {
+      tone: 'good',
+      text: reqStatus === 'completed' ? 'Card secured — Auto Pay active' : 'Auto Pay active',
+    };
+  }
+  if (requestDone) {
+    // The funnel already ran for this visit (it will never text again),
+    // but the protection has since lapsed — say so instead of "active".
+    return {
+      tone: 'bad',
+      text: 'Auto Pay no longer active — card was secured but the method lapsed or was removed. Check the customer\'s saved payment methods.',
+    };
+  }
   // A pending row or a consumed one-text-ever stamp both mean a link is
   // (or was) out — the funnel will never text this visit again, so offer
   // no send button, just the state.

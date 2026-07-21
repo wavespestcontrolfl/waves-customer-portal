@@ -27,19 +27,20 @@ jest.mock('../services/logger', () => ({
   debug: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
+  // Role switchable per request so the tech-scoping path is testable.
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = 'tech-1';
-    req.techRole = 'admin';
+    req.techRole = req.headers['x-test-role'] || 'admin';
     return next();
   },
   requireAdmin: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 const mockRequestCard = jest.fn();
-const mockEnabled = jest.fn(() => true);
+const mockLaneReady = jest.fn(async () => true);
 jest.mock('../services/appointment-card-request', () => ({
   requestCardForAppointment: (...args) => mockRequestCard(...args),
-  isAppointmentCardRequestEnabled: (...args) => mockEnabled(...args),
+  isSecureCardLaneReady: (...args) => mockLaneReady(...args),
 }));
 const mockOnAutopay = jest.fn(async () => false);
 jest.mock('../services/autopay-eligibility', () => ({
@@ -52,11 +53,19 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
-function stubTables(rows) {
+function stubTables(rows, { ownsVisit = true } = {}) {
   db.mockImplementation((table) => {
     const q = {};
     q.where = jest.fn(() => q);
-    q.first = jest.fn(async () => rows[table]);
+    q.whereNotIn = jest.fn(() => q);
+    // The tech-ownership probe selects exactly 'scheduled_services.id';
+    // the data reads select plain column lists — distinguish so a test
+    // can present a visit that EXISTS but is not the tech's.
+    q.first = jest.fn(async (...cols) => (
+      cols[0] === 'scheduled_services.id'
+        ? (ownsVisit ? { id: 'svc-1' } : undefined)
+        : rows[table]
+    ));
     return q;
   });
 }
@@ -79,7 +88,7 @@ async function withServer(fn) {
 describe('GET /admin/schedule/:id/card-request', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockEnabled.mockReturnValue(true);
+    mockLaneReady.mockResolvedValue(true);
     mockOnAutopay.mockResolvedValue(false);
   });
 
@@ -107,13 +116,13 @@ describe('GET /admin/schedule/:id/card-request', () => {
     });
   });
 
-  test('no request row and no stamp → nulls, enabled reflects the gate', async () => {
+  test('no request row and no stamp → nulls, enabled reflects the lane (gate + template)', async () => {
     stubTables({
       scheduled_services: { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null },
       appointment_card_requests: undefined,
       customers: { id: 'cust-1' },
     });
-    mockEnabled.mockReturnValue(false);
+    mockLaneReady.mockResolvedValue(false);
 
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`);
@@ -135,13 +144,40 @@ describe('GET /admin/schedule/:id/card-request', () => {
     });
   });
 
+  test("404 for a technician on a visit that exists but is not theirs (Codex #2921 P1)", async () => {
+    stubTables({
+      scheduled_services: { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null },
+      appointment_card_requests: undefined,
+      customers: { id: 'cust-1' },
+    }, { ownsVisit: false });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`, {
+        headers: { 'x-test-role': 'technician' },
+      });
+      expect(response.status).toBe(404);
+    });
+  });
+
+  test('a technician CAN read their own visit', async () => {
+    stubTables({
+      scheduled_services: { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null },
+      appointment_card_requests: undefined,
+      customers: { id: 'cust-1' },
+    }, { ownsVisit: true });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`, {
+        headers: { 'x-test-role': 'technician' },
+      });
+      expect(response.status).toBe(200);
+    });
+  });
+
   test('an autopay-eligibility failure degrades to autopayActive false, never a 500', async () => {
     stubTables({
       scheduled_services: { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null },
       appointment_card_requests: undefined,
       customers: { id: 'cust-1' },
     });
-    mockEnabled.mockReturnValue(true);
     mockOnAutopay.mockRejectedValue(new Error('autopay lookup down'));
 
     await withServer(async (baseUrl) => {
@@ -152,10 +188,28 @@ describe('GET /admin/schedule/:id/card-request', () => {
   });
 });
 
+describe('GET /admin/schedule/card-request-availability', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockLaneReady.mockResolvedValue(true);
+  });
+
+  test('reflects both dark levers via isSecureCardLaneReady', async () => {
+    stubTables({});
+    await withServer(async (baseUrl) => {
+      let response = await fetch(`${baseUrl}/admin/schedule/card-request-availability`);
+      await expect(response.json()).resolves.toEqual({ enabled: true });
+      mockLaneReady.mockResolvedValue(false);
+      response = await fetch(`${baseUrl}/admin/schedule/card-request-availability`);
+      await expect(response.json()).resolves.toEqual({ enabled: false });
+    });
+  });
+});
+
 describe('POST /admin/schedule/:id/card-request', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockEnabled.mockReturnValue(true);
+    mockLaneReady.mockResolvedValue(true);
     mockOnAutopay.mockResolvedValue(false);
   });
 
@@ -206,10 +260,18 @@ describe('source guards — booking hook and client defaults', () => {
     expect(scheduleSrc).toContain("requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'admin' })");
   });
 
+  test('the card-request GET is tech-scoped like its per-visit neighbors (Codex #2921 P1)', () => {
+    const getRoute = scheduleSrc.slice(scheduleSrc.indexOf("router.get('/:id/card-request'"));
+    expect(getRoute.slice(0, 800)).toContain('technicianOwnsScheduledService(req, req.params.id)');
+  });
+
   test('the booking checkbox is OFF by default and only the first created group carries the flag', () => {
     expect(createModalSrc).toContain('const [sendCardLink, setSendCardLink] = useState(false);');
     expect(createModalSrc).toContain(
-      'sendCardOnFileLink: sendCardLink && results.length === 0 && createdGroupKeysRef.current.size === 0 ? true : undefined,',
+      'sendCardOnFileLink: cardLinkAvailable && sendCardLink && results.length === 0 && createdGroupKeysRef.current.size === 0 ? true : undefined,',
     );
+    // The checkbox must not render while the lane is dark (Codex #2921 P2).
+    expect(createModalSrc).toContain("adminFetch('/admin/schedule/card-request-availability')");
+    expect(createModalSrc).toContain('{cardLinkAvailable && (');
   });
 });
