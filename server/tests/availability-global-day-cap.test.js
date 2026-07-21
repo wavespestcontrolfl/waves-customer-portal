@@ -77,6 +77,10 @@ function arrayChain(rowsArr) {
     whereNot: () => b,
     whereIn: () => b,
     whereNotIn: () => b,
+    // Case-insensitive city leg (schedule small-fixes wave) rewired the zone
+    // filter through .modify + .whereRaw — passthroughs keep the fixture rows.
+    whereRaw: () => b,
+    modify(fn) { fn(b); return b; },
     leftJoin: () => b,
     select: () => b,
     then: (resolve, reject) => Promise.resolve(rowsArr).then(resolve, reject),

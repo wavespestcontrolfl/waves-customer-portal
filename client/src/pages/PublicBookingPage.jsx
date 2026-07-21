@@ -37,6 +37,22 @@ function readCookie(name) {
   } catch { return null; }
 }
 
+// The arrival window promised to the customer is 2 HOURS from the slot start
+// (owner directive; matches sms-time-format arrivalWindowRange and
+// ReschedulePage). A slot's end_time/end_label is the job-duration block that
+// sizes scheduling — never show it as the arrival window.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
+function arrivalEndLabel(start24) {
+  const [h, m] = String(start24 || '').split(':').map(Number);
+  if (Number.isNaN(h)) return null;
+  const total = (h * 60 + (m || 0) + ARRIVAL_WINDOW_MINUTES) % (24 * 60);
+  const hour = Math.floor(total / 60);
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${String(total % 60).padStart(2, '0')} ${suffix}`;
+}
+
 // Capture paid-click attribution from the current URL + Meta cookies so a direct
 // /book?gclid=… / ?fbclid=… booking on the portal page is attributed the same way
 // the astro funnel's BookingForm is. Mirrors the LeadAttribution shape the server
@@ -1165,7 +1181,15 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.glassNavy }}>{service?.label}</strong></div>
                 <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
-                <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
+                {/* Arrival window = start + 2h (owner rule) — never the
+                    job-duration end_label the scheduler blocked out. */}
+                <div>
+                  {selectedSlot?.start_label}
+                  {(() => {
+                    const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
+                    return end ? ` – ${end}` : '';
+                  })()}
+                </div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>

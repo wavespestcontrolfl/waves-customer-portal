@@ -8,7 +8,7 @@ const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = r
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
-  addETMonthsByWeekday, etNthWeekdayOfMonth,
+  addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
 } = require('../utils/datetime-et');
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -253,20 +253,14 @@ class SmartRebooker {
 
     // Same-day target whose window already elapsed in ET is just as
     // unreachable as yesterday — a stale morning option accepted in the
-    // afternoon would move the job into a past window.
-    if (newDateStr === etDateString()) {
-      const cutoff = windowEnd || win.start || service.window_start;
-      if (cutoff) {
-        const nowEt = etParts(new Date());
-        const [ch, cm] = String(cutoff).split(':').map(Number);
-        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
-          throw Object.assign(new Error('That window has already passed today'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
-      }
+    // afternoon would move the job into a past window. Shared cutoff logic
+    // (datetime-et.sameDayWindowElapsed) so every mover rejects identically.
+    if (sameDayWindowElapsed(newDateStr, windowEnd || win.start || service.window_start)) {
+      throw Object.assign(new Error('That window has already passed today'), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'SLOT_TAKEN',
+      });
     }
     const updates = {
       scheduled_date: newDate,
@@ -539,19 +533,12 @@ class SmartRebooker {
         });
       }
     }
-    if (seriesDateStr === etDateString()) {
-      const cutoff = win.end || service.window_end || win.start || service.window_start;
-      if (cutoff) {
-        const nowEt = etParts(new Date());
-        const [ch, cm] = String(cutoff).split(':').map(Number);
-        if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
-          throw Object.assign(new Error('That window has already passed today'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
-      }
+    if (sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
+      throw Object.assign(new Error('That window has already passed today'), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'SLOT_TAKEN',
+      });
     }
     const pattern = parent.recurring_pattern;
     const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
@@ -995,4 +982,82 @@ class SmartRebooker {
   }
 }
 
+// Side effects reschedule() applies around a live (en_route/on_site) move,
+// shared with the raw movers that flip live rows → 'confirmed' outside
+// SmartRebooker (admin bulk reschedule, IB reschedule_appointment, IB
+// move_stops_to_day). Without these, a live move flips the row but:
+//   1. skips the job_status_history append (the repo's audit trail) — runs
+//      on `conn`, so a transactional caller keeps it atomic with the flip;
+//   2. leaves tech_status pointing at the moved job (tech shows en route /
+//      on site forever) — released best-effort, same as the post-commit
+//      cleanup in reschedule(); clearTechCurrentJob only clears when the
+//      pointer still targets this job;
+//   3. leaves an open TrackPage on the stale live screen — refresh pushed.
+// Call AFTER the caller's status UPDATE, and only for rows that were live.
+// `svc` is the pre-update row (id / status / customer_id / technician_id);
+// `actor` is the acting technician/staff uuid for history attribution
+// (null = system, matching reschedule()'s own insert).
+// Transactional half: the job_status_history append. Runs on `conn` so a
+// transactional caller keeps it atomic with the status flip — and ONLY this
+// half may run inside a caller's transaction (see below).
+async function applyLiveMoveHistory(conn, svc, { actor = null } = {}) {
+  if (String(svc.status) !== 'confirmed') {
+    await conn('job_status_history').insert({
+      job_id: svc.id,
+      from_status: svc.status,
+      to_status: 'confirmed',
+      transitioned_by: actor,
+    });
+  }
+}
+
+// Post-commit half: tech_status release + customer tracker refresh. Both are
+// externally visible outside the caller's transaction (clearTechCurrentJob
+// writes via the GLOBAL db connection; the socket emit reaches clients
+// immediately), so a transactional caller MUST run this only after a
+// successful commit — otherwise a rollback leaves the tech cleared and
+// clients holding a phantom refresh for a move that never happened. Matches
+// reschedule()'s own post-commit sequencing above.
+async function applyLiveMovePostCommitEffects(svc) {
+  if (svc.technician_id) {
+    try {
+      await clearTechCurrentJob({
+        tech_id: svc.technician_id,
+        current_job_id: svc.id,
+        status: 'idle',
+      });
+    } catch (err) {
+      logger.error(`[rebooker] tech_status clear after live move failed for ${svc.id}: ${err.message}`);
+    }
+  }
+  emitCustomerJobRefresh(svc, 'confirmed');
+}
+
+// Convenience composition for NON-transactional callers (the IB movers run
+// their UPDATE directly on db, so "after the update" is already
+// post-commit). Transactional callers (admin bulk reschedule) must call the
+// two halves separately: applyLiveMoveHistory on the trx, then
+// applyLiveMovePostCommitEffects after the commit.
+async function applyLiveMoveSideEffects(conn, svc, opts = {}) {
+  // The two halves are INDEPENDENT for non-transactional callers: the move has
+  // already committed, so the audit-history append is best-effort, but the
+  // operational cleanup (tech_status release + tracker refresh) is not — a
+  // failed history insert must NOT skip it, or the tech stays pinned to the
+  // moved job and the customer sees a stale live tracker while the caller still
+  // reports success. Catch (not await-through) the history append so cleanup
+  // always runs; a history failure is still logged.
+  try {
+    await applyLiveMoveHistory(conn, svc, opts);
+  } catch (err) {
+    logger.error(`[rebooker] live-move history append failed for ${svc.id}: ${err.message}`);
+  }
+  await applyLiveMovePostCommitEffects(svc);
+}
+
 module.exports = new SmartRebooker();
+// Shared with the IB schedule tools + bulk admin movers so every reschedule
+// path applies the same live-lifecycle rewind (see comment on the constant).
+module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
+module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
+module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;

@@ -475,10 +475,13 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   // the label: a 'rescheduled' pending-rebook placeholder or terminal row
   // parked on the slot must not be advertised in confirmations/reminders.
   // Suppressed-but-sendable siblings stay — the owner texts on their behalf.
+  // EXCEPT windowless pre-closed placeholders (windows_preclosed): those
+  // services only share the 08:00 slot by convention, not by clock time, so
+  // an 8 AM owner's texts must never advertise them.
   // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false, 'ar.windows_preclosed': false })
     .andWhere(function liveServiceSendableOrLegacy() {
       this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
     })
@@ -542,6 +545,40 @@ function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
     alreadyInside72hWindow: hoursUntil > 0 && hoursUntil <= 72.25,
     alreadyInside24hWindow: hoursUntil > 0 && hoursUntil <= 24.25 && apptDateET === tomorrowET,
   };
+}
+
+// The reminder cron's 72h branch only delivers while the appointment is more
+// than 24.25 hours out (checkAndSendReminders: `hoursUntil > 24.25` — the
+// boundary where the 24h reminder takes over, plus the 15-minute cron slack).
+// Every compensating re-arm — handleReschedule's failed-notice path below,
+// the dispatch route's rearmRescheduleReminderWindows, reschedule-sms's
+// blocked-confirmation re-arm — must consult this before clearing
+// reminder_72h_sent: an armed 72h flag on a closer appointment can never
+// fire, so the cron would just re-select the row every 15 minutes until the
+// appointment is cancelled or the row is otherwise closed, while the covered
+// flag the caller's own sync stamped was already the correct terminal state
+// (the re-armed 24h window carries the fallback notice for those). Exported
+// on the service object so those callers reuse this exact boundary instead
+// of hardcoding their own copy of 24.25.
+function reminder72hStillReachable(appointmentTime, now = new Date()) {
+  const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
+  if (isNaN(apptTime.getTime())) return false;
+  return (apptTime.getTime() - now.getTime()) / 3600000 > 24.25;
+}
+
+// The 24h twin: the cron's 24h branch only delivers while the appointment
+// START is still in the future (checkAndSendReminders: `hoursUntil > 0`).
+// That band matters because a same-day reschedule can be VALID with a past
+// start — the slot is judged by its window END, which hasn't elapsed — so a
+// compensating re-arm that clears reminder_24h_sent after the start passed
+// leaves an armed flag the cron can never fire, and the row re-enters every
+// 15-minute scan until something else closes it. Same contract as the 72h
+// helper above: every compensating re-arm consults this before clearing
+// reminder_24h_sent, never a local copy of the boundary.
+function reminder24hStillReachable(appointmentTime, now = new Date()) {
+  const apptTime = appointmentTime instanceof Date ? appointmentTime : new Date(appointmentTime);
+  if (isNaN(apptTime.getTime())) return false;
+  return apptTime.getTime() > now.getTime();
 }
 
 // ── Landline detection ──
@@ -998,6 +1035,34 @@ const AppointmentReminders = {
    *
    * Pass `options.sendConfirmation` (boolean) to override the source-based default —
    * e.g. admin_manual with the "Send confirmation SMS" checkbox unchecked passes false.
+   *
+   * Pass `options.closeReminderWindows` (boolean) when the visit has NO time
+   * window: the row still registers at the canonical date+08:00 slot time
+   * (the convention the DB sync trigger, the self-heal sweep, and the
+   * same-slot dedup all COALESCE on), but it is inserted as a NON-DELIVERING
+   * PLACEHOLDER — both reminder windows pre-closed in the same insert, so the
+   * cron never texts "at 8:00 AM" for a time nobody chose, plus two markers:
+   *   • suppressed_by_sibling=true takes the row out of slot OWNERSHIP
+   *     everywhere the one-owner-per-slot machinery looks (this method's
+   *     dedup, registerVisitReminderInTx's dedup, the DB sync trigger's
+   *     arrival check, promotion's no-owner-remains check). A REAL 8 AM
+   *     visit registered later therefore inserts ARMED instead of landing
+   *     suppressed behind a row that will never send — and conversely this
+   *     path SKIPS the same-slot dedup entirely, so an existing real 8 AM
+   *     owner never absorbs the date-only service (no label merge, no
+   *     promotable sibling): the placeholder inserts identically whether or
+   *     not an owner holds the 08:00 slot.
+   *   • windows_preclosed=true is the durable marker the DB machinery keys
+   *     placeholder semantics on: sibling promotion on slot departure skips
+   *     it (the placeholder must never be promoted into an armed 08:00
+   *     sender), and the sync trigger holds it suppressed with both windows
+   *     closed across date-only moves while the service stays windowless.
+   * When a real window is later set, the sync trigger's time_changed branch
+   * clears the marker, re-decides slot ownership, and re-arms the windows
+   * from the real start — from then on the row is an ordinary registration.
+   * Until then, the row's existence keeps selfHealMissingReminderRows (which
+   * registers row-less windowless visits at 08:00 ARMED) from resurrecting
+   * the 8 AM promise. Confirmation keeps its normal source-based handling.
    */
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
@@ -1014,6 +1079,7 @@ const AppointmentReminders = {
       const sendConfirmation = typeof options.sendConfirmation === 'boolean'
         ? options.sendConfirmation
         : (source === 'booking_new' || source === 'admin_manual');
+      const closeReminderWindows = options.closeReminderWindows === true;
 
       const registration = await db.transaction(async (trx) => {
         await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
@@ -1026,6 +1092,46 @@ const AppointmentReminders = {
 
         if (existing) {
           return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
+        }
+
+        // Windowless pre-closed placeholder — see the closeReminderWindows
+        // JSDoc above. One INSERT (a register-then-close pair would leave a
+        // gap where a cron tick could send an 08:00-stamped reminder), and
+        // deliberately WITHOUT the same-slot dedup below: the placeholder
+        // never owns the slot, never merges its label into a real owner,
+        // never sends, and is never promoted, so it inserts the same way
+        // whether or not an owner holds 08:00. All three flags — 72h, 24h,
+        // AND confirmation — close in this one INSERT: the post-transaction
+        // confirmation mark would leave a crash window for the stranded-
+        // confirmation sweep. (suppressed_by_sibling is set explicitly, so
+        // the legacy fingerprint trigger has nothing to re-derive.)
+        if (closeReminderWindows) {
+          const windowsClosedAt = new Date();
+          const [record] = await trx('appointment_reminders').insert({
+            scheduled_service_id: scheduledServiceId,
+            customer_id: customerId,
+            appointment_time: apptTime,
+            service_type: serviceLabel,
+            source,
+            // Confirmation closes IN the insert, not via the post-transaction
+            // mark: a windowless visit has no time to confirm, and a crash
+            // between insert and mark would leave the row for the stranded-
+            // confirmation sweep, which would text an 08:00 confirmation —
+            // the exact send this placeholder exists to suppress.
+            confirmation_sent: true,
+            confirmation_sent_at: windowsClosedAt,
+            reminder_72h_sent: true,
+            reminder_72h_sent_at: windowsClosedAt,
+            reminder_24h_sent: true,
+            reminder_24h_sent_at: windowsClosedAt,
+            // Placeholder markers — suppressed_by_sibling removes the row
+            // from slot ownership; windows_preclosed keeps promotion and the
+            // sync trigger from ever arming it while the visit is windowless.
+            suppressed_by_sibling: true,
+            windows_preclosed: true,
+          }).returning('*');
+
+          return { record, serviceLabel, inserted: true };
         }
 
         // Owner-only dedup — see registerVisitReminderInTx: a suppressed
@@ -1112,10 +1218,14 @@ const AppointmentReminders = {
       logger.info(`[appt-remind] Registered: ${scheduledServiceId} (source: ${source})`);
 
       if (!sendConfirmation) {
-        // non-confirmation sources — mark confirmation as "sent" (not applicable)
-        await db('appointment_reminders')
-          .where({ id: record.id })
-          .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        // non-confirmation sources — mark confirmation as "sent" (not
+        // applicable). Pre-closed placeholders already stamped it in their
+        // insert (crash-window fix) — skip the redundant write.
+        if (!record.windows_preclosed) {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        }
         return record;
       }
 
@@ -1292,7 +1402,10 @@ const AppointmentReminders = {
     try {
       const staleCutoff = new Date(now.getTime() - 2 * 60 * 1000);
       const stranded = await db('appointment_reminders')
-        .where({ cancelled: false, confirmation_sent: false })
+        // windows_preclosed belt-and-braces: placeholders insert with the
+        // confirmation already closed, but a pre-closed row must never be
+        // healable into an 08:00 confirmation even if a flag write regresses.
+        .where({ cancelled: false, confirmation_sent: false, windows_preclosed: false })
         .where('created_at', '<', staleCutoff)
         .whereNotExists(function () {
           this.select(1)
@@ -1318,6 +1431,14 @@ const AppointmentReminders = {
     try {
       const reminders = await db('appointment_reminders')
         .where({ cancelled: false, confirmation_sent: true })
+        // Belt-and-braces marker exclusion: a windowless pre-closed
+        // placeholder is normally hidden from this scan by its closed flags
+        // alone, but any writer that mistakenly clears them would put the
+        // row straight into the send set — texting the 08:00 placeholder
+        // time nobody chose. Excluding the durable marker outright means a
+        // future flag-clearing bug can never text; a real window arrival
+        // clears windows_preclosed (DB sync trigger) and re-admits the row.
+        .where({ windows_preclosed: false })
         .where(function () {
           this.where({ reminder_72h_sent: false }).orWhere({ reminder_24h_sent: false });
         })
@@ -1376,8 +1497,24 @@ const AppointmentReminders = {
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
           if (!prefs.serviceReminder72h || (channel72 === 'sms' && !prefs.smsEnabled)) {
-            logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
-            results.skipped++;
+            // Close the window like the neighboring skip branches — an
+            // unmarked preference skip re-enters every 15-minute scan forever.
+            // Guarded on appointment_time like the post-send flag update
+            // below: a concurrent move re-arms this row with the NEW time,
+            // and an unguarded close by id would stomp the re-arm and
+            // silently close the new appointment's reminder. 0 rows matched
+            // = the row moved out from under us; skip the bookkeeping and
+            // leave the re-armed row alone.
+            const closed72 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+            if (closed72 === 0) {
+              logger.info(`[appt-remind] 72h preference-skip close skipped for ${r.scheduled_service_id} — appointment moved during scan; leaving re-armed row`);
+            } else {
+              logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+              results.skipped++;
+            }
             continue;
           }
 
@@ -1428,12 +1565,23 @@ const AppointmentReminders = {
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
             });
 
-            await db('appointment_reminders')
+            // Guard on appointment_time: a concurrent move re-arms this row
+            // (DB sync trigger / handleReschedule) with the NEW time — an
+            // unguarded update by id would stomp that re-arm and silently
+            // close the new slot's reminder. 0 rows matched = the row moved
+            // out from under us; skip the sent bookkeeping (the re-armed row
+            // owns the new state).
+            const flagged72 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
 
-            results.sent72h++;
-            logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            if (flagged72 === 0) {
+              logger.info(`[appt-remind] 72h flag skipped for ${r.scheduled_service_id} — appointment moved during send; leaving re-armed row`);
+            } else {
+              results.sent72h++;
+              logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            }
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 72h reminder failed for ${r.scheduled_service_id}: ${err.message}`);
@@ -1448,8 +1596,20 @@ const AppointmentReminders = {
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
           if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
-            logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
-            results.skipped++;
+            // Close the window like the neighboring skip branches — see the
+            // 72h twin above: guarded on appointment_time so a concurrent
+            // move's re-arm is never stomped; 0 rows matched = the row
+            // moved, skip the bookkeeping and leave the re-armed row alone.
+            const closed24 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            if (closed24 === 0) {
+              logger.info(`[appt-remind] 24h preference-skip close skipped for ${r.scheduled_service_id} — appointment moved during scan; leaving re-armed row`);
+            } else {
+              logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+              results.skipped++;
+            }
             continue;
           }
 
@@ -1495,12 +1655,20 @@ const AppointmentReminders = {
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
             });
 
-            await db('appointment_reminders')
+            // Same appointment_time guard as the 72h flag above — a
+            // concurrent move re-armed this row for its new time; don't
+            // stomp that re-arm after sending for the old one.
+            const flagged24 = await db('appointment_reminders')
               .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
 
-            results.sent24h++;
-            logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            if (flagged24 === 0) {
+              logger.info(`[appt-remind] 24h flag skipped for ${r.scheduled_service_id} — appointment moved during send; leaving re-armed row`);
+            } else {
+              results.sent24h++;
+              logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
+            }
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 24h reminder failed for ${r.scheduled_service_id}: ${err.message}`);
@@ -1674,8 +1842,6 @@ const AppointmentReminders = {
         if (!startMoved && prevSent) return { sent: true, at: prevSentAt };
         return { sent: coveredVal, at: coveredVal ? now : null };
       };
-      const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
-      const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
         // Re-arm the row: a reschedule moves the appointment to a live new time,
@@ -1684,12 +1850,28 @@ const AppointmentReminders = {
         // cron's live-status guard re-checks the service each run, so this can
         // never resurrect a reminder for a still-terminal service.
         cancelled: false,
-        reminder_72h_sent: r72.sent,
-        reminder_72h_sent_at: r72.at,
-        reminder_24h_sent: r24.sent,
-        reminder_24h_sent_at: r24.at,
         updated_at: now,
       };
+      // Marker carve-out — a windowless pre-closed placeholder
+      // (windows_preclosed) or a sibling-suppressed row NEVER recomputes its
+      // reminder windows here. Their flags are HELD closed by the DB
+      // machinery (the sync trigger keeps a placeholder closed across
+      // date-only moves and only re-arms it when a real window arrives; a
+      // suppressed row's slot owner carries the messaging — same carve-out
+      // markRescheduleNoticeSent and every no-send re-arm take). The admin
+      // bulk/dispatch paths call this AFTER their service update, so an
+      // unmarked recompute would clear the trigger-held flags and the 15-min
+      // cron would text the 08:00 placeholder time nobody chose (or
+      // double-text beside the slot owner). appointment_time / cancelled /
+      // the confirmation supersede below still sync normally.
+      if (!record.windows_preclosed && !record.suppressed_by_sibling) {
+        const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
+        const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
+        rescheduleUpdate.reminder_72h_sent = r72.sent;
+        rescheduleUpdate.reminder_72h_sent_at = r72.at;
+        rescheduleUpdate.reminder_24h_sent = r24.sent;
+        rescheduleUpdate.reminder_24h_sent_at = r24.at;
+      }
       // A reschedule supersedes a still-pending creation confirmation — admin
       // saves defer the confirmation SMS off the request path, so a reschedule
       // landing in that window must claim the slot. This suppresses the deferred
@@ -1744,12 +1926,12 @@ const AppointmentReminders = {
           }
         }
       } finally {
-        if (!noticeSent && (newApptTime.getTime() - Date.now()) / 3600000 > 24.25) {
+        if (!noticeSent && reminder72hStillReachable(newApptTime)) {
           // Re-arm ONLY while the appointment is still inside the 72h
-          // delivery band — the cron's 72h branch never fires once
-          // hoursUntil <= 24.25, so a false flag there would just keep the
-          // row in every 15-minute scan forever (the still-armed 24h window
-          // carries the fallback for those). Guarded three ways so a failed
+          // delivery band (reminder72hStillReachable — the cron's 72h branch
+          // never fires once hoursUntil <= 24.25, so a false flag there would
+          // just keep the row in every 15-minute scan forever; the still-armed
+          // 24h window carries the fallback). Guarded three ways so a failed
           // attempt only re-arms state it still owns:
           //   • appointment_time — a newer reschedule to a different time
           //     (which may have sent its own notice) makes this a no-op;
@@ -2068,6 +2250,11 @@ AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel
 // resolution the appointment reminders use.
 AppointmentReminders.apptChannel = apptChannel;
 AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
+// Shared re-arm boundaries (see each function's own comment) — the dispatch
+// and reschedule-sms compensating re-arms consult these instead of hardcoding
+// the cron's 24.25h / start-in-the-future cutoffs.
+AppointmentReminders.reminder72hStillReachable = reminder72hStillReachable;
+AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
 
 AppointmentReminders._test = {
   maskPhone,

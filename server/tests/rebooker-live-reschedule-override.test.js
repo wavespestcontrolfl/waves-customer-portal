@@ -25,6 +25,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const SmartRebooker = require('../services/rebooker');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { clearTechCurrentJob } = require('../services/tech-status');
@@ -207,6 +208,53 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(payload).not.toHaveProperty('track_sms_sent_at');
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
     expect(mockIoEmit).not.toHaveBeenCalled();
+  });
+
+  // Same-day elapsed-window guard (shared datetime-et.sameDayWindowElapsed).
+  // A move to TODAY whose effective window already passed in ET is as
+  // unreachable as a past date — it must 409 before any DB write. A move to
+  // today with a still-future window is fine. The windows sit at the ET day
+  // edges, and sameDayWindowElapsed reads the REAL wall clock (no injectable
+  // now) — so a real-clock run in the last minute of the ET day flipped the
+  // "still future" 23:58 window to elapsed, and a run in the first minute
+  // flipped the "elapsed" 00:00–00:01 window to future. Freeze the clock at
+  // noon ET of the current day instead (same fake-timer pattern as
+  // appointment-reminders-dedup): both assertions are then deterministic at
+  // any real run time. etDateString() is read BEFORE freezing so the frozen
+  // instant sits on the real current day, keeping the module-level dayOffset
+  // fixtures (real clock at load) on the same calendar.
+  describe('same-day elapsed-window guard (clock frozen at ET noon)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(parseETDateTime(`${etDateString()}T12:00`));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('a same-day move whose window already elapsed in ET is rejected before any write', async () => {
+      const serviceLookup = chain({ first: jest.fn().mockResolvedValue(liveService('confirmed')) });
+      db.mockImplementation(() => serviceLookup);
+
+      await expect(SmartRebooker.reschedule(
+        'svc-1', etDateString(), { start: '00:00', end: '00:01' }, 'customer_request', 'admin',
+      )).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'SLOT_TAKEN',
+        message: 'That window has already passed today',
+      });
+      // Rejected up front — the move transaction never opened.
+      expect(db.transaction).toBeUndefined();
+    });
+
+    test('a same-day move to a still-future window today still succeeds', async () => {
+      const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+
+      await expect(SmartRebooker.reschedule(
+        'svc-1', etDateString(), { start: '23:58', end: '23:59' }, 'customer_request', 'admin',
+      )).resolves.toMatchObject({ success: true, newDate: etDateString() });
+      expect(updateQuery.update).toHaveBeenCalled();
+    });
   });
 
   test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {
@@ -568,5 +616,118 @@ describe('live-status reschedule override (allowLive)', () => {
     // The overlapping sibling is never written — no unassigned-but-overlapping
     // row commits; the whole trx rolls back.
     expect(sibUpdate.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('applyLiveMoveSideEffects (shared with the raw movers)', () => {
+  // The raw movers (admin bulk reschedule, IB reschedule_appointment, IB
+  // move_stops_to_day) flip en_route/on_site → confirmed outside
+  // SmartRebooker — this helper carries the side effects reschedule()
+  // applies around that flip: history append, tech_status release,
+  // customer tracker refresh.
+  const { applyLiveMoveSideEffects } = SmartRebooker;
+
+  function connMock() {
+    const historyInsert = chain();
+    const conn = jest.fn((table) => {
+      if (table === 'job_status_history') return historyInsert;
+      throw new Error(`Unexpected conn table ${table}`);
+    });
+    return { conn, historyInsert };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test.each(['en_route', 'on_site'])(
+    'appends the %s → confirmed history row on the caller conn, frees the tech, and refreshes the tracker',
+    async (status) => {
+      const { conn, historyInsert } = connMock();
+
+      await applyLiveMoveSideEffects(conn, liveService(status), { actor: 'staff-1' });
+
+      // History append matches reschedule()'s own insert shape.
+      expect(historyInsert.insert).toHaveBeenCalledWith({
+        job_id: 'svc-1',
+        from_status: status,
+        to_status: 'confirmed',
+        transitioned_by: 'staff-1',
+      });
+      // tech_status pointer released so the tech goes idle.
+      expect(clearTechCurrentJob).toHaveBeenCalledWith({
+        tech_id: 'tech-1',
+        current_job_id: 'svc-1',
+        status: 'idle',
+      });
+      // Open TrackPage / customer portal gets the refresh.
+      expect(mockIoTo).toHaveBeenCalledWith('customer:cust-1');
+      expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+        job_id: 'svc-1',
+        status: 'confirmed',
+        eta: null,
+        tech_first_name: null,
+      }));
+    },
+  );
+
+  test('defaults history attribution to null (system), matching reschedule()', async () => {
+    const { conn, historyInsert } = connMock();
+
+    await applyLiveMoveSideEffects(conn, liveService('en_route'));
+
+    expect(historyInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      transitioned_by: null,
+    }));
+  });
+
+  test('unassigned job: no tech_status touch, but history + refresh still fire', async () => {
+    const { conn, historyInsert } = connMock();
+
+    await applyLiveMoveSideEffects(conn, { ...liveService('on_site'), technician_id: null });
+
+    expect(historyInsert.insert).toHaveBeenCalled();
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(mockIoEmit).toHaveBeenCalled();
+  });
+
+  test('a tech_status clear failure is swallowed (best-effort, like reschedule()) — the refresh still fires', async () => {
+    const { conn } = connMock();
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('tech_status down'));
+
+    await expect(applyLiveMoveSideEffects(conn, liveService('en_route'))).resolves.toBeUndefined();
+    expect(mockIoEmit).toHaveBeenCalled();
+  });
+
+  test('a history-append failure still runs the post-commit cleanup (audit is best-effort, cleanup is not)', async () => {
+    // For non-transactional IB callers the move has already committed by the
+    // time the history row is appended. If that insert throws, the operational
+    // cleanup (tech_status release + tracker refresh) must STILL run — else the
+    // tech stays pinned to the moved job and the customer holds a stale live
+    // tracker while the caller reports success. The failure is logged, not
+    // swallowed silently.
+    const historyInsert = chain({ insert: jest.fn().mockRejectedValue(new Error('history table down')) });
+    const conn = jest.fn((table) => {
+      if (table === 'job_status_history') return historyInsert;
+      throw new Error(`Unexpected conn table ${table}`);
+    });
+
+    await expect(
+      applyLiveMoveSideEffects(conn, liveService('en_route'), { actor: 'staff-1' }),
+    ).resolves.toBeUndefined();
+
+    // Audit failure logged…
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('live-move history append failed'));
+    // …but the tech is still freed…
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({
+      tech_id: 'tech-1',
+      current_job_id: 'svc-1',
+      status: 'idle',
+    });
+    // …and the customer tracker still refreshes.
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1',
+      status: 'confirmed',
+    }));
   });
 });

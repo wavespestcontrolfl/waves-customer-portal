@@ -16,7 +16,8 @@ const {
 } = require('../utils/service-normalizer');
 const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
-  etNthWeekdayOfMonth, parseETDateTime,
+  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
+  windowDurationMinutes, deriveWindowEnd,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -507,7 +508,15 @@ function normalizeBoosterMonths(value) {
 function normalizeHHMM(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/);
   if (!m) return null;
-  return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
+  const hh = parseInt(m[1], 10);
+  // Range, not just shape: the shape-only check let 25:00 / 09:75 through to
+  // the TIME cast (a raw PG error on the bulk mover instead of a per-row
+  // validation failure). Every caller already treats null as invalid, and
+  // DB-sourced TIME values are in range by definition, so only raw-payload
+  // call sites change behavior. File-local function — the admin-dispatch and
+  // rain-out copies are separate and unaffected.
+  if (hh > 23 || parseInt(m[2], 10) > 59) return null;
+  return `${String(hh).padStart(2, '0')}:${m[2]}`;
 }
 
 function normalizeDateOnly(value) {
@@ -570,6 +579,16 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
   if (!apptTime) return;
   await trx('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
+    // Marker carve-out — the scheduled_services update that precedes every
+    // call to this helper already ran the DB sync trigger, which owns marked
+    // rows: a windowless pre-closed placeholder (windows_preclosed) is HELD
+    // with both windows closed across date-only moves (re-armed only when a
+    // real window arrives), and sibling suppression is re-decided on time
+    // changes. Re-arming those rows here would put the 08:00 placeholder
+    // time nobody chose into the cron's send set, or double-text beside the
+    // slot's owner. Same carve-out AppointmentReminders.handleReschedule
+    // takes on its own recompute.
+    .where({ suppressed_by_sibling: false, windows_preclosed: false })
     .update({
       appointment_time: apptTime,
       reminder_72h_sent: false,
@@ -1510,10 +1529,15 @@ function getZone(city, zip) {
   const z = zip || '';
   if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
   if (c === 'palmetto') return 'palmetto';
-  if (c.includes('lakewood') || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
+  // Myakka City sits east of Lakewood Ranch — the eastern zone (explicit,
+  // not a fallthrough).
+  if (c.includes('lakewood') || c === 'myakka city' || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
   if (c.includes('bradenton')) return 'bradenton_north';
-  if (c === 'sarasota') return 'sarasota';
-  if (['venice', 'nokomis', 'north port'].includes(c)) return 'venice_north_port';
+  // Longboat Key + Siesta Key are Sarasota barrier islands.
+  if (['sarasota', 'longboat key', 'siesta key'].includes(c)) return 'sarasota';
+  // Osprey sits between Sarasota and Venice on the 41 corridor, same as
+  // Nokomis; North Venice is Venice.
+  if (['venice', 'north venice', 'nokomis', 'osprey', 'north port'].includes(c)) return 'venice_north_port';
   return 'lakewood_ranch';
 }
 
@@ -3688,25 +3712,213 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           }
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
+            // scheduled_date holds ET calendar dates — a past target moves the
+            // visit where no upcoming query will ever find it. Per-row throw so
+            // the batch result carries the reason instead of failing wholesale.
+            // Shared strict validator: normalizeDateOnly only splits on 'T', so
+            // an impossible calendar date (2099-02-31) passed the shape check
+            // and died downstream as a raw PG cast error.
+            const bulkTargetDate = validScheduleDate(payload.scheduledDate);
+            if (!bulkTargetDate) {
+              throw Object.assign(new Error('scheduledDate must be a valid YYYY-MM-DD date that is not in the past'), { isValidation: true });
+            }
             let reminderSyncTime = null;
             let callFollowUpShiftFrom = null;
+            // Collected inside the trx, applied only after a successful commit.
+            let liveMoveRow = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
-              const updates = { scheduled_date: payload.scheduledDate };
-              if (payload?.windowStart) updates.window_start = payload.windowStart;
-              if (payload?.windowEnd) updates.window_end = payload.windowEnd;
-              await trx('scheduled_services').where({ id }).update(updates);
+              // Terminal rows are one-way (#2717 pattern — see the cancel
+              // branch below): a stale board selection must not resurrect a
+              // finished visit onto a new date.
+              if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
+                throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
+              }
+              // Persist the NORMALIZED date — the raw payload may carry a
+              // 'T…' suffix that only the validator strips.
+              const updates = { scheduled_date: bulkTargetDate };
+              // Same validate-then-persist-the-normalized-value rule as the
+              // date above: an unnormalized time Postgres happens to accept
+              // ("2:00 PM") would store 14:00 while the reminderSyncTime below
+              // silently falls back to 08:00, so handleReschedule would then
+              // stamp appointment_time at the wrong hour.
+              if (payload?.windowStart) {
+                const ws = normalizeHHMM(payload.windowStart);
+                if (!ws) throw Object.assign(new Error('windowStart must be HH:MM'), { isValidation: true });
+                updates.window_start = ws;
+              }
+              if (payload?.windowEnd) {
+                const we = normalizeHHMM(payload.windowEnd);
+                if (!we) throw Object.assign(new Error('windowEnd must be HH:MM'), { isValidation: true });
+                updates.window_end = we;
+              }
+              // An EXPLICIT end must land after its effective start on the
+              // same day. normalizeHHMM is shape+range only, so an inverted
+              // pair (18:00–09:00) — or an end-only edit at/before the stored
+              // start — persisted a non-positive span invisible to every
+              // overlap predicate (they all assume start < end). Derived ends
+              // (the start-only block below) are start+duration by
+              // construction, so only the explicit-end forms need this. The
+              // start is either the just-normalized payload value or the
+              // stored TIME run through the same normalizer; both sides are
+              // zero-padded HH:MM, so the string compare is a time compare.
+              // This is the lane's only explicit-end intake — the IB movers
+              // (create/reschedule/move_stops) all derive their ends.
+              if (updates.window_end) {
+                const effectiveStart = updates.window_start || normalizeHHMM(svc.window_start);
+                if (effectiveStart && updates.window_end <= effectiveStart) {
+                  throw Object.assign(
+                    new Error('windowEnd must be after the window start (same-day window)'),
+                    { isValidation: true },
+                  );
+                }
+              }
+              // A start-only move must not validate or persist against the
+              // STALE stored end: moving an 08:00–09:00 visit to 16:00 today
+              // was rejected after 09:00 (the old end read as elapsed), and
+              // the UPDATE would have persisted the 16:00 start beside the
+              // stale 09:00 end — an inverted window. Derive the complete
+              // window up front — new start + the visit's original duration
+              // (stored span, else the flat-60 convention), the same
+              // derivation the IB reschedule tool uses — so BOTH the elapsed
+              // guard below and the UPDATE see the derived end. deriveWindowEnd
+              // returns null when that end would cross midnight (a modulo
+              // wrap would slip an inverted block past every overlap check) —
+              // per-row throw, like every other validation here.
+              if (updates.window_start && !updates.window_end) {
+                const derivedEnd = deriveWindowEnd(
+                  updates.window_start,
+                  windowDurationMinutes(svc.window_start, svc.window_end),
+                );
+                if (!derivedEnd) {
+                  throw Object.assign(
+                    new Error('that window would cross midnight (pick an earlier start)'),
+                    { isValidation: true },
+                  );
+                }
+                updates.window_end = derivedEnd;
+              }
+              // validScheduleDate accepts TODAY, but a move to today whose
+              // effective window already elapsed in ET lands the visit in a
+              // past window no route can serve — unreachable, just like a past
+              // date. Same cutoff logic the rebooker uses (window_end preferred,
+              // else window_start; new value over the stored one — a start-only
+              // move consults the DERIVED end set above, never the stale stored
+              // one). Per-row throw so the batch result carries the reason
+              // instead of failing wholesale; a today move with a still-future
+              // window still passes.
+              if (sameDayWindowElapsed(
+                bulkTargetDate,
+                updates.window_end || svc.window_end || updates.window_start || svc.window_start,
+              )) {
+                throw Object.assign(
+                  new Error('that window has already passed today (pick a later window or a future date)'),
+                  { isValidation: true },
+                );
+              }
+              // A live (en_route/on_site) row being moved rewinds its tracker
+              // lifecycle like the rebooker's live override — stale arrival
+              // timestamps must not survive onto the new date. LIVE_LIFECYCLE_RESET
+              // clears the tracker fields but not status, so also land the row
+              // back on 'confirmed' in the same UPDATE — otherwise it stays live
+              // on a future date, matching the rebooker's own path.
+              const wasLive = ['en_route', 'on_site'].includes(String(svc.status));
+              if (wasLive) {
+                const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
+                Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
+              }
+              // Compare-and-swap on the OBSERVED status + schedule fields:
+              // the terminal guard and the wasLive classification above came
+              // from the read at the top of this trx — under READ COMMITTED
+              // another writer can complete or cancel the row before this
+              // UPDATE lands, and status alone also let two ORDINARY moves of
+              // the same confirmed row both match, the later one silently
+              // clobbering the newer date/window and logging from a stale
+              // snapshot. Matching the observed scheduled_date + window_start
+              // makes the later writer miss instead (knex renders a null
+              // value in the object form as IS NULL — the same contract
+              // auto-dispatch's rebooker `expect` relies on). window_end is
+              // in the predicate too: the start-only form derives its new end
+              // from THIS read's duration (windowDurationMinutes over the
+              // observed pair) and the elapsed guard + reschedule_log read
+              // the same snapshot — a concurrent edit that only resized the
+              // END would otherwise still match on start alone and have its
+              // end silently overwritten by the stale-duration derivation.
+              // Field-level CAS
+              // is the repo's established pattern for exactly this (rebooker
+              // options.expect); deliberately NOT SELECT..FOR UPDATE, which
+              // would widen this quick single-row mover's tx shape for no
+              // added safety. updated_at stays out of the predicate: knex
+              // never auto-touches it and not every mover stamps it (this
+              // UPDATE doesn't), so it isn't a reliable change marker. Zero
+              // rows matched = the row changed under us; refuse this id (the
+              // batch carries the reason).
+              const prevDate = normalizeDateOnly(svc.scheduled_date);
+              const updatedRows = await trx('scheduled_services')
+                .where({ id })
+                .where('status', String(svc.status))
+                .where({
+                  scheduled_date: prevDate,
+                  window_start: svc.window_start ?? null,
+                  window_end: svc.window_end ?? null,
+                })
+                .update(updates);
+              if (updatedRows === 0) {
+                throw Object.assign(
+                  new Error('the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry'),
+                  { isValidation: true },
+                );
+              }
+              // Rebooker-parity side effects of the live → confirmed flip.
+              // ONLY the job_status_history audit row belongs on the trx (it
+              // must be atomic with the flip, like the rebooker's own path).
+              // The tech_status release writes via the GLOBAL db connection
+              // and the customer refresh emits a socket immediately — neither
+              // rolls back, so both are deferred to after the commit.
+              if (wasLive) {
+                const { applyLiveMoveHistory } = require('../services/rebooker');
+                await applyLiveMoveHistory(trx, svc, { actor: req.technicianId || null });
+                liveMoveRow = svc;
+              }
+              // Audit row matching the rebooker's reschedule_log conventions.
+              await trx('reschedule_log').insert({
+                scheduled_service_id: id,
+                customer_id: svc.customer_id,
+                original_date: svc.scheduled_date,
+                new_date: bulkTargetDate,
+                reason_code: 'admin',
+                initiated_by: 'admin_bulk',
+                original_window: svc.window_start ? `${svc.window_start}-${svc.window_end}` : null,
+                new_window: (() => {
+                  const ws = updates.window_start || svc.window_start;
+                  const we = updates.window_end || svc.window_end;
+                  return ws ? (we ? `${ws}-${we}` : String(ws)) : null;
+                })(),
+              });
               callFollowUpShiftFrom = svc.scheduled_date;
-              const prevDate = svc.scheduled_date instanceof Date
-                ? svc.scheduled_date.toISOString().split('T')[0]
-                : normalizeDateOnly(svc.scheduled_date);
-              const nextDate = normalizeDateOnly(payload.scheduledDate);
-              const nextStart = payload?.windowStart || svc.window_start;
+              // prevDate (the normalized observed date) is hoisted above the
+              // CAS UPDATE — normalizeDateOnly handles both the pg Date and
+              // string forms, same result as the old inline instanceof split.
+              const nextDate = bulkTargetDate;
+              const nextStart = updates.window_start || svc.window_start;
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
               }
             });
+            // Post-commit only: the tech_status release writes on the global
+            // db connection and the customer refresh emits a socket, so a
+            // rolled-back trx must not have left either behind. Best-effort —
+            // the move is committed; a side-effect failure must not report the
+            // row as failed.
+            if (liveMoveRow) {
+              try {
+                const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+                await applyLiveMovePostCommitEffects(liveMoveRow);
+              } catch (err) {
+                logger.error(`[admin-schedule] bulk reschedule live-move side effects failed for ${id}: ${err.message}`);
+              }
+            }
             // Resync the reminder row so the 72h/24h cron texts the new date —
             // mirrors the cancel branch's handleCancellation call below.
             if (reminderSyncTime) {
@@ -3738,7 +3950,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 conn: db,
                 parentServiceId: id,
                 fromDate: callFollowUpShiftFrom,
-                toDate: payload.scheduledDate,
+                toDate: bulkTargetDate,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);

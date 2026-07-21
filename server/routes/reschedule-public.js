@@ -651,6 +651,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         try {
           await db('appointment_reminders')
             .whereIn('scheduled_service_id', shiftedOccurrences.map((occ) => occ.id))
+            // A sibling-suppressed row is suppressed BY SETTING both sent
+            // flags — clearing them would put it back in the cron's send set
+            // alongside the slot's owner (duplicate reminders), and a
+            // windowless pre-closed placeholder (windows_preclosed, which
+            // implies suppressed) would start texting the 08:00 placeholder
+            // time nobody chose. A cancelled row must stay silent too. Same
+            // carve-outs as the dispatch route's no-send re-arm
+            // (rearmRescheduleReminderWindows).
+            .where({ suppressed_by_sibling: false, cancelled: false })
             .update({
               reminder_72h_sent: false,
               reminder_72h_sent_at: null,

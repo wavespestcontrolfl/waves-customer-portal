@@ -602,7 +602,17 @@ async function reserveSlot({
           })
           .where((q) => {
             if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
-            if (zoneCities.length) q.orWhereIn('customers.city', zoneCities);
+            if (zoneCities.length) {
+              // Case-insensitive: customer rows carry free-text city casing
+              // ("BRADENTON", "lakewood ranch") — the estimate generator
+              // lowercases both sides, so an exact-case IN here would let a
+              // conflicting row slip past the zone-capacity check.
+              const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
+              q.orWhereRaw(
+                `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
+                lowered,
+              );
+            }
           })
           .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
           .first('scheduled_services.id');
