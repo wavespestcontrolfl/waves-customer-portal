@@ -598,6 +598,14 @@ router.post('/mileage', async (req, res, next) => {
     const isBusiness = resolvedPurpose === 'business';
     // Date-effective (the IRS changes the rate mid-year).
     const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDate) : 0;
+    // REFUSE a business trip with no verified rate (a date past the horizon →
+    // rate 0), same as classifyTrips: persisting $0 would look reviewed and
+    // never self-heal when the rate is added (reports sum persisted values).
+    if (isBusiness && !(irsRate > 0)) {
+      return res.status(422).json({
+        error: 'No verified IRS mileage rate for this trip’s date yet — add the published rate before recording a business trip for it.',
+      });
+    }
     const deductionAmount = isBusiness ? parseFloat((distanceMiles * irsRate).toFixed(2)) : 0;
 
     const [inserted] = await db('mileage_log').insert({

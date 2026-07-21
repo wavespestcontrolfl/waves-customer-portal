@@ -2886,7 +2886,7 @@ function PnlTab() {
     };
     if (
       !window.confirm(
-        `Set the vehicle deduction method to "${labels[method]}"? This changes which side of Schedule C line 9 is deducted. Confirm with your CPA first.`,
+        `Record your intended vehicle deduction method as "${labels[method]}"? This P&L always reports ACTUAL vehicle costs — the setting doesn't change the totals; if you choose standard mileage it just discloses the mileage figure to apply manually with your CPA (line 9 allows one method, not both).`,
       )
     ) {
       return;
@@ -3165,7 +3165,7 @@ function PnlTab() {
                 color: D.muted,
               }}
             >
-              <span>Vehicle deduction method (Schedule&nbsp;C line 9):</span>
+              <span>Intended vehicle method (informational — P&amp;L reports actual costs):</span>
               <select
                 value={pnl.vehicleDeduction.method || ""}
                 disabled={savingMethod}
