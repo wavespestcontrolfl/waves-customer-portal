@@ -794,7 +794,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       const flippingSideId = winnerMode === null ? winnerId : loserId;
       let hasArtifacts = false;
       for (const table of ['scheduled_services', 'invoices']) {
-        // eslint-disable-next-line no-await-in-loop
+         
         const row = await trx(table).where({ customer_id: flippingSideId }).first('id');
         if (row) { hasArtifacts = true; break; }
       }
@@ -1207,29 +1207,38 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
           mode: 'auto',
           evidence: candidate.evidence,
         });
-        results.merged.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
-        try {
-          const name = [group.winner.first_name, group.winner.last_name].filter(Boolean).join(' ') || 'Unknown';
-          await require('./notification-service').notifyAdmin(
-            'customer',
-            'Duplicate customer auto-merged',
-            `Merged a duplicate row into ${name} (same phone, matching identity, no billing on the duplicate). Reversible — full snapshot in the merge journal.`,
-            {
-              // The SPA registers /admin/customers and opens Customer 360
-              // via ?customerId= — a /admin/customers/<uuid> path 404s.
-              link: `/admin/customers?customerId=${group.winner.id}`,
-              metadata: { winnerId: group.winner.id, loserId: candidate.loser.id },
-            },
-          );
-        } catch (notifyErr) {
-          logger.warn(`[customer-dedupe] merge notify failed (non-blocking): ${notifyErr.message}`);
-        }
+        const name = [group.winner.first_name, group.winner.last_name].filter(Boolean).join(' ') || 'Unknown';
+        results.merged.push({ winnerId: group.winner.id, loserId: candidate.loser.id, winnerName: name });
       } catch (e) {
         // A failed green merge means the row changed under us — leave it for
         // the next sweep / the review queue rather than retrying in-loop.
         logger.warn(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} failed: ${e.message}`);
         results.skipped.push({ loserId: candidate.loser.id, tier: 'green', reasons: [`merge_failed: ${e.message}`] });
       }
+    }
+  }
+
+  // ONE digest bell per sweep (never per merge — green work is quiet, the
+  // digest is the audit surface). Names capped so the body stays scannable.
+  if (results.merged.length) {
+    try {
+      const names = results.merged.slice(0, 5).map((m) => m.winnerName).join(', ');
+      const more = results.merged.length > 5 ? ` and ${results.merged.length - 5} more` : '';
+      await require('./notification-service').notifyAdmin(
+        'customer',
+        `${results.merged.length} duplicate customer${results.merged.length === 1 ? '' : 's'} auto-merged`,
+        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. All reversible — full snapshots in the merge journal.`,
+        {
+          // The SPA registers /admin/customers and opens Customer 360
+          // via ?customerId= — a /admin/customers/<uuid> path 404s.
+          link: results.merged.length === 1
+            ? `/admin/customers?customerId=${results.merged[0].winnerId}`
+            : '/admin/customers',
+          metadata: { merged: results.merged.map(({ winnerId, loserId }) => ({ winnerId, loserId })) },
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[customer-dedupe] merge digest notify failed (non-blocking): ${notifyErr.message}`);
     }
   }
   return results;
