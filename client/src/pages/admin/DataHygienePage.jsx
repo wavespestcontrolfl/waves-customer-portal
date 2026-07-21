@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { CheckCircle2, DatabaseZap, Eye, EyeOff, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -73,11 +74,19 @@ function percent(value) {
 }
 
 export default function DataHygienePage({ embedded = false } = {}) {
+  const location = useLocation();
   const [status, setStatus] = useState(() => {
     // Digest bells deep-link to ?status=auto_applied.
     const fromUrl = new URLSearchParams(window.location.search).get("status");
     return STATUSES.includes(fromUrl) ? fromUrl : "pending";
   });
+  // The Agents hub keeps this page mounted across tab/URL changes — a digest
+  // click while already on the tab only updates the query string, so the
+  // initializer never reruns. Follow ?status= whenever the URL changes.
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(location.search).get("status");
+    if (fromUrl && STATUSES.includes(fromUrl)) setStatus(fromUrl);
+  }, [location.search]);
   const [data, setData] = useState({ proposals: [] });
   const [metrics, setMetrics] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
