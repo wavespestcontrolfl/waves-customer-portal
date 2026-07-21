@@ -11,6 +11,9 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const { etDateString } = require('../utils/datetime-et');
+// Canonical DATE-cell → 'YYYY-MM-DD' (local getters, no TZ shift) — the same
+// normalization the Tax Center mileage path uses before resolving IRS rates.
+const { dateCellStr } = require('../services/pnl-report');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -84,8 +87,13 @@ router.put('/trips/:id', async (req, res, next) => {
     const updates = { updated_at: db.fn.now() };
 
     if (is_business !== undefined) {
-      // Recalculate deduction at the trip's date-effective rate.
-      const irsRate = mileageService.getIrsRate(trip.trip_date);
+      // Recalculate deduction at the trip's date-effective rate. NORMALIZE the
+      // DATE cell to its 'YYYY-MM-DD' calendar string first — node-postgres
+      // hands a `date` column back as a local-midnight Date, and passing that
+      // instant into getIrsRate would ET-shift it a day (so a 2026-07-01 trip
+      // resolves as Jun 30 → 72.5¢ instead of 76¢). dateCellStr uses local
+      // getters, the same normalization the Tax Center bulk path applies.
+      const irsRate = mileageService.getIrsRate(dateCellStr(trip.trip_date));
       // REFUSE a business classification with no verified rate (date past the
       // horizon → 0): persisting $0 would look reviewed and never self-heal
       // when the rate is added (reports sum persisted values). Same guard as
