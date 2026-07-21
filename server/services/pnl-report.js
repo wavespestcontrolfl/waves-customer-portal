@@ -312,11 +312,22 @@ async function paidRevenueForWindow(db, startDate, endDate) {
     // chargeback withdrawal is a dispute balance transaction netted in ITS
     // period (DISPUTE_TXN_TYPES) — excluding disputed rows here would erase
     // the original receipt retroactively.
+    // Processor-aware refund accounting: Stripe-ledgered rows (processor
+    // 'stripe' with a charge/PI id) stay GROSS — their refunds arrive as
+    // balance transactions, netted in the refund's own period below. Rows
+    // OUTSIDE Stripe's ledger (legacy imports, cash/check) have no balance
+    // transaction ever, so their locally recorded refund_amount nets here,
+    // in the receipt period (the only date those rows reliably carry).
     db('payments')
       .whereIn('status', ['paid', 'refunded', 'disputed'])
       .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
       .whereBetween('payment_date', [startDate, endDate])
-      .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
+      .select(db.raw(`COALESCE(SUM(
+        CASE WHEN processor = 'stripe' AND (stripe_charge_id IS NOT NULL OR stripe_payment_intent_id IS NOT NULL)
+          THEN amount
+          ELSE amount - COALESCE(refund_amount, 0)
+        END
+      )::text, '0') as total`))
       .first()
       .catch(missingTableOnly({ total: '0' })),
     // Paid-Stripe-invoice gap rows (no payments row for the PI) — same shape

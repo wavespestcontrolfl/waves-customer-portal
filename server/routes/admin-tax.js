@@ -1087,6 +1087,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     try {
       payments = await db('payments')
         .whereBetween('payment_date', [sd, ed])
+        // Same receipt predicate as the P&L builder: only cash that arrived
+        // (paid/refunded/disputed). Upcoming/processing/failed attempts are
+        // not receipts and must not appear beside income evidence.
+        .whereIn('payments.status', ['paid', 'refunded', 'disputed'])
         .whereRaw("COALESCE(payments.metadata->>'source', '') <> 'invoice_refund'")
         .leftJoin('customers', 'payments.customer_id', 'customers.id')
         .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
