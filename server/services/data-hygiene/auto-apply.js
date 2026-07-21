@@ -240,7 +240,10 @@ async function runAutoApplySweep({ dbi = db } = {}) {
         `Data hygiene: ${results.applied} fix${results.applied === 1 ? '' : 'es'} auto-applied`,
         `${ruleSummary}. All audited and reversible from the Data Hygiene page. ${Number(remaining?.n) || 0} lower-confidence proposals still pending review.`,
         {
-          link: '/admin/data-hygiene?status=auto_applied',
+          // The hygiene page lives as a tab of the Agents hub; a bare
+          // /admin/data-hygiene redirect DROPS query params (verified in
+          // dev) — deep-link the tab route directly.
+          link: '/admin/agents?tab=hygiene&status=auto_applied',
           metadata: { ...results },
         },
       );
