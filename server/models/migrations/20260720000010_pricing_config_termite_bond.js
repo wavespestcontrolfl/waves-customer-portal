@@ -29,5 +29,20 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   const hasTable = await knex.schema.hasTable('pricing_config');
   if (!hasTable) return;
-  await knex('pricing_config').where({ config_key: 'termite_bond' }).del();
+  // Symmetric with the insert-if-absent up(): only remove the row when it
+  // still holds exactly the values this migration seeded — a pre-existing
+  // or admin-edited row is live pricing config this migration doesn't own
+  // and must survive a rollback.
+  const row = await knex('pricing_config').where({ config_key: 'termite_bond' }).first();
+  if (!row) return;
+  let data = row.data;
+  try { data = typeof data === 'string' ? JSON.parse(data) : data; } catch { return; }
+  const seeded = data && typeof data === 'object'
+    && Object.keys(data).length === 3
+    && Number(data.term_1yr) === 60
+    && Number(data.term_5yr) === 54
+    && Number(data.term_10yr) === 45;
+  if (seeded) {
+    await knex('pricing_config').where({ config_key: 'termite_bond' }).del();
+  }
 };

@@ -10045,10 +10045,18 @@ function termiteBondOptionsFromEstimateData(parsedData = {}) {
 // saves carry the form field inputs.termiteBondTerm.
 function syncBondTermIntoReplayableInputs(parsedData = {}, termKey) {
   for (const shape of [parsedData?.engineInputs, parsedData?.engineRequest]) {
-    const termite = shape?.services?.termite;
+    if (!shape || typeof shape !== 'object') continue;
+    const termite = shape.services?.termite;
     if (termite && typeof termite === 'object') {
       if (termKey) termite.bondTerm = termKey;
       else delete termite.bondTerm;
+    }
+    // Real V2/admin saves replay engineRequest = { profile,
+    // selectedServices, options } through translateV2CallToV1Input — the
+    // bond rides options.termiteBondTerm there (codex #2915 r5).
+    if (shape.options && typeof shape.options === 'object'
+      && ('termiteBondTerm' in shape.options || Array.isArray(shape.selectedServices))) {
+      shape.options.termiteBondTerm = termKey || 'none';
     }
   }
   const formInputs = parsedData?.inputs;
@@ -10183,15 +10191,26 @@ function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
 // estimate that rewrites estimate_data + the totals columns server-side,
 // TOCTOU-guarded against a concurrent accept (the accept path freezes
 // whatever rows this wrote — customerSelection alone never bills).
+// Estimate token format gate (same slug-or-64-hex pattern as the other
+// public estimate routes): malformed probes 404 before any DB read.
+const BOND_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
 router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
   try {
     // Kill-switch completeness (codex #2915 r1): the gate must dead-end this
     // mutation even for estimates whose payloads still carry a bondOptions
     // snapshot from when the gate was on.
     if (!termiteBondOptionGateOn()) return res.status(403).json({ error: 'bond_option_disabled' });
+    // Generic-404 posture (AGENTS.md contract; codex #2915 r5): malformed
+    // tokens, unknown tokens, and non-active rows are indistinguishable — a
+    // leaked draft/archived token must not confirm the row exists.
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const term = req.body?.term;
     if (typeof term !== 'string' || !term) {
       return res.status(400).json({ error: 'term is required' });

@@ -426,8 +426,11 @@ finding and warns on P1. Reviewers must return JSON matching
   send, generic errors — no PII in responses or logs).
   `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
   estimate page — same contract family as the service-preferences toggles.
-  Token IS the auth (full 32-hex estimate token row lookup, generic 404);
-  dark behind GATE_TERMITE_BOND_OPTION (off → uniform 403
+  Token IS the auth: slug-or-64-hex format gate rejects malformed probes
+  before any DB read, and the 404 is generic — unknown token, malformed
+  token, and non-active rows (draft/archived/expired/locked) are
+  indistinguishable, so a leaked inactive token never confirms a row
+  exists. Dark behind GATE_TERMITE_BOND_OPTION (off → uniform 403
   `bond_option_disabled` before any DB read, and the 30/hr per-IP limiter
   — shared /64-collapsing `rateLimitKey` — `skip`s while dark so probes
   never see a revealing 429). Mutates ONLY the termite-bond selection:

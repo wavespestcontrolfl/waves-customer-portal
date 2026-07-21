@@ -531,4 +531,20 @@ describe('codex #2915 r4 hardening', () => {
     expect(parsed.inputs.termiteBondTerm).toBe('none');
     expect('bondTerm' in parsed.engineRequest.services.termite).toBe(false);
   });
+
+  test('V2 replay shape (engineRequest = {profile, selectedServices, options}) syncs options.termiteBondTerm (r5)', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteBondTerm: '10yr' })));
+    const parsed = {
+      engineRequest: {
+        profile: { homeSqFt: 2000 },
+        selectedServices: ['TERMITE_BAIT'],
+        options: { termiteBaitSystem: 'advance', termiteBondTerm: '10yr' },
+      },
+      result: mapped,
+    };
+    applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(parsed.engineRequest.options.termiteBondTerm).toBe('1yr');
+    applySelectedTermiteBondToEstimateData(parsed, 'none');
+    expect(parsed.engineRequest.options.termiteBondTerm).toBe('none');
+  });
 });
