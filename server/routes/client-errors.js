@@ -23,15 +23,25 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-// A JS error name / constructor name (TypeError, ChunkLoadError, …). Anything
-// else collapses to a generic label — never echo attacker text.
-const errorName = (value) =>
-  (/^[A-Za-z][A-Za-z0-9_.$]{0,60}$/.test(String(value || '')) ? String(value) : 'Error');
+// A JS error name / constructor name (TypeError, ChunkLoadError, …). Must be a
+// short identifier AND carry no long digit run (a PAN/SSN smuggled into the name
+// field); anything else collapses to a generic label — never echo attacker text.
+const errorName = (value) => {
+  const v = String(value || '');
+  return /^[A-Za-z][A-Za-z0-9_.$]{0,60}$/.test(v) && !/\d{5,}/.test(v) ? v : 'Error';
+};
 
-// A caller-set context label — the code passes fixed strings like
-// "PageErrorBoundary" or "banking:payout". Reject anything that isn't that shape.
+// Context is a FIXED, code-set label — a shape check alone still lets attacker
+// text (e.g. "a4242424242424242") through on this public route, so collapse to a
+// strict allowlist. New callers add their label here on purpose.
+const CONTEXT_LABELS = new Set([
+  'PageErrorBoundary',
+  'banking:reconcile',
+  'banking:download',
+  'banking:payout',
+]);
 const contextLabel = (value) =>
-  (/^[A-Za-z][A-Za-z0-9:._ -]{0,60}$/.test(String(value || '')) ? String(value) : undefined);
+  (CONTEXT_LABELS.has(String(value || '')) ? String(value) : undefined);
 
 // Known top-level route roots. The route is reduced to just its root so no token
 // or injected value in the tail can persist; unknown roots become "other".

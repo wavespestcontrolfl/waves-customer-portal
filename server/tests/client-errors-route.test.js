@@ -61,15 +61,23 @@ describe('POST /api/client-errors', () => {
     expect(ctxOf().route).toBe('other');
   });
 
-  test('rejects non-conforming name and context (no attacker text echoed)', async () => {
-    await post({
-      name: '4242424242424242',       // a PAN in the name field
-      context: '123-45-6789',          // an SSN in the context field
-      route: '/admin/x',
-    });
-    const [error] = mockCapture.mock.calls[0];
-    expect(error.name).toBe('Error');
-    expect(ctxOf().context).toBeUndefined();
+  test('context is an allowlist — shape-valid attacker text (PAN) is dropped', async () => {
+    await post({ name: 'E', context: 'banking:payout', route: '/admin/x' });
+    expect(ctxOf().context).toBe('banking:payout'); // known label passes
+    mockCapture.mockClear();
+    await post({ name: 'E', context: 'a4242424242424242', route: '/admin/x' });
+    expect(ctxOf().context).toBeUndefined(); // shape-valid but not allowlisted
+  });
+
+  test('name rejects a PAN even with a leading letter (digit-run guard)', async () => {
+    await post({ name: '4242424242424242', route: '/admin/x' }); // bare PAN
+    expect(mockCapture.mock.calls[0][0].name).toBe('Error');
+    mockCapture.mockClear();
+    await post({ name: 'a4242424242424242', route: '/admin/x' }); // letter + PAN
+    expect(mockCapture.mock.calls[0][0].name).toBe('Error');
+    mockCapture.mockClear();
+    await post({ name: 'ChunkLoadError', route: '/admin/x' }); // real error name
+    expect(mockCapture.mock.calls[0][0].name).toBe('ChunkLoadError');
   });
 
   test('componentStack keeps only "in/at ComponentName" tokens, dropping injected PII', async () => {
