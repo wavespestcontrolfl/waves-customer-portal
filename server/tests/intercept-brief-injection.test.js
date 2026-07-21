@@ -91,12 +91,15 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(op.secondary_kws).toEqual(payload.secondary_kws);
 
     // adam-augusta byline → same Adam Benetti record + body-emphasis note.
+    // Whitelisted author fields only — never years_*/tenure (fabricated
+    // claim; company founded 2024).
     expect(op.byline.author_frontmatter).toEqual({
       name: 'Adam Benetti',
       role: 'Founder & Lead Technician',
       fdacs_license: 'JB351547',
       bio_url: '/about/authors/adam-benetti',
     });
+    expect(Object.keys(op.byline.author_frontmatter).some((k) => /^years_|tenure/i.test(k))).toBe(false);
     expect(op.byline.emphasis).toMatch(/Augusta National/);
 
     // CTA codes resolve to the manifest descriptions.

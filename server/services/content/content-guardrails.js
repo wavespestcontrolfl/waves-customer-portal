@@ -493,6 +493,177 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   return null;
 }
 
+// ── MDX component gate ──────────────────────────────────────────────
+// SAFE_MDX_COMPONENTS mirrors the RECONCILED Astro component contract
+// (wavespestcontrol-astro PR #342): the set where
+//   1. packages/blog-schema/schema.ts COMPONENT_NAMES (the publish-gate
+//      catalog — an uncataloged name rejects the PR) and
+//   2. src/layouts/BlogPostLayout.astro mdxComponents (the renderer registry
+//      — a cataloged-but-unregistered name crashes the MDX build with
+//      "Expected component X to be defined")
+// agree on an implemented component. Before #342 the two had drifted: the
+// writer's favorite <SeasonalPressureChart>/<HomeZoneMap> were registered but
+// uncataloged, so every post embedding them parked at the Astro gate after a
+// full generation spend, while 14 phantom catalog names (WhyTrustUs, TLDR,
+// DataCallout, ProTip, …) had no renderer at all. Any PascalCase JSX tag
+// outside this set is a P0 — the draft routes to review exactly like the
+// other body-policy P0s. If the astro catalog changes again, update this
+// list to the new catalog∩renderer intersection.
+const SAFE_MDX_COMPONENTS = Object.freeze([
+  'AppPhone',
+  'BottomLineBox',
+  'ComparisonTable',
+  'HomeZoneMap',
+  'HonestRejection',
+  'PestEvidenceGrid',
+  'SeasonalPressureChart',
+]);
+
+const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
+// A PascalCase JSX opening tag — the shape MDX treats as a component
+// invocation. Closing tags (</X>) reuse the same name and need no extra scan.
+const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9]*)\b/g;
+
+function uncatalogedComponentFinding(body) {
+  const text = String(body || '');
+  const re = new RegExp(JSX_COMPONENT_TAG_RE.source, JSX_COMPONENT_TAG_RE.flags);
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (!SAFE_MDX_COMPONENT_SET.has(m[1])) {
+      return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${m[1]}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')}) — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
+    }
+  }
+  return null;
+}
+
+// ── citation-token residue gate ─────────────────────────────────────
+// A model-side citation apparatus (<cite index="12">…</cite> or bare
+// index="N" tokens) leaking into publishable copy — one live draft shipped
+// 12 of them. There is no legitimate use for this markup in a draft: real
+// sourcing is prose attribution plus an allowlisted link.
+const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']\d+["']/i;
+
+function citationResidueFinding(text) {
+  const m = String(text || '').match(CITATION_RESIDUE_RE);
+  if (!m) return null;
+  return finding('P0', 'CITATION_TOKEN_RESIDUE', `Draft contains raw citation markup ("${m[0]}") — model citation tokens must never ship. Attribute sources in prose instead.`);
+}
+
+// ── off-footprint service-claim gate ────────────────────────────────
+// Regional SWFL cities Waves does NOT serve. The canonical footprint is
+// config/locations CITY_TO_LOCATION; this candidate list is filtered against
+// it at scan time so a city added to the real footprint automatically drops
+// out of the blocklist. A blocked city is only a P0 inside a SERVICE-CLAIM
+// context (we serve / your home / call-schedule-book / our technicians /
+// same-day within ~90 chars) — bare educational mentions ("tegu lizards
+// spread from Fort Myers") must pass.
+const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
+  'Fort Myers', 'Cape Coral', 'Naples', 'Bonita Springs', 'Marco Island',
+  'Estero', 'Lehigh Acres', 'St. Petersburg', 'Tampa', 'Winter Haven',
+  'Plant City',
+]);
+
+function outOfAreaCities() {
+  let footprint = null;
+  try {
+    ({ CITY_TO_LOCATION: footprint } = require('../../config/locations'));
+  } catch { footprint = null; }
+  if (!footprint) return [...OUT_OF_AREA_CITY_CANDIDATES]; // fail closed: full blocklist
+  return OUT_OF_AREA_CITY_CANDIDATES.filter((c) => !footprint[c.toLowerCase()]);
+}
+
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our technicians?|our techs?|our team|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection))\b/i;
+const CLAIM_CONTEXT_WINDOW = 90;
+
+function offFootprintCityFinding(text) {
+  const s = String(text || '');
+  if (!s) return null;
+  for (const city of outOfAreaCities()) {
+    // "St." may be written without the period; multi-word cities may wrap.
+    const cityRe = new RegExp(`\\b${escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+')}\\b`, 'gi');
+    let m;
+    while ((m = cityRe.exec(s)) !== null) {
+      const window = s.slice(Math.max(0, m.index - CLAIM_CONTEXT_WINDOW), Math.min(s.length, m.index + m[0].length + CLAIM_CONTEXT_WINDOW));
+      if (SERVICE_CLAIM_CONTEXT_RE.test(window)) {
+        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions are fine; service/CTA framing is not.`);
+      }
+    }
+  }
+  return null;
+}
+
+// ── internal-route gate ─────────────────────────────────────────────
+// Site-relative link destinations must resolve to routes that actually
+// exist — one live draft linked a dead /pest-library/fleas/. The allowlist
+// is deliberately CONSERVATIVE: the conversion pages, the hub service pages
+// (kept in sync with content-brief-builder's SERVICE_HUB_LINKS — a unit test
+// asserts the superset), and the city-service URL patterns the briefs/prompts
+// mandate. Everything else parks the draft for review. Brief-mandated links
+// (internal_links_to_add, curated operator hub_link) are threaded in per-draft
+// via the allowedInternalLinks option — they are binding writer instructions,
+// exactly like requiredSourceUrls on the external gate.
+const ALLOWED_INTERNAL_LINKS = Object.freeze([
+  '/',
+  '/book/',
+  '/pest-control-quote/',
+  '/pest-control-calculator/',
+  // hub service pages (superset of content-brief-builder SERVICE_HUB_LINKS)
+  '/pest-control-services/',
+  '/waveguard-memberships/',
+  '/pest-library/',
+  '/lawn-care/',
+  '/lawn-care/fertilizer-blackout-manatee-county/',
+  '/mosquito-control/',
+  '/termite-inspection/',
+  '/rodent-control/',
+  '/tree-shrub-care/',
+  // hub pages the legacy writer prompts already reference
+  '/service-areas/',
+  '/pest-control-deals/',
+  '/pest-inspection/',
+  '/waves-guarantee/',
+  '/faqs/',
+]);
+
+// /{service}-{city}-fl/ city-service pages (incl. the city quote pages the
+// city-service prompt mandates for CTAs and the Bradenton-only specialty
+// slugs the legacy optimizer prompt lists).
+const CITY_SERVICE_LINK_RE = /^\/(?:pest-control|lawn-care|mosquito-control|termite-control|rodent-control|bed-bug-control|termite-inspection|commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|lawn-aeration)-[a-z][a-z-]*-fl\/$/;
+
+function normalizeInternalPath(dest) {
+  let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
+  if (!p.startsWith('/')) return null;
+  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/.test(p)) p += '/';
+  return p;
+}
+
+// Every site-relative destination in the body: markdown links/images and
+// href/src attributes. (Absolute URLs are the external gate's job.)
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)/gi;
+
+function internalRouteFinding(body, allowedInternalLinks = []) {
+  const text = String(body || '');
+  if (!text) return null;
+  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
+  for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
+    const norm = normalizeInternalPath(link);
+    if (norm) allowed.add(norm);
+  }
+  const re = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const dest = m[1] || m[2];
+    // Anchor-only and in-repo image references are not routes.
+    if (dest.startsWith('/images/')) continue;
+    const norm = normalizeInternalPath(dest);
+    if (!norm) continue;
+    if (allowed.has(norm)) continue;
+    if (CITY_SERVICE_LINK_RE.test(norm)) continue;
+    return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
+  }
+  return null;
+}
+
 // Normalize service/topic value(s) to candidate FAQ_BLOCKED_SERVICES ids. The
 // ids are lowercase/singular/hyphenated ('rodent', 'bed-bug'), but legacy blog
 // `tag` values are display-cased plurals ("Rodents", "Bed Bugs", "Cockroaches").
@@ -875,8 +1046,17 @@ function preventionPromiseFinding(text) {
  * operatorCitations: operator brief carries source_notes directives (writer
  *   locates the sources itself) — additionally allow the curated citation +
  *   competitor-source hosts. Both default off: mined drafts stay internal-only.
+ * allowedInternalLinks: brief-mandated internal link targets
+ *   (internal_links_to_add, curated operator hub_link) — allowed for this
+ *   draft on top of the static ALLOWED_INTERNAL_LINKS set.
+ * isRefresh: the draft rewrites the body of an EXISTING live page. The
+ *   structure-of-new-content checks (component allowlist, internal-route
+ *   allowlist) are skipped — legacy live bodies predate both policies and a
+ *   refresh must not park on links/components it merely preserved. The
+ *   citation-residue and off-footprint checks still apply in full (those are
+ *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -917,6 +1097,15 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // just like in body — scan the full publishable text for both.
     productClaimFinding(publishableText),
     preventionPromiseFinding(publishableText),
+    // Citation residue + off-footprint service claims cover everything that
+    // ships (body AND meta) on every lane — neither has a legitimate form.
+    citationResidueFinding(publishableText),
+    offFootprintCityFinding(publishableText),
+    // Component + internal-route allowlists are body-structure policies for
+    // NEW content; refresh drafts of legacy live pages are exempt (see the
+    // isRefresh option doc above).
+    isRefresh ? null : uncatalogedComponentFinding(body),
+    isRefresh ? null : internalRouteFinding(body, allowedInternalLinks),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -939,5 +1128,13 @@ module.exports = {
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).
   PRO_PRODUCT_TERMS,
   ACTIVE_INGREDIENT_TERMS,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding },
+  // single source of truth for the MDX component vocabulary, the internal
+  // link allowlist, and the out-of-footprint city blocklist — consumed by
+  // writer-agent-config so the writer's instructions can never drift from
+  // what these gates enforce at publish.
+  SAFE_MDX_COMPONENTS,
+  ALLOWED_INTERNAL_LINKS,
+  OUT_OF_AREA_CITY_CANDIDATES,
+  outOfAreaCities,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

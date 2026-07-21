@@ -2765,6 +2765,21 @@ class AutonomousRunner {
     // bucket.
     const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
     const baseService = opp.service || brief.service || null;
+    // Brief-mandated internal links are binding writer instructions (the
+    // prompt calls internal_links_to_add a checklist), so they are allowed on
+    // top of the guardrails' static internal-route allowlist — same posture
+    // as requiredSourceUrls on the external-link gate. The curated operator
+    // hub_link (a city page outside the static set) is part of that contract.
+    let briefLinks = brief?.internal_links_to_add;
+    if (typeof briefLinks === 'string') { try { briefLinks = JSON.parse(briefLinks); } catch (_) { briefLinks = []; } }
+    // hub_link is read un-bucket-gated (like faqBlockedTopic above): spoke
+    // seeds carry it outside the intercept bucket and the quality gate's
+    // hub_link_present check REQUIRES the draft to contain it.
+    const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link || null;
+    const allowedInternalLinks = [
+      ...(Array.isArray(briefLinks) ? briefLinks : []),
+      ...(curatedHubLink ? [curatedHubLink] : []),
+    ];
     return {
       service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
       primaryKeyword: brief.target_keyword || null,
@@ -2772,6 +2787,11 @@ class AutonomousRunner {
       operatorFaqException,
       requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
       operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
+      allowedInternalLinks,
+      // Refresh drafts rewrite an EXISTING live body — the component/internal-
+      // route structure checks skip (legacy links/components the refresh merely
+      // preserves must not park it); citation/off-footprint still apply.
+      isRefresh: brief.action_type === 'refresh_existing_page',
     };
   }
 

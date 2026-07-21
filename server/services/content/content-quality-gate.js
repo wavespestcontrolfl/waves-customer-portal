@@ -88,6 +88,10 @@ function minTotalScoreFor(pageType) {
 const HARD_CHECKS = [
   { name: 'schema_valid', weight: 8, evaluate: checkSchemaValid },
   { name: 'title_meta_spam_free', weight: 0, evaluate: checkTitleMetaSpamFree },
+  // Truncation guard: the length BAND lives in title-meta-spam-gate (meta
+  // >190 hard / >160 soft) — this is the COMPLETENESS complement. Weight 0,
+  // same as title_meta_spam_free: pure hard gate, no score contribution.
+  { name: 'meta_description_complete', weight: 0, evaluate: checkMetaDescriptionComplete },
   { name: 'serp_brief_attached', weight: 4, evaluate: checkSerpBriefAttached },
   { name: 'gsc_signal_attached', weight: 4, evaluate: checkGscSignalAttached },
   { name: 'no_duplicate_intent', weight: 6, evaluate: checkNoDuplicateIntent },
@@ -270,6 +274,35 @@ function checkTitleMetaSpamFree(draft, brief) {
     ok: true,
     soft_warnings: result.soft_failures,
   };
+}
+
+// Meta descriptions that read as CUT OFF — no terminal punctuation, a
+// trailing ellipsis, or a dangling article/preposition/conjunction before
+// the period — shipped on generated posts (truncated mid-sentence metas were
+// a recurring Codex finding). The publisher's sentence-aware clamp fixes the
+// overflow path; this hard check parks drafts whose meta was AUTHORED
+// truncated. Absence is not failed here — presence/length are owned by the
+// schema + title-meta-spam checks.
+const DANGLING_META_ENDINGS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'nor', 'to', 'of', 'for', 'with',
+  'in', 'on', 'at', 'by', 'from', 'into', 'over', 'under', 'near', 'about',
+  'between', 'during', 'without', 'within', 'vs', 'versus', 'than', 'as',
+  'if', 'when', 'while', 'because', 'that', 'which', 'your', 'our', 'their',
+  'its', 'his', 'her', 'my',
+]);
+
+function checkMetaDescriptionComplete(draft) {
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
+  const core = m.replace(/["'”’)\]]+$/, '');
+  if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
+  const beforePunct = core.replace(/[.!?]+$/, '').trim();
+  const lastWord = (beforePunct.split(/\s+/).pop() || '').toLowerCase().replace(/[^a-z']/g, '');
+  if (DANGLING_META_ENDINGS.has(lastWord)) {
+    return { ok: false, reason: `meta_ends_with_dangling_word_${lastWord}` };
+  }
+  return { ok: true };
 }
 
 function isPageOnlyOpportunity(brief) {
@@ -930,7 +963,7 @@ module.exports._internals = {
   PAGE_TYPE_CHECKS,
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
-  checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
+  checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
   isOperatorAuthoredBrief, isCompetitorGapBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,

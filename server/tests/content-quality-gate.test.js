@@ -810,3 +810,62 @@ describe('redaction: LOWERCASE customer names in headings (Codex round 14)', () 
     }
   });
 });
+
+// ── meta_description_complete (truncation guard) ─────────────────────
+
+describe('checkMetaDescriptionComplete', () => {
+  const { checkMetaDescriptionComplete } = require('../services/content/content-quality-gate')._internals;
+
+  test('complete sentences pass (period / question / exclamation, closing quote ok)', () => {
+    for (const m of [
+      'Spot chinch bug damage early and know when a professional treatment is worth it.',
+      'Is your St. Augustine lawn yellowing in patches? Here is what Waves techs check first.',
+      'Stop the swarm before it reaches the eaves!',
+      'They call it "the silent lawn killer."',
+    ]) {
+      expect(checkMetaDescriptionComplete({ meta_description: m }).ok).toBe(true);
+    }
+  });
+
+  test('missing terminal punctuation fails (the truncated-meta defect)', () => {
+    const r = checkMetaDescriptionComplete({ meta_description: 'Learn the early signs of chinch bug damage and what Sarasota homeowners should' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('meta_missing_terminal_punctuation');
+  });
+
+  test('trailing ellipsis fails (both forms)', () => {
+    expect(checkMetaDescriptionComplete({ meta_description: 'What Sarasota homeowners should know...' }).ok).toBe(false);
+    expect(checkMetaDescriptionComplete({ meta_description: 'What Sarasota homeowners should know…' }).ok).toBe(false);
+  });
+
+  test('dangling article/preposition before the period fails', () => {
+    for (const m of [
+      'Everything Bradenton homeowners need to know about the.',
+      'How to protect your lawn from chinch bugs and.',
+      'When to schedule a treatment for.',
+    ]) {
+      const r = checkMetaDescriptionComplete({ meta_description: m });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/^meta_ends_with_dangling_word_/);
+    }
+  });
+
+  test('reads frontmatter.meta_description as a fallback', () => {
+    const r = checkMetaDescriptionComplete({ frontmatter: { meta_description: 'Truncated without an end' } });
+    expect(r.ok).toBe(false);
+  });
+
+  test('absent meta is not this check\'s failure (presence/length owned elsewhere)', () => {
+    expect(checkMetaDescriptionComplete({}).ok).toBe(true);
+  });
+
+  test('a truncated meta hard-fails evaluate() on every page type', () => {
+    const result = evaluate(
+      { body: 'Body copy.', title: 'Chinch Bug Damage in Sarasota', meta_description: 'Spot the early signs of chinch bug damage before your' },
+      { page_type: 'none', serp_signal: { dominant_intent: 'informational' }, gsc_signal: { impressions: 10 } },
+      {},
+    );
+    expect(result.ok).toBe(false);
+    expect(result.hard_failures.map((f) => f.name)).toContain('meta_description_complete');
+  });
+});

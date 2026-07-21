@@ -1,3 +1,9 @@
+// The SERVICE_HUB_LINKS drift guard below loads content-brief-builder, which
+// pulls in db/logger at module scope — mock both so this stays a pure unit
+// suite (nothing else here touches them).
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
 const guardrails = require('../services/content/content-guardrails');
 
 describe('content-guardrails', () => {
@@ -1174,6 +1180,193 @@ describe('product/prevention guards — round-10 hardening (Codex findings)', ()
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+});
+
+// ── writer-hardening gates (uncataloged components, citation residue,
+//    off-footprint service claims, invented internal routes) ─────────────
+
+describe('MDX component allowlist (UNCATALOGED_COMPONENT)', () => {
+  test('SAFE_MDX_COMPONENTS mirrors the reconciled astro catalog∩renderer set', () => {
+    // wavespestcontrol-astro PR #342 reconciled packages/blog-schema/schema.ts
+    // COMPONENT_NAMES with BlogPostLayout.astro mdxComponents to exactly this
+    // set — a portal drift from it re-opens the parked-PR defect class.
+    expect([...guardrails.SAFE_MDX_COMPONENTS].sort()).toEqual([
+      'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
+      'HonestRejection', 'PestEvidenceGrid', 'SeasonalPressureChart',
+    ]);
+  });
+
+  test('all safe components pass, including the writer favorites', () => {
+    const body = [
+      '<SeasonalPressureChart />',
+      '<HomeZoneMap title="Where we treat" zones={[{ label: "Eaves", note: "wasp nests" }]} />',
+      '<PestEvidenceGrid />',
+      '<ComparisonTable columns={["What you get","DIY","Pro"]} rows={[{ label: "Speed", values: ["Slow","Fast"] }]} />',
+      '<BottomLineBox verdict="Treat now" recommendation="Book an inspection" />',
+      '<HonestRejection audience="One-off wasp nest" reason="A can of spray fixes it" />',
+    ].join('\n\n');
+    const r = guardrails.evaluate({ body }, {});
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
+  });
+
+  test('a component outside the safe set is P0 and fails the gate', () => {
+    const r = guardrails.evaluate({ body: 'Compare tiers below.\n\n<WaveGuardLadder tier="Gold" />' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('phantom-catalog names removed by the reconciliation are blocked too', () => {
+    for (const name of ['WhyTrustUs', 'TLDR', 'DataCallout', 'ProTip', 'FAQBlock']) {
+      const r = guardrails.evaluate({ body: `<${name} />` }, {});
+      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+    }
+  });
+
+  test('lowercase HTML tags and comparison prose are not components', () => {
+    const r = guardrails.evaluate({ body: 'Ants march <br /> onward. Colonies of <a href="/pest-control-quote/">1,000s</a> form fast.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
+  });
+
+  test('refresh drafts skip the component gate (legacy live bodies)', () => {
+    const r = guardrails.evaluate({ body: '<AppLegacyWidget /> refreshed copy.' }, { isRefresh: true });
+    expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
+  });
+});
+
+describe('citation-token residue (CITATION_TOKEN_RESIDUE)', () => {
+  test('<cite index="N"> markup is P0', () => {
+    const r = guardrails.evaluate({ body: 'Drywood termites swarm in spring <cite index="7">UF/IFAS</cite>.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('bare index="N" token residue is P0', () => {
+    const r = guardrails.evaluate({ body: 'Swarm season peaks in April index="12" across Sarasota.' }, {});
+    expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+  });
+
+  test('citation residue hiding in editable meta is caught too', () => {
+    const r = guardrails.evaluate({
+      body: 'Clean body copy.',
+      frontmatter: { meta_description: 'Termite guide <cite index="1"> for Sarasota homeowners.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+  });
+
+  test('prose attribution and component props pass clean', () => {
+    const r = guardrails.evaluate({
+      body: 'Per UF/IFAS, chinch bugs peak in July. <ComparisonTable columns={["A","B"]} rows={[{ label: "x", values: ["1","2"] }]} highlight={1} />',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(false);
+  });
+});
+
+describe('off-footprint service claims (OFF_FOOTPRINT_CITY_CLAIM)', () => {
+  test('service claim naming an out-of-area city is P0', () => {
+    const r = guardrails.evaluate({
+      body: 'Our technicians proudly serve Fort Myers homeowners with same-day treatments.',
+    }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('CTA framing near an out-of-area city blocks (schedule/book/call)', () => {
+    for (const body of [
+      'Schedule your Naples home inspection today.',
+      'Book a visit for your Cape Coral lawn this week.',
+      'Call now — Tampa homeowners love our approach to your yard.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('bare educational mentions pass (both directions of the fix)', () => {
+    const r = guardrails.evaluate({
+      body: 'Tegu lizards spread north from Fort Myers over the past decade, and Naples researchers have tracked cane toads since 2015. None of that changes what Bradenton yards deal with.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('service claims naming footprint cities pass', () => {
+    const r = guardrails.evaluate({
+      body: 'We serve Bradenton, Sarasota, Venice, and Punta Gorda — schedule your home treatment today.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('a service claim hiding in editable meta is caught', () => {
+    const r = guardrails.evaluate({
+      body: 'Clean educational body.',
+      frontmatter: { meta_description: 'Serving Bonita Springs homes with pest control you can trust.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('outOfAreaCities derives against CITY_TO_LOCATION (footprint cities never blocklisted)', () => {
+    const { CITY_TO_LOCATION } = require('../config/locations');
+    const list = guardrails.outOfAreaCities();
+    expect(list).toContain('Fort Myers');
+    for (const city of list) {
+      expect(CITY_TO_LOCATION[city.toLowerCase()]).toBeUndefined();
+    }
+  });
+});
+
+describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
+  test('an invented internal route is P0 (the /pest-library/fleas/ defect)', () => {
+    const r = guardrails.evaluate({ body: 'Read our [flea guide](/pest-library/fleas/) for details.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('allowlisted routes, city-service patterns, images, and anchors pass', () => {
+    const body = [
+      'Get a [quote](/pest-control-quote/) or [book online](/book/).',
+      'Numbers live in the [calculator](/pest-control-calculator/).',
+      'See [WaveGuard](/waveguard-memberships/) and the [pest library](/pest-library/).',
+      'City pages: [Bradenton](/pest-control-bradenton-fl/) and [Sarasota quotes](/pest-control-quote-sarasota-fl/).',
+      '![Chinch bug damage](/images/blog/chinch-bugs/damage.webp)',
+      'Jump to the [FAQ](#faq).',
+    ].join('\n');
+    const r = guardrails.evaluate({ body }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('query strings, fragments, and missing trailing slashes normalize before matching', () => {
+    const r = guardrails.evaluate({
+      body: '[quote](/pest-control-quote?utm_source=blog) and [book](/book#today) and [hub](/termite-inspection)',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('href attribute destinations are policed too', () => {
+    const r = guardrails.evaluate({ body: 'Visit <a href="/totally-invented-page/">this page</a> now.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
+  test('brief-mandated links are allowed via allowedInternalLinks', () => {
+    const body = 'Curated: [hub](/pest-control-sarasota-fl/) plus [special](/lawn-care/fall-armyworm-outbreak/).';
+    const blocked = guardrails.evaluate({ body }, {});
+    expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['/lawn-care/fall-armyworm-outbreak/'] });
+    expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('refresh drafts skip the internal-route gate (legacy live links preserved)', () => {
+    const r = guardrails.evaluate({ body: 'Old page links to [legacy](/some-2019-era-page/).' }, { isRefresh: true });
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('drift guard: every content-brief-builder SERVICE_HUB_LINKS target is allowlisted', () => {
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    const allowed = new Set(guardrails.ALLOWED_INTERNAL_LINKS);
+    for (const links of Object.values(SERVICE_HUB_LINKS)) {
+      for (const link of links) {
+        expect(allowed.has(link)).toBe(true);
+      }
     }
   });
 });

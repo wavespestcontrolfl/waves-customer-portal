@@ -743,14 +743,26 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
       expect(clampMetaDescription(m)).toBe(m);
     });
 
-    test('clamps an over-160 meta to <=160 at a word boundary, staying >=115 with no trailing punctuation', () => {
+    test('clamps an over-160 single-sentence meta at a word boundary and closes it with a period', () => {
       const long = 'Ant trails in Bradenton homes can signal a much bigger colony nearby; here is exactly how to identify them, seal the entry points, and decide when a professional inspection is genuinely worth the cost this season.';
       expect(long.length).toBeGreaterThan(160);
       const out = clampMetaDescription(long);
       expect(out.length).toBeLessThanOrEqual(160);
       expect(out.length).toBeGreaterThanOrEqual(115);
-      expect(long.startsWith(out)).toBe(true);
-      expect(/[\s.,;:–—-]$/u.test(out)).toBe(false);
+      // No complete sentence fits in 160, so the clamp word-cuts, drops any
+      // dangling connective, and closes the fragment with a period — the
+      // shipped meta always reads as finished copy.
+      expect(long.startsWith(out.slice(0, -1))).toBe(true);
+      expect(out.endsWith('.')).toBe(true);
+      expect(/[\s,;:–—-]\.$/u.test(out)).toBe(false);
+    });
+
+    test('clamps an over-160 multi-sentence meta at the last complete sentence', () => {
+      const long = 'Ant trails in Bradenton homes can signal a much bigger colony nearby. Here is how to identify them and seal the entry points fast. A professional inspection is genuinely worth the cost this season.';
+      expect(long.length).toBeGreaterThan(160);
+      const out = clampMetaDescription(long);
+      expect(out).toBe('Ant trails in Bradenton homes can signal a much bigger colony nearby. Here is how to identify them and seal the entry points fast.');
+      expect(out.length).toBeGreaterThanOrEqual(115);
     });
   });
 });
