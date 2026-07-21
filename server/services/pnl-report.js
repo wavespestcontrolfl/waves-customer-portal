@@ -17,12 +17,13 @@
  *                  See paidRevenueForWindow for the full basis and the
  *                  refund-ledger sync-coverage caveat. Disputes/chargebacks
  *                  are not yet ledgered and are out of scope here.
- *   labor        — time_entry_daily_summary.total_job_minutes × the loaded
- *                  labor rate from company_financials (the same rate per-visit
- *                  job costing uses; the summary table stores minutes, not
- *                  cost). Job minutes only — drive/admin/break time is not
- *                  COGS labor, matching job-costing.js's entry_type='job'
- *                  scoping.
+ *   labor        — NO imputed labor: the sole technician is the OWNER, and
+ *                  an owner/sole-proprietor's own labor is not a deductible
+ *                  expense. Real payroll/contract-labor spend flows through
+ *                  expense categories like every other paid cost. The
+ *                  job-costing helpers (rateAsOf/costLaborByDay) remain
+ *                  exported for management surfaces and the informational
+ *                  time-tracking CSV.
  *   materials    — expenses in the COGS categories.
  *   opex         — every other expense INCLUDING uncategorized ones (the old
  *                  whereNotIn(name) dropped NULL-category rows entirely — in
@@ -128,17 +129,31 @@ function toUTCDay(v) {
  * silently deleted their depreciation from every historical P&L.
  */
 function prorateAssetDepreciation(asset, startDate, endDate) {
-  const annual = parseFloat(asset?.annual_depreciation || 0);
-  if (!annual) return 0;
   const periodStart = toUTCDay(startDate);
   const periodEnd = toUTCDay(endDate);
   if (!periodStart || !periodEnd) return 0;
-  const inService = toUTCDay(asset.placed_in_service_date) || toUTCDay(asset.purchase_date);
-  const disposed = toUTCDay(asset.disposal_date);
+  const inService = toUTCDay(asset?.placed_in_service_date) || toUTCDay(asset?.purchase_date);
+  const disposed = toUTCDay(asset?.disposal_date);
+  let total = 0;
+
+  // Immediate expensing (Section 179 / 100% bonus): the WHOLE deduction is
+  // recognized in the placed-in-service year — never prorated by days. Such
+  // assets usually carry annual_depreciation NULL, so filtering on the
+  // annual field alone silently dropped the entire deduction from the P&L
+  // and the CPA package.
+  const method = String(asset?.depreciation_method || '');
+  if (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected) {
+    const immediate = parseFloat(asset?.section_179_amount ?? asset?.purchase_cost ?? 0) || 0;
+    if (immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
+      total += immediate;
+    }
+  }
+
+  const annual = parseFloat(asset?.annual_depreciation || 0);
+  if (!annual) return total;
   const effStart = inService && inService > periodStart ? inService : periodStart;
   const effEnd = disposed && disposed < periodEnd ? disposed : periodEnd;
-  if (effStart > effEnd) return 0;
-  let total = 0;
+  if (effStart > effEnd) return total;
   for (let y = effStart.getUTCFullYear(); y <= effEnd.getUTCFullYear(); y++) {
     const yStart = new Date(Date.UTC(y, 0, 1));
     const yEnd = new Date(Date.UTC(y, 11, 31));
@@ -451,19 +466,8 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, laborRows, rateRows, matRow, opexRows, feeRow, mileageRow, assets] = await Promise.all([
+  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
-    db('time_entry_daily_summary')
-      .whereBetween('work_date', [startDate, endDate])
-      .select('work_date', 'total_job_minutes')
-      .catch(missingTableOnly([])),
-    // Full effective-dated rate history up to the period end — each day's
-    // labor is costed at the rate in force that day (see costLaborByDay).
-    db('company_financials')
-      .where('effective_date', '<=', endDate)
-      .orderBy('effective_date', 'asc')
-      .select('effective_date', 'loaded_labor_rate')
-      .catch(missingTableOnly([])),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
@@ -504,23 +508,37 @@ async function buildPnlReport(db, startDate, endDate) {
     // (see prorateDepreciation) instead of deleting the asset's history.
     // Rows merely deactivated (active=false, never disposed — archived /
     // non-business) stay excluded, matching every other tax surface.
+    // Includes immediate-expensing assets (§179 / bonus — annual NULL):
+    // their whole deduction recognizes in the placed-in-service year.
     db('equipment_register')
-      .whereNotNull('annual_depreciation')
+      .where(function hasDeduction() {
+        this.whereNotNull('annual_depreciation')
+          .orWhere('section_179_elected', true)
+          .orWhereIn('depreciation_method', ['section_179', 'bonus_100']);
+      })
       .where(function activeOrDisposed() {
         this.where('active', true)
           .orWhere('disposed', true)
           .orWhereNotNull('disposal_date');
       })
-      .select('annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date')
+      .select(
+        'annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date',
+        'depreciation_method', 'section_179_elected', 'section_179_amount', 'purchase_cost',
+      )
       .catch(missingTableOnly([])),
   ]);
-
-  const { laborCost } = costLaborByDay(laborRows, rateRows);
 
   const report = assemblePnl({
     serviceRevenue,
     otherRevenue: 0,
-    laborCost,
+    // No imputed labor: the sole technician IS the owner, and an
+    // owner/sole-proprietor's own labor is not a deductible expense —
+    // costing job minutes at the loaded job-costing rate deducted
+    // fictitious payroll. Real payroll/contract-labor spend, when it
+    // exists, flows through expense categories (opex) like every other
+    // paid cost. costLaborByDay stays exported for job-costing surfaces
+    // and the informational time-tracking CSV.
+    laborCost: 0,
     materialsCost: parseFloat(matRow?.total || 0),
     opexRows,
     processingFees: parseFloat(feeRow?.total || 0),
@@ -530,13 +548,15 @@ async function buildPnlReport(db, startDate, endDate) {
 
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
   // synced payout-transaction ledger, which lags until each payout is paid
-  // AND synced. Completeness is proven, not inferred from the newest
-  // transaction date (one fresh payout can leap past endDate while older
-  // ones sit in the backfill backlog): the window is closed only when
+  // AND synced. FAIL CLOSED: the window is proven complete only when
   // (a) no paid payout still needs its transaction (re)sync, (b) no payout
-  // overlapping the window is still unsettled (its transactions don't exist
-  // in the ledger yet), and (c) the ledger has rows reaching the window end.
-  const [ledgerHead, backlogRow, unsettledRow] = await Promise.all([
+  // anywhere is still unsettled (an unsettled payout — whatever its own
+  // creation date — can hold in-window transactions the ledger lacks), and
+  // (c) a SYNCED PAID payout exists that was created AFTER the window end,
+  // proving Stripe's chronological sweep has passed the cutoff. Anything
+  // weaker (e.g. the newest transaction date) can label incomplete figures
+  // final.
+  const [ledgerHead, backlogRow, unsettledRow, sweepRow] = await Promise.all([
     db('stripe_payout_transactions')
       .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
       .first()
@@ -557,12 +577,16 @@ async function buildPnlReport(db, startDate, endDate) {
       .count('* as n')
       .first()
       .catch(missingTableOnly({ n: 0 })),
-    // Pending/in-transit payouts created on-or-before the window end carry
-    // transactions the ledger can't have yet.
     db('stripe_payouts')
       .whereNotIn('status', ['paid', 'canceled', 'failed'])
+      .count('* as n')
+      .first()
+      .catch(missingTableOnly({ n: 0 })),
+    db('stripe_payouts')
+      .where('status', 'paid')
+      .where('transaction_count', '>', 0)
       .whereRaw(
-        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') <= ?::date",
+        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') > ?::date",
         [endDate],
       )
       .count('* as n')
@@ -572,20 +596,22 @@ async function buildPnlReport(db, startDate, endDate) {
   const outflowLedgerThrough = ledgerHead?.through || null;
   const backlogCount = parseInt(backlogRow?.n || 0, 10);
   const unsettledCount = parseInt(unsettledRow?.n || 0, 10);
+  const sweptPastWindow = parseInt(sweepRow?.n || 0, 10) > 0;
   let coverageNote = null;
   if (!outflowLedgerThrough) {
     coverageNote = 'Refund/dispute/fee ledger has never been synced — outflows and processing fees are NOT reflected in these figures. Run Banking → Sync, then regenerate.';
   } else if (backlogCount > 0) {
     coverageNote = `${backlogCount} paid payout(s) still await transaction sync — outflow and fee figures are incomplete. Run Banking → Sync (repeat until it reports no backfill), then regenerate.`;
   } else if (unsettledCount > 0) {
-    coverageNote = `${unsettledCount} payout(s) in this window are still settling — their refunds/disputes/fees are not in the ledger yet. Figures firm up once they pay out and sync.`;
-  } else if (outflowLedgerThrough < endDate) {
-    coverageNote = `Refund/dispute/fee ledger is synced through ${outflowLedgerThrough} — outflows and processing fees after that date are not yet reflected. Run Banking → Sync, then regenerate for final figures.`;
+    coverageNote = `${unsettledCount} payout(s) are still settling — their refunds/disputes/fees are not in the ledger yet. Figures firm up once they pay out and sync.`;
+  } else if (!sweptPastWindow) {
+    coverageNote = `Stripe's payout sweep has not yet passed ${endDate} — outflows and fees near the window end may not be in the ledger. Figures firm up once the next payout after the cutoff pays out and syncs.`;
   }
   report.coverage = {
     outflowLedgerThrough,
     backlogCount,
     unsettledCount,
+    sweptPastWindow,
     complete: !coverageNote,
     note: coverageNote,
   };

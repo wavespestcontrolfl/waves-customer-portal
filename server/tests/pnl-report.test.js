@@ -230,7 +230,27 @@ describe('prorateDepreciation', () => {
     expect(total).toBe(365);
   });
 
-  test('§179/bonus assets (annual NULL) and future assets contribute nothing', () => {
+  test('§179/bonus assets recognize their WHOLE deduction in the in-service year, never prorated', () => {
+    const s179 = {
+      annual_depreciation: null,
+      depreciation_method: 'section_179',
+      section_179_elected: true,
+      section_179_amount: '12000',
+      placed_in_service_date: '2026-07-01',
+    };
+    // In-service inside the window: full amount even though only half the
+    // year remains (immediate expensing is never day-prorated).
+    expect(prorateDepreciation([s179], year.start, year.end)).toBe(12000);
+    // The deduction belongs ONLY to the in-service year.
+    expect(prorateDepreciation([s179], '2027-01-01', '2027-12-31')).toBe(0);
+    // bonus_100 without a section_179_amount falls back to purchase cost.
+    expect(prorateDepreciation(
+      [{ annual_depreciation: null, depreciation_method: 'bonus_100', purchase_cost: '5000', placed_in_service_date: '2026-03-01' }],
+      year.start, year.end,
+    )).toBe(5000);
+  });
+
+  test('non-179 assets with annual NULL and future assets contribute nothing', () => {
     const total = prorateDepreciation(
       [
         { annual_depreciation: null, placed_in_service_date: '2026-01-01' },

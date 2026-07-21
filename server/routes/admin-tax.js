@@ -1227,16 +1227,19 @@ router.get('/export/tax-package', async (req, res, next) => {
       }));
     } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
-    // Labor detail. The summary table stores MINUTES (work_date keyed), not a
-    // cost column — the old query filtered a nonexistent `date` column, so
-    // labor.csv had been empty since the feature shipped. Map the real columns
-    // into the shapes laborToCSV's fallback field names understand, costing
-    // job minutes at the loaded labor rate (same basis as per-visit costing).
+    // Time-tracking detail — INFORMATIONAL ONLY. The imputed cost column
+    // prices job minutes at the internal job-costing rate; the sole
+    // technician is the owner, whose own labor is NOT a deductible expense,
+    // so this schedule deliberately does NOT feed pnl.csv (its COGS labor
+    // line is real payroll/contract-labor spend only, which flows through
+    // expense categories). The summary table stores MINUTES (work_date
+    // keyed), not a cost column — the old query filtered a nonexistent
+    // `date` column, so this export had been empty since the feature
+    // shipped.
     let laborSummaries = [];
     try {
       // Effective-dated rates: each day costs at the rate in force that day
-      // (rateAsOf) — the same basis as the builder's P&L labor line, so
-      // labor.csv always foots to pnl.csv.
+      // (rateAsOf) — same basis as per-visit job costing.
       const rateRows = await db('company_financials')
         .where('effective_date', '<=', ed)
         .orderBy('effective_date', 'asc')
@@ -1287,7 +1290,9 @@ router.get('/export/tax-package', async (req, res, next) => {
     archive.append(csv.expensesToCSV(expenses), { name: 'expenses.csv' });
     archive.append(csv.mileageToCSV(trips), { name: 'mileage.csv' });
     archive.append(csv.depreciationToCSV(equipment), { name: 'depreciation.csv' });
-    archive.append(csv.laborToCSV(laborSummaries), { name: 'labor.csv' });
+    // Renamed so a CPA can't mistake the imputed job-costing figures for a
+    // payroll expense schedule (owner labor is not deductible).
+    archive.append(csv.laborToCSV(laborSummaries), { name: 'labor-timetracking-informational.csv' });
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     archive.append(csv.generateReadme(year, pnlData), { name: 'README.txt' });
 
