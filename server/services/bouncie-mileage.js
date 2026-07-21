@@ -52,11 +52,13 @@ const IRS_MILEAGE_RATE_TABLE = [
   { from: '2026-01-01', rate: 0.725 }, // Notice 2026-10
   { from: '2026-07-01', rate: 0.76 },  // Announcement 2026-11 (IRB 2026-29)
 ];
-// The table is only authoritative through the end of the last covered year.
-// The final entry is effective FROM its date but NOT forever — the IRS sets a
-// new rate each year, so a date past this horizon has no verified rate yet.
-// FAIL CLOSED (rate 0) rather than silently reusing 2026 H2's 0.76 for 2027+;
-// bump this and add the entry when the IRS publishes the next rate.
+// The table is authoritative only within [FROM, THROUGH]. The final entry is
+// effective FROM its date but NOT forever — the IRS sets a new rate yearly, so
+// a date past the horizon has no verified rate; and dates before the first
+// entry belong to years with their own (uncarried) rates. FAIL CLOSED (rate 0)
+// on BOTH ends rather than silently reusing an adjacent year's rate. Extend the
+// table and bump these when adding a verified IRS rate.
+const IRS_RATE_COVERED_FROM = '2024-01-01';
 const IRS_RATE_COVERED_THROUGH = '2026-12-31';
 
 function getIrsRate(tripDate) {
@@ -68,10 +70,10 @@ function getIrsRate(tripDate) {
   } else {
     dstr = String(tripDate || '').slice(0, 10);
   }
-  // Beyond the verified horizon → 0 (fail closed). A visible run of $0
-  // deductions signals "add the new IRS rate", never a silently-wrong figure.
-  if (dstr > IRS_RATE_COVERED_THROUGH) {
-    logger.warn(`[bouncie-mileage] no verified IRS mileage rate for ${dstr} (beyond ${IRS_RATE_COVERED_THROUGH}) — returning 0; add the published rate`);
+  // Outside the verified window (either end) → 0 (fail closed). A visible run
+  // of $0 deductions signals "add the IRS rate", never a silently-wrong figure.
+  if (dstr < IRS_RATE_COVERED_FROM || dstr > IRS_RATE_COVERED_THROUGH) {
+    logger.warn(`[bouncie-mileage] no verified IRS mileage rate for ${dstr} (outside ${IRS_RATE_COVERED_FROM}..${IRS_RATE_COVERED_THROUGH}) — returning 0; add the published rate`);
     return 0;
   }
   let rate = IRS_MILEAGE_RATE_TABLE[0].rate;
@@ -472,8 +474,11 @@ async function computeDailySummary(equipmentId, date) {
     if (trips.length === 0) return null;
 
     const totalMiles = trips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
-    const businessTrips = trips.filter(t => t.is_business);
-    const personalTrips = trips.filter(t => !t.is_business);
+    // business vs personal are DISTINCT from unclassified: only an explicit
+    // purpose counts, so an unreviewed trip isn't miscounted as personal (which
+    // would misstate the business %). total = business + personal + unclassified.
+    const businessTrips = trips.filter(t => t.is_business === true);
+    const personalTrips = trips.filter(t => t.purpose === 'personal');
     const businessMiles = businessTrips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
     const personalMiles = personalTrips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
     const businessPct = totalMiles > 0 ? parseFloat(((businessMiles / totalMiles) * 100).toFixed(2)) : 100;

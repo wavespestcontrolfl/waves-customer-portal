@@ -576,11 +576,17 @@ async function buildPnlReport(db, startDate, endDate) {
   const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets,
     financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
+    // TAX reporting sums the DEDUCTIBLE amount, not gross spend: partial
+    // categories (meals 50%, partial-business vehicle use) carry a lower
+    // tax_deductible_amount, and deducting the full amount overstates the
+    // deduction / understates taxable income. NULL tax_deductible_amount falls
+    // back to the full amount (assumed fully deductible until a policy lowers
+    // it). Same COALESCE on both the COGS and opex aggregations.
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
       .whereIn('expense_categories.name', COGS_CATEGORIES)
-      .select(db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"))
+      .select(db.raw("COALESCE(SUM(COALESCE(expenses.tax_deductible_amount, expenses.amount))::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
     db('expenses')
@@ -592,8 +598,11 @@ async function buildPnlReport(db, startDate, endDate) {
         this.whereNull('expense_categories.name')
           .orWhereNotIn('expense_categories.name', COGS_CATEGORIES);
       })
-      .select('expense_categories.name as category', 'expense_categories.irs_line')
-      .sum('expenses.amount as total')
+      .select(
+        'expense_categories.name as category',
+        'expense_categories.irs_line',
+        db.raw('SUM(COALESCE(expenses.tax_deductible_amount, expenses.amount)) as total'),
+      )
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
       .catch(missingTableOnly([])),
     // Synced Stripe fees for the window (ET days). All balance-transaction

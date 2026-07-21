@@ -129,7 +129,7 @@ exports.up = async function up(knex) {
                  SUM(deduction_amount) AS deduction,
                  SUM(distance_miles) AS total_miles,
                  SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
-                 SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
+                 SUM(distance_miles) FILTER (WHERE purpose = 'personal') AS personal_miles
           FROM mileage_log
           WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
           GROUP BY equipment_id, trip_date
@@ -161,7 +161,7 @@ exports.up = async function up(knex) {
                  SUM(deduction_amount) AS deduction,
                  SUM(distance_miles) AS total_miles,
                  SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
-                 SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
+                 SUM(distance_miles) FILTER (WHERE purpose = 'personal') AS personal_miles
           FROM mileage_log
           WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
           GROUP BY equipment_id, date_trunc('month', trip_date)::date
