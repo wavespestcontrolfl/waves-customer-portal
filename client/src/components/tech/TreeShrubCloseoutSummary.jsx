@@ -86,6 +86,7 @@ export default function TreeShrubCloseoutSummary({ summary = {}, onComplete, onD
     productsReady = false, protocolReady = false, photoCount = 0,
     areasTreated = '', smsEnabled = true, aiAnalysisStatus = 'pending',
     aiSummary = '', suggestedCustomerAction = '', findings = [], canComplete = false,
+    scores = null,
   } = summary;
 
   // Per-finding decision state, seeded from the AI defaults.
@@ -106,7 +107,6 @@ export default function TreeShrubCloseoutSummary({ summary = {}, onComplete, onD
     const m = {};
     for (const f of findings) m[f.key] = { action: f.defaultAction || 'monitor', detail: f.detail };
     setDecisions(m);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewKey, findingsSig]);
 
   const aiNote = { complete: 'Complete', pending: 'Analyzing…', failed: 'Will finalize after', not_required: 'Not needed' }[aiAnalysisStatus];
@@ -124,7 +124,6 @@ export default function TreeShrubCloseoutSummary({ summary = {}, onComplete, onD
   // tech completes via the panel's always-visible sticky footer (not this button).
   useEffect(() => {
     if (onDecisionsChange) onDecisionsChange(currentDecisions);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [decisions, findings]);
 
   const handleComplete = () => {
@@ -143,6 +142,30 @@ export default function TreeShrubCloseoutSummary({ summary = {}, onComplete, onD
         <Row ok={protocolReady} label="Protocol" note={protocolReady ? 'Complete' : 'Incomplete'} />
         <Row ok={smsEnabled} label="Customer report" note={smsEnabled ? 'Will send' : 'Send off'} />
       </div>
+
+      {/* AI photo scores — lawn-assessment-style tiles so the tech sees what
+          the vision pass read without opening the report (owner ask 2026-07-21). */}
+      {scores && Object.values(scores).some((v) => Number.isFinite(Number(v))) ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 6, marginBottom: 10 }}>
+          {[
+            ['foliageFullness', 'Foliage'],
+            ['leafColorVigor', 'Color'],
+            ['pestActivity', 'Pest'],
+            ['diseaseLeafSpot', 'Disease'],
+            ['waterHeatStress', 'Stress'],
+          ].map(([key, label]) => {
+            const n = Number(scores[key]);
+            const known = Number.isFinite(n);
+            const color = !known ? D.muted : n >= 75 ? D.green : n >= 50 ? D.amber : D.red;
+            return (
+              <div key={key} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: '7px 4px', textAlign: 'center' }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color }}>{known ? Math.round(n) : '—'}</div>
+                <div style={{ fontSize: 10.5, color: D.muted, fontWeight: 700 }}>{label}</div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {/* AI summary line */}
       {aiSummary ? (

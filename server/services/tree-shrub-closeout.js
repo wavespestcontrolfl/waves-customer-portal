@@ -245,6 +245,26 @@ function isHerbicideLikeProduct(productRef = {}) {
   return /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(textValue);
 }
 
+// Family classifiers = text classifier OR the explicit catalog category
+// column. The text classifiers key off names/actives/MOA groups and can miss
+// a sparse catalog row whose only signal is category='insecticide' — which
+// previously bypassed the pollinator/IRAC gates AND the chip↔product rules.
+function productCategoryText(productRef = {}) {
+  return combinedText(productRef.catalog?.category, productRef.input?.category);
+}
+function isInsectFamilyProduct(productRef = {}) {
+  return isInsectLikeProduct(productRef) || /insectic|miticide|\bigr\b/.test(productCategoryText(productRef));
+}
+function isFungicideFamilyProduct(productRef = {}) {
+  return isFungicideLikeProduct(productRef) || /fungic/.test(productCategoryText(productRef));
+}
+function isHerbicideFamilyProduct(productRef = {}) {
+  return isHerbicideLikeProduct(productRef) || /herbic/.test(productCategoryText(productRef));
+}
+function isFertilizerFamilyProduct(productRef = {}) {
+  return isFertilizerLikeProduct(productRef) || /fertiliz/.test(productCategoryText(productRef));
+}
+
 function productNeedsIracFracLog(productRef = {}) {
   const catalog = productRef.catalog || productRef;
   // Herbicides carry rotation history too (HRAC — pre-emergent resistance
@@ -252,7 +272,7 @@ function productNeedsIracFracLog(productRef = {}) {
   // rotation-log confirmation must gate those applications like the
   // IRAC/FRAC ones (codex P2 r3).
   return !!catalog.irac_group || !!catalog.frac_group || !!catalog.hrac_group
-    || isInsectLikeProduct(productRef) || isFungicideLikeProduct(productRef) || isHerbicideLikeProduct(productRef);
+    || isInsectFamilyProduct(productRef) || isFungicideFamilyProduct(productRef) || isHerbicideFamilyProduct(productRef);
 }
 
 function buildProductRefs(products = [], productRows = []) {
@@ -425,21 +445,56 @@ function isFertilizerLikeProduct(productRef = {}) {
   return /\bfertiliz|\bfert\b|\b\d+\s*-\s*\d+\s*-\s*\d+\b/.test(productText(productRef));
 }
 
+/**
+ * Derives the typed `treatments_completed` chip string from the visit's
+ * recorded products (owner directive 2026-07-21: techs add solutions used;
+ * the treatment chips derive from them). Emits ONLY strings from the
+ * tree_shrub findingsFields options list — the compliance gates and the
+ * report narrative key off these exact values. No products → 'Inspection
+ * only'. Chips derived from products always satisfy TYPED_CHIP_PRODUCT_RULES
+ * by construction (chip ⇐ matching product).
+ */
+// Pre-emergent detection within herbicide-family products: the literal
+// phrase plus the pre-emergent brands/actives the herbicide classifier
+// already recognizes (codex P2 — Barricade/prodiamine, Dimension/dithiopyr,
+// Snapshot, Specticle/indaziflam, Gallery/isoxaben, etc. must not derive as
+// a spot treatment). Post-emergent names deliberately absent.
+const TS_PRE_EMERGENT_RE = /pre[\s-]?emergent|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|\bbarricade\b|\bdimension\b|\bgallery\b|\bronstar\b|\bsnapshot\b|\bspecticle\b|\bmarengo\b|\bfreehand\b/i;
+
+function deriveTreeShrubTreatments({ products = [], productRows = [] } = {}) {
+  const refs = buildProductRefs(products, productRows);
+  if (!refs.length) return 'Inspection only';
+  const chips = new Set();
+  for (const ref of refs) {
+    const txt = productText(ref);
+    if (isFertilizerFamilyProduct(ref)) chips.add(/\bpalm\b/i.test(txt) ? 'Palm fertilizer' : 'Fertilizer');
+    if (isInsectFamilyProduct(ref)) chips.add(/\bhort(?:icultural)?[\s-]*oil\b/i.test(txt) ? 'Horticultural oil' : 'Insect treatment');
+    if (isFungicideFamilyProduct(ref)) chips.add('Disease / fungicide treatment');
+    if (isHerbicideFamilyProduct(ref)) chips.add(TS_PRE_EMERGENT_RE.test(txt) ? 'Pre-emergent bed treatment' : 'Weed spot treatment');
+    if (/micro[\s-]?nutrient|minor[\s-]?element/i.test(txt)) chips.add('Micronutrients');
+  }
+  // A product that matches no classifier (soil amendments etc.) still means
+  // work was performed — record the amendment chip rather than fabricating a
+  // pesticide claim or falling back to 'Inspection only'.
+  if (!chips.size) chips.add('Soil amendment / acidifier');
+  return [...chips].join(', ');
+}
+
 const TYPED_CHIP_PRODUCT_RULES = [
-  { chip: 'Fertilizer', matches: isFertilizerLikeProduct },
-  { chip: 'Palm fertilizer', matches: isFertilizerLikeProduct },
-  { chip: 'Insect treatment', matches: isInsectLikeProduct },
-  { chip: 'Disease / fungicide treatment', matches: isFungicideLikeProduct },
+  { chip: 'Fertilizer', matches: isFertilizerFamilyProduct },
+  { chip: 'Palm fertilizer', matches: isFertilizerFamilyProduct },
+  { chip: 'Insect treatment', matches: isInsectFamilyProduct },
+  { chip: 'Disease / fungicide treatment', matches: isFungicideFamilyProduct },
   // Horticultural oils are bee-sensitive contact products — the insect
   // classifier already recognizes them.
-  { chip: 'Horticultural oil', matches: isInsectLikeProduct },
+  { chip: 'Horticultural oil', matches: isInsectFamilyProduct },
   // Herbicide applications (audit 2026-07-18 P2): pre-emergent and weed
   // spot treatments are pesticide applications — without a matching product
   // the visit has no service_products / property_application_history row,
   // so the FDACS inspector export shows no record of an application the
   // report claims. Same product-actuals bar as the insect/fungicide chips.
-  { chip: 'Pre-emergent bed treatment', matches: isHerbicideLikeProduct },
-  { chip: 'Weed spot treatment', matches: isHerbicideLikeProduct },
+  { chip: 'Pre-emergent bed treatment', matches: isHerbicideFamilyProduct },
+  { chip: 'Weed spot treatment', matches: isHerbicideFamilyProduct },
 ];
 
 /**
@@ -474,7 +529,7 @@ function validateTreeShrubTypedCompliance({
   const warnings = [];
   const zone = inferTreeShrubOrdinanceZone(service);
   const productRefs = buildProductRefs(products, productRows);
-  const hasInsectProduct = productRefs.some(isInsectLikeProduct);
+  const hasInsectProduct = productRefs.some(isInsectFamilyProduct);
   const needsIracFracLog = productRefs.some(productNeedsIracFracLog);
   const missingActuals = productRefs.filter(missingProductActuals).map(productName).filter(Boolean);
   const pollinatorStatus = text(values.pollinator_status);
@@ -562,4 +617,5 @@ module.exports = {
   productHasNpFertilizer,
   validateTreeShrubCloseout,
   validateTreeShrubTypedCompliance,
+  deriveTreeShrubTreatments,
 };

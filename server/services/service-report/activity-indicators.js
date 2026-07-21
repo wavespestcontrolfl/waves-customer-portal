@@ -723,11 +723,11 @@ const REQUIRED_FINDINGS_FIELDS = {
   ],
   termite_bait_station: ['stations_checked', 'termite_activity', 'bait_consumption'],
   rodent_bait_station: ['stations_checked', 'bait_consumption'],
-  // Owner spec §6 lists six enforcement fields — five live here (incl. the
-  // recommendation chips), the sixth is the required next-step selection
-  // (REQUIRED_NEXT_STEP_TYPES). Exceeds the ≤4 budget by owner instruction
-  // ("same enforcement, inside the new checklist model").
-  tree_shrub: ['plant_groups', 'landscape_condition', 'observed_conditions', 'treatments_completed', 'customer_recommendations'],
+  // Owner directive 2026-07-21 (closeout simplification): the tech types only
+  // scope + condition; treatments derive from the products applied and
+  // observed conditions come from the AI photo review, so neither is required
+  // input anymore. The detail modules (palm/shrub/bed) are optional.
+  tree_shrub: ['plant_groups', 'landscape_condition'],
   // Owner spec §8 marks the full knockdown checklists required — all fast
   // taps (Y/N selects + chips). Exceeds the ≤4 budget by owner instruction;
   // followup_window (followup_required = Yes) and palmetto activity_locations
@@ -1045,10 +1045,10 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
         errors.push(`Invalid value for ${field.key}: ${value}`);
       }
     }
-    // chips store a comma-joined selection (multi_select convention) —
+    // chips and multi_select both store a comma-joined selection —
     // every element must come from the field's options so an off-list
     // string can't reach the immutable customer-facing snapshot.
-    if (field.type === 'chips' && Array.isArray(field.options) && field.options.length) {
+    if ((field.type === 'chips' || field.type === 'multi_select') && Array.isArray(field.options) && field.options.length) {
       const parts = String(value).split(',').map((s) => s.trim()).filter(Boolean);
       for (const part of parts) {
         if (!field.options.includes(part)) {
@@ -1147,12 +1147,10 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
       errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
     }
-    if (enforceRequired && groups.includes('Palms')) {
-      for (const key of ['palm_condition', 'ganoderma_conk_observed']) {
-        const value = values[key];
-        if (value == null || String(value).trim() === '') missing.push(key);
-      }
-    }
+    // Palm-module fields (incl. palm_condition/ganoderma) are OPTIONAL detail
+    // even when Palms were serviced — owner directive 2026-07-21 (closeout
+    // simplification): the detail modules live behind an optional expander and
+    // must not force the module open on every palm visit.
   }
 
   // Cross-field consistency (rodent family, owner spec §§1–4): "none" chips
@@ -1297,7 +1295,7 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     const fieldTypeByKey = new Map(fields.map((f) => [f.key, f.type]));
     for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
       const value = values[key];
-      const isEmpty = fieldTypeByKey.get(key) === 'chips'
+      const isEmpty = ['chips', 'multi_select'].includes(fieldTypeByKey.get(key))
         ? String(value ?? '').split(',').map((s) => s.trim()).filter(Boolean).length === 0
         : (value == null || String(value).trim() === '');
       if (isEmpty) missing.push(key);
@@ -2157,7 +2155,7 @@ function buildTypedReportSnapshot({
     // shred single-select customer labels that contain commas ("Older,
     // inactive damage only"), and mapped chip labels may themselves carry
     // commas. Legacy snapshots without the array render as prose.
-    const customerValueParts = field.type === 'chips'
+    const customerValueParts = (field.type === 'chips' || field.type === 'multi_select')
       ? String(value).split(',').map((s) => s.trim()).filter(Boolean)
         .map((part) => customerLabelForValue(field.key, part))
       : null;
@@ -2269,6 +2267,14 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         // internal fields are tech-facing compliance entries — validated and
         // stored, but excluded from the customer-facing snapshot findings.
         internal: !!f.internal,
+        // detail fields render inside the collapsed "More detail (optional)"
+        // expander; autoFilled fields are hidden from the form entirely and
+        // derived server-side at completion (e.g. treatments from products);
+        // pesticideOnly fields only render once a pesticide product is on the
+        // visit (server compliance validation is the enforcement either way).
+        detail: !!f.detail,
+        autoFilled: !!f.autoFilled,
+        pesticideOnly: !!f.pesticideOnly,
       })),
     photoCategories: config.photoCategories || [],
     requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],

@@ -55,7 +55,7 @@ const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
-const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
@@ -3713,6 +3713,46 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             error: 'Some recorded products were not found in the catalog — refresh the product list and try again.',
             code: 'tree_shrub_unknown_products',
             details: submittedProductIds.filter((id) => !found.has(String(id))),
+          });
+        }
+      }
+      // The simplified closeout hides the treatments field on PRIMARY T&S
+      // completions — derive the chips from the recorded products (with
+      // catalog rows, loaded and fail-closed above) so the compliance rules,
+      // snapshot, and narrative keep their exact chip vocabulary. ALWAYS
+      // derive on the primary path: the field is autoFilled/hidden there, so
+      // any submitted value is a stale restored draft from before the
+      // cutover (codex P2 r1). COMBINED visits (tree_shrub as a COMPANION
+      // section) are excluded: the completion payload has ONE shared
+      // products list with no per-line attribution, so deriving would pull
+      // lawn-only products into the T&S snapshot (codex P2 r2) — the
+      // companion form renders the treatments dropdown instead and the
+      // tech's selection stands. Mutating the values object in place feeds
+      // the typed report snapshot built later from the same reference.
+      if (typedFindingsType === 'tree_shrub') {
+        treeShrubComplianceValues.treatments_completed = deriveTreeShrubTreatments({
+          products: products || [],
+          productRows: typedProductRows,
+        });
+      }
+      // The cross-field contradiction rules ran on the pre-derivation values —
+      // re-run them so a derived 'Inspection only' can't sit beside an
+      // applied-treatment detail field (e.g. pre-emergent marked Yes with
+      // zero products recorded).
+      {
+        const derivedValidation = ActivityIndicators.validateTypedFindings({
+          type: 'tree_shrub',
+          values: treeShrubComplianceValues,
+          expectedType: 'tree_shrub',
+          enforceRequired: false,
+        });
+        if (!derivedValidation.ok) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));
+          return res.status(400).json({
+            error: 'The recorded products contradict the visit detail fields',
+            code: 'typed_findings_invalid',
+            details: derivedValidation.errors,
+            missing: [],
           });
         }
       }

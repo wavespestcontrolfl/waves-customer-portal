@@ -5371,7 +5371,7 @@ const EMPTY_COMPANION_ENTRY = {
 // chips + optional AI-drafted recommendations. Shared by the mobile and
 // desktop renders of CompletionPanel — `variant` only switches the
 // palette/label chrome between the CP mobile tokens and the D palette.
-function TypedFindingsSection({
+export function TypedFindingsSection({
   variant,
   schema,
   values,
@@ -5388,6 +5388,7 @@ function TypedFindingsSection({
   includeComms,
   onIncludeCommsChange,
   onAiDraft,
+  pesticideProductPresent = true,
 }) {
   const mobile = variant === "mobile";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
@@ -5415,6 +5416,44 @@ function TypedFindingsSection({
     paddingBottom: 4,
     borderBottom: `1px solid ${hairline}`,
   };
+  // autoFilled fields are derived server-side at completion (treatments from
+  // products) and never rendered on the PRIMARY form; COMPANION sections
+  // (combined visits — onRecommendationsChange null) still render them as a
+  // normal dropdown, because the shared products list can't be attributed
+  // per service line so the server does not derive there (codex P2 r2).
+  // pesticideOnly compliance fields appear once a pesticide product is
+  // recorded (the server 422s them if missed, so hiding them can't skip
+  // enforcement). detail fields collapse behind one optional expander so
+  // routine visits stay a short form (owner directive 2026-07-21).
+  const companionSection = typeof onRecommendationsChange !== "function" || !onRecommendationsChange;
+  const visibleFields = (schema.fields || []).filter(
+    (f) => (!f.autoFilled || companionSection) && (!f.pesticideOnly || pesticideProductPresent),
+  );
+  const primaryFields = visibleFields.filter((f) => !f.detail);
+  const detailFields = visibleFields.filter((f) => f.detail);
+  const renderField = (field, index, list) => (
+    <div key={field.key} style={{ marginBottom: 12 }}>
+      {/* Sectioned schemas (rodent trapping): header above the first
+          field of each section so the checklist scans in groups. */}
+      {field.section && field.section !== list[index - 1]?.section && (
+        <div style={sectionHeaderStyle}>{field.section}</div>
+      )}
+      <div style={fieldLabelStyle}>
+        {field.label}
+        {typedFieldRequiredNow(field, values) && (
+          <span style={{ color: requiredColor }}> *</span>
+        )}
+      </div>
+      <ProjectFindingFieldInput
+        field={field}
+        id={`typed-finding-${schema.type}-${field.key}`}
+        name={`structuredFindings.${field.key}`}
+        value={values[field.key] || ""}
+        onChange={(value) => onFieldChange(field.key, value)}
+        inputStyle={{ width: "100%", boxSizing: "border-box" }}
+      />
+    </div>
+  );
   return (
     <div style={{ marginBottom: 20 }}>
       {/* Companion sections (onRecommendationsChange null) label themselves
@@ -5422,29 +5461,22 @@ function TypedFindingsSection({
       <label style={labelCss}>
         {onRecommendationsChange ? "Service findings" : schema.label || "Service findings"}
       </label>
-      {(schema.fields || []).map((field, index) => (
-        <div key={field.key} style={{ marginBottom: 12 }}>
-          {/* Sectioned schemas (rodent trapping): header above the first
-              field of each section so the checklist scans in groups. */}
-          {field.section && field.section !== schema.fields[index - 1]?.section && (
-            <div style={sectionHeaderStyle}>{field.section}</div>
-          )}
-          <div style={fieldLabelStyle}>
-            {field.label}
-            {typedFieldRequiredNow(field, values) && (
-              <span style={{ color: requiredColor }}> *</span>
-            )}
-          </div>
-          <ProjectFindingFieldInput
-            field={field}
-            id={`typed-finding-${schema.type}-${field.key}`}
-            name={`structuredFindings.${field.key}`}
-            value={values[field.key] || ""}
-            onChange={(value) => onFieldChange(field.key, value)}
-            inputStyle={{ width: "100%", boxSizing: "border-box" }}
-          />
-        </div>
-      ))}
+      {primaryFields.map(renderField)}
+      {detailFields.length > 0 && (
+        <details style={{ marginBottom: 12 }}>
+          <summary
+            style={{
+              ...sectionHeaderStyle,
+              cursor: "pointer",
+              listStyle: "none",
+              borderBottom: "none",
+            }}
+          >
+            More detail (optional) ▸
+          </summary>
+          {detailFields.map(renderField)}
+        </details>
+      )}
       {schema.activity && (
         <div style={{ marginBottom: 12 }}>
           <div style={fieldLabelStyle}>
@@ -7865,6 +7897,19 @@ export function CompletionPanel({
     return () => { live = false; };
   }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  // Gates the pesticideOnly compliance fields (pollinator / IRAC-FRAC) in the
+  // typed findings form — they appear once a pesticide-family product is on
+  // the visit. Display-only: the server compliance validation is authoritative.
+  // Brand-named catalog rows ("Dominion 2L") reach the client without a
+  // category, and the server classifies them from catalog text we don't have —
+  // so a row with NO category conservatively shows the fields rather than
+  // hiding ones the server will 422 on (codex P1). Hiding requires a category
+  // that is positively non-pesticide.
+  const pesticideProductPresent = selectedProducts.some((p) => {
+    const category = String(p.category || p.product_category || "");
+    if (/insectic|miticide|fungic|herbic|pesticid|\bigr\b|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
+    return !category.trim();
+  });
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -11154,6 +11199,7 @@ export function CompletionPanel({
                   aiSummary: treeShrubReview?.aiSummary || "",
                   suggestedCustomerAction: treeShrubReview?.suggestedCustomerAction || "",
                   findings: treeShrubReview?.findings || [],
+                  scores: treeShrubReview?.scores || null,
                   // Don't advertise one-tap completion while regulatory closeout fields
                   // (bed sqft, pollinator status, IRAC/FRAC, product actuals) are still
                   // required — the same gate handleSubmit enforces.
@@ -12316,6 +12362,7 @@ export function CompletionPanel({
             {isTypedFindings && (
               <TypedFindingsSection
                 variant="mobile"
+                pesticideProductPresent={pesticideProductPresent}
                 schema={typedFindingsSchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
@@ -12342,6 +12389,7 @@ export function CompletionPanel({
                 <TypedFindingsSection
                   key={schema.type}
                   variant="mobile"
+                  pesticideProductPresent={pesticideProductPresent}
                   schema={schema}
                   values={entry.values}
                   onFieldChange={(key, value) =>
@@ -14431,6 +14479,7 @@ export function CompletionPanel({
           {isTypedFindings && (
             <TypedFindingsSection
               variant="desktop"
+              pesticideProductPresent={pesticideProductPresent}
               schema={typedFindingsSchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
@@ -14457,6 +14506,7 @@ export function CompletionPanel({
               <TypedFindingsSection
                 key={schema.type}
                 variant="desktop"
+                pesticideProductPresent={pesticideProductPresent}
                 schema={schema}
                 values={entry.values}
                 onFieldChange={(key, value) =>

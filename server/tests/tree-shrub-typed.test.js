@@ -19,7 +19,7 @@ const {
   getActivityIndicator,
 } = require('../services/service-report/activity-indicators');
 const { PROJECT_TYPES } = require('../services/project-types');
-const { validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 
 const BASE_VALUES = {
   plant_groups: 'Palms, Shrubs, Ornamentals',
@@ -41,11 +41,39 @@ describe('tree & shrub schema', () => {
     for (const section of ['Service scope', 'Observed conditions', 'Treatments', 'Palm module', 'Shrub & ornamental module', 'Bed & pre-emergent module', 'Compliance', 'Recommendations']) {
       expect(sections.has(section)).toBe(true);
     }
+    // Owner directive 2026-07-21 (closeout simplification): only scope +
+    // condition are typed by hand — treatments derive from products,
+    // observed conditions come from the AI photo review, detail modules are
+    // optional.
     expect(REQUIRED_FINDINGS_FIELDS.tree_shrub).toEqual([
-      'plant_groups', 'landscape_condition', 'observed_conditions',
-      'treatments_completed', 'customer_recommendations',
+      'plant_groups', 'landscape_condition',
     ]);
     expect(nextStepRequiredForType('tree_shrub')).toBe(true);
+  });
+
+  test('simplified-closeout field flags (owner directive 2026-07-21)', () => {
+    const schema = findingsSchemaForType('tree_shrub');
+    const byKey = Object.fromEntries(schema.fields.map((f) => [f.key, f]));
+    // Treatments never render on the PRIMARY form — derived from products at
+    // completion (companion sections render it as a dropdown; the shared
+    // products list on combined visits can't be attributed per line).
+    expect(byKey.treatments_completed.autoFilled).toBe(true);
+    expect(byKey.treatments_completed.type).toBe('multi_select');
+    // Detail modules live behind the optional expander.
+    for (const key of ['observed_conditions', 'palms_serviced', 'palm_condition', 'ganoderma_conk_observed', 'pest_pressure', 'bed_weed_pressure', 'weed_breakthrough_areas']) {
+      expect({ key, detail: byKey[key].detail }).toEqual({ key, detail: true });
+    }
+    // Core scope fields stay primary.
+    expect(byKey.plant_groups.detail).toBe(false);
+    expect(byKey.landscape_condition.detail).toBe(false);
+    // Compliance renders only once a pesticide product is on the visit.
+    expect(byKey.pollinator_status.pesticideOnly).toBe(true);
+    expect(byKey.irac_frac_logged.pesticideOnly).toBe(true);
+    // Multi-value fields are dropdowns now; the comma-joined storage contract
+    // is shared with chips so downstream consumers are unaffected.
+    expect(byKey.plant_groups.type).toBe('multi_select');
+    expect(byKey.observed_conditions.type).toBe('multi_select');
+    expect(byKey.customer_recommendations.type).toBe('multi_select');
   });
 
   test('no pest activity gauge — condition narrative leads instead', () => {
@@ -155,30 +183,24 @@ describe('owner template composition', () => {
 });
 
 describe('validation', () => {
-  test('palm module core required when Palms is a serviced group', () => {
+  test('palm module is optional detail even when Palms is a serviced group (owner directive 2026-07-21)', () => {
     const result = validateTypedFindings({
       type: 'tree_shrub',
       values: {
         plant_groups: 'Palms, Shrubs',
         landscape_condition: 'Good',
-        observed_conditions: 'Healthy / new growth',
-        treatments_completed: 'Palm fertilizer',
-        customer_recommendations: 'Continue program',
       },
       expectedType: 'tree_shrub',
       enforceRequired: true,
     });
-    expect(result.ok).toBe(false);
-    expect(result.missing).toEqual(expect.arrayContaining(['palm_condition', 'ganoderma_conk_observed']));
+    expect(result.ok).toBe(true);
+    expect(result.missing).toEqual([]);
 
     const noPalms = validateTypedFindings({
       type: 'tree_shrub',
       values: {
         plant_groups: 'Shrubs',
         landscape_condition: 'Good',
-        observed_conditions: 'Healthy / new growth',
-        treatments_completed: 'Fertilizer',
-        customer_recommendations: 'Continue program',
       },
       expectedType: 'tree_shrub',
       enforceRequired: true,
@@ -525,5 +547,82 @@ describe('ported closeout compliance (typed path)', () => {
       completionPhotos: photos,
     });
     expect(injection.blocks.map((b) => b.code)).toContain('tree_shrub_injection_use_palm_flow');
+  });
+});
+
+describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
+  const cat = (over) => ({ id: 'p1', name: 'Product', category: '', ...over });
+  const derive = (rows) => deriveTreeShrubTreatments({
+    products: rows.map((r) => ({ productId: r.id })),
+    productRows: rows,
+  });
+
+  test('no products → Inspection only', () => {
+    expect(deriveTreeShrubTreatments({ products: [], productRows: [] })).toBe('Inspection only');
+  });
+
+  test('insecticide → Insect treatment; hort oil variant → Horticultural oil', () => {
+    expect(derive([cat({ name: 'Dominion 2L', category: 'insecticide' })])).toContain('Insect treatment');
+    const oil = derive([cat({ name: 'Horticultural Oil Concentrate', category: 'insecticide' })]);
+    expect(oil).toContain('Horticultural oil');
+    expect(oil).not.toContain('Insect treatment');
+  });
+
+  test('fertilizer → Fertilizer; palm blend → Palm fertilizer', () => {
+    expect(derive([cat({ name: 'Ferromec AC 15-0-0', category: 'fertilizer' })])).toContain('Fertilizer');
+    expect(derive([cat({ name: 'Palm Fertilizer 8-2-12', category: 'fertilizer' })])).toContain('Palm fertilizer');
+  });
+
+  test('fungicide and herbicide map to their chips; pre-emergent name wins', () => {
+    expect(derive([cat({ name: 'Banner Maxx', category: 'fungicide' })])).toContain('Disease / fungicide treatment');
+    expect(derive([cat({ name: 'SpeedZone', category: 'herbicide' })])).toContain('Weed spot treatment');
+    expect(derive([cat({ name: 'Pre-Emergent Barricade', category: 'herbicide' })])).toContain('Pre-emergent bed treatment');
+  });
+
+  test('pre-emergent BRANDS/actives derive the pre-emergent chip, not weed spot (codex P2)', () => {
+    for (const name of ['Barricade 4FL', 'Dimension 2EW', 'Prodiamine 65 WDG', 'Snapshot 2.5 TG', 'Specticle FLO', 'Gallery 75 DF']) {
+      const out = derive([cat({ name, category: 'herbicide' })]);
+      expect({ name, out }).toEqual({ name, out: expect.stringContaining('Pre-emergent bed treatment') });
+      expect(out).not.toContain('Weed spot treatment');
+    }
+    // Post-emergent products still derive the spot chip.
+    expect(derive([cat({ name: 'Roundup QuikPro', category: 'herbicide' })])).toContain('Weed spot treatment');
+  });
+
+  test('unclassified product records the soil-amendment chip, never a pesticide claim', () => {
+    const out = derive([cat({ name: 'Soil Conditioner Plus', category: 'amendment' })]);
+    expect(out).toBe('Soil amendment / acidifier');
+  });
+
+  test('every derived chip is a legal treatments_completed option', () => {
+    const options = PROJECT_TYPES.tree_shrub.findingsFields.find((f) => f.key === 'treatments_completed').options;
+    const out = derive([
+      cat({ id: 'a', name: 'Dominion 2L', category: 'insecticide' }),
+      cat({ id: 'b', name: 'Palm Fertilizer 8-2-12', category: 'fertilizer' }),
+      cat({ id: 'c', name: 'Banner Maxx', category: 'fungicide' }),
+    ]);
+    for (const chip of out.split(',').map((x) => x.trim())) {
+      expect(options).toContain(chip);
+    }
+  });
+
+  test('derived chips satisfy the chip↔product compliance rule by construction', () => {
+    const rows = [cat({ name: 'Dominion 2L', category: 'insecticide' })];
+    const values = {
+      plant_groups: 'Shrubs',
+      landscape_condition: 'Good',
+      treatments_completed: deriveTreeShrubTreatments({ products: [{ productId: 'p1', amount: 2, amountUnit: 'oz' }], productRows: rows }),
+      pollinator_status: 'No blooms or no bees',
+      irac_frac_logged: 'Yes',
+    };
+    const result = validateTreeShrubTypedCompliance({
+      service: { address_line1: '1 Test St', city: 'Parrish' },
+      serviceDate: '2026-03-10',
+      values,
+      products: [{ productId: 'p1', amount: 2, amountUnit: 'oz' }],
+      productRows: rows,
+      completionPhotos: ['a', 'b'],
+    });
+    expect(result.blocks.filter((b) => b.code === 'tree_shrub_products_required')).toEqual([]);
   });
 });
