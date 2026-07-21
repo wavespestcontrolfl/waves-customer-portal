@@ -59,6 +59,15 @@ const { buildServiceRecordCompletionTimingFields } = require('../services/servic
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const { hashCompletionRequest } = require('../services/completion-attempts');
 
+// Fix round 6 (Codex P2): the recap-delivery refusal tests drive the real
+// sendRecap against a knex mock — the SMS provider module is mocked so an
+// approved recap in the control case "sends" without touching messaging.
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(),
+}));
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendRecap } = require('../services/service-report/recap-delivery');
+
 const TODAY = '2026-07-19';
 
 describe('backfillCompletionPlan', () => {
@@ -1398,5 +1407,97 @@ describe('completion route wiring (source contracts)', () => {
     expect(invoiceSource).toMatch(/\.\.\.\(accruedStatementId \? \{ payer_statement_id: accruedStatementId \} : \{\}\),/);
     // Behavioral coverage (attach skipped, rollup untouched, default
     // unchanged) lives in invoice-deposit-credit-tax.test.js.
+  });
+});
+
+describe('backfill keeps the pest recap quiet (Codex P2, PR #2897 fix round 6)', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+  test('completion never enqueues the recap render under backfill — the pending row feeds an operator-reachable Approve & send card', () => {
+    // The PEST_RECAP rail branches on isBackfillCompletion FIRST: quiet
+    // closeouts log the skip…
+    expect(source).toMatch(/if \(process\.env\.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send'[^\n]*record\.scheduled_service_id\) \{\s*\n\s*if \(isBackfillCompletion\) \{\s*\n\s*logger\.info\(`\[dispatch\] backfill completion: pest recap render NOT enqueued for visit \$\{svc\.id\}/);
+    // …and the enqueue lives only in the else branch.
+    expect(source).toMatch(/\} else \{\s*\n\s*try \{\s*\n\s*const \{ enqueueRecap \} = require\('\.\.\/services\/service-report\/recap-pipeline'\);[\s\S]{0,400}await enqueueRecap\(record\.scheduled_service_id, \{ force: true \}\);/);
+    // The completion path has exactly one enqueue call site — no ungated twin.
+    expect((source.match(/enqueueRecap\(record\.scheduled_service_id/g) || []).length).toBe(1);
+  });
+
+  // Defense in depth: even a recap row that existed BEFORE the quiet closeout
+  // (pre-completion Generate) and got approved days later must not text the
+  // customer about "today's visit". sendRecap reads the durable
+  // structured_notes.backfill marker off the service record and refuses.
+  function recapKnexMock({ recap, serviceRecord }) {
+    const updates = [];
+    const knex = jest.fn((table) => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      first: jest.fn(async () => (table === 'service_recaps' ? recap : serviceRecord)),
+      update: jest.fn((patch) => {
+        updates.push({ table, patch });
+        return Promise.resolve(1);
+      }),
+    }));
+    knex.fn = { now: () => new Date('2026-07-19T16:00:00Z') };
+    return { knex, updates };
+  }
+
+  const APPROVED_RECAP = { id: 'recap-1', status: 'approved', sent_at: null, send_attempt_at: null };
+  const SERVICE_ROW = {
+    id: 'rec-1',
+    customer_id: 'cust-1',
+    report_view_token: 'tok-1',
+    first_name: 'Pat',
+    phone: '+19415551234',
+  };
+
+  beforeEach(() => {
+    sendCustomerMessage.mockReset();
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  test('sendRecap refuses a backfilled record — no claim, no SMS, reason names the quiet closeout', async () => {
+    const { knex, updates } = recapKnexMock({
+      recap: APPROVED_RECAP,
+      serviceRecord: {
+        ...SERVICE_ROW,
+        structured_notes: JSON.stringify({ backfill: true, requestReview: false }),
+      },
+    });
+    const result = await sendRecap('svc-backfilled', { knex });
+    expect(result).toEqual({ ok: false, reason: 'backfill_quiet_closeout' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Refused BEFORE the send_attempt_at claim — the row stays untouched.
+    expect(updates).toEqual([]);
+  });
+
+  test('the marker is the differentiator: the same approved recap on a normal record still sends', async () => {
+    const { knex, updates } = recapKnexMock({
+      recap: APPROVED_RECAP,
+      serviceRecord: {
+        ...SERVICE_ROW,
+        structured_notes: JSON.stringify({ requestReview: true }),
+      },
+    });
+    const result = await sendRecap('svc-normal', { knex });
+    expect(result.ok).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Claim then sent_at stamp — the quiet path above produced neither.
+    expect(updates.length).toBe(2);
+    expect(updates[1].patch).toHaveProperty('sent_at');
+  });
+
+  test('an object-shaped structured_notes marker (pre-serialization) refuses too', async () => {
+    const { knex } = recapKnexMock({
+      recap: APPROVED_RECAP,
+      serviceRecord: { ...SERVICE_ROW, structured_notes: { backfill: true } },
+    });
+    const result = await sendRecap('svc-backfilled-obj', { knex });
+    expect(result).toEqual({ ok: false, reason: 'backfill_quiet_closeout' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

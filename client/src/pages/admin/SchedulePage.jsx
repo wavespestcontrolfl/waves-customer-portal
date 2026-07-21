@@ -647,11 +647,21 @@ export function completionPreferencesNeedDraft({
   includePayLink = true,
   requestReview = true,
   clientPestRating = null,
+  backfillCloseout = false,
+  backfillCloseoutDefault = false,
+  backfillTimeOnSite = "",
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
-    || clientPestRating != null;
+    || clientPestRating != null
+    // The backdated-closeout choices are quiet/loud state: losing a checked
+    // box across a reload turns the SAME submit into a LOUD completion
+    // (sends + collection rails), and the ≥7-days default is CHECKED, so it
+    // is drift from the panel default — either direction — that needs a
+    // draft. Typed minutes ride along like any other text field.
+    || backfillCloseout !== backfillCloseoutDefault
+    || String(backfillTimeOnSite || "").trim() !== "";
 }
 
 export function normalizeCompletionDetourPhotos(photos) {
@@ -669,6 +679,61 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
   if (!backfill) return { timeOnSite: elapsed };
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
+}
+
+// Restore leg of the draft snapshot for the backdated-closeout choices. A
+// draft that predates these fields restores the panel default (missing ≠
+// false: for a ≥7-days-stale visit the default is CHECKED, and restoring
+// false would turn the same submit LOUD — sends + collection rails).
+// Eligibility is NOT re-checked here: every consumer (backfillQuietCloseout,
+// the submit body, the checkbox render) already gates on backfillEligible,
+// so a value restored onto a no-longer-eligible panel is inert by
+// construction.
+export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = false) {
+  return {
+    backfillCloseout:
+      typeof savedDraft?.backfillCloseout === "boolean"
+        ? savedDraft.backfillCloseout
+        : backfillCloseoutDefault,
+    backfillTimeOnSite:
+      typeof savedDraft?.backfillTimeOnSite === "string"
+        ? savedDraft.backfillTimeOnSite
+        : "",
+  };
+}
+
+// Why the review ask will not go out for this completion, or null when it
+// follows the operator's toggle. "backfill" mirrors the server forcing
+// requestReview=false under a backdated quiet closeout — with the reason set,
+// the review checkbox shows the suppressed state and the custom-review-time
+// validation never blocks a submit the server would silence anyway.
+export function completionReviewSuppressionReason({
+  isIncompleteVisit = false,
+  backfillQuietCloseout = false,
+  visitOutcome = "completed",
+  customerConcernInteraction = false,
+  willInvoice = false,
+} = {}) {
+  if (isIncompleteVisit) return "incomplete";
+  if (backfillQuietCloseout) return "backfill";
+  if (visitOutcome === "customer_declined") return "customer_declined";
+  if (visitOutcome === "customer_concern" || customerConcernInteraction) {
+    return "customer_concern";
+  }
+  return willInvoice ? "invoice_created" : null;
+}
+
+export function completionWillReview({
+  oneTimeRecapOnly = false,
+  requestReview = true,
+  willInvoice = false,
+  reviewSuppressionReason = null,
+} = {}) {
+  return (
+    (oneTimeRecapOnly || !!requestReview) &&
+    !willInvoice &&
+    !reviewSuppressionReason
+  );
 }
 
 function completionDraftKey(serviceId) {
@@ -7733,14 +7798,21 @@ export function CompletionPanel({
       )
     : 0;
   const backfillEligible = panelIsAdmin && backfillDaysPast >= 1;
+  const backfillCloseoutDefault = panelIsAdmin && backfillDaysPast >= 7;
   const [backfillCloseout, setBackfillCloseout] = useState(
-    panelIsAdmin && backfillDaysPast >= 7,
+    backfillCloseoutDefault,
   );
   // Operator-typed minutes for a backdated closeout. Starts EMPTY on
   // purpose: the running `elapsed` spans the whole stale gap, so backfill
   // must never inherit it — blank submits no timeOnSite and the duration
   // stays unknown (see completionTimeOnSiteBody).
   const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
+  // A backdated quiet closeout suppresses every customer send server-side —
+  // the client-side flags must agree, or the success overlay and CTA
+  // sub-label claim sends for a completion that texted nobody. Derived here,
+  // above the recap/review state, so recap eligibility and the review
+  // suppression chain can fold it in.
+  const backfillQuietCloseout = backfillEligible && backfillCloseout;
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -8272,7 +8344,15 @@ export function CompletionPanel({
   const chipServiceLine = closeoutChipLine(serviceTypeForArea, serviceLineForCloseout);
   const observationChips = observationChipsForLine(chipServiceLine);
   const recommendationChips = recommendationChipsForLine(chipServiceLine);
-  const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
+  // Under a backdated quiet closeout the server never enqueues the recap
+  // render and recap delivery refuses the send — so hide the capture/approve
+  // cards and let the success overlay auto-close instead of holding it open
+  // for a recap that will never exist.
+  const recapEligible =
+    pestRecapFlag &&
+    pestRecapReady &&
+    serviceLineForCloseout === "pest" &&
+    !backfillQuietCloseout;
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
@@ -8387,24 +8467,25 @@ export function CompletionPanel({
     ? "Service Complete + Invoice"
     : "Service Complete";
   const isIncompleteVisit = visitOutcome === "incomplete";
-  const reviewSuppressionReason = isIncompleteVisit
-    ? "incomplete"
-    : visitOutcome === "customer_declined"
-      ? "customer_declined"
-      : visitOutcome === "customer_concern" ||
-          isCustomerConcernInteraction(customerInteraction)
-        ? "customer_concern"
-        : willInvoice
-          ? "invoice_created"
-          : null;
-  const willReview =
-    (oneTimeRecapOnly || !!requestReview) &&
-    !willInvoice &&
-    !reviewSuppressionReason;
-  // A backdated quiet closeout suppresses every customer send server-side —
-  // the client-side flag must agree, or the success overlay and CTA sub-label
-  // claim "SMS + Report sent" for a completion that texted nobody.
-  const backfillQuietCloseout = backfillEligible && backfillCloseout;
+  // Backfill rides the suppression chain (reason "backfill"): willReview goes
+  // false while the backdate checkbox is active, so the review checkbox shows
+  // "Review request suppressed", the timing selector hides, and the
+  // custom-review-time validation cannot block a submit whose review the
+  // server forces off anyway.
+  const reviewSuppressionReason = completionReviewSuppressionReason({
+    isIncompleteVisit,
+    backfillQuietCloseout,
+    visitOutcome,
+    customerConcernInteraction:
+      isCustomerConcernInteraction(customerInteraction),
+    willInvoice,
+  });
+  const willReview = completionWillReview({
+    oneTimeRecapOnly,
+    requestReview,
+    willInvoice,
+    reviewSuppressionReason,
+  });
   const effectiveSendSms =
     !isIncompleteVisit && !backfillQuietCloseout && (oneTimeRecapOnly || sendSms);
   const reviewSendsWithCompletionSms =
@@ -8928,6 +9009,9 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        backfillCloseout,
+        backfillCloseoutDefault,
+        backfillTimeOnSite,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -8955,6 +9039,12 @@ export function CompletionPanel({
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
+        // Backdated-closeout choices: the checked box is what keeps this
+        // submit QUIET (no sends, no collection rails) and the typed minutes
+        // are operator input — both must survive the billing-409 detour and
+        // any panel reload, or the restored submit silently turns LOUD.
+        backfillCloseout,
+        backfillTimeOnSite,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -9049,6 +9139,8 @@ export function CompletionPanel({
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
+    backfillCloseout,
+    backfillTimeOnSite,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -9116,6 +9208,16 @@ export function CompletionPanel({
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
+    // draft without the fields falls back to the panel default. Consumers all
+    // gate on backfillEligible, so this stays inert if the visit is somehow
+    // no longer past-dated.
+    const restoredBackfill = restoredBackfillChoices(
+      savedDraft,
+      backfillCloseoutDefault,
+    );
+    setBackfillCloseout(restoredBackfill.backfillCloseout);
+    setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");

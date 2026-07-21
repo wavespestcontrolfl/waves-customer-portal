@@ -5558,15 +5558,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
     // failure here never blocks completion; the tech approves before it ever sends.
+    // Backfill closeouts skip the enqueue entirely: the pending row is inert on
+    // its own, but it feeds the success overlay's "Approve & send" card — an
+    // operator-reachable "today's visit" text days after the fact — so this
+    // rail is gated like the other customer-contact rails. Recap delivery also
+    // refuses the structured_notes.backfill marker as defense in depth.
     if (process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
-      try {
-        const { enqueueRecap } = require('../services/service-report/recap-pipeline');
-        // Keyed on the scheduled-service id so pre-completion captures match the render.
-        // force=true re-renders even if a pre-completion Generate already failed (no
-        // service_records row existed yet) — now it does.
-        await enqueueRecap(record.scheduled_service_id, { force: true });
-      } catch (err) {
-        logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
+      if (isBackfillCompletion) {
+        logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
+      } else {
+        try {
+          const { enqueueRecap } = require('../services/service-report/recap-pipeline');
+          // Keyed on the scheduled-service id so pre-completion captures match the render.
+          // force=true re-renders even if a pre-completion Generate already failed (no
+          // service_records row existed yet) — now it does.
+          await enqueueRecap(record.scheduled_service_id, { force: true });
+        } catch (err) {
+          logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
+        }
       }
     }
     let reportSmsUrl = reportUrl;
