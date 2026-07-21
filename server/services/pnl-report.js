@@ -591,8 +591,11 @@ async function buildPnlReport(db, startDate, endDate) {
         'expense_categories.irs_line',
         db.raw('SUM(expenses.amount) as total'),
         // Non-deductible portion of this category (e.g. the disallowed 50% of
-        // meals) — summed across categories into the tax adjustment.
-        db.raw('SUM(expenses.amount - COALESCE(expenses.tax_deductible_amount, expenses.amount)) as non_deductible'),
+        // meals). The deductible amount is CLAMPED to [0, amount] here too, so
+        // a bad historical row (deductible > amount, or negative) can't produce
+        // a negative add-back that understates taxable income — belt-and-braces
+        // with the write-time validation.
+        db.raw('SUM(expenses.amount - LEAST(expenses.amount, GREATEST(0, COALESCE(expenses.tax_deductible_amount, expenses.amount)))) as non_deductible'),
       )
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
       .catch(missingTableOnly([])),

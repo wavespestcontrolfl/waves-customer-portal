@@ -395,9 +395,21 @@ router.post('/expenses', async (req, res, next) => {
       }
     }
 
+    // tax_deductible_amount MUST be within [0, amount] — a value above the
+    // expense or below zero corrupts the book-to-tax bridge (a negative
+    // non-deductible add-back would understate taxable income).
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return res.status(400).json({ error: 'amount must be a number ≥ 0' });
+    }
+    const deductible = deductibleAmount == null ? amt : parseFloat(deductibleAmount);
+    if (!Number.isFinite(deductible) || deductible < 0 || deductible > amt) {
+      return res.status(400).json({ error: 'deductibleAmount must be between 0 and the expense amount' });
+    }
+
     const [inserted] = await db('expenses').insert({
       category_id: categoryId, description, amount,
-      tax_deductible_amount: deductibleAmount ?? amount,
+      tax_deductible_amount: deductible,
       expense_date: expenseDate, vendor_name: vendorName,
       payment_method: paymentMethod, is_recurring: isRecurring || false,
       recurrence_period: recurrencePeriod, tax_year: taxYear, quarter, notes,

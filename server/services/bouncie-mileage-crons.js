@@ -147,8 +147,16 @@ function initBouncieMileageCrons() {
             // stays unclassified at $0 until confirmed in the Tax Center
             // mileage review (PR #2931). Auto-deducting on a geographic match
             // turned false matches into tax deductions without review.
-            await db('mileage_log')
+            // Re-assert the same guards as the load query IN the UPDATE — an
+            // operator could classify this trip while matchTripToJob ran, and
+            // an id-only update would overwrite their manual review with an
+            // automated suggestion. A zero-row update means someone got there
+            // first; don't count it.
+            const changed = await db('mileage_log')
               .where('id', trip.id)
+              .whereNull('customer_id')
+              .whereNot('classification_method', 'manual_review')
+              .whereNot('purpose', 'personal')
               .update({
                 customer_id: jobMatch.customer_id,
                 job_id: jobMatch.job_id,
@@ -156,7 +164,7 @@ function initBouncieMileageCrons() {
                 classification_notes: `Suggested business — re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron). Confirm in Tax Center.`,
                 updated_at: db.fn.now(),
               });
-            matched++;
+            if (changed) matched++;
           }
         } catch (err) {
           logger.error(`[bouncie-crons] Re-match failed for trip ${trip.id}: ${err.message}`);
