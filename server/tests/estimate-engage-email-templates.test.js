@@ -145,23 +145,36 @@ describe('estimate.engage_* seeds — render QA across the v1 category packs', (
 
   test('compliance language: no "safe", no fixed re-entry minutes, no invented stats', () => {
     for (const t of TEMPLATES) {
-      const text = [t.subject, t.preview, ...t.blocks.map((b) => b.content || b.label || b.alt || '')].join(' ');
+      const text = [t.subject, t.preview, ...t.blocks.map(
+        (b) => [b.content, b.label, b.alt, ...(b.items || [])].filter(Boolean).join(' '),
+      )].join(' ');
       expect(text).not.toMatch(/\bsafe\b/i);
       expect(text).not.toMatch(/\d+\s*(minutes|mins)\b/i);
       expect(text).not.toMatch(/\d+%/);
     }
   });
 
-  test('proof modules follow the owner tier plan (reviews everywhere; current-UI screenshot on the sell moments)', () => {
+  test('proof modules follow the owner tier plan (why-Waves everywhere; current-UI screenshot on the sell moments)', () => {
     const FULL_SELL = ['estimate.engage_unopened', 'estimate.engage_expiring_unseen'];
     const PROTOCOL = [...FULL_SELL, 'estimate.engage_return_after_dark'];
     const APP = [...FULL_SELL, 'estimate.engage_high_intent'];
     for (const t of TEMPLATES) {
-      const text = t.blocks.map((b) => b.content || '').join(' ');
+      const text = t.blocks.map((b) => [b.content, ...(b.items || [])].filter(Boolean).join(' ')).join(' ');
       const images = t.blocks.filter((b) => b.type === 'image');
-      // Reviews line on ALL 7 — static five-star claim (owner decision:
-      // no live numbers), grounded in the public Google rating.
+      // Why-Waves module on ALL 7 (owner 07-21: visuals + why-choose-us) —
+      // heading, exactly one van photo, and the claim check-list. Every
+      // claim already ships on a public surface; the reviews claim stays
+      // STATIC (owner decision: no live numbers).
+      expect(t.blocks.some((b) => b.type === 'heading' && b.content === 'Why folks choose Waves')).toBe(true);
       expect(text).toContain('Five-star rated on Google');
+      expect(text).toContain('Family-owned and local');
+      const vanShots = images.filter((b) => /\/why-waves-van-(home|streets)\.jpg$/.test(b.src));
+      expect(vanShots).toHaveLength(1);
+      // The flagship never-viewed sells carry the at-your-home shot; the
+      // rest the Sarasota streetscape.
+      expect(vanShots[0].src.endsWith(
+        FULL_SELL.includes(t.key) ? '/why-waves-van-home.jpg' : '/why-waves-van-streets.jpg',
+      )).toBe(true);
       // Post-service protocol copy where the tier plan puts it (copy-only
       // until the fresh visit-report capture lands — owner 07-15: never a
       // stale-UI product shot).
@@ -169,7 +182,7 @@ describe('estimate.engage_* seeds — render QA across the v1 category packs', (
       // The current-UI reschedule capture rides the app module.
       const wantsAppShot = APP.includes(t.key);
       expect(images.some((b) => b.src.endsWith('/app-reschedule-slots.png'))).toBe(wantsAppShot);
-      expect(images).toHaveLength(wantsAppShot ? 1 : 0);
+      expect(images).toHaveLength(wantsAppShot ? 2 : 1);
       // Hosted assets must be absolute portal URLs with alt text, and never
       // the retired June (old-UI) captures.
       for (const img of images) {

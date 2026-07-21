@@ -46,10 +46,35 @@ const IMG = 'https://portal.wavespestcontrol.com/app-email';
 // OWNER DECISION: reviews claim is STATIC ("five-star rated"), no live
 // numbers — grounded in the public Google rating (5.0 displayed, 185 of
 // 186 reviews five-star at authoring time).
-const REVIEWS_LINE = {
-  type: 'small_note',
-  content: '★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.',
+const REVIEWS_CLAIM = '★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.';
+
+// "Why Waves" module (owner 2026-07-21: "content on why they should chose
+// us" + "they need visuals"). Every claim is already shipped on a public
+// surface — the reviews line (owner-ratified STATIC, no live numbers), the
+// marketing hero ("actually shows up — same day, every time"), the author
+// E-E-A-T pages (family-owned, FDACS-licensed), GuaranteeBadges. Nothing
+// invented here; guarantee specifics stay in {{category_benefit}} where
+// the truth-scope demotion lives. Photos are the public marketing-hero
+// van shots, re-cut to email weight (~200KB JPEG, 1040px for 520 CSS px).
+const WHY_WAVES_ITEMS = [
+  REVIEWS_CLAIM,
+  'Family-owned and local — one Southwest Florida team for your whole property.',
+  'FDACS-licensed and insured, with a written report after every visit.',
+  'We actually show up — same-day service, on time, every time.',
+];
+const VAN_HOME_IMG = {
+  type: 'image', src: `${IMG}/why-waves-van-home.jpg`,
+  alt: 'The Waves van outside a customer’s home in Southwest Florida', width: 520, radius: 18,
 };
+const VAN_STREETS_IMG = {
+  type: 'image', src: `${IMG}/why-waves-van-streets.jpg`,
+  alt: 'The Waves van in a Sarasota neighborhood', width: 520, radius: 18,
+};
+const whyWavesModule = (img) => [
+  { type: 'heading', content: 'Why folks choose Waves' },
+  img,
+  { type: 'list', items: WHY_WAVES_ITEMS },
+];
 // COPY-ONLY for now (owner 2026-07-15: the June app screenshots show the
 // OLD UI) — the fresh visit-report capture drops in here as a follow-up;
 // never ship a stale-UI product shot.
@@ -132,12 +157,12 @@ const TEMPLATES = [
       { type: 'heading', content: '{{category_headline}}' },
       { type: 'paragraph', content: 'Hi {{first_name}}, we sent over your {{service_label}} estimate and wanted to follow up personally. No sales pitch — just making sure it landed, and answering anything you’re wondering about.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      ...whyWavesModule(VAN_HOME_IMG),
       { type: 'heading', content: 'What your plan covers' },
       { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
       ...APP_MODULE,
       ...FAQ_MODULE,
-      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'View my estimate', url_variable: 'estimate_url' },
       SAFETY_LINK_CTA,
@@ -158,7 +183,7 @@ const TEMPLATES = [
       { type: 'paragraph', content: '{{category_question}}' },
       { type: 'heading', content: 'How it works' },
       { type: 'paragraph', content: '{{category_process}}' },
-      REVIEWS_LINE,
+      ...whyWavesModule(VAN_STREETS_IMG),
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
       { type: 'signature', content: '— The Waves Team' },
@@ -178,7 +203,7 @@ const TEMPLATES = [
       { type: 'heading', content: 'How it works' },
       { type: 'paragraph', content: '{{category_process}}' },
       ...APP_MODULE,
-      REVIEWS_LINE,
+      ...whyWavesModule(VAN_STREETS_IMG),
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
       BRADENTON_REPLY_NOTE,
@@ -198,7 +223,7 @@ const TEMPLATES = [
       { type: 'paragraph', content: '{{category_hook}}' },
       { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
-      REVIEWS_LINE,
+      ...whyWavesModule(VAN_STREETS_IMG),
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Pick up where I left off', url_variable: 'estimate_accept_url' },
       BRADENTON_REPLY_NOTE,
@@ -217,8 +242,8 @@ const TEMPLATES = [
       { type: 'paragraph', content: 'Hi {{first_name}}, just checking in on your {{service_label}} estimate — no rush at all.' },
       { type: 'paragraph', content: '{{category_question}}' },
       { type: 'paragraph', content: '{{category_included}}' },
+      ...whyWavesModule(VAN_STREETS_IMG),
       ...FAQ_MODULE,
-      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Take another look', url_variable: 'estimate_url' },
       SAFETY_LINK_CTA,
@@ -237,7 +262,7 @@ const TEMPLATES = [
       { type: 'paragraph', content: 'Hi {{first_name}}, a quick heads up: your {{service_label}} estimate expires on {{expires_date}}. Until then, your pricing is locked in.' },
       { type: 'paragraph', content: '{{category_included}}' },
       { type: 'paragraph', content: 'Need more time to decide? Just reply — we’re happy to extend it.' },
-      REVIEWS_LINE,
+      ...whyWavesModule(VAN_STREETS_IMG),
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept before it expires', url_variable: 'estimate_accept_url' },
       BRADENTON_REPLY_NOTE,
@@ -257,13 +282,13 @@ const TEMPLATES = [
       { type: 'heading', content: '{{category_headline}}' },
       { type: 'paragraph', content: 'Hi {{first_name}}, your {{service_label}} estimate expires on {{expires_date}} and it doesn’t look like you’ve had a chance to see it yet — worth one quick look before it does.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      ...whyWavesModule(VAN_HOME_IMG),
       { type: 'heading', content: 'What your plan covers' },
       { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
       ...APP_MODULE,
       { type: 'paragraph', content: 'Need more time? Just reply — we’re happy to extend it.' },
       ...FAQ_MODULE,
-      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'See my estimate', url_variable: 'estimate_url' },
       SAFETY_LINK_CTA,

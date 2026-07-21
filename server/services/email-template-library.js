@@ -260,6 +260,15 @@ function normalizeBlocks(blocks) {
         href: block.href ? String(block.href) : '',
       };
     }
+    if (type === 'list') {
+      // items survives admin edits for the same reason details.variant
+      // does — the default branch below would collapse the block to
+      // {type, content} and silently drop every row.
+      return {
+        type,
+        items: Array.isArray(block.items) ? block.items.map((item) => String(item || '')) : [],
+      };
+    }
     return { type, content: String(block?.content || '') };
   });
 }
@@ -356,6 +365,29 @@ function renderBlocks(blocks, payload) {
         if (href && altText) textParts.push(`${altText}: ${href}`);
         else if (altText) textParts.push(altText);
         else if (href) textParts.push(href);
+      }
+    } else if (block.type === 'list') {
+      // Check-list rows (single column, navy check) — resolved {{variables}}
+      // like every other block; an item that resolves to blank drops, so
+      // truth-scoped claims can be payload-driven the same way FAQ rows are.
+      const items = (block.items || [])
+        .map((item) => ({
+          html: renderInline(item, payload),
+          text: renderInline(item, payload, { html: false }),
+        }))
+        .filter((item) => String(item.text || '').trim() !== '');
+      if (items.length) {
+        htmlParts.push(`
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:14px 0;">
+            ${items.map((item) => `
+              <tr>
+                <td valign="top" width="22" style="padding:5px 8px 5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.heading};font-weight:700;">&#10003;</td>
+                <td style="padding:5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${item.html}</td>
+              </tr>
+            `).join('')}
+          </table>
+        `);
+        textParts.push(items.map((item) => `- ${item.text}`).join('\n'));
       }
     } else if (block.type === 'divider') {
       htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
