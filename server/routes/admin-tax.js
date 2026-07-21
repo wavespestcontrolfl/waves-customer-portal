@@ -44,9 +44,12 @@ router.get('/dashboard', async (req, res, next) => {
         db.raw('COALESCE(SUM(accumulated_depreciation), 0) as total_depreciation'),
       ).first().catch(() => ({ count: 0, total_cost: 0, book_value: 0, total_depreciation: 0 }));
 
-    // Upcoming deadlines
+    // Upcoming AND overdue deadlines. Dropping the due_date >= now() filter is
+    // deliberate: an unfiled PAST-DUE deadline is the most urgent thing to
+    // surface (the UI has an OVERDUE state for exactly this), and filtering it
+    // out hid it entirely. Ordered by due_date ascending, so the earliest —
+    // i.e. the most overdue, then the nearest upcoming — leads.
     const nextDeadlines = await db('tax_filing_calendar')
-      .where('due_date', '>=', db.fn.now())
       .whereNot('status', 'filed')
       .orderBy('due_date').limit(5)
       .catch(() => []);
