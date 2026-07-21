@@ -811,20 +811,18 @@ function ExpensesTab() {
   );
   const [categorizing, setCategorizing] = useState(false);
 
-  // The button's count and the server's scope MUST come from the same rows:
-  // send the visible uncategorized ids (plus the year filter) so a run can
-  // never mutate expenses the operator isn't looking at, and so `remaining`
-  // reports the backlog on THIS screen. Capped at the route's 500 max.
-  const uncategorizedIds = expenses
-    .filter((e) => !e.categoryId)
-    .map((e) => e.id)
-    .slice(0, 500);
-  const uncategorizedCount = uncategorizedIds.length;
+  // YEAR-wide uncategorized count from the summary (grouped by category, so
+  // the null-category bucket is the whole year's backlog) — NOT just the 50
+  // rows this page loaded. Scoping the run by year alone lets it drain the
+  // entire year's backlog across pages instead of stalling after page 1, while
+  // still never touching a different tax year.
+  const uncategorizedCount =
+    summary.find((s) => !s.category)?.count || 0;
 
   const runAutoCategorize = async () => {
     if (
       !window.confirm(
-        `AI-categorize up to 20 of the ${uncategorizedCount} uncategorized ${yearFilter} expenses shown into Schedule C categories? Each pick is recorded and reviewable — run again to continue through the backlog.`,
+        `AI-categorize up to 20 of the ${uncategorizedCount} uncategorized ${yearFilter} expenses into Schedule C categories? Each pick is recorded and reviewable — run again to continue through the backlog.`,
       )
     ) {
       return;
@@ -836,7 +834,6 @@ function ExpensesTab() {
         body: JSON.stringify({
           limit: 20,
           year: yearFilter,
-          ids: uncategorizedIds,
         }),
       });
       alert(

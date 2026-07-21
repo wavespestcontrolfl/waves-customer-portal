@@ -588,9 +588,14 @@ router.post('/mileage', async (req, res, next) => {
       return res.status(400).json({ error: 'tripDate and distanceMiles are required' });
     }
 
+    // A hand-entered trip IS an operator classification — mark it as such so
+    // is_business/purpose/method agree (the schema defaults are is_business=
+    // true + classification_method='auto', which left manual entries looking
+    // auto-classified and mis-attributed). Only a business trip deducts.
+    const isBusiness = (purpose || 'business') !== 'personal';
     // Date-effective (the IRS changes the rate mid-year).
-    const irsRate = require('../services/bouncie-mileage').getIrsRate(tripDate);
-    const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
+    const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDate) : 0;
+    const deductionAmount = isBusiness ? parseFloat((distanceMiles * irsRate).toFixed(2)) : 0;
 
     const [inserted] = await db('mileage_log').insert({
       vehicle_name: vehicleName || 'Manual Entry',
@@ -600,6 +605,8 @@ router.post('/mileage', async (req, res, next) => {
       distance_miles: distanceMiles,
       duration_minutes: durationMinutes || null,
       purpose: purpose || 'business',
+      is_business: isBusiness,
+      classification_method: 'manual',
       irs_rate: irsRate,
       deduction_amount: deductionAmount,
       source: 'manual',

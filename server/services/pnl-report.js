@@ -650,16 +650,23 @@ async function buildPnlReport(db, startDate, endDate) {
     // direction (never over-claiming) is deliberate if a second vehicle is
     // ever added — per-vehicle elections would be the enhancement then, and
     // mileage_log has no FK into equipment_register to attribute miles today.
+    // Period-effective: the election that was in force through the window END,
+    // not simply the newest row — rebuilding a prior year or older custom
+    // period must not apply a later election to it. No row on/before endDate
+    // (e.g. a pre-election historical period) → null → fail closed.
     db('company_financials')
+      .where('effective_date', '<=', endDate)
       .orderBy('effective_date', 'desc')
       .select('vehicle_deduction_method')
       .first()
       .catch(missingTableOnly(null)),
     db('equipment_register')
       .where('asset_category', 'vehicle')
-      .where(function stillHeld() {
-        this.where('active', true).orWhere('disposed', false);
-      })
+      // Only a CURRENTLY-HELD vehicle bars the rate: active AND not disposed.
+      // An archived (active=false) vehicle left at disposed=false must not
+      // suppress an eligible active vehicle's mileage.
+      .where('active', true)
+      .whereNot('disposed', true)
       .where(function barred() {
         this.whereIn('depreciation_method', MILEAGE_BARRING_METHODS)
           .orWhere('section_179_elected', true);

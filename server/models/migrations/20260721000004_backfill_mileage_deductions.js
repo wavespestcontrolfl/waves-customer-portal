@@ -42,11 +42,17 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('mileage_log'))) return;
 
   await knex.transaction(async (trx) => {
-    // 0. RETIRE legacy auto-classifications: any is_business=true row NOT
-    //    classified by an operator was auto-set from a proximity match and is
-    //    not substantiated. Reset to unclassified/$0, keeping job context as a
-    //    suggestion so it resurfaces in the Tax Center review. Idempotent —
-    //    once is_business=false the row no longer matches.
+    // 0. RETIRE legacy auto-classifications: an is_business=true row that was
+    //    auto-set from a proximity match is not substantiated. Reset those to
+    //    unclassified/$0, keeping job context as a suggestion so they resurface
+    //    in the Tax Center review. Idempotent — once is_business=false the row
+    //    no longer matches.
+    //
+    //    PRESERVE operator-entered mileage: the manual-entry route inserts
+    //    source='manual' but leaves classification_method at its schema default
+    //    ('auto'), so a method-only predicate would wrongly wipe hand-entered
+    //    business trips. source='manual' rows (and method manual/manual_review)
+    //    are operator-substantiated and kept.
     await trx.raw(`
       UPDATE mileage_log
       SET is_business = false,
@@ -58,6 +64,7 @@ exports.up = async function up(knex) {
             ELSE 'needs_review' END,
           updated_at = now()
       WHERE is_business = true
+        AND source IS DISTINCT FROM 'manual'
         AND classification_method IS DISTINCT FROM 'manual'
         AND classification_method IS DISTINCT FROM 'manual_review'
     `);
@@ -82,12 +89,20 @@ exports.up = async function up(knex) {
         AND (COALESCE(deduction_amount, 0) <> 0 OR COALESCE(irs_rate, 0) <> 0)
     `);
 
-    // 3. Recompute daily-summary irs_deduction from the corrected rows (only
-    //    the money field moves; miles/counts are unaffected by the rate).
+    // 3. Recompute daily-summary money AND classification fields from the
+    //    corrected rows — the step-0 reset moved miles from business to
+    //    unclassified, so business_miles/personal_miles/business_pct are stale
+    //    too, not just the deduction. total_miles is rate/classification-
+    //    independent and left as-is.
     if (await knex.schema.hasTable('mileage_daily_summary')) {
       await trx.raw(`
         UPDATE mileage_daily_summary s
-        SET irs_deduction = COALESCE(t.total, 0),
+        SET irs_deduction = COALESCE(t.deduction, 0),
+            business_miles = COALESCE(t.business_miles, 0),
+            personal_miles = COALESCE(t.personal_miles, 0),
+            business_pct = CASE WHEN COALESCE(t.total_miles, 0) > 0
+              THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
+              ELSE 0 END,
             irs_rate = (CASE
               WHEN s.summary_date >= DATE '2026-07-01' THEN 0.76
               WHEN s.summary_date >= DATE '2026-01-01' THEN 0.725
@@ -95,7 +110,11 @@ exports.up = async function up(knex) {
               ELSE 0.67 END),
             updated_at = now()
         FROM (
-          SELECT equipment_id, trip_date, SUM(deduction_amount) AS total
+          SELECT equipment_id, trip_date,
+                 SUM(deduction_amount) AS deduction,
+                 SUM(distance_miles) AS total_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
           FROM mileage_log
           WHERE equipment_id IS NOT NULL
           GROUP BY equipment_id, trip_date
@@ -104,11 +123,16 @@ exports.up = async function up(knex) {
       `);
     }
 
-    // 4. Recompute monthly-summary irs_deduction from the corrected rows.
+    // 4. Same recompute for the monthly summary.
     if (await knex.schema.hasTable('mileage_monthly_summary')) {
       await trx.raw(`
         UPDATE mileage_monthly_summary s
-        SET irs_deduction = COALESCE(t.total, 0),
+        SET irs_deduction = COALESCE(t.deduction, 0),
+            business_miles = COALESCE(t.business_miles, 0),
+            personal_miles = COALESCE(t.personal_miles, 0),
+            business_pct = CASE WHEN COALESCE(t.total_miles, 0) > 0
+              THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
+              ELSE 0 END,
             irs_rate = (CASE
               WHEN s.summary_month >= DATE '2026-07-01' THEN 0.76
               WHEN s.summary_month >= DATE '2026-01-01' THEN 0.725
@@ -116,7 +140,11 @@ exports.up = async function up(knex) {
               ELSE 0.67 END),
             updated_at = now()
         FROM (
-          SELECT equipment_id, date_trunc('month', trip_date)::date AS month, SUM(deduction_amount) AS total
+          SELECT equipment_id, date_trunc('month', trip_date)::date AS month,
+                 SUM(deduction_amount) AS deduction,
+                 SUM(distance_miles) AS total_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business IS DISTINCT FROM true) AS personal_miles
           FROM mileage_log
           WHERE equipment_id IS NOT NULL
           GROUP BY equipment_id, date_trunc('month', trip_date)::date
