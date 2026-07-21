@@ -550,6 +550,34 @@ describe('ported closeout compliance (typed path)', () => {
   });
 });
 
+describe('companion context (combined visits — codex P2)', () => {
+  test('companion schema requires treatments and clears autoFilled', () => {
+    const companionSchema = findingsSchemaForType('tree_shrub', { companion: true });
+    const byKey = Object.fromEntries(companionSchema.fields.map((f) => [f.key, f]));
+    expect(byKey.treatments_completed.required).toBe(true);
+    expect(byKey.treatments_completed.autoFilled).toBe(false);
+    expect(companionSchema.requiredFields).toContain('treatments_completed');
+    // Primary schema unchanged: hidden + derived.
+    const primary = findingsSchemaForType('tree_shrub');
+    const primaryByKey = Object.fromEntries(primary.fields.map((f) => [f.key, f]));
+    expect(primaryByKey.treatments_completed.autoFilled).toBe(true);
+    expect(primaryByKey.treatments_completed.required).toBe(false);
+  });
+
+  test('companion validation requires treatments; primary does not', () => {
+    const values = { plant_groups: 'Shrubs', landscape_condition: 'Good' };
+    const companion = validateTypedFindings({
+      type: 'tree_shrub', values, expectedType: 'tree_shrub', enforceRequired: true, companion: true,
+    });
+    expect(companion.ok).toBe(false);
+    expect(companion.missing).toContain('treatments_completed');
+    const primary = validateTypedFindings({
+      type: 'tree_shrub', values, expectedType: 'tree_shrub', enforceRequired: true,
+    });
+    expect(primary.ok).toBe(true);
+  });
+});
+
 describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
   const cat = (over) => ({ id: 'p1', name: 'Product', category: '', ...over });
   const derive = (rows) => deriveTreeShrubTreatments({

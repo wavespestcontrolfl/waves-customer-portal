@@ -1014,7 +1014,21 @@ function customerLabelForValue(fieldKey, value) {
  *                                      client submitted typed findings)
  * @returns {{ ok: boolean, errors: string[], missing: string[] }}
  */
-function validateTypedFindings({ type, values, expectedType, enforceRequired = false } = {}) {
+// COMPANION-context extras: on combined visits (e.g. lawn + T&S) the server
+// cannot derive T&S treatments from the ONE shared products list (no per-line
+// attribution), so the companion form must collect them — required there,
+// autoFilled/hidden on the primary form (codex P2, 2026-07-21).
+const COMPANION_REQUIRED_FINDINGS_FIELDS = {
+  tree_shrub: ['treatments_completed'],
+};
+
+function requiredFindingsFieldsFor(type, { companion = false } = {}) {
+  const base = REQUIRED_FINDINGS_FIELDS[type] || [];
+  const extra = companion ? (COMPANION_REQUIRED_FINDINGS_FIELDS[type] || []) : [];
+  return extra.length ? [...base, ...extra] : base;
+}
+
+function validateTypedFindings({ type, values, expectedType, enforceRequired = false, companion = false } = {}) {
   const errors = [];
   const missing = [];
 
@@ -1293,7 +1307,7 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     // selections but a plain trim check would accept it (Codex P2). A
     // required chips field needs at least one non-empty part.
     const fieldTypeByKey = new Map(fields.map((f) => [f.key, f.type]));
-    for (const key of REQUIRED_FINDINGS_FIELDS[type] || []) {
+    for (const key of requiredFindingsFieldsFor(type, { companion })) {
       const value = values[key];
       const isEmpty = ['chips', 'multi_select'].includes(fieldTypeByKey.get(key))
         ? String(value ?? '').split(',').map((s) => s.trim()).filter(Boolean).length === 0
@@ -2233,7 +2247,7 @@ const TYPE_MODULE_SECTIONS = {
   },
 };
 
-function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
+function findingsSchemaForType(projectType, { serviceKey = null, companion = false } = {}) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
   const indicator = ACTIVITY_INDICATORS[projectType] || null;
@@ -2257,7 +2271,7 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         section: f.section || null,
         options: f.options || null,
         placeholder: f.placeholder || null,
-        required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
+        required: requiredFindingsFieldsFor(projectType, { companion }).includes(f.key),
         // Conditional requirement ({ field, value } or { field, values }):
         // required exactly when the named sibling field holds a non-empty
         // value other than `value` / outside `values`. Served so the client
@@ -2273,11 +2287,13 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         // pesticideOnly fields only render once a pesticide product is on the
         // visit (server compliance validation is the enforcement either way).
         detail: !!f.detail,
-        autoFilled: !!f.autoFilled,
+        // Companion sections must collect what the server can't derive there —
+        // the companion-required extras render as normal inputs.
+        autoFilled: !!f.autoFilled && !(companion && (COMPANION_REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
       })),
     photoCategories: config.photoCategories || [],
-    requiredFields: REQUIRED_FINDINGS_FIELDS[projectType] || [],
+    requiredFields: requiredFindingsFieldsFor(projectType, { companion }),
     nextStepChips: chipsForType(projectType),
     nextStepRequired: nextStepRequiredForType(projectType),
     activity: indicator

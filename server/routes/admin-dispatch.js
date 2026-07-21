@@ -1899,7 +1899,7 @@ router.get('/:date?', async (req, res, next) => {
         // completion must never block on a registry fetch.
         companionSchemas: completionProfile
           ? (completionProfile.companions || [])
-            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
+            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
             .filter(Boolean)
           : null,
         linkedProject: linkedProject ? {
@@ -3072,6 +3072,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         };
       }
       if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
+        // Primary T&S: treatments_completed is autoFilled/hidden and derived
+        // from products later in this request — a submitted value is a stale
+        // pre-cutover draft the tech has no input to change, and validating
+        // it here could 400 on contradictions the tech can't fix (codex P2
+        // r3). Strip it before validation; derivation re-fills it.
+        if (typedFindingsType === 'tree_shrub' && structuredFindings?.values
+          && typeof structuredFindings.values === 'object') {
+          delete structuredFindings.values.treatments_completed;
+        }
         const findingsValidation = ActivityIndicators.validateTypedFindings({
           type: structuredFindings?.type,
           values: structuredFindings?.values,

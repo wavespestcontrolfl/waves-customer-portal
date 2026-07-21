@@ -154,7 +154,11 @@ export default function TreeShrubCloseoutSummary({ summary = {}, onComplete, onD
             ['diseaseLeafSpot', 'Disease'],
             ['waterHeatStress', 'Stress'],
           ].map(([key, label]) => {
-            const n = Number(scores[key]);
+            // null/'' are legal "unscored" shapes — Number() would coerce
+            // them to a finite 0 and paint a red crisis tile (codex P3;
+            // same trap as the report's toScore()).
+            const raw = scores[key];
+            const n = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
             const known = Number.isFinite(n);
             const color = !known ? D.muted : n >= 75 ? D.green : n >= 50 ? D.amber : D.red;
             return (

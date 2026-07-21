@@ -5330,7 +5330,13 @@ function pruneRestoredFindingsValues(restored, fields) {
     const field = fieldByKey.get(key);
     if (!field) {
       delete values[key];
-    } else if (field.type === "chips" && Array.isArray(field.options)) {
+    } else if (field.autoFilled) {
+      // Derived server-side (e.g. primary T&S treatments) — a restored
+      // pre-cutover draft value has no visible input and could trip
+      // validation the tech can't fix (codex P2). Companion slices clear
+      // the flag for fields they collect, so those restores survive.
+      delete values[key];
+    } else if ((field.type === "chips" || field.type === "multi_select") && Array.isArray(field.options)) {
       const kept = String(raw || "")
         .split(",")
         .map((s) => s.trim())
@@ -5417,17 +5423,16 @@ export function TypedFindingsSection({
     borderBottom: `1px solid ${hairline}`,
   };
   // autoFilled fields are derived server-side at completion (treatments from
-  // products) and never rendered on the PRIMARY form; COMPANION sections
-  // (combined visits — onRecommendationsChange null) still render them as a
-  // normal dropdown, because the shared products list can't be attributed
-  // per service line so the server does not derive there (codex P2 r2).
-  // pesticideOnly compliance fields appear once a pesticide product is
-  // recorded (the server 422s them if missed, so hiding them can't skip
-  // enforcement). detail fields collapse behind one optional expander so
-  // routine visits stay a short form (owner directive 2026-07-21).
-  const companionSection = typeof onRecommendationsChange !== "function" || !onRecommendationsChange;
+  // products) and never rendered — companion schema slices clear the flag
+  // for fields the companion must collect (shared products list can't be
+  // attributed per service line), so this filter is schema-driven for both
+  // contexts. pesticideOnly compliance fields appear once a pesticide
+  // product is recorded (the server 422s them if missed, so hiding them
+  // can't skip enforcement). detail fields collapse behind one optional
+  // expander so routine visits stay a short form (owner directive
+  // 2026-07-21).
   const visibleFields = (schema.fields || []).filter(
-    (f) => (!f.autoFilled || companionSection) && (!f.pesticideOnly || pesticideProductPresent),
+    (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
   );
   const primaryFields = visibleFields.filter((f) => !f.detail);
   const detailFields = visibleFields.filter((f) => f.detail);

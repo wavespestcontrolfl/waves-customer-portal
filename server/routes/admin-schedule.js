@@ -1505,7 +1505,7 @@ async function loadProjectCompletionContextByServiceId(services) {
       // combo must not expose exclusion/sanitation module fields (Codex P2).
       companionSchemas: completionProfile
         ? (completionProfile.companions || [])
-          .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
+          .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
           .filter(Boolean)
         : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,
