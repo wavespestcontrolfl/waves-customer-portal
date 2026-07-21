@@ -1232,6 +1232,17 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+// The per-application charge divides the plan annual by the SINGLE unit's
+// visit count. Termite-bond riders are unit-count-exempt, so the single
+// unit is the non-bond line set (codex #2915 r6) — bait+bond derives 4
+// from the bait line; true multi-unit plans still return null.
+function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
+  const nonBond = (Array.isArray(recurringLines) ? recurringLines : [])
+    .filter((svc) => !String(recurringServiceKey(svc) || '').startsWith('termite_bond'));
+  if (nonBond.length !== 1 || supplementUnitCount !== 0) return null;
+  return visitsPerYearForRecurringService(nonBond[0]);
+}
+
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
@@ -1561,10 +1572,16 @@ const EstimateConverter = {
     // recurring unit only — the same gate the fee and estimated_price writers
     // use; a standalone supplement beside it means the plan annual isn't this
     // unit's annual, so the cadence fallback (status quo) applies.
-    const singleRecurringUnitVisits = (recurringServicesForConversion.length === 1
-      && supplementStandaloneUnits.length === 0)
-      ? visitsPerYearForRecurringService(recurringServicesForConversion[0])
-      : null;
+    // Rider-aware (codex #2915 r6): the bond is carved out of the unit
+    // count, so the "single unit" whose visits drive the per-application
+    // division is the NON-bond line set. Without this, a raw engine-backed
+    // bait+bond accept (no recurring.services for the cadence inference to
+    // read → monthly fallback) would stamp the monthly total as the
+    // per-visit fee ($50) instead of plan-annual ÷ visits ($600/4 = $150).
+    const singleRecurringUnitVisits = riderAwareSingleUnitVisits(
+      recurringServicesForConversion,
+      supplementStandaloneUnits.length,
+    );
     const perApplicationAmount = billingCadence
       ? perApplicationChargeAmount({
           billingCadence,
@@ -2919,3 +2936,4 @@ module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGua
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
+module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;

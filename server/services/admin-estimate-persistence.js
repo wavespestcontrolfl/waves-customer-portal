@@ -665,14 +665,24 @@ function parseStoredEstimateData(estimateData) {
 // kill switch (codex #2915 r1). Reject rather than strip: silently deleting
 // a line the operator saw priced would desync the client-computed totals
 // this save path trusts.
+// Selected bond rows across EVERY persisted shape: mapped recurring lists
+// AND the raw engine line items (engineResult.lineItems / result.lineItems)
+// — the public/converter paths merge raw rows back into pricing and
+// billing, so a guard that only scans recurring.services misses
+// engine-backed saves (codex #2915 r6).
+function selectedTermiteBondRows(estimateData) {
+  const mapped = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  const raw = [estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  return [...mapped, ...raw].filter((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
+    || /termite bond/i.test(String(svc?.name || '')));
+}
+
 function assertNoDarkTermiteBondPayload(estimateData) {
   const gateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
   if (gateOn) return;
-  const result = estimateData?.result && typeof estimateData.result === 'object' ? estimateData.result : {};
-  const lists = [result?.recurring?.services, estimateData?.recurring?.services];
-  const hasBondRow = lists.some((list) => Array.isArray(list)
-    && list.some((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
-      || /termite bond/i.test(String(svc?.name || ''))));
+  const hasBondRow = selectedTermiteBondRows(estimateData).length > 0;
   if (hasBondRow) {
     throw errorWithStatus('Termite bond option is disabled (GATE_TERMITE_BOND_OPTION) — remove the bond selection and save again.', 422);
   }
@@ -688,11 +698,7 @@ function assertLiveTermiteBondRates(estimateData) {
   const { TERMITE } = require('./pricing-engine/constants');
   const staleError = () => errorWithStatus('Termite bond rates have changed — recalculate the estimate before saving.', 422);
 
-  const lists = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services];
-  const bondRows = lists
-    .flatMap((list) => (Array.isArray(list) ? list : []))
-    .filter((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
-      || /termite bond/i.test(String(svc?.name || '')));
+  const bondRows = selectedTermiteBondRows(estimateData);
   for (const row of bondRows) {
     const term = row.bondTerm || String(row.service || '').replace(/^termite_bond_/, '');
     const quarterly = Number(TERMITE.bond?.[term]?.quarterly);

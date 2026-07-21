@@ -548,3 +548,57 @@ describe('codex #2915 r4 hardening', () => {
     expect(parsed.engineRequest.options.termiteBondTerm).toBe('none');
   });
 });
+
+describe('codex #2915 r6 hardening', () => {
+  const EstimateConverter = require('../services/estimate-converter');
+  const { applySelectedTermiteBondToEstimateData } = require('../routes/estimate-public');
+  const {
+    assertNoDarkTermiteBondPayload,
+    assertLiveTermiteBondRates,
+  } = require('../services/admin-estimate-persistence');
+
+  const baitRow = { name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35, perTreatment: 105, visitsPerYear: 4 };
+  const bondRow = { name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr', mo: 15, perTreatment: 45, visitsPerYear: 4 };
+
+  test('rider-aware single-unit visits: bait+bond derives 4 from the bait line (the $150-vs-$50 money path)', () => {
+    const { riderAwareSingleUnitVisits } = EstimateConverter;
+    expect(riderAwareSingleUnitVisits([baitRow, bondRow], 0)).toBe(4);
+    expect(riderAwareSingleUnitVisits([baitRow], 0)).toBe(4);
+    // True multi-unit plans stay null (rows priced individually).
+    const pestRow = { name: 'Pest Control', service: 'pest_control', visitsPerYear: 4 };
+    expect(riderAwareSingleUnitVisits([pestRow, baitRow, bondRow], 0)).toBeNull();
+    expect(riderAwareSingleUnitVisits([baitRow, bondRow], 1)).toBeNull();
+  });
+
+  test('dark-gate + rate guards scan raw engine line items too', () => {
+    const engineResult = generateEstimate(termiteInput({ termiteBondTerm: '10yr' }));
+    const rawData = { engineInputs: {}, engineResult };
+    const prev = process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    try {
+      let status;
+      try { assertNoDarkTermiteBondPayload(rawData); } catch (err) { status = err.statusCode || err.status; }
+      expect(status).toBe(422);
+    } finally {
+      process.env.GATE_TERMITE_BOND_OPTION = prev;
+    }
+    // Gate on: live rates pass; a stale raw bond line fails closed.
+    expect(() => assertLiveTermiteBondRates(rawData)).not.toThrow();
+    const rawBond = engineResult.lineItems.find((li) => String(li.service).startsWith('termite_bond'));
+    rawBond.perApp = 40;
+    let status;
+    try { assertLiveTermiteBondRates(rawData); } catch (err) { status = err.statusCode || err.status; }
+    expect(status).toBe(422);
+  });
+
+  test('switcher handles result-shaped raw payloads (result.lineItems is the display source)', () => {
+    const engineResult = generateEstimate(termiteInput({ termiteBondTerm: '10yr' }));
+    const parsed = { result: engineResult };
+    const before = engineResult.summary.recurringAnnualAfterDiscount;
+    const outcome = applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(outcome).toMatchObject({ ok: true, monthlyDelta: 5, annualDelta: 60, selectedBondTerm: '1yr' });
+    const bond = parsed.result.lineItems.find((li) => String(li.service).startsWith('termite_bond'));
+    expect(bond).toMatchObject({ bondTerm: '1yr', perApp: 60 });
+    expect(parsed.result.summary.recurringAnnualAfterDiscount).toBe(before + 60);
+  });
+});

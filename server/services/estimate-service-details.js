@@ -310,7 +310,12 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What are the term options, and what happens if I sell the house?',
-        a: 'You choose a 1-, 5-, or 10-year term, billed monthly or annually in advance — longer terms lock lower monthly rates, fixed for the term you pick. The guarantee is transferable to a new homeowner with a transfer inspection and a $250 transfer fee, which is a genuine selling point when you list the house: the buyer inherits active termite protection with its history documented in the app.',
+        // Cadence corrected 2026-07-20 (owner: per-application billing) —
+        // the bond rides the quarterly station check and is charged per
+        // application, never as a monthly/annual subscription. True for
+        // manually-scheduled bonds today and the estimate selector when
+        // GATE_TERMITE_BOND_OPTION is live.
+        a: 'You choose a 1-, 5-, or 10-year term, priced per application on the same quarterly station check — longer terms lock a lower per-application rate, fixed for the term you pick. The guarantee is transferable to a new homeowner with a transfer inspection and a $250 transfer fee, which is a genuine selling point when you list the house: the buyer inherits active termite protection with its history documented in the app.',
       },
       {
         q: 'Do I own the bait stations, or am I renting them?',

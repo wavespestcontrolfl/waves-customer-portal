@@ -10132,10 +10132,15 @@ function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
 // the read adapters term-key it) and the summary totals, by the same exact
 // snapshot deltas the mapped path uses (codex #2915 r3).
 function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
-  const engineResult = parsedData?.engineResult && typeof parsedData.engineResult === 'object'
-    ? parsedData.engineResult
-    : null;
-  if (!engineResult || !Array.isArray(engineResult.lineItems)) {
+  // Raw engine output may be persisted under engineResult OR directly under
+  // result (the display precedence reads result first) — mutate whichever
+  // container(s) actually hold the raw lineItems so the selector's source
+  // and the switch target can never be different copies (codex #2915 r6).
+  const containers = [parsedData?.engineResult, parsedData?.result]
+    .filter((c, idx, arr) => c && typeof c === 'object' && Array.isArray(c.lineItems)
+      && arr.indexOf(c) === idx);
+  const engineResult = containers[0] || null;
+  if (!engineResult) {
     return { ok: false, reason: 'bond_not_available' };
   }
   const isBondLine = (li) => li && typeof li === 'object'
@@ -10148,38 +10153,40 @@ function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
   const monthlyDelta = Math.round((nextMonthly - currentMonthly) * 100) / 100;
   const annualDelta = Math.round((nextAnnual - currentAnnual) * 100) / 100;
 
-  engineResult.lineItems = engineResult.lineItems.filter((li) => !isBondLine(li));
-  if (option) {
-    engineResult.lineItems.push({
-      service: 'termite_bond',
-      bondTerm: option.key,
-      bondYears: option.years,
-      name: option.name || `Termite Bond (${option.label} Term)`,
-      annual: nextAnnual,
-      monthly: nextMonthly,
-      perApp: Number(option.perApp ?? option.quarterly) || 0,
-      visitsPerYear: 4,
-      discountable: false,
-    });
-  }
-  const summary = engineResult.summary && typeof engineResult.summary === 'object' ? engineResult.summary : null;
-  if (summary) {
-    const adjust = [
-      ['recurringAnnualBeforeDiscount', annualDelta],
-      ['recurringAnnualAfterDiscount', annualDelta],
-      ['recurringMonthlyAfterDiscount', monthlyDelta],
-      ['year1Total', annualDelta],
-      ['year2Annual', annualDelta],
-      ['year2Monthly', monthlyDelta],
-    ];
-    for (const [field, delta] of adjust) {
-      if (Number.isFinite(Number(summary[field]))) {
-        summary[field] = Math.round((Number(summary[field]) + delta) * 100) / 100;
+  for (const container of containers) {
+    container.lineItems = container.lineItems.filter((li) => !isBondLine(li));
+    if (option) {
+      container.lineItems.push({
+        service: 'termite_bond',
+        bondTerm: option.key,
+        bondYears: option.years,
+        name: option.name || `Termite Bond (${option.label} Term)`,
+        annual: nextAnnual,
+        monthly: nextMonthly,
+        perApp: Number(option.perApp ?? option.quarterly) || 0,
+        visitsPerYear: 4,
+        discountable: false,
+      });
+    }
+    const summary = container.summary && typeof container.summary === 'object' ? container.summary : null;
+    if (summary) {
+      const adjust = [
+        ['recurringAnnualBeforeDiscount', annualDelta],
+        ['recurringAnnualAfterDiscount', annualDelta],
+        ['recurringMonthlyAfterDiscount', monthlyDelta],
+        ['year1Total', annualDelta],
+        ['year2Annual', annualDelta],
+        ['year2Monthly', monthlyDelta],
+      ];
+      for (const [field, delta] of adjust) {
+        if (Number.isFinite(Number(summary[field]))) {
+          summary[field] = Math.round((Number(summary[field]) + delta) * 100) / 100;
+        }
       }
     }
+    const bait = container.lineItems.find((li) => li && li.service === 'termite_bait');
+    if (bait) bait.selectedBondTerm = option ? option.key : null;
   }
-  const bait = engineResult.lineItems.find((li) => li && li.service === 'termite_bait');
-  if (bait) bait.selectedBondTerm = option ? option.key : null;
   syncBondTermIntoReplayableInputs(parsedData, option ? option.key : null);
   const changed = monthlyDelta !== 0 || annualDelta !== 0
     || Boolean(currentLine) !== Boolean(option)
