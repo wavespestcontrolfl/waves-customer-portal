@@ -44,15 +44,24 @@ router.get('/dashboard', async (req, res, next) => {
         db.raw('COALESCE(SUM(accumulated_depreciation), 0) as total_depreciation'),
       ).first().catch(() => ({ count: 0, total_cost: 0, book_value: 0, total_depreciation: 0 }));
 
-    // Upcoming AND overdue deadlines. Dropping the due_date >= now() filter is
-    // deliberate: an unfiled PAST-DUE deadline is the most urgent thing to
-    // surface (the UI has an OVERDUE state for exactly this), and filtering it
-    // out hid it entirely. Ordered by due_date ascending, so the earliest —
-    // i.e. the most overdue, then the nearest upcoming — leads.
-    const nextDeadlines = await db('tax_filing_calendar')
-      .whereNot('status', 'filed')
-      .orderBy('due_date').limit(5)
-      .catch(() => []);
+    // Overdue AND upcoming deadlines, fetched SEPARATELY so a pile of old
+    // overdue rows can't crowd out (and hide) current/upcoming filings. Overdue
+    // leads the list most-recent-first (nearest actionable), then upcoming
+    // soonest-first — so the "Next Deadline" headline shows the most pressing
+    // item and both groups always have room.
+    const [overdueDeadlines, upcomingDeadlines] = await Promise.all([
+      db('tax_filing_calendar')
+        .whereNot('status', 'filed')
+        .where('due_date', '<', db.fn.now())
+        .orderBy('due_date', 'desc').limit(3)
+        .catch(() => []),
+      db('tax_filing_calendar')
+        .whereNot('status', 'filed')
+        .where('due_date', '>=', db.fn.now())
+        .orderBy('due_date', 'asc').limit(5)
+        .catch(() => []),
+    ]);
+    const nextDeadlines = [...overdueDeadlines, ...upcomingDeadlines];
 
     // Pending advisor alerts
     const alertCounts = await db('tax_advisor_alerts')
