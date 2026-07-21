@@ -676,6 +676,27 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     };
   }
 
+  // V2 reports (lawn/T&S) carry an honest snapshot status — the generic
+  // "No high-priority issues were noted." line must not sit two cards above
+  // a needs-attention gauge saying the opposite (found in the David Thomas
+  // T&S dry-run). Use the snapshot's own peace-of-mind line instead.
+  const v2Snapshot = data.reportV2?.snapshot;
+  if (v2Snapshot && ['needs_attention', 'watch', 'urgent'].includes(String(v2Snapshot.status || ''))) {
+    return {
+      heading: 'your service is complete!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: v2Snapshot.peaceOfMind
+        || v2Snapshot.statusHeadline
+        || 'Service completed — we noted items to keep an eye on; details are below.',
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
+      detail: [
+        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
+        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
+      ].filter(Boolean).join(' '),
+    };
+  }
+
   return {
     heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',

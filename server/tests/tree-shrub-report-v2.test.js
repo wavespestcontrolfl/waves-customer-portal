@@ -11,7 +11,8 @@ const { buildTreeShrubInsightCards } = require('../services/service-report/tree-
 const { buildTreeShrubReportV2 } = require('../services/service-report/tree-shrub-report-v2');
 
 // Spec example scores: Foliage 84, Color 76, Pest 58 (Watch), Disease 88 (Strong),
-// Water 72 — overall "Healthy — monitoring light pest pressure".
+// Water 72 — overall "Healthy — monitoring pest pressure" (no severity words
+// in ISSUE_TOPIC — the status prefix carries severity).
 function assessment(overrides = {}) {
   return {
     assessmentDate: '2026-06-23',
@@ -149,7 +150,7 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
   it('builds the snapshot headline from the most severe insight (spec example)', () => {
     const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment() });
     expect(v2).toBeTruthy();
-    expect(v2.snapshot.statusHeadline).toBe('Healthy — monitoring light pest pressure');
+    expect(v2.snapshot.statusHeadline).toBe('Healthy — monitoring pest pressure');
     expect(v2.snapshot.status).toBe('healthy');
     expect(v2.diagnosis).toHaveLength(5);
     expect(v2.snapshot.peaceOfMind).toMatch(/No urgent plant decline/);

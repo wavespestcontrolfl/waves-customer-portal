@@ -196,8 +196,12 @@ function buildTrends(assessment) {
 }
 
 // Short topic phrase for the headline, from the top issue card's category.
+// No severity words here — the status prefix ("Needs attention — " / "Action
+// needed — ") carries severity, and a hardcoded "light" beside a heavy
+// infestation photo set understates what the customer can see (found in the
+// David Thomas dry-run: pest health 28 rendered "light pest pressure").
 const ISSUE_TOPIC = {
-  pest_pressure: 'light pest pressure',
+  pest_pressure: 'pest pressure',
   disease_leaf_spot: 'leaf-spot signals',
   water_stress: 'water and heat stress',
   color_vigor: 'color and fullness',
