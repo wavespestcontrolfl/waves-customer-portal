@@ -141,20 +141,19 @@ function initBouncieMileageCrons() {
           );
 
           if (jobMatch) {
-            const rate = mileageService.getIrsRate(tripDate);
+            // Attach the job context so the operator can review with it, but
+            // do NOT auto-classify as business or write a deduction — a
+            // proximity match is a SUGGESTION, not substantiation. The trip
+            // stays unclassified at $0 until confirmed in the Tax Center
+            // mileage review (PR #2931). Auto-deducting on a geographic match
+            // turned false matches into tax deductions without review.
             await db('mileage_log')
               .where('id', trip.id)
               .update({
                 customer_id: jobMatch.customer_id,
                 job_id: jobMatch.job_id,
-                // All canonical classification fields move together —
-                // is_business alone left purpose/rate contradicting it.
-                purpose: 'business',
-                is_business: true,
-                classification_method: 'job_match',
-                classification_notes: `Re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron)`,
-                irs_rate: rate,
-                deduction_amount: parseFloat((parseFloat(trip.distance_miles || 0) * rate).toFixed(2)),
+                classification_method: 'job_match_suggested',
+                classification_notes: `Suggested business — re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron). Confirm in Tax Center.`,
                 updated_at: db.fn.now(),
               });
             matched++;

@@ -32,24 +32,25 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 
 /**
  * IRS standard business mileage rate, DATE-effective. The IRS normally sets
- * ONE rate per calendar year, but has occasionally changed it mid-year when
- * fuel prices spiked (2011, 2022) — the date-effective table exists to model
- * those splits authoritatively rather than assume a single annual rate.
- * Accepts a 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass the
- * trip date); a bare year number resolves at that year's OPENING rate and is
- * reserved for year-granularity report displays.
+ * ONE rate per calendar year, but occasionally revises it mid-year when fuel
+ * prices spike (2011, 2022, and again 2026) — the date-effective table exists
+ * to model those splits authoritatively rather than assume a single annual
+ * rate. Accepts a 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass
+ * the trip date); a bare year number resolves at that year's OPENING rate and
+ * is reserved for year-granularity report displays.
  *
- * 2026: a SINGLE rate of 72.5¢ applies all year — the IRS set no mid-year
- * increase (IR / Notice 2026-10: "72.5 cents per mile driven for business
- * use ... Beginning Jan. 1, 2026", up 2.5¢ from 2025's 70¢). A prior 76¢
- * "July 1" entry here was NOT an IRS figure and overstated every H2 2026
- * deduction; it has been removed. Add a mid-year row ONLY against a real IRS
- * notice, and verify each rate against irs.gov before relying on it.
+ * 2026 IS a mid-year split: 72.5¢ Jan 1–Jun 30 (Notice 2026-10), then 76¢
+ * from Jul 1 (Announcement 2026-11, IRB 2026-29, effective 2026-07-01 due to
+ * fuel-price increases — supersedes Notice 2026-10 for H2). Verified verbatim
+ * against irs.gov/irb/2026-29_irb. Verify each rate against a real IRS notice
+ * before adding it; per-trip money paths resolve the rate at the trip date so
+ * H1 and H2 trips carry the correct figure.
  */
 const IRS_MILEAGE_RATE_TABLE = [
   { from: '2024-01-01', rate: 0.67 },  // Notice 2024-08
   { from: '2025-01-01', rate: 0.70 },  // Notice 2025-05
   { from: '2026-01-01', rate: 0.725 }, // Notice 2026-10
+  { from: '2026-07-01', rate: 0.76 },  // Announcement 2026-11 (IRB 2026-29)
 ];
 
 function getIrsRate(tripDate) {
@@ -343,9 +344,15 @@ async function processTripWebhook(event) {
     });
 
     if (jobMatch) {
-      classification.is_business = true;
-      classification.method = 'auto';
-      classification.notes = `Job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away)`;
+      // Attach job context for review, but do NOT auto-classify as business
+      // or write a deduction. A proximity job match is a SUGGESTION, not
+      // substantiation — business-vs-personal is an operator/CPA decision
+      // made in the Tax Center mileage review (PR #2931). Auto-deducting on a
+      // geographic match turned false matches into tax deductions with no
+      // review. An operator-configured business geo-fence (classifyTrip above)
+      // still classifies, since that's a deliberate rule the operator set.
+      classification.notes = `Suggested business — job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away). Confirm in Tax Center.`;
+      if (!classification.is_business) classification.method = 'job_match_suggested';
     }
 
     const irsRate = getIrsRate(tripDate);
@@ -413,7 +420,10 @@ async function processTripWebhook(event) {
       })
       .returning('*');
 
-    logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${classification.is_business ? 'business' : 'personal'}`);
+    const logState = classification.is_business
+      ? 'business'
+      : (jobMatch ? 'unclassified (job-match suggested — awaits review)' : 'unclassified');
+    logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${logState}`);
 
     // Update daily summary
     if (assignedVehicle) {
