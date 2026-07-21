@@ -4,16 +4,18 @@
 //
 // reportError(error, context)
 //   context: a string label, or { context, componentStack } from a boundary.
-// Replace any token-like path segment (≥16 chars of URL-safe/hex/uuid) with
-// ":token" — public routes like /report/:token, /receipt/:token, /track/:token,
-// and /service-outlines/:token carry long-lived bearer tokens in the path, and
-// telemetry must not ship those. Route structure is preserved.
-function safePath(pathname) {
+// Public routes carry long-lived bearer tokens in the path (/report/:token,
+// /estimate/:token, /pay/:token, … — and legacy estimate slugs can be as short
+// as 3 chars, so a length heuristic is unsafe). Telemetry must never ship a
+// token. Policy by ROUTE STRUCTURE, not length: the admin/tech surfaces have no
+// path tokens, so keep them for triage; every other route keeps only its root
+// segment and redacts whatever follows.
+export function safePath(pathname) {
   if (typeof pathname !== 'string' || !pathname) return undefined;
-  return pathname
-    .split('/')
-    .map((seg) => (/^[A-Za-z0-9_-]{16,}$/.test(seg) ? ':token' : seg))
-    .join('/');
+  if (/^\/(admin|tech)(\/|$)/.test(pathname)) return pathname;
+  const segments = pathname.split('/').filter(Boolean);
+  if (segments.length <= 1) return pathname;
+  return `/${segments[0]}/:token`;
 }
 
 export function reportError(error, context) {

@@ -53,6 +53,12 @@ describe('POST /api/client-errors', () => {
     expect(captureContext.contexts.client_error.stack.length).toBe(4000);
   });
 
+  test('scrubs a token-route url server-side (defense in depth)', async () => {
+    await post({ message: 'x', url: '/estimate/short3' });
+    const [, captureContext] = mockCapture.mock.calls[0];
+    expect(captureContext.contexts.client_error.url).toBe('/estimate/:token');
+  });
+
   test('a missing message still reports (never 500s)', async () => {
     const res = await post({});
     expect(res.status).toBe(204);

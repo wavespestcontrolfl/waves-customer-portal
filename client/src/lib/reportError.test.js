@@ -24,18 +24,29 @@ describe('reportError', () => {
     });
   });
 
-  test('scrubs token-like path segments from the reported url', async () => {
-    vi.stubGlobal('window', { location: { pathname: '/report/AbC123dEf456GhI789jkL' } });
-    reportError(new Error('crash'));
-    const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
-    expect(body.url).toBe('/report/:token');
+  test('redacts token routes regardless of token length', async () => {
+    for (const [path, expected] of [
+      ['/report/AbC123dEf456GhI789jkL', '/report/:token'],
+      ['/estimate/abc', '/estimate/:token'], // legacy 3-char slug
+      ['/pay/statement/xyz789', '/pay/:token'],
+      ['/receipt/ZZZ', '/receipt/:token'],
+    ]) {
+      sendBeacon.mockClear();
+      vi.stubGlobal('window', { location: { pathname: path } });
+      reportError(new Error('crash'));
+      const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
+      expect(body.url).toBe(expected);
+    }
   });
 
-  test('keeps short non-token path segments intact', async () => {
-    vi.stubGlobal('window', { location: { pathname: '/admin/banking' } });
-    reportError(new Error('crash'));
-    const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
-    expect(body.url).toBe('/admin/banking');
+  test('keeps token-free admin/tech paths intact for triage', async () => {
+    for (const path of ['/admin/banking', '/tech/route', '/login', '/']) {
+      sendBeacon.mockClear();
+      vi.stubGlobal('window', { location: { pathname: path } });
+      reportError(new Error('crash'));
+      const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
+      expect(body.url).toBe(path);
+    }
   });
 
   test('accepts a plain string context', async () => {

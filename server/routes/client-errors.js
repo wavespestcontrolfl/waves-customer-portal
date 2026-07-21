@@ -19,6 +19,18 @@ const limiter = rateLimit({
 const clip = (value, max) =>
   typeof value === 'string' && value.length ? value.slice(0, max) : undefined;
 
+// Defense in depth: the client already scrubs token-bearing paths, but never
+// forward a raw pathname to Sentry regardless. Keep the token-free admin/tech
+// surfaces; for every other route keep only the root and drop what follows
+// (public token routes carry bearer credentials, some as short as 3 chars).
+const safePath = (value) => {
+  const path = clip(value, 500);
+  if (!path || !path.startsWith('/')) return undefined;
+  if (/^\/(admin|tech)(\/|$)/.test(path)) return path;
+  const segments = path.split('/').filter(Boolean);
+  return segments.length <= 1 ? path : `/${segments[0]}/:token`;
+};
+
 // POST /api/client-errors  { message, stack, componentStack, context, url }
 router.post('/', limiter, (req, res) => {
   try {
@@ -31,7 +43,7 @@ router.post('/', limiter, (req, res) => {
       contexts: {
         client_error: {
           context: clip(context, 200),
-          url: clip(url, 500),
+          url: safePath(url),
           stack: clip(stack, 4000),
           componentStack: clip(componentStack, 4000),
           userAgent: clip(req.headers['user-agent'], 300),
