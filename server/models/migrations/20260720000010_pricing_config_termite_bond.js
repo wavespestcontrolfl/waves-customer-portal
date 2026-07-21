@@ -26,23 +26,11 @@ exports.up = async function up(knex) {
   });
 };
 
-exports.down = async function down(knex) {
-  const hasTable = await knex.schema.hasTable('pricing_config');
-  if (!hasTable) return;
-  // Symmetric with the insert-if-absent up(): only remove the row when it
-  // still holds exactly the values this migration seeded — a pre-existing
-  // or admin-edited row is live pricing config this migration doesn't own
-  // and must survive a rollback.
-  const row = await knex('pricing_config').where({ config_key: 'termite_bond' }).first();
-  if (!row) return;
-  let data = row.data;
-  try { data = typeof data === 'string' ? JSON.parse(data) : data; } catch { return; }
-  const seeded = data && typeof data === 'object'
-    && Object.keys(data).length === 3
-    && Number(data.term_1yr) === 60
-    && Number(data.term_5yr) === 54
-    && Number(data.term_10yr) === 45;
-  if (seeded) {
-    await knex('pricing_config').where({ config_key: 'termite_bond' }).del();
-  }
+exports.down = async function down() {
+  // Non-destructive by design (pre-push P0): up() is insert-if-absent, so a
+  // row present at rollback time may be pre-existing or admin-edited — and
+  // even one still holding the seeded 60/54/45 values is indistinguishable
+  // from migration-owned. A rolled-back codebase ignores the config key
+  // entirely (the db-bridge branch is gone with it), so leaving the row in
+  // place is harmless; deleting live pricing config is not.
 };

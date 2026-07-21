@@ -1017,11 +1017,18 @@ async function syncConstantsFromDB(dbInstance) {
       // Belt-and-suspenders with the admin route's termite_bond validation:
       // only strictly-positive finite rates overwrite the runtime constants —
       // a legacy/hand-edited row can never sync a negative or NaN warranty
-      // price (codex #2915 r2).
-      const positive = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
-      if (positive(tb.term_1yr)) constants.TERMITE.bond['1yr'].quarterly = r(tb.term_1yr);
-      if (positive(tb.term_5yr)) constants.TERMITE.bond['5yr'].quarterly = r(tb.term_5yr);
-      if (positive(tb.term_10yr)) constants.TERMITE.bond['10yr'].quarterly = r(tb.term_10yr);
+      // price (codex #2915 r2). CENT precision, not the whole-dollar r()
+      // helper (pre-push P0): the validator accepts cents, so $54.50 must
+      // quote and bill $54.50 — never a silently-rounded $55.
+      const bondRate = (v) => (Number.isFinite(Number(v)) && Number(v) > 0
+        ? Math.round(Number(v) * 100) / 100
+        : null);
+      const tb1 = bondRate(tb.term_1yr);
+      const tb5 = bondRate(tb.term_5yr);
+      const tb10 = bondRate(tb.term_10yr);
+      if (tb1) constants.TERMITE.bond['1yr'].quarterly = tb1;
+      if (tb5) constants.TERMITE.bond['5yr'].quarterly = tb5;
+      if (tb10) constants.TERMITE.bond['10yr'].quarterly = tb10;
     }
 
     // ── Rodent ───────────────────────────────────────────────
