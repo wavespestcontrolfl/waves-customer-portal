@@ -36,10 +36,24 @@ describe('POST /api/client-errors', () => {
     const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error.name).toBe('TypeError');
     expect(captureContext.tags).toEqual({ source: 'client' });
-    expect(ctxOf()).toEqual({ context: 'PageErrorBoundary', route: 'admin' });
+    expect(ctxOf()).toEqual({ context: 'PageErrorBoundary', route: 'admin/banking' });
     // Explicit fingerprint so distinct (name, context, route) classes don't all
     // collapse into one Sentry issue via the shared synthetic stack.
-    expect(captureContext.fingerprint).toEqual(['client-error', 'TypeError', 'PageErrorBoundary', 'admin']);
+    expect(captureContext.fingerprint).toEqual(['client-error', 'TypeError', 'PageErrorBoundary', 'admin/banking']);
+  });
+
+  test('admin/tech keep a safe page segment so pages fingerprint separately', async () => {
+    for (const [route, expected] of [
+      ['/admin/banking', 'admin/banking'],
+      ['/admin/dashboard', 'admin/dashboard'],
+      ['/tech/route', 'tech/route'],
+      ['/admin/4242424242424242', 'admin'], // injected digit tail dropped
+      ['/admin/a4242424242', 'admin'], // mixed with digits dropped
+    ]) {
+      mockCapture.mockClear();
+      await post({ name: 'E', route });
+      expect(ctxOf().route).toBe(expected);
+    }
   });
 
   test('distinct failure classes get distinct fingerprints', async () => {
@@ -48,7 +62,7 @@ describe('POST /api/client-errors', () => {
     mockCapture.mockClear();
     await post({ name: 'RangeError', context: 'PageErrorBoundary', route: '/report/t' });
     const fpB = mockCapture.mock.calls[0][1].fingerprint;
-    expect(fpA).toEqual(['client-error', 'TypeError', 'banking:payout', 'admin']);
+    expect(fpA).toEqual(['client-error', 'TypeError', 'banking:payout', 'admin/x']);
     expect(fpB).toEqual(['client-error', 'RangeError', 'PageErrorBoundary', 'report']);
   });
 

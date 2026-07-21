@@ -66,11 +66,21 @@ const ROUTE_ROOTS = new Set([
   'receipt', 'track', 'contract', 'card', 'prep', 'rate', 'recap', 'review',
   'secure', 'reschedule', 'price-change', 'service-outlines', 'book', 'login',
 ]);
-const routeRoot = (value) => {
+// A page-name segment: lowercase letters + hyphens, NO digits — so admin/tech
+// page names (banking, dashboard, service-outlines) are kept but any tokenized
+// or injected tail (digits, mixed case, PANs) is dropped.
+const PAGE_SEG_RE = /^[a-z][a-z-]{0,30}$/;
+const routeLabel = (value) => {
   const path = String(value || '');
   if (!path.startsWith('/')) return undefined;
-  const first = path.split('/').filter(Boolean)[0];
+  const segs = path.split('/').filter(Boolean);
+  const first = segs[0];
   if (!first) return '/';
+  // admin/tech carry no path tokens — keep a safe page segment so distinct pages
+  // (/admin/banking vs /admin/dashboard) fingerprint separately.
+  if (first === 'admin' || first === 'tech') {
+    return segs[1] && PAGE_SEG_RE.test(segs[1]) ? `${first}/${segs[1]}` : first;
+  }
   return ROUTE_ROOTS.has(first) ? first : 'other';
 };
 
@@ -78,12 +88,15 @@ const routeRoot = (value) => {
 // componentStack is intentionally NOT accepted: React component names are
 // unbounded, so on a public endpoint an attacker could inject a person's name as
 // a fake "component". Only the three allowlisted/transformed fields are kept.
-router.post('/', globalLimiter, limiter, (req, res) => {
+// Per-IP limiter FIRST so only requests that pass it debit the shared global
+// bucket — otherwise one noisy IP could drain the all-caller quota with requests
+// its own per-IP cap would have rejected anyway.
+router.post('/', limiter, globalLimiter, (req, res) => {
   try {
     const { name, context, route } = req.body || {};
     const name_ = errorName(name);
     const context_ = contextLabel(context);
-    const route_ = routeRoot(route);
+    const route_ = routeLabel(route);
     const err = new Error(name_);
     err.name = name_;
     Sentry.captureException(err, {
