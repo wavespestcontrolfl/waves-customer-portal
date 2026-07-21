@@ -58,7 +58,14 @@
  * standard mileage: a vehicle depreciated under MACRS/§179 is BARRED from the
  * standard mileage rate for its remaining life (Pub 463), and prod's register
  * carries the van on MACRS — so defaulting would invent an unclaimable
- * deduction. buildPnlReport surfaces that conflict as `methodConflict`.
+ * deduction.
+ *
+ * A barred election is not merely warned about: when vehicleMileageBarred is
+ * set, a 'standard_mileage' election FAILS CLOSED to the actual-expenses
+ * basis (mileage excluded, Vehicle Expenses opex + vehicle depreciation kept)
+ * so the total never includes a deduction the code knows is disallowed.
+ * buildPnlReport still attaches `methodConflict` explaining it and pointing to
+ * the actual-expenses election.
  *
  * assemblePnl() is pure (no I/O) and unit-tested; buildPnlReport() runs the
  * queries and feeds it.
@@ -213,6 +220,7 @@ function assemblePnl({
   depreciationTotal = 0,
   vehicleDepreciation = 0,
   vehicleMethod = null,
+  vehicleMileageBarred = false,
 } = {}) {
   const revenue = round2(serviceRevenue);
   const other = round2(otherRevenue);
@@ -223,7 +231,12 @@ function assemblePnl({
   // Unelected (NULL) fails closed to the actual-expenses side: recorded cash
   // stays, the computed mileage figure is dropped. See the module header.
   const method = VEHICLE_METHODS.includes(vehicleMethod) ? vehicleMethod : null;
-  const useStandardMileage = method === 'standard_mileage';
+  // A standard-mileage election is HONORED only when it's actually allowed. If
+  // a held vehicle took MACRS/§179 the rate is barred (Pub 463), so we FAIL
+  // CLOSED to the actual-expenses basis — keep Vehicle Expenses opex and
+  // vehicle depreciation, EXCLUDE the mileage — rather than count a deduction
+  // the code knows is disallowed. A warning alone would leave the total wrong.
+  const useStandardMileage = method === 'standard_mileage' && !vehicleMileageBarred;
   const rawMileage = round2(Number(mileageDeduction) || 0);
   const countedMileage = useStandardMileage ? rawMileage : 0;
 
@@ -286,6 +299,9 @@ function assemblePnl({
     vehicleDeduction: {
       method,                       // null = unelected
       elected: method !== null,
+      // The election was set but NOT applied because it's disallowed — the
+      // P&L fell back to actual-expenses treatment (mileage excluded).
+      barred: method === 'standard_mileage' && vehicleMileageBarred,
       countedMileage,
       excludedMileage: useStandardMileage ? 0 : rawMileage,
       excludedVehicleExpenses,
@@ -671,11 +687,16 @@ async function buildPnlReport(db, startDate, endDate) {
       startDate, endDate,
     ),
     vehicleMethod,
+    // A held vehicle on MACRS/§179 is barred from the standard mileage rate
+    // (Pub 463) — assemblePnl fails closed on this so a barred election never
+    // inflates the total, only warns.
+    vehicleMileageBarred: (barredVehicles || []).length > 0,
   });
 
   // Pub 463 conflict: standard mileage elected while a held vehicle carries
   // MACRS/§179 depreciation, which disqualifies that vehicle from the rate.
-  // Reported, never auto-corrected — reversing an election is a CPA call.
+  // The mileage is ALREADY excluded from the total above (fail-closed); this
+  // explains why and tells the operator to switch the election.
   if (vehicleMethod === 'standard_mileage' && (barredVehicles || []).length > 0) {
     report.vehicleDeduction.methodConflict = {
       reason: 'depreciation_bars_standard_mileage',
@@ -686,7 +707,8 @@ async function buildPnlReport(db, startDate, endDate) {
       note: 'Standard mileage is elected, but these vehicles were depreciated '
         + 'under MACRS/§179 — IRS Pub 463 bars the standard mileage rate for a '
         + 'vehicle for the rest of its life once that depreciation is claimed. '
-        + 'Confirm the election with your CPA.',
+        + 'The mileage deduction has been EXCLUDED from this P&L; switch the '
+        + 'election to actual expenses (with your CPA) to use vehicle costs.',
     };
   }
 

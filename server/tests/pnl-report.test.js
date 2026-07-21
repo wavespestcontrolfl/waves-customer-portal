@@ -416,4 +416,50 @@ describe('assemblePnl — vehicle deduction election (Schedule C line 9)', () =>
         .toBe(11200);
     });
   });
+
+  // A MACRS/§179 vehicle is barred from the standard mileage rate (Pub 463).
+  // Electing it anyway must NOT inflate the total — fail closed to actual
+  // expenses (mileage excluded, opex + depreciation kept), warning alongside.
+  describe('barred standard-mileage election fails closed', () => {
+    const barred = {
+      serviceRevenue: 10000,
+      opexRows: [{ category: 'Vehicle Expenses', irs_line: '9', total: '2400.00' }],
+      mileageDeduction: 3300,
+      depreciationTotal: 3200,
+      vehicleDepreciation: 3200,
+      vehicleMethod: 'standard_mileage',
+      vehicleMileageBarred: true,
+    };
+
+    test('excludes the barred mileage from the total', () => {
+      const out = assemblePnl(barred);
+      expect(out.deductions.mileage).toBe(0);
+      expect(out.vehicleDeduction.excludedMileage).toBe(3300);
+      expect(out.vehicleDeduction.barred).toBe(true);
+    });
+
+    test('keeps Vehicle Expenses opex and vehicle depreciation (actual basis)', () => {
+      const out = assemblePnl(barred);
+      // Fell back to actual expenses: opex + depreciation both survive.
+      expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')?.amount)
+        .toBe(2400);
+      expect(out.deductions.depreciation).toBe(3200);
+      expect(out.vehicleDeduction.excludedVehicleDepreciation).toBe(0);
+    });
+
+    test('an UNBARRED standard-mileage election still counts mileage', () => {
+      const out = assemblePnl({ ...barred, vehicleMileageBarred: false });
+      expect(out.deductions.mileage).toBe(3300);
+      expect(out.vehicleDeduction.barred).toBe(false);
+    });
+
+    test('barred flag only bites a standard-mileage election, not actual/unelected', () => {
+      for (const vehicleMethod of ['actual_expenses', null]) {
+        const out = assemblePnl({ ...barred, vehicleMethod });
+        // Not standard mileage, so being "barred" is irrelevant and never true.
+        expect(out.vehicleDeduction.barred).toBe(false);
+        expect(out.deductions.depreciation).toBe(3200); // full depreciation kept
+      }
+    });
+  });
 });

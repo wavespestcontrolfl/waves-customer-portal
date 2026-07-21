@@ -740,7 +740,12 @@ async function getIrsReport(year) {
       const tripDate = typeof trip.trip_date === 'string' ? trip.trip_date : trip.trip_date.toISOString().split('T')[0];
       const monthKey = tripDate.slice(0, 7);
       const miles = parseFloat(trip.distance_miles || 0);
-      const isBiz = trip.is_business !== false && trip.purpose !== 'personal';
+      // Canonical business flag — ONLY an explicit is_business=true deducts.
+      // The old `is_business !== false` counted UNCLASSIFIED trips (null) as
+      // business, overstating the report and disagreeing with exportIrsCsv
+      // (which filters is_business=true) and the manual-review policy where
+      // unclassified trips carry $0 until an operator confirms them.
+      const isBiz = trip.is_business === true;
 
       // Each trip deducts at ITS OWN date-effective rate — a single yearly
       // rate misstated H2 miles whenever the IRS changed the rate mid-year.
