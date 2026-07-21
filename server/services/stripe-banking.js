@@ -254,7 +254,47 @@ async function syncPayouts(limit = 50) {
     }
 
     if (synced > 0) logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
-    return { synced, has_more: hasMore };
+
+    // Self-healing coverage pass — the watermark only moves FORWARD, so
+    // without this, historical paid payouts synced before the
+    // reporting_category column (or whose transaction sync failed) would
+    // keep an incomplete refund/dispute/fee ledger forever, silently
+    // overstating P&L revenue. Each run re-syncs a bounded batch of paid
+    // payouts that have no transaction rows or rows missing
+    // reporting_category (syncPayoutTransactions is a full delete+insert per
+    // payout, so a re-run fully refreshes them); repeated syncs converge.
+    let backfilled = 0;
+    try {
+      const BACKFILL_PER_RUN = 25;
+      const stale = await db('stripe_payouts as sp')
+        .where('sp.status', 'paid')
+        .where(function needsResync() {
+          this.whereNull('sp.transaction_count')
+            .orWhere('sp.transaction_count', 0)
+            .orWhereExists(function preCategoryRows() {
+              this.select(db.raw('1'))
+                .from('stripe_payout_transactions as t')
+                .whereRaw('t.payout_id = sp.id')
+                .whereNull('t.reporting_category');
+            });
+        })
+        .orderBy('sp.created_at_stripe', 'desc')
+        .limit(BACKFILL_PER_RUN)
+        .select('sp.stripe_payout_id');
+      for (const row of stale) {
+        try {
+          await syncPayoutTransactions(row.stripe_payout_id);
+          backfilled++;
+        } catch (err) {
+          logger.warn(`[stripe-banking] Backfill transaction sync failed for ${row.stripe_payout_id}:`, err.message);
+        }
+      }
+      if (backfilled > 0) logger.info(`[stripe-banking] Backfilled transaction detail for ${backfilled} historical payout(s)`);
+    } catch (err) {
+      logger.warn('[stripe-banking] Historical payout backfill pass failed:', err.message);
+    }
+
+    return { synced, backfilled, has_more: hasMore };
   } catch (err) {
     logger.error('[stripe-banking] syncPayouts failed:', err.message);
     throw err;
