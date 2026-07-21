@@ -604,7 +604,7 @@ router.post(
     try {
       switch (event.type) {
         case 'payment_intent.succeeded':
-          await handlePaymentIntentSucceeded(event.data.object);
+          await handlePaymentIntentSucceeded(event.data.object, event.created);
           break;
 
         case 'payment_intent.processing':
@@ -867,7 +867,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
   }
 }
 
-async function handlePaymentIntentSucceeded(paymentIntent) {
+// `eventCreated` is the Stripe event's unix-seconds timestamp — when Stripe
+// emitted payment_intent.succeeded, i.e. the settlement moment. Threaded
+// through so the ACH settlement-date restamp below can't drift onto the
+// webhook DELIVERY day when a retry crosses a month/year boundary (mirrors
+// handlePaymentIntentProcessing's initiatedAt).
+async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
 
@@ -1095,10 +1100,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     // payment_intent.processing arrived; restamp to the SETTLEMENT day so
     // revenue lands in the period the money actually cleared (an ACH
     // initiated before a month/year end and settled after was reported in
-    // the wrong period). Safe: this update is scoped to status='processing'
+    // the wrong period). The settlement moment is the EVENT's timestamp,
+    // not this handler's run time — a delayed/retried webhook must not
+    // shift the date. Safe: this update is scoped to status='processing'
     // rows below, so card payments (settled same-day) are never touched,
     // and a replay matches 0 rows.
-    payment_date: etDateString(),
+    payment_date: etDateString(eventCreated ? new Date(eventCreated * 1000) : undefined),
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;

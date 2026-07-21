@@ -317,7 +317,12 @@ async function paidRevenueForWindow(db, startDate, endDate) {
     // balance transactions, netted in the refund's own period below. Rows
     // OUTSIDE Stripe's ledger (legacy imports, cash/check) have no balance
     // transaction ever, so their locally recorded refund_amount nets here,
-    // in the receipt period (the only date those rows reliably carry).
+    // in the receipt period. KNOWN LIMITATION: those rows carry no durable
+    // refund date (refunded_at is never written), so refund-period
+    // recognition is impossible without a cash-refund ledger that doesn't
+    // exist — receipt-period netting is the only computable treatment and
+    // can shift income across periods for a cross-period cash refund.
+    // Zero such refund rows exist in prod at ship time.
     db('payments')
       .whereIn('status', ['paid', 'refunded', 'disputed'])
       .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")

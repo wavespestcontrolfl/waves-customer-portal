@@ -266,6 +266,31 @@ async function syncPayouts(limit = 50) {
     let backfilled = 0;
     try {
       const BACKFILL_PER_RUN = 25;
+      // First, refresh payouts stuck in a non-terminal LOCAL status: the
+      // forward-only watermark never revisits a payout first observed as
+      // pending/in-transit, so without this its local row would stay
+      // non-paid forever and the paid-only selection below could never
+      // sync its transactions.
+      const nonTerminal = await db('stripe_payouts')
+        .whereNotIn('status', ['paid', 'canceled', 'failed'])
+        .orderBy('created_at_stripe', 'desc')
+        .limit(BACKFILL_PER_RUN)
+        .select('stripe_payout_id');
+      for (const row of nonTerminal) {
+        try {
+          const p = await stripe.payouts.retrieve(row.stripe_payout_id);
+          await db('stripe_payouts')
+            .where('stripe_payout_id', row.stripe_payout_id)
+            .update({
+              status: p.status,
+              arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
+              failure_message: p.failure_message || null,
+              synced_at: new Date().toISOString(),
+            });
+        } catch (err) {
+          logger.warn(`[stripe-banking] Status refresh failed for ${row.stripe_payout_id}:`, err.message);
+        }
+      }
       const stale = await db('stripe_payouts as sp')
         .where('sp.status', 'paid')
         .where(function needsResync() {
