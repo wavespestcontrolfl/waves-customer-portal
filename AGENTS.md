@@ -812,6 +812,13 @@ finding and warns on P1. Reviewers must return JSON matching
   write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
   server, no SSE). Treat the auth ordering and the read-only tool surface as
   security-critical).
+  `/api/client-errors` (POST; unauthenticated client error telemetry. An
+  anonymous surface — /admin/login, a public token route, or any page — can
+  crash in the browser, so the reporter cannot require auth. Hardened: per-IP
+  rate limit (30/min), every field truncated server-side before it reaches
+  Sentry (tagged `source=client`), and the client scrubs token-like path
+  segments out of the reported URL. No reads, no PII persistence, no writes to
+  app data — it only forwards to Sentry).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

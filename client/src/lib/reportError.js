@@ -4,6 +4,18 @@
 //
 // reportError(error, context)
 //   context: a string label, or { context, componentStack } from a boundary.
+// Replace any token-like path segment (≥16 chars of URL-safe/hex/uuid) with
+// ":token" — public routes like /report/:token, /receipt/:token, /track/:token,
+// and /service-outlines/:token carry long-lived bearer tokens in the path, and
+// telemetry must not ship those. Route structure is preserved.
+function safePath(pathname) {
+  if (typeof pathname !== 'string' || !pathname) return undefined;
+  return pathname
+    .split('/')
+    .map((seg) => (/^[A-Za-z0-9_-]{16,}$/.test(seg) ? ':token' : seg))
+    .join('/');
+}
+
 export function reportError(error, context) {
   try {
     const meta = typeof context === 'string' ? { context } : context || {};
@@ -12,7 +24,7 @@ export function reportError(error, context) {
       stack: error?.stack,
       componentStack: meta.componentStack,
       context: meta.context,
-      url: typeof window !== 'undefined' ? window.location?.pathname : undefined,
+      url: typeof window !== 'undefined' ? safePath(window.location?.pathname) : undefined,
     });
 
     // sendBeacon survives page unload (the typical case for a crash); fall back

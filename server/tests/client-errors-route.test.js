@@ -29,31 +29,28 @@ const post = (body) => fetch(`${baseUrl}/api/client-errors`, {
 });
 
 describe('POST /api/client-errors', () => {
-  test('forwards to Sentry tagged source=client and returns 204', async () => {
+  test('forwards to Sentry tagged source=client (CaptureContext object) and returns 204', async () => {
     const res = await post({ message: 'Boom', stack: 'at x', componentStack: 'in <App>', context: 'PageErrorBoundary', url: '/admin/banking' });
     expect(res.status).toBe(204);
     expect(mockCapture).toHaveBeenCalledTimes(1);
 
-    const [error, scopeFn] = mockCapture.mock.calls[0];
+    const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toBe('Boom');
-
-    const scope = { setTag: jest.fn(), setContext: jest.fn() };
-    scopeFn(scope);
-    expect(scope.setTag).toHaveBeenCalledWith('source', 'client');
-    expect(scope.setContext).toHaveBeenCalledWith('client_error', expect.objectContaining({
+    // @sentry/node 10.x: object form, not a scope callback.
+    expect(typeof captureContext).toBe('object');
+    expect(captureContext.tags).toEqual({ source: 'client' });
+    expect(captureContext.contexts.client_error).toMatchObject({
       context: 'PageErrorBoundary', url: '/admin/banking',
-    }));
+    });
   });
 
   test('truncates oversized fields before forwarding', async () => {
     const res = await post({ message: 'm'.repeat(2000), stack: 's'.repeat(9000) });
     expect(res.status).toBe(204);
-    const [error, scopeFn] = mockCapture.mock.calls[0];
+    const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error.message.length).toBe(500);
-    const scope = { setTag: jest.fn(), setContext: jest.fn() };
-    scopeFn(scope);
-    expect(scope.setContext.mock.calls[0][1].stack.length).toBe(4000);
+    expect(captureContext.contexts.client_error.stack.length).toBe(4000);
   });
 
   test('a missing message still reports (never 500s)', async () => {

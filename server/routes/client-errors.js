@@ -23,16 +23,20 @@ const clip = (value, max) =>
 router.post('/', limiter, (req, res) => {
   try {
     const { message, stack, componentStack, context, url } = req.body || {};
-    Sentry.captureException(new Error(clip(message, 500) || 'Client error (no message)'), (scope) => {
-      scope.setTag('source', 'client');
-      scope.setContext('client_error', {
-        context: clip(context, 200),
-        url: clip(url, 500),
-        stack: clip(stack, 4000),
-        componentStack: clip(componentStack, 4000),
-        userAgent: clip(req.headers['user-agent'], 300),
-      });
-      return scope;
+    // @sentry/node 10.x: the second arg is a CaptureContext OBJECT, not a
+    // scope-mutator callback (a callback is silently ignored, dropping the tag
+    // and context).
+    Sentry.captureException(new Error(clip(message, 500) || 'Client error (no message)'), {
+      tags: { source: 'client' },
+      contexts: {
+        client_error: {
+          context: clip(context, 200),
+          url: clip(url, 500),
+          stack: clip(stack, 4000),
+          componentStack: clip(componentStack, 4000),
+          userAgent: clip(req.headers['user-agent'], 300),
+        },
+      },
     });
   } catch {
     /* telemetry ingestion must never 500 the caller */

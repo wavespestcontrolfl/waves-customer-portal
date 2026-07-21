@@ -24,6 +24,20 @@ describe('reportError', () => {
     });
   });
 
+  test('scrubs token-like path segments from the reported url', async () => {
+    vi.stubGlobal('window', { location: { pathname: '/report/AbC123dEf456GhI789jkL' } });
+    reportError(new Error('crash'));
+    const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
+    expect(body.url).toBe('/report/:token');
+  });
+
+  test('keeps short non-token path segments intact', async () => {
+    vi.stubGlobal('window', { location: { pathname: '/admin/banking' } });
+    reportError(new Error('crash'));
+    const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
+    expect(body.url).toBe('/admin/banking');
+  });
+
   test('accepts a plain string context', async () => {
     reportError(new Error('x'), 'banking:payout');
     const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
