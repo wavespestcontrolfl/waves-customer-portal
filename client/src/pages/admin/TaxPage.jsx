@@ -2640,19 +2640,20 @@ function RevenueTab() {
 
   const load = () => {
     setLoading(true);
-    // Quarter follows the SELECTED month, not browser-local "today" — the
-    // old derivation left the quarterly card frozen on the current quarter
-    // while the reconcile card above it showed whatever month was picked,
-    // stacking two different periods as if related.
-    const selMonth = parseInt(String(month).split("-")[1], 10) || 1;
+    // Quarter AND year follow the SELECTED month, not browser-local
+    // "today" — the old derivation left the quarterly card frozen on the
+    // current quarter (and the server on the current year), stacking two
+    // different periods as if related.
+    const [selYear, selMonthStr] = String(month).split("-");
+    const selMonth = parseInt(selMonthStr, 10) || 1;
     const q = `Q${Math.ceil(selMonth / 3)}`;
     Promise.all([
       adminFetch(`/admin/tax/revenue/reconcile?month=${month}`).catch(
         () => null,
       ),
-      adminFetch(`/admin/tax/revenue/quarterly-estimate?quarter=${q}`).catch(
-        () => null,
-      ),
+      adminFetch(
+        `/admin/tax/revenue/quarterly-estimate?quarter=${q}&year=${selYear}`,
+      ).catch(() => null),
     ]).then(([r, qe]) => {
       setReconcile(r);
       setQuarterly(qe);

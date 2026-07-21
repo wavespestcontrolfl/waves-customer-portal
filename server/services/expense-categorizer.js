@@ -80,4 +80,18 @@ Rules:
   return parsed;
 }
 
-module.exports = { autoCategorizeExpense };
+/**
+ * The AI's deductiblePercent is derived from UNTRUSTED input (emailed
+ * invoice content can prompt-inject it; the model can hallucinate) —
+ * never let it mutate tax_deductible_amount unvalidated. Returns a finite
+ * percent in (0, 100) when a partial deduction is legitimately indicated,
+ * else null (caller keeps the full amount / leaves the row for review).
+ */
+function sanitizeDeductiblePercent(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n <= 0 || n >= 100) return null;
+  return n;
+}
+
+module.exports = { autoCategorizeExpense, sanitizeDeductiblePercent };

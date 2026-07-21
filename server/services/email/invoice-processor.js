@@ -115,12 +115,15 @@ async function processVendorInvoice(email, classification) {
       let deductibleAmount = amount;
       if (!categoryRow) {
         try {
-          const { autoCategorizeExpense } = require('../expense-categorizer');
+          const { autoCategorizeExpense, sanitizeDeductiblePercent } = require('../expense-categorizer');
           const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
           if (ai?.categoryId) {
             categoryRow = { id: ai.categoryId };
-            if (ai.deductiblePercent !== undefined && ai.deductiblePercent < 100) {
-              deductibleAmount = parseFloat((amount * ai.deductiblePercent / 100).toFixed(2));
+            // deductiblePercent is untrusted (email-influenced AI output) —
+            // only a validated partial percent may reduce the deduction.
+            const pct = sanitizeDeductiblePercent(ai.deductiblePercent);
+            if (pct !== null) {
+              deductibleAmount = parseFloat((amount * pct / 100).toFixed(2));
             }
           }
         } catch (err) {

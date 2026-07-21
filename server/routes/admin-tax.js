@@ -378,9 +378,11 @@ router.post('/expenses', async (req, res, next) => {
         aiCategory = await autoCategorizeExpense(vendorName, description, amount);
         if (aiCategory?.categoryId) {
           categoryId = aiCategory.categoryId;
-          // If AI says partially deductible, adjust
-          if (aiCategory.deductiblePercent !== undefined && aiCategory.deductiblePercent < 100) {
-            deductibleAmount = deductibleAmount ?? parseFloat((amount * aiCategory.deductiblePercent / 100).toFixed(2));
+          // Untrusted AI output — only a validated partial percent may
+          // reduce the deduction (see sanitizeDeductiblePercent).
+          const pct = sanitizeDeductiblePercent(aiCategory.deductiblePercent);
+          if (pct !== null) {
+            deductibleAmount = deductibleAmount ?? parseFloat((amount * pct / 100).toFixed(2));
           }
         }
       } catch (err) {
@@ -524,7 +526,7 @@ router.post('/advisor/run', async (req, res, next) => {
 // Shared with the email invoice-processor — see
 // server/services/expense-categorizer.js (extracted 2026-07-21 so emailed
 // vendor invoices stop landing uncategorized).
-const { autoCategorizeExpense } = require('../services/expense-categorizer');
+const { autoCategorizeExpense, sanitizeDeductiblePercent } = require('../services/expense-categorizer');
 
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE LOG (Bouncie GPS Integration)
@@ -703,8 +705,14 @@ async function classifyTrips(ids, purpose) {
     const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
     await db('mileage_log').where({ id: row.id }).update({
       purpose,
+      // Keep the canonical classification fields other surfaces read
+      // (admin-mileage filters on is_business) in lockstep with purpose.
+      is_business: purpose === 'business',
+      classification_method: 'manual_review',
+      classification_notes: 'Classified via Tax Center mileage review',
       irs_rate: purpose === 'business' ? rate : 0,
       deduction_amount: deduction,
+      updated_at: new Date(),
     });
     updated++;
     deductionTotal += deduction;
@@ -759,8 +767,10 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
         const ai = await autoCategorizeExpense(exp.vendor_name, exp.description, exp.amount);
         if (ai?.categoryId) {
           const update = { category_id: ai.categoryId, updated_at: new Date() };
-          if (ai.deductiblePercent !== undefined && ai.deductiblePercent < 100) {
-            update.tax_deductible_amount = parseFloat((exp.amount * ai.deductiblePercent / 100).toFixed(2));
+          // Untrusted AI output — validated partial percents only.
+          const pct = sanitizeDeductiblePercent(ai.deductiblePercent);
+          if (pct !== null) {
+            update.tax_deductible_amount = parseFloat((exp.amount * pct / 100).toFixed(2));
           }
           await db('expenses').where({ id: exp.id }).update(update);
           results.push({ id: exp.id, description: exp.description, category: ai.categoryName, reasoning: ai.reasoning, applied: true });
@@ -833,8 +843,12 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       return res.status(400).json({ error: 'quarter parameter required (Q1, Q2, Q3, or Q4)' });
     }
     const now = new Date();
-    // Use ET year so the quarter doesn't roll over to next year late on Dec 31 ET.
-    const year = etParts(now).year;
+    // Optional ?year= pins the estimate to the SELECTED period's year (the
+    // Revenue tab derives quarter+year from its month picker); default stays
+    // the ET year so the quarter doesn't roll over late on Dec 31 ET.
+    const year = /^\d{4}$/.test(String(req.query.year || ''))
+      ? parseInt(req.query.year, 10)
+      : etParts(now).year;
     const qNum = parseInt(quarter.replace('Q', ''));
     const startMonth = (qNum - 1) * 3;
     const pad2 = (n) => String(n).padStart(2, '0');
