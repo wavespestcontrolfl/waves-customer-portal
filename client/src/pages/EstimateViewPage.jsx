@@ -4067,6 +4067,17 @@ function EstimateViewPageInner() {
           body: JSON.stringify({ term }),
         });
         if (!r.ok) throw new Error(`bond update failed: ${r.status}`);
+        // Annual prepay doesn't support bond riders (the converter fails that
+        // conversion closed) — a customer who already chose prepay and then
+        // adds a bond must come back through the payment choice, or the next
+        // confirm posts a combination the server rejects mid-flow (codex
+        // #2915 r3). The reloaded payload stops advertising prepay
+        // (annualPrepayEligible flips false), so resetting here is enough.
+        if (term !== 'none' && paymentPreference === 'prepay_annual') {
+          setPaymentPreference(null);
+          setCtaPhase('configure');
+          setError('Annual prepay isn’t available with a termite bond — pick a payment option again.');
+        }
         await loadEstimate({ preserveSelection: true });
         scrollToPriceSection();
       } catch (err) {
@@ -4081,7 +4092,7 @@ function EstimateViewPageInner() {
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
     await chained;
-  }, [adminDraftPreview, loadEstimate, token]);
+  }, [adminDraftPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
     if (!scheduledServiceId) return;

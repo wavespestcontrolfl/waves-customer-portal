@@ -437,3 +437,58 @@ describe('codex #2915 r2 hardening', () => {
     expect(status).toBe(422);
   });
 });
+
+describe('codex #2915 r3 hardening', () => {
+  const {
+    buildPricingBundle,
+    applySelectedTermiteBondToEstimateData,
+  } = require('../routes/estimate-public');
+  const { assertLiveTermiteBondRates } = require('../services/admin-estimate-persistence');
+
+  function rawEngineEstimate(term) {
+    const engineResult = generateEstimate(termiteInput(term ? { termiteBondTerm: term } : {}));
+    return {
+      id: `estimate-raw-${term || 'none'}`,
+      status: 'sent',
+      monthly_total: engineResult.summary.recurringMonthlyAfterDiscount,
+      annual_total: engineResult.summary.recurringAnnualAfterDiscount,
+      onetime_total: engineResult.summary.oneTimeTotal,
+      waveguard_tier: 'Bronze',
+      estimate_data: { engineInputs: {}, engineResult },
+    };
+  }
+
+  test('raw engine estimates get the selector: options sourced from the bait line item', async () => {
+    const bundle = await buildPricingBundle(rawEngineEstimate('10yr'));
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite).toBeTruthy();
+    expect(termite.bondOptions).toHaveLength(3);
+    expect(termite.selectedBondTerm).toBe('10yr');
+  });
+
+  test('raw engine switcher rewrites the line item + summary by exact deltas', () => {
+    const estimate = rawEngineEstimate('10yr');
+    const parsed = estimate.estimate_data;
+    const before = parsed.engineResult.summary.recurringAnnualAfterDiscount;
+    const outcome = applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(outcome).toMatchObject({ ok: true, changed: true, monthlyDelta: 5, annualDelta: 60, selectedBondTerm: '1yr' });
+    const bond = parsed.engineResult.lineItems.find((li) => String(li.service).startsWith('termite_bond'));
+    expect(bond).toMatchObject({ bondTerm: '1yr', perApp: 60, annual: 240, monthly: 20 });
+    expect(parsed.engineResult.summary.recurringAnnualAfterDiscount).toBe(before + 60);
+
+    const removal = applySelectedTermiteBondToEstimateData(parsed, 'none');
+    expect(removal).toMatchObject({ ok: true, monthlyDelta: -20, annualDelta: -240, selectedBondTerm: null });
+    expect(parsed.engineResult.lineItems.some((li) => String(li.service).startsWith('termite_bond'))).toBe(false);
+    expect(parsed.engineResult.summary.recurringAnnualAfterDiscount).toBe(before - 180);
+  });
+
+  test('a stale OPTIONS snapshot fails the save closed even with no bond selected', () => {
+    const data = mapV1ToLegacyShape(generateEstimate(termiteInput()));
+    const estimateData = { result: data };
+    expect(() => assertLiveTermiteBondRates(estimateData)).not.toThrow();
+    data.results.tmBait.bondOptions.find((o) => o.key === '10yr').perApp = 40;
+    let status;
+    try { assertLiveTermiteBondRates(estimateData); } catch (err) { status = err.statusCode || err.status; }
+    expect(status).toBe(422);
+  });
+});

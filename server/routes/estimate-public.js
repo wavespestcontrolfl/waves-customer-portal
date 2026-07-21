@@ -10019,18 +10019,37 @@ function isTermiteBondRow(svc = {}) {
 // totals by the exact bond delta; the caller applies the same deltas to
 // estimates.monthly_total/annual_total. The rewritten rows are the billing
 // truth: accept freezes them and the converter schedules/bills from them.
+// Quote-time bond options snapshot, both persisted shapes: v1-mapped saves
+// stamp it at result.results.tmBait.bondOptions; modular-engine saves carry
+// it on the termite-bait LINE ITEM inside engineResult.lineItems (codex
+// #2915 r3 — reading only the v1 spot left engine-backed estimates with a
+// priced snapshot but no selector).
+function termiteBondOptionsFromEstimateData(parsedData = {}) {
+  const v1 = parsedData?.result?.results?.tmBait?.bondOptions;
+  if (Array.isArray(v1) && v1.length) return v1;
+  const lineLists = [parsedData?.engineResult?.lineItems, parsedData?.result?.lineItems];
+  for (const lineItems of lineLists) {
+    if (!Array.isArray(lineItems)) continue;
+    const bait = lineItems.find((li) => li && li.service === 'termite_bait' && Array.isArray(li.bondOptions) && li.bondOptions.length);
+    if (bait) return bait.bondOptions;
+  }
+  return null;
+}
+
 function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
   const result = parsedData?.result && typeof parsedData.result === 'object' ? parsedData.result : null;
   const stats = result?.results?.tmBait || null;
-  const options = Array.isArray(stats?.bondOptions) ? stats.bondOptions : null;
-  if (!result || !options || !options.length) return { ok: false, reason: 'bond_not_available' };
+  const options = termiteBondOptionsFromEstimateData(parsedData);
+  if (!options || !options.length) return { ok: false, reason: 'bond_not_available' };
   const normalized = termKey === 'none' || termKey == null || termKey === '' ? null : String(termKey);
   const option = normalized ? options.find((o) => o.key === normalized) : null;
   if (normalized && !option) return { ok: false, reason: 'invalid_bond_term' };
 
-  const lists = [result.recurring, parsedData.recurring]
+  const lists = [result?.recurring, parsedData.recurring]
     .filter((rec, idx, arr) => rec && Array.isArray(rec.services) && arr.indexOf(rec) === idx);
-  if (!lists.length) return { ok: false, reason: 'bond_not_available' };
+  if (!lists.length) {
+    return applySelectedTermiteBondToRawEngineData(parsedData, option);
+  }
 
   const currentRow = lists[0].services.find(isTermiteBondRow) || null;
   const currentMonthly = Number(currentRow?.mo ?? currentRow?.monthly) || 0;
@@ -10069,10 +10088,70 @@ function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
       if (Number.isFinite(Number(result.totals[field]))) result.totals[field] = Math.round((Number(result.totals[field]) + delta) * 100) / 100;
     }
   }
-  stats.selectedBondTerm = option ? option.key : null;
+  if (stats) stats.selectedBondTerm = option ? option.key : null;
   const changed = monthlyDelta !== 0 || annualDelta !== 0
     || Boolean(currentRow) !== Boolean(option)
     || Boolean(currentRow && option && currentRow.bondTerm !== option.key);
+  return { ok: true, changed, monthlyDelta, annualDelta, selectedBondTerm: option ? option.key : null };
+}
+
+// Raw modular-engine payloads ({ engineInputs, engineResult }) have no
+// mapped recurring lists — the switch rewrites the engineResult itself:
+// the bond LINE ITEM (raw convention: service 'termite_bond' + bondTerm;
+// the read adapters term-key it) and the summary totals, by the same exact
+// snapshot deltas the mapped path uses (codex #2915 r3).
+function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
+  const engineResult = parsedData?.engineResult && typeof parsedData.engineResult === 'object'
+    ? parsedData.engineResult
+    : null;
+  if (!engineResult || !Array.isArray(engineResult.lineItems)) {
+    return { ok: false, reason: 'bond_not_available' };
+  }
+  const isBondLine = (li) => li && typeof li === 'object'
+    && String(li.service || '').toLowerCase().startsWith('termite_bond');
+  const currentLine = engineResult.lineItems.find(isBondLine) || null;
+  const currentMonthly = Number(currentLine?.monthly ?? currentLine?.mo) || 0;
+  const currentAnnual = Number(currentLine?.annual) || Math.round(currentMonthly * 12 * 100) / 100;
+  const nextMonthly = option ? Number(option.monthly) || 0 : 0;
+  const nextAnnual = option ? Number(option.annual) || 0 : 0;
+  const monthlyDelta = Math.round((nextMonthly - currentMonthly) * 100) / 100;
+  const annualDelta = Math.round((nextAnnual - currentAnnual) * 100) / 100;
+
+  engineResult.lineItems = engineResult.lineItems.filter((li) => !isBondLine(li));
+  if (option) {
+    engineResult.lineItems.push({
+      service: 'termite_bond',
+      bondTerm: option.key,
+      bondYears: option.years,
+      name: option.name || `Termite Bond (${option.label} Term)`,
+      annual: nextAnnual,
+      monthly: nextMonthly,
+      perApp: Number(option.perApp ?? option.quarterly) || 0,
+      visitsPerYear: 4,
+      discountable: false,
+    });
+  }
+  const summary = engineResult.summary && typeof engineResult.summary === 'object' ? engineResult.summary : null;
+  if (summary) {
+    const adjust = [
+      ['recurringAnnualBeforeDiscount', annualDelta],
+      ['recurringAnnualAfterDiscount', annualDelta],
+      ['recurringMonthlyAfterDiscount', monthlyDelta],
+      ['year1Total', annualDelta],
+      ['year2Annual', annualDelta],
+      ['year2Monthly', monthlyDelta],
+    ];
+    for (const [field, delta] of adjust) {
+      if (Number.isFinite(Number(summary[field]))) {
+        summary[field] = Math.round((Number(summary[field]) + delta) * 100) / 100;
+      }
+    }
+  }
+  const bait = engineResult.lineItems.find((li) => li && li.service === 'termite_bait');
+  if (bait) bait.selectedBondTerm = option ? option.key : null;
+  const changed = monthlyDelta !== 0 || annualDelta !== 0
+    || Boolean(currentLine) !== Boolean(option)
+    || Boolean(currentLine && option && currentLine.bondTerm !== option.key);
   return { ok: true, changed, monthlyDelta, annualDelta, selectedBondTerm: option ? option.key : null };
 }
 
@@ -15105,11 +15184,16 @@ function termiteBondOptionGateOn() {
 // switches terms via PUT /:token/bond (server-side re-total, /preferences
 // pattern), so accept freezes already-rewritten rows.
 function attachTermiteBondSelector(services = [], estData = {}) {
-  const stats = estData?.result?.results?.tmBait || estData?.results?.tmBait || null;
-  const options = Array.isArray(stats?.bondOptions) ? stats.bondOptions : null;
+  // Both persisted shapes (v1-mapped stats OR the raw engine bait line) —
+  // codex #2915 r3: engine-backed estimates carry the snapshot on the line
+  // item, and reading only the v1 spot left them selector-less.
+  const options = termiteBondOptionsFromEstimateData(estData)
+    || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
   const section = (services || []).find((s) => s?.key === 'termite_bait');
   if (!section) return services;
-  const rows = recurringServicesWithSupplements(estData?.result || estData || {});
+  // Raw engine payloads keep their rows under engineResult (same root
+  // precedence as the accept-path readers).
+  const rows = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
   const selectedRow = rows.find((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond')) || null;
   // Selector (unsold state) requires BOTH a persisted snapshot and the live
   // gate; the solo fold below runs off the selected ROW alone — sold state

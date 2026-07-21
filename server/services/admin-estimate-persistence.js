@@ -685,19 +685,38 @@ function assertNoDarkTermiteBondPayload(estimateData) {
 // refreshed the live constants; fail the save closed on any mismatch —
 // never silently rewrite a line the operator saw priced.
 function assertLiveTermiteBondRates(estimateData) {
+  const { TERMITE } = require('./pricing-engine/constants');
+  const staleError = () => errorWithStatus('Termite bond rates have changed — recalculate the estimate before saving.', 422);
+
   const lists = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services];
   const bondRows = lists
     .flatMap((list) => (Array.isArray(list) ? list : []))
     .filter((svc) => String(svc?.service || '').toLowerCase().startsWith('termite_bond')
       || /termite bond/i.test(String(svc?.name || '')));
-  if (!bondRows.length) return;
-  const { TERMITE } = require('./pricing-engine/constants');
   for (const row of bondRows) {
     const term = row.bondTerm || String(row.service || '').replace(/^termite_bond_/, '');
     const quarterly = Number(TERMITE.bond?.[term]?.quarterly);
     const rowPerApp = Number(row.perTreatment ?? row.perApp);
-    if (!(quarterly > 0) || !(Math.abs(rowPerApp - quarterly) <= 0.005)) {
-      throw errorWithStatus('Termite bond rates have changed — recalculate the estimate before saving.', 422);
+    if (!(quarterly > 0) || !(Math.abs(rowPerApp - quarterly) <= 0.005)) throw staleError();
+  }
+
+  // The quote-time OPTIONS snapshot must be live too (codex #2915 r3): a
+  // "No bond" save still persists selectable rates, and PUT /:token/bond
+  // later charges from that snapshot — a stale one would sell yesterday's
+  // price. Both persisted shapes (v1 stats + raw engine bait line).
+  const optionLists = [
+    estimateData?.result?.results?.tmBait?.bondOptions,
+    ...[estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+      .map((items) => (Array.isArray(items)
+        ? items.find((li) => li && li.service === 'termite_bait' && Array.isArray(li.bondOptions))?.bondOptions
+        : null)),
+  ];
+  for (const options of optionLists) {
+    if (!Array.isArray(options)) continue;
+    for (const opt of options) {
+      const quarterly = Number(TERMITE.bond?.[opt?.key]?.quarterly);
+      const optRate = Number(opt?.perApp ?? opt?.quarterly);
+      if (!(quarterly > 0) || !(Math.abs(optRate - quarterly) <= 0.005)) throw staleError();
     }
   }
 }
