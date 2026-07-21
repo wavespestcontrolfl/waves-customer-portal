@@ -23,7 +23,7 @@ const {
   dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
   REFUND_TXN_TYPES,
-  DISPUTE_TXN_TYPES,
+  DISPUTE_REPORTING_CATEGORIES,
 } = require('../services/pnl-report');
 
 describe('outflow transaction type sets', () => {
@@ -37,14 +37,16 @@ describe('outflow transaction type sets', () => {
     expect(REFUND_TXN_TYPES).not.toContain('payment_failure_refund');
   });
 
-  test('disputes net via adjustment/payment_reversal — open subtracts, won adds back, lost stays', () => {
-    // SUM(-amount) semantics over Stripe's dispute carriers: dispute.created
-    // posts a NEGATIVE adjustment (subtract), a won dispute posts a POSITIVE
-    // one (net back to zero), a lost dispute posts nothing further (stays
-    // subtracted). ACH-debit disputes ride payment_reversal. Deposit
-    // chargebacks are covered because deposit receipts stay on the received
-    // side and the loss shows here in its own period.
-    expect(DISPUTE_TXN_TYPES).toEqual(['adjustment', 'payment_reversal']);
+  test('disputes filter on reporting_category, never the umbrella adjustment type', () => {
+    // Stripe carries dispute money under type 'adjustment' — an umbrella
+    // type that also covers unrelated balance activity — so the filter must
+    // use the canonical reporting_category (round-4 pre-push P0). SUM(-amount)
+    // semantics: 'dispute' posts NEGATIVE on open (subtract), 'dispute_reversal'
+    // posts POSITIVE on win (net to zero), lost posts nothing (stays
+    // subtracted). Deposit chargebacks are covered because deposit receipts
+    // stay on the received side and the loss shows here in its own period.
+    expect(DISPUTE_REPORTING_CATEGORIES).toEqual(['dispute', 'dispute_reversal']);
+    expect(DISPUTE_REPORTING_CATEGORIES).not.toContain('adjustment');
     const sumNegated = (rows) => rows.reduce((s, r) => s - r.amount, 0);
     expect(sumNegated([{ amount: -150 }])).toBe(150); // open: revenue down
     expect(sumNegated([{ amount: -150 }, { amount: 150 }])).toBe(0); // won

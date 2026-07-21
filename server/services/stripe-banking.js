@@ -364,6 +364,10 @@ async function syncPayoutTransactions(stripePayoutId) {
         payout_id: payout.id,
         stripe_txn_id: txn.id,
         type: txn.type,
+        // Canonical classification — required to tell dispute movements
+        // (reporting_category dispute/dispute_reversal, carried under the
+        // umbrella type 'adjustment') apart from unrelated adjustments.
+        reporting_category: txn.reporting_category || null,
         amount: txn.amount / 100,
         fee: txn.fee / 100,
         net: txn.net / 100,

@@ -7,7 +7,7 @@ const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, REFUND_TXN_TYPES, DISPUTE_TXN_TYPES,
+  prorateAssetDepreciation, REFUND_TXN_TYPES, DISPUTE_REPORTING_CATEGORIES,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1185,10 +1185,13 @@ router.get('/export/tax-package', async (req, res, next) => {
     let refunds = [];
     try {
       refunds = await db('stripe_payout_transactions')
-        // Same type set pnl.csv nets — refunds (card, bank/local-method,
-        // bounced-refund reversals) AND dispute movements — so every outflow
+        // Same predicate pnl.csv nets — refunds by specific TYPE, dispute
+        // movements by canonical reporting_category — so every outflow
         // figure in the P&L has a supporting row here.
-        .whereIn('type', [...REFUND_TXN_TYPES, ...DISPUTE_TXN_TYPES])
+        .where(function refundsOrDisputes() {
+          this.whereIn('type', REFUND_TXN_TYPES)
+            .orWhereIn('reporting_category', DISPUTE_REPORTING_CATEGORIES);
+        })
         .whereRaw(
           "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
           [sd, ed],
