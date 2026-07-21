@@ -30,15 +30,15 @@ const CARD = COLORS.white;
 // Washes/borders are alpha tints of the three status colors themselves — no
 // separate pastel hex family (owner 2026-07-09: reduce the palette).
 const TONE = {
-  good: { color: COLORS.green, wash: 'rgba(22, 163, 74, 0.08)', border: 'rgba(22, 163, 74, 0.35)' },
-  watch: { color: COLORS.orange, wash: 'rgba(245, 158, 11, 0.08)', border: 'rgba(245, 158, 11, 0.38)' },
+  good: { color: COLORS.glassNavy, wash: 'rgba(4, 57, 94, 0.08)', border: 'rgba(4, 57, 94, 0.35)' },
+  watch: { color: COLORS.glassNavy, wash: 'rgba(4, 57, 94, 0.08)', border: 'rgba(4, 57, 94, 0.38)' },
   attention: { color: COLORS.red, wash: 'rgba(200, 16, 46, 0.06)', border: 'rgba(200, 16, 46, 0.3)' },
 };
 function tone(key) { return TONE[key] || TONE.watch; }
 
 // Entry-point node status → color + word. active = protection applied / clear = no
 // activity found (both reassuring green); watched = activity or recommendation noted.
-const NODE_COLOR = { active: COLORS.green, clear: COLORS.green, watched: COLORS.orange };
+const NODE_COLOR = { active: COLORS.glassNavy, clear: COLORS.glassNavy, watched: COLORS.glassNavy };
 const NODE_WORD = { active: 'Treated', clear: 'Clear', watched: 'Watching' };
 
 // Fixed positions for the entry points we recognize; anything else is distributed
@@ -104,7 +104,7 @@ function TrendArrow({ trend }) {
   const up = TREND_UP.has(trend);
   if (!up && !TREND_DOWN.has(trend)) return null;
   return (
-    <span style={{ color: up ? COLORS.red : COLORS.green, fontSize: 11, marginLeft: 4 }}>
+    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 11, marginLeft: 4 }}>
       {up ? '▲' : '▼'}
     </span>
   );
@@ -201,7 +201,7 @@ function PestPressureRating({ metric, token, live, onRefreshed }) {
   }, [token, metric && metric.submittedRating]);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
-    return <div style={{ marginTop: 12, fontSize: 14, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
+    return <div style={{ marginTop: 12, fontSize: 14, color: COLORS.glassNavy, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
   }
   if (!metric.rating || !token || !live) return null;
   const submit = async (n) => {
@@ -285,7 +285,7 @@ export function PestProtectionMap({ defense, print = false }) {
     const angle = (Math.PI * 2 * idx) / Math.max(nodes.length, 1) - Math.PI / 2;
     return { ...node, x: 160 + Math.cos(angle) * 96, y: 120 + Math.sin(angle) * 66, label: node.label, dy: 15 };
   });
-  const ringColor = '#0A7EC2';
+  const ringColor = COLORS.glassNavy;
   const rings = [
     { rx: 48, ry: 34, o: 0.85 }, { rx: 84, ry: 58, o: 0.5 },
     { rx: 120, ry: 82, o: 0.3 }, { rx: 150, ry: 100, o: 0.16 },
@@ -375,12 +375,12 @@ export function PestProtectionMap({ defense, print = false }) {
             <linearGradient id={`pestRing-${gradId}`} gradientUnits="userSpaceOnUse" x1="40" y1="10" x2="290" y2="225">
               <stop offset="0%" stopColor="#AFE1FF" />
               <stop offset="45%" stopColor="#38AAE1" />
-              <stop offset="78%" stopColor="#0A7EC2" />
+              <stop offset="78%" stopColor="#04395E" />
               <stop offset="100%" stopColor="#FFBE78" />
             </linearGradient>
             <radialGradient id={`pestGlow-${gradId}`} cx="0.5" cy="0.5" r="0.5">
-              <stop offset="0%" stopColor="#7CC7F0" stopOpacity="0.4" />
-              <stop offset="100%" stopColor="#7CC7F0" stopOpacity="0" />
+              <stop offset="0%" stopColor='rgba(4, 57, 94, 0.35)' stopOpacity="0.4" />
+              <stop offset="100%" stopColor='rgba(4, 57, 94, 0.35)' stopOpacity="0" />
             </radialGradient>
             <linearGradient id={`pestShimmer-${gradId}`} gradientUnits="objectBoundingBox" x1="0" y1="0" x2="1" y2="0">
               <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
@@ -505,7 +505,7 @@ export function PestProtectionMap({ defense, print = false }) {
             style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: '0.35s' }}
           >
             <span style={{ color: ringColor, fontWeight: 800, lineHeight: 1.2 }} aria-hidden="true">〰</span>
-            <span style={{ color: BODY }}><strong style={{ color: TEXT }}>Exterior perimeter</strong> — <span style={{ color: perimeterActive ? COLORS.green : COLORS.orange, fontWeight: 700 }}>{perimeterActive ? 'Treated' : 'Monitored'}</span>{perimeter.detail ? ` · ${perimeter.detail}` : ''}</span>
+            <span style={{ color: BODY }}><strong style={{ color: TEXT }}>Exterior perimeter</strong> — <span style={{ color: perimeterActive ? COLORS.glassNavy : COLORS.glassNavy, fontWeight: 700 }}>{perimeterActive ? 'Treated' : 'Monitored'}</span>{perimeter.detail ? ` · ${perimeter.detail}` : ''}</span>
           </div>
         ) : null}
         {placed.map((n, i) => {
@@ -530,7 +530,7 @@ export function PestProtectionMap({ defense, print = false }) {
 export function PestPrimaryMove({ primaryMove }) {
   if (!primaryMove?.title) return null;
   return (
-    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${'#0A7EC2'}` }}>
+    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.glassNavy}` }}>
       <div data-gt="eyebrow" style={eyebrow}>Your next step</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 6px' }}>{primaryMove.title}</h3>
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
@@ -573,12 +573,12 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 15, fontWeight: 700, color: TEXT }}>{bug.suspectLabel}</span>
               {bug.confirmedByTech ? (
-                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.green, background: '#ECFDF3', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.glassNavy, background: 'rgba(4, 57, 94, 0.08)', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
               ) : null}
             </div>
             {bug.whereSeen ? <div style={{ fontSize: 14, color: BODY, marginTop: 4 }}>Where: {bug.whereSeen}</div> : null}
             <details open={print} style={{ marginTop: 8 }}>
-              <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, color: '#0A7EC2', listStyle: 'none' }}>More about this pest</summary>
+              <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, color: COLORS.glassNavy, listStyle: 'none' }}>More about this pest</summary>
               <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
                 {bug.whyItMatters ? <Line label="Why it matters" value={bug.whyItMatters} /> : null}
                 {bug.whatWeDid ? <Line label="What we did" value={bug.whatWeDid} /> : null}
@@ -602,7 +602,7 @@ function Line({ label, value }) {
 }
 
 // ── Season forecast: "what to expect" (pest-forecast/) ──────────────────────────
-const LEVEL_COLOR = { high: COLORS.red, elevated: COLORS.orange, moderate: COLORS.orange, low: COLORS.green };
+const LEVEL_COLOR = { high: COLORS.red, elevated: COLORS.glassNavy, moderate: COLORS.glassNavy, low: COLORS.glassNavy };
 
 export function PestSeasonForecast({ forecast }) {
   if (!forecast?.pests?.length) return null;

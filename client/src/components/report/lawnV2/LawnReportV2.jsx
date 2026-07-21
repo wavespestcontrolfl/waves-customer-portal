@@ -32,19 +32,21 @@ const TAN = '#F2EEE0';
 // One vocabulary shared by the overall score, the diagnosis cards, water, and
 // mowing. Customer-safe words only — never "diseased", "infestation", etc.
 export const STATUS = {
-  strong: { label: 'Strong', color: COLORS.green },
-  healthy: { label: 'Healthy', color: COLORS.green },
-  good: { label: 'Good', color: COLORS.green },
-  stable: { label: 'Stable', color: COLORS.green },
-  balanced: { label: 'Balanced', color: COLORS.green },
-  ideal: { label: 'Ideal', color: COLORS.green },
-  watch: { label: 'Watch', color: COLORS.orange },
+  strong: { label: 'Strong', color: COLORS.glassNavy },
+  healthy: { label: 'Healthy', color: COLORS.glassNavy },
+  good: { label: 'Good', color: COLORS.glassNavy },
+  stable: { label: 'Stable', color: COLORS.glassNavy },
+  balanced: { label: 'Balanced', color: COLORS.glassNavy },
+  ideal: { label: 'Ideal', color: COLORS.glassNavy },
+  // Watch/off-target accents render brand navy, not orange — report surfaces
+  // keep one accent family (owner ruling 2026-07-21, uniform across V2 layers).
+  watch: { label: 'Watch', color: COLORS.glassNavy },
   needs_attention: { label: 'Needs attention', color: COLORS.red },
   urgent: { label: 'Needs attention', color: COLORS.red },
-  too_short: { label: 'A bit short', color: COLORS.orange },
-  too_tall: { label: 'A bit tall', color: COLORS.orange },
-  low: { label: 'Below target', color: COLORS.orange },
-  high: { label: 'Above target', color: COLORS.orange },
+  too_short: { label: 'A bit short', color: COLORS.glassNavy },
+  too_tall: { label: 'A bit tall', color: COLORS.glassNavy },
+  low: { label: 'Below target', color: COLORS.glassNavy },
+  high: { label: 'Above target', color: COLORS.glassNavy },
   tracking: { label: 'Tracking', color: COLORS.grayMid },
   not_assessed: { label: 'Not assessed', color: COLORS.grayMid },
 };
@@ -266,10 +268,10 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       ) : null}
 
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
-        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={'#0A7EC2'} /> : null}
+        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={COLORS.glassNavy} /> : null}
         {customerAction
-          ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
-          : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we’ve got it covered." dot={COLORS.green} /> : null)}
+          ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.glassNavy} />
+          : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we’ve got it covered." dot={COLORS.glassNavy} /> : null)}
         {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
       {seasonalNote ? (
@@ -283,9 +285,9 @@ export function LawnSnapshotHero({ snapshot = {} }) {
 export function LawnFollowUpCard({ followUp = null }) {
   if (!followUp || !followUp.scheduled) return null;
   return (
-    <Card style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}` }}>
+    <Card style={{ background: 'rgba(4, 57, 94, 0.10)', border: `1px solid ${COLORS.glassNavy}` }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <span style={{ flex: 'none', width: 30, height: 30, borderRadius: 999, background: COLORS.green, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 16, fontWeight: 800 }}>✓</span>
+        <span style={{ flex: 'none', width: 30, height: 30, borderRadius: 999, background: COLORS.glassNavy, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 16, fontWeight: 800 }}>✓</span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 15.5, color: TEXT }}>{followUp.headline || 'Follow-up already planned'}</div>
           {followUp.reason ? <p style={{ margin: '4px 0 0', fontSize: 14, color: BODY, lineHeight: 1.5 }}>{followUp.reason}</p> : null}
@@ -530,7 +532,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
 function InsightLine({ label, value, strong }) {
   return (
     <div style={{ fontSize: 13.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
-      <span style={{ fontWeight: 700, color: strong ? statusMeta('healthy').color : MUTED }}>{label}: </span>
+      <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
   );
@@ -567,15 +569,15 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       </div>
       {/* Stacked bar with a target marker — segments grow on mount */}
       <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
-        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: '#0A7EC2', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: '#7CC7F0', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
         {Number.isFinite(target) ? (
           <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
         ) : null}
       </div>
       <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
-        {hasRain ? <Legend color={'#0A7EC2'} label="Rain" /> : null}
-        {hasIrr ? <Legend color="#7CC7F0" label="Irrigation" /> : null}
+        {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
+        {hasIrr ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
         {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
       </div>
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -587,7 +589,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
-        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
@@ -675,7 +677,7 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
               <div style={{ fontSize: 10.5, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
               <div style={{
                 width: '100%', maxWidth: 26, height: Math.max(2, mounted ? h : 0),
-                background: v ? (on ? COLORS.glassNavy : '#0A7EC2') : BORDER, borderRadius: 4,
+                background: v ? (on ? COLORS.glassNavy : COLORS.glassNavy) : BORDER, borderRadius: 4,
                 transition: `height 0.7s cubic-bezier(0.4,0,0.2,1) ${i * 45}ms, background 0.15s ease`,
               }} />
               <div style={{ fontSize: 11, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{d.d}</div>
@@ -720,7 +722,7 @@ export function MowingHeightGauge({ mowing = {} }) {
           <div style={{ position: 'relative', height: 34 }}>
             <div style={{ position: 'absolute', left: 0, right: 0, top: 13, height: 8, borderRadius: 6, background: '#F1EEE6' }} />
             {/* ideal band */}
-            <div style={{ position: 'absolute', left: pct(lo), width: `calc(${pct(hi)} - ${pct(lo)})`, top: 13, height: 8, borderRadius: 6, background: COLORS.greenLight, border: `1px solid ${COLORS.green}` }} />
+            <div style={{ position: 'absolute', left: pct(lo), width: `calc(${pct(hi)} - ${pct(lo)})`, top: 13, height: 8, borderRadius: 6, background: 'rgba(4, 57, 94, 0.10)', border: `1px solid ${COLORS.glassNavy}` }} />
             {/* measured marker */}
             <div style={{ position: 'absolute', left: pct(measured), top: 4, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ width: 3, height: 26, background: statusMeta(status).color, borderRadius: 2 }} />
@@ -736,7 +738,7 @@ export function MowingHeightGauge({ mowing = {} }) {
         <figure style={{ margin: hasGauge ? '16px 0 0' : 0 }}>
           {/* Eager: presigned URL — see LawnPhotoStrip. */}
           <img src={photoUrl} alt="On-site lawn length"
-            style={{ width: '100%', borderRadius: 10, display: 'block', border: `1px solid ${COLORS.greenLight}` }} />
+            style={{ width: '100%', borderRadius: 10, display: 'block', border: `1px solid ${'rgba(4, 57, 94, 0.10)'}` }} />
           <figcaption style={{ marginTop: 6, fontSize: 12, color: MUTED }}>On-site lawn length</figcaption>
         </figure>
       ) : null}
@@ -748,9 +750,11 @@ export function MowingHeightGauge({ mowing = {} }) {
 }
 
 // ── 5b. What Waves did today (solutions / products applied) ──────────────────────
+// Product dots are list bullets, not statuses — one navy family (owner
+// 2026-07-21); red stays reserved for needs-attention chrome only.
 const KIND_DOT = {
-  fungicide: '#0A7EC2', herbicide: COLORS.orange, pre_emergent: COLORS.orange,
-  insecticide: COLORS.red, fertilizer: COLORS.green, supplement: COLORS.green, other: COLORS.grayMid,
+  fungicide: COLORS.glassNavy, herbicide: COLORS.glassNavy, pre_emergent: COLORS.glassNavy,
+  insecticide: COLORS.glassNavy, fertilizer: COLORS.glassNavy, supplement: COLORS.glassNavy, other: COLORS.grayMid,
 };
 
 export function LawnTreatmentCard({ treatment = {} }) {
@@ -843,7 +847,7 @@ export function LawnVisitTimeline({ timeline = {} }) {
               }}
             >
               {!isLast ? <span style={{ position: 'absolute', left: 13, top: 28, bottom: 0, width: 2, background: BORDER }} /> : null}
-              <span style={{ flex: 'none', width: 28, height: 28, borderRadius: 999, background: COLORS.green, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 14, fontWeight: 800, zIndex: 1 }}>
+              <span style={{ flex: 'none', width: 28, height: 28, borderRadius: 999, background: COLORS.glassNavy, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 14, fontWeight: 800, zIndex: 1 }}>
                 <TimelineGlyph type={e.type || ''} />
               </span>
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -977,7 +981,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 
       {Number.isFinite(delta) && delta !== 0 ? (
         <div style={{ marginTop: 12, fontSize: 14.5, color: BODY }}>
-          <strong style={{ color: delta > 0 ? COLORS.green : COLORS.orange }}>{delta > 0 ? '+' : ''}{delta} points</strong> overall since your first assessment.
+          <strong style={{ color: delta > 0 ? COLORS.glassNavy : COLORS.glassNavy }}>{delta > 0 ? '+' : ''}{delta} points</strong> overall since your first assessment.
         </div>
       ) : null}
       {note ? (
@@ -990,7 +994,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 // ── 6. Trends across visits ──────────────────────────────────────────────────────
 // Reusable line chart. points = [{ label, value }]. Needs 2+ scored points to draw
 // (a single visit has no trend — matches V1, which hides the trend until 2+ visits).
-export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = '#0A7EC2', zeroLine = false, band = null, compact = false, footnote = null }) {
+export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = COLORS.glassNavy, zeroLine = false, band = null, compact = false, footnote = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const gidRef = useRef(`lg-${Math.random().toString(36).slice(2)}`);
@@ -1038,7 +1042,7 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
         {band && Number.isFinite(band[0]) && Number.isFinite(band[1]) ? (
           <rect x={padX} y={y(Math.min(band[1], hi))} width={W - 2 * padX}
                 height={Math.max(0, y(Math.max(band[0], lo)) - y(Math.min(band[1], hi)))}
-                fill={COLORS.greenLight} opacity="0.7" />
+                fill={'rgba(4, 57, 94, 0.10)'} opacity="0.7" />
         ) : null}
         {zeroLine ? <line x1={padX} x2={W - padX} y1={y(0)} y2={y(0)} stroke={BORDER} strokeDasharray="3 3" /> : null}
         {/* gradient area fades in; line draws on mount */}
@@ -1086,8 +1090,8 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
 
 // Picks an accent color for a trend's latest point so the line reads at a glance.
 function scoreAccent(v) { return statusMeta(scoreStatus(v)).color; }
-function bandAccent(v, lo, hi) { return v >= lo && v <= hi ? COLORS.green : COLORS.orange; }
-function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.green : COLORS.orange; }
+function bandAccent(v, lo, hi) { return v >= lo && v <= hi ? COLORS.glassNavy : COLORS.glassNavy; }
+function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.glassNavy : COLORS.glassNavy; }
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
 export function LawnTrends({ trends = {} }) {

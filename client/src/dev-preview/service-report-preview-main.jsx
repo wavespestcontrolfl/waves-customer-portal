@@ -11,6 +11,8 @@ import ReportViewPage from '../pages/ReportViewPage';
 import legacyLawnReport from '../pages/__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from '../pages/__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from '../pages/__fixtures__/mosquito-report-v2.json';
+import pestReportV2 from '../pages/__fixtures__/pest-report-v2.json';
+import treeShrubReportV2 from '../pages/__fixtures__/tree-shrub-report-v2.json';
 
 // Client-built coverage: strip the API serviceCoverage so the page's own
 // normalizeServiceCoverage builds the section from raw locations — the code
@@ -64,6 +66,8 @@ const SCENARIOS = {
   'server-summary': serverSummary,
   'lawn-v2': lawnReportV2,
   'mosquito-v2': mosquitoReportV2,
+  'pest-v2': pestReportV2,
+  'tree-shrub-v2': treeShrubReportV2,
 };
 const scenario = new URLSearchParams(window.location.search).get('scenario') || 'server-summary';
 const payload = SCENARIOS[scenario] || serverSummary;

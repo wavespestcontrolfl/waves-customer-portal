@@ -361,12 +361,13 @@ function formatReportTitleDate(value) {
 }
 
 function serviceDisplayName(data = {}) {
-  const raw = data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
-  // Customers see the service, not the billing cadence: "Quarterly Pest Control"
-  // renders as "Pest Control" (owner 2026-07-09 — match lawn / tree & shrub, which
-  // carry no term qualifier).
-  const stripped = String(raw).replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '').trim();
-  return stripped || raw;
+  // The EXACT service name, cadence included — "Bi-Monthly Tree & Shrub Care
+  // Service" (owner 2026-07-21: every service report names the exact service;
+  // reverses the 2026-07-09 cadence-strip ruling). serviceDisplayName stays
+  // first: for linked reports the server intentionally sends the LIVE
+  // scheduled-service name there, while serviceType is the service-record
+  // snapshot and can lag a rename (codex P2).
+  return String(data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service').trim() || 'Service';
 }
 
 function reportDocumentTitle(data = {}) {
@@ -5160,10 +5161,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           justify-content: center;
           min-height: 34px;
-          border: 1px solid #86efac;
+          border: 1px solid rgba(4, 57, 94, 0.45);
           border-radius: 999px;
-          background: rgba(22, 163, 74, 0.12);
-          color: #15803D;
+          background: rgba(4, 57, 94, 0.10);
+          color: #04395E;
           font-size: 12px;
           line-height: 1;
           font-weight: 800;
@@ -5225,9 +5226,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border: 1px solid rgba(22, 163, 74, 0.35);
-          background: rgba(22, 163, 74, 0.12);
-          color: #15803D;
+          border: 1px solid rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.10);
+          color: #04395E;
         }
         .status-timeline-marker-pending {
           border-color: #cbd5e1;
@@ -5277,8 +5278,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .readiness-card {
-          border-color: rgba(22, 163, 74, 0.35);
-          background: #f0fdf4;
+          border-color: rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.05);
         }
         .readiness-card h2 {
           margin-bottom: 8px;
@@ -5402,9 +5403,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .service-coverage-chip strong {
           font-size: 14px;
         }
-        .service-coverage-chip.status-green { border-color: #86efac; background: rgba(22, 163, 74, 0.12); color: #15803D; }
-        .service-coverage-chip.status-blue { border-color: rgba(10, 126, 194, 0.45); background: rgba(10, 126, 194, 0.12); color: #0A7EC2; }
-        .service-coverage-chip.status-orange { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #B45309; }
+        .service-coverage-chip.status-green { border-color: rgba(4, 57, 94, 0.45); background: rgba(4, 57, 94, 0.10); color: #04395E; }
+        .service-coverage-chip.status-blue { border-color: rgba(4, 57, 94, 0.35); background: rgba(4, 57, 94, 0.07); color: #04395E; }
+        .service-coverage-chip.status-orange { border-color: rgba(4, 57, 94, 0.45); background: rgba(4, 57, 94, 0.10); color: #04395E; }
         .service-coverage-card-grid {
           display: grid;
           grid-template-columns: minmax(0, .88fr) minmax(320px, 1.12fr);
@@ -5628,23 +5629,23 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
-          fill: #15803D;
-          stroke: #15803D;
+          fill: #04395E;
+          stroke: #04395E;
         }
         .coverage-area.status-light-green,
         .coverage-area.status-partially_treated {
           fill: url(#coverage-partial-pattern);
-          stroke: #15803d;
+          stroke: #04395E;
         }
         .coverage-area.status-blue,
         .coverage-marker.status-blue .coverage-marker-inner {
-          fill: #2563eb;
-          stroke: #0A7EC2;
+          fill: rgba(4, 57, 94, 0.55);
+          stroke: #04395E;
         }
         .coverage-area.status-orange,
         .coverage-marker.status-orange .coverage-marker-inner {
-          fill: #f59e0b;
-          stroke: #92400e;
+          fill: #04395E;
+          stroke: #032B47;
         }
         .coverage-area.status-red,
         .coverage-marker.status-red .coverage-marker-inner {
@@ -5657,10 +5658,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke: #475569;
         }
         .coverage-partial-bg {
-          fill: rgba(22,163,74,.28);
+          fill: rgba(4,57,94,.24);
         }
         .coverage-partial-line {
-          stroke: #15803D;
+          stroke: #04395E;
           stroke-width: 2;
           opacity: .65;
         }
@@ -5671,10 +5672,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-linejoin: round;
           opacity: .92;
         }
-        .coverage-line.status-green { stroke: #15803D; }
-        .coverage-line.status-light-green { stroke: #65a30d; stroke-dasharray: 12 8; }
-        .coverage-line.status-blue { stroke: #2563eb; stroke-dasharray: 7 7; }
-        .coverage-line.status-orange { stroke: #f59e0b; stroke-dasharray: 10 8; }
+        .coverage-line.status-green { stroke: #04395E; }
+        .coverage-line.status-light-green { stroke: rgba(4, 57, 94, 0.7); stroke-dasharray: 12 8; }
+        .coverage-line.status-blue { stroke: rgba(4, 57, 94, 0.55); stroke-dasharray: 7 7; }
+        .coverage-line.status-orange { stroke: #04395E; stroke-dasharray: 10 8; }
         .coverage-line.status-red { stroke: #dc2626; stroke-dasharray: 7 6; }
         .coverage-line.status-gray { stroke: #94a3b8; stroke-dasharray: 8 8; }
         .coverage-geometry-group:focus,
@@ -5762,17 +5763,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
         }
         .coverage-legend-item.status-green .coverage-legend-swatch,
-        .coverage-status-chip.status-green { background: rgba(22, 163, 74, 0.12); border-color: #86efac; color: #15803D; }
-        .coverage-legend-item.status-green .coverage-legend-swatch { background: #16a34a; color: #fff; }
+        .coverage-status-chip.status-green { background: rgba(4, 57, 94, 0.10); border-color: rgba(4, 57, 94, 0.45); color: #04395E; }
+        .coverage-legend-item.status-green .coverage-legend-swatch { background: #04395E; color: #fff; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch,
-        .coverage-status-chip.status-light-green { background: #ecfccb; border-color: #bef264; color: #365314; }
-        .coverage-legend-item.status-light-green .coverage-legend-swatch { background: #65a30d; color: #fff; }
+        .coverage-status-chip.status-light-green { background: rgba(4, 57, 94, 0.08); border-color: rgba(4, 57, 94, 0.35); color: #04395E; }
+        .coverage-legend-item.status-light-green .coverage-legend-swatch { background: rgba(4, 57, 94, 0.7); color: #fff; }
         .coverage-legend-item.status-blue .coverage-legend-swatch,
-        .coverage-status-chip.status-blue { background: rgba(10, 126, 194, 0.12); border-color: rgba(10, 126, 194, 0.45); color: #0A7EC2; }
-        .coverage-legend-item.status-blue .coverage-legend-swatch { background: #2563eb; color: #fff; }
+        .coverage-status-chip.status-blue { background: rgba(4, 57, 94, 0.07); border-color: rgba(4, 57, 94, 0.35); color: #04395E; }
+        .coverage-legend-item.status-blue .coverage-legend-swatch { background: rgba(4, 57, 94, 0.55); color: #fff; }
         .coverage-legend-item.status-orange .coverage-legend-swatch,
-        .coverage-status-chip.status-orange { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.45); color: #B45309; }
-        .coverage-legend-item.status-orange .coverage-legend-swatch { background: #f59e0b; color: #fff; }
+        .coverage-status-chip.status-orange { background: rgba(4, 57, 94, 0.10); border-color: rgba(4, 57, 94, 0.45); color: #04395E; }
+        .coverage-legend-item.status-orange .coverage-legend-swatch { background: #04395E; color: #fff; }
         .coverage-legend-item.status-red .coverage-legend-swatch,
         .coverage-status-chip.status-red { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
         .coverage-legend-item.status-red .coverage-legend-swatch { background: #dc2626; color: #fff; }
@@ -5935,9 +5936,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          border: 1px solid rgba(22, 163, 74, 0.35);
-          background: rgba(22, 163, 74, 0.12);
-          color: #15803D;
+          border: 1px solid rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.10);
+          color: #04395E;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -5949,13 +5950,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .workflow-status-current .workflow-event-icon {
-          border-color: rgba(10, 126, 194, 0.45);
-          background: rgba(10, 126, 194, 0.12);
-          color: #0A7EC2;
+          border-color: rgba(4, 57, 94, 0.45);
+          background: rgba(4, 57, 94, 0.10);
+          color: #04395E;
         }
         .workflow-status-skipped .workflow-event-icon {
-          border-color: rgba(245, 158, 11, 0.45);
-          background: rgba(245, 158, 11, 0.12);
+          border-color: rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.07);
           color: #B45309;
         }
         .workflow-event-body {

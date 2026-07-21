@@ -1,0 +1,216 @@
+{
+  "reportVersion": "service_report_v1",
+  "serviceDate": "2026-07-21",
+  "customerName": "Jordan Rivera",
+  "customerFirstName": "Jordan",
+  "technician": "Adam",
+  "companyName": "Waves Pest Control",
+  "serviceLine": "tree_shrub",
+  "serviceType": "Bi-Monthly Tree & Shrub Care Service",
+  "reportV2": {
+    "snapshot": {
+      "overallScore": 71,
+      "status": "healthy",
+      "statusHeadline": "Healthy \u2014 monitoring light pest pressure",
+      "scoreExplanation": "Your landscape is stable overall \u2014 the score is mainly pulled down by pest activity signals, while the other areas are generally in a healthy range.",
+      "peaceOfMind": "No urgent plant decline was found today. We noted 3 items to monitor and will recheck them on future visits.",
+      "todaysFocus": [
+        "Plant treatment",
+        "Color & growth",
+        "Insect treatment",
+        "Fertilizer"
+      ],
+      "watching": [
+        "Light pest-pressure signals to monitor",
+        "Water coverage in one area is worth a check",
+        "We looked into what you flagged"
+      ],
+      "mainWatch": "Visible pest-pressure signals on some foliage (chewing, stippling, or residue).",
+      "wavesNext": "Recheck the affected foliage next visit to confirm the signals are easing.",
+      "customerAction": null,
+      "noActionNeeded": true
+    },
+    "diagnosis": [
+      {
+        "key": "foliage_fullness",
+        "label": "Foliage Fullness",
+        "score": 78,
+        "status": "healthy",
+        "confidence": "ai_supported",
+        "customerExplanation": "Good fullness overall with only minor thin spots.",
+        "evidence": [],
+        "explanation": "Good fullness overall with only minor thin spots."
+      },
+      {
+        "key": "leaf_color_vigor",
+        "label": "Leaf Color & Vigor",
+        "score": 72,
+        "status": "healthy",
+        "confidence": "ai_supported",
+        "customerExplanation": "Healthy, fairly even color across the plants.",
+        "evidence": [],
+        "explanation": "Healthy, fairly even color across the plants."
+      },
+      {
+        "key": "pest_activity",
+        "label": "Pest Activity Signals",
+        "score": 58,
+        "status": "watch",
+        "confidence": "ai_supported",
+        "customerExplanation": "Light pest-pressure signals on some foliage \u2014 worth monitoring.",
+        "evidence": [],
+        "explanation": "Light pest-pressure signals on some foliage \u2014 worth monitoring."
+      },
+      {
+        "key": "disease_leaf_spot",
+        "label": "Disease / Leaf Spot Signals",
+        "score": 81,
+        "status": "healthy",
+        "confidence": "ai_supported",
+        "customerExplanation": "No clear leaf-spot signals to monitor right now.",
+        "evidence": [],
+        "explanation": "No clear leaf-spot signals to monitor right now."
+      },
+      {
+        "key": "water_heat_mechanical_stress",
+        "label": "Water, Heat & Pruning Stress",
+        "score": 66,
+        "status": "watch",
+        "confidence": "ai_supported",
+        "customerExplanation": "Some dry margins, wilt, or pruning stress worth watching.",
+        "evidence": [],
+        "explanation": "Some dry margins, wilt, or pruning stress worth watching."
+      }
+    ],
+    "insights": [
+      {
+        "category": "pest_pressure",
+        "status": "watch",
+        "confidence": "ai_supported",
+        "headline": "Light pest-pressure signals to monitor",
+        "whatWeSaw": "Visible pest-pressure signals on some foliage (chewing, stippling, or residue).",
+        "whyItMatters": "Catching pest pressure early keeps it from spreading across the planting.",
+        "wavesAction": "Treated the affected foliage today and built follow-up monitoring into the plan.",
+        "nextVisitPlan": "Recheck the affected foliage next visit to confirm the signals are easing.",
+        "priority": 1
+      },
+      {
+        "category": "water_stress",
+        "status": "watch",
+        "confidence": "area_estimated",
+        "headline": "Water coverage in one area is worth a check",
+        "whatWeSaw": "Visible dry-stress signals in one shrub area even though the property got rain this week.",
+        "whyItMatters": "That pattern usually points to coverage in that specific bed rather than the whole property needing more water.",
+        "wavesAction": "Flagged the area and will recheck coverage there next visit.",
+        "customerAction": "Check that the irrigation reaches that bed evenly rather than watering the whole property more.",
+        "priority": 2
+      },
+      {
+        "category": "customer_concern",
+        "status": "watch",
+        "confidence": "tech_confirmed",
+        "headline": "We looked into what you flagged",
+        "whatWeSaw": "You mentioned: \u201cCustomer asked about yellowing on the gardenia hedge near the lanai.\u201d. We checked it during the visit.",
+        "whyItMatters": "We want what you noticed tracked on the report, not lost.",
+        "wavesAction": "Noted it on this visit and built any follow-up into the plan.",
+        "nextVisitPlan": "Follow up on it next visit.",
+        "priority": 3
+      }
+    ],
+    "plantGroups": [],
+    "water": null,
+    "treatment": {
+      "products": [
+        {
+          "name": "Dominion 2L",
+          "activeIngredient": null,
+          "kind": "insecticide",
+          "whatItDoes": "protects the plants from foliage-feeding pests",
+          "targets": [],
+          "area": null
+        },
+        {
+          "name": "Ferromec AC 15-0-0",
+          "activeIngredient": null,
+          "kind": "fertilizer",
+          "whatItDoes": "feeds the plants to support color, density, and new growth",
+          "targets": [],
+          "area": null
+        }
+      ],
+      "focus": [
+        "Plant treatment",
+        "Color & growth",
+        "Insect treatment",
+        "Fertilizer"
+      ],
+      "kinds": [
+        "insecticide",
+        "fertilizer"
+      ]
+    },
+    "heroPhoto": {
+      "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNjAwIj48cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjYwMCIgZmlsbD0iaHNsKDE1MCw0NSUsMzglKSIvPjxyZWN0IHk9IjQ0MCIgd2lkdGg9IjgwMCIgaGVpZ2h0PSIxNjAiIGZpbGw9ImhzbCgxNTAsMzUlLDI2JSkiLz48dGV4dCB4PSI0MDAiIHk9IjMxMCIgZm9udC1mYW1pbHk9IkhlbHZldGljYSIgZm9udC1zaXplPSI0MiIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+R2FyZGVuaWEgaGVkZ2U8L3RleHQ+PC9zdmc+",
+      "label": "Best view",
+      "caption": "Pest-pressure signals on gardenia hedge"
+    },
+    "photos": [
+      {
+        "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNjAwIj48cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjYwMCIgZmlsbD0iaHNsKDE1MCw0NSUsMzglKSIvPjxyZWN0IHk9IjQ0MCIgd2lkdGg9IjgwMCIgaGVpZ2h0PSIxNjAiIGZpbGw9ImhzbCgxNTAsMzUlLDI2JSkiLz48dGV4dCB4PSI0MDAiIHk9IjMxMCIgZm9udC1mYW1pbHk9IkhlbHZldGljYSIgZm9udC1zaXplPSI0MiIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+R2FyZGVuaWEgaGVkZ2U8L3RleHQ+PC9zdmc+",
+        "label": "Best view",
+        "caption": "Pest-pressure signals on gardenia hedge"
+      },
+      {
+        "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNjAwIj48cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjYwMCIgZmlsbD0iaHNsKDEyMCw0NSUsMzglKSIvPjxyZWN0IHk9IjQ0MCIgd2lkdGg9IjgwMCIgaGVpZ2h0PSIxNjAiIGZpbGw9ImhzbCgxMjAsMzUlLDI2JSkiLz48dGV4dCB4PSI0MDAiIHk9IjMxMCIgZm9udC1mYW1pbHk9IkhlbHZldGljYSIgZm9udC1zaXplPSI0MiIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+RnJvbnQgZm91bmRhdGlvbiBiZWQ8L3RleHQ+PC9zdmc+",
+        "label": "bed",
+        "caption": "Beds treated and fertilized today"
+      },
+      {
+        "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNjAwIj48cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjYwMCIgZmlsbD0iaHNsKDkwLDQ1JSwzOCUpIi8+PHJlY3QgeT0iNDQwIiB3aWR0aD0iODAwIiBoZWlnaHQ9IjE2MCIgZmlsbD0iaHNsKDkwLDM1JSwyNiUpIi8+PHRleHQgeD0iNDAwIiB5PSIzMTAiIGZvbnQtZmFtaWx5PSJIZWx2ZXRpY2EiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlN5bHZlc3RlciBwYWxtPC90ZXh0Pjwvc3ZnPg==",
+        "label": "palm",
+        "caption": "Palm canopy full, good frond color"
+      },
+      {
+        "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNjAwIj48cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjYwMCIgZmlsbD0iaHNsKDMwLDQ1JSwzOCUpIi8+PHJlY3QgeT0iNDQwIiB3aWR0aD0iODAwIiBoZWlnaHQ9IjE2MCIgZmlsbD0iaHNsKDMwLDM1JSwyNiUpIi8+PHRleHQgeD0iNDAwIiB5PSIzMTAiIGZvbnQtZmFtaWx5PSJIZWx2ZXRpY2EiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNyb3RvbiByb3c8L3RleHQ+PC9zdmc+",
+        "label": "disease",
+        "caption": "Early leaf-spot signals on croton"
+      }
+    ],
+    "photoSummary": "Shrub beds show mostly healthy new growth. Scattered pest-pressure signals on the gardenia hedge along the south side. A few croton leaves show early leaf-spot signals. Beds near the driveway look slightly dry.",
+    "trends": {
+      "overall": [
+        {
+          "label": "Mar 21",
+          "value": 62
+        },
+        {
+          "label": "May 19",
+          "value": 67
+        },
+        {
+          "label": "Jul 21",
+          "value": 71
+        }
+      ]
+    },
+    "smsSummary": "Your tree & shrub report is ready: healthy \u2014 monitoring light pest pressure. No action needed on your end."
+  },
+  "products": [
+    {
+      "name": "Dominion 2L",
+      "category": "insecticide",
+      "target": "Scale / whitefly",
+      "method": "Soil drench"
+    },
+    {
+      "name": "Ferromec AC 15-0-0",
+      "category": "fertilizer",
+      "target": "Nutrient support",
+      "method": "Foliar"
+    }
+  ],
+  "petAdvisory": "Keep pets off treated beds and foliage until dry.",
+  "customerEmail": "test.customer@example.com",
+  "customerPhone": "+19415550190",
+  "serviceAddress": "1200 Palm Row Ct, Parrish, FL 34219"
+}
