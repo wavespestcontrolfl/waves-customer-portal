@@ -183,11 +183,17 @@ function PayoutsTab() {
   const [txns, setTxns] = useState({});
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
+  // reqId guard (same pattern as CashFlowTab): rapid Next/Previous clicks
+  // must not let a slower OLDER request — success or failure — clobber the
+  // newer page's rows or paint its error.
+  const reqIdRef = useRef(0);
 
   const load = useCallback(async (p) => {
+    const reqId = ++reqIdRef.current;
     setLoading(true);
     try {
       const d = await adminFetch(`/admin/banking/payouts?limit=20&page=${p}`);
+      if (reqId !== reqIdRef.current) return;
       setPayouts(d.payouts || []);
       setLoadError(null);
       // Use the authoritative `pages` field from the backend instead of guessing
@@ -198,12 +204,13 @@ function PayoutsTab() {
           : (d.payouts || []).length === 20,
       );
     } catch (e) {
+      if (reqId !== reqIdRef.current) return;
       // Distinguish "load failed" from "no payouts" — the old no-op catch
       // rendered a silently empty table.
       setPayouts([]);
       setLoadError(e.message || "Failed to load");
     }
-    setLoading(false);
+    if (reqId === reqIdRef.current) setLoading(false);
   }, []);
 
   useEffect(() => {
