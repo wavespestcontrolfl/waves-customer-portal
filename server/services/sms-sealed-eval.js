@@ -681,6 +681,186 @@ async function evaluateExamGate({ dbi = db } = {}) {
   return blockers;
 }
 
+// --- Auto-run on prompt bump -----------------------------------------------
+
+const AUTO_EXAM_MIN_ITEMS = envNum('SEALED_EXAM_AUTO_MIN_ITEMS', 10);
+const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
+
+/**
+ * Nightly sweep: make sure the CURRENT drafter PROMPT_VERSION has a completed
+ * exam on every leg — covers both the first-ever baselines and every future
+ * prompt bump, with no human click. No-ops (cheap SELECTs only) when the
+ * current version is already examined, so the nightly cadence costs nothing
+ * between bumps.
+ *
+ * Spend rails gate NEW runs only: refuses to CREATE when the item pool
+ * exceeds SEALED_EXAM_AUTO_MAX_ITEMS (each item is several LLM calls; the
+ * refusal is LOGGED, never silent) or is below SEALED_EXAM_AUTO_MIN_ITEMS
+ * (too small to mean anything). Resumes are never pool-gated — they finish
+ * an already-paid, creation-frozen cohort. A completed run per (leg,
+ * version) always short-circuits, even when a newer failed rerun exists; a
+ * stranded 'running' row (crash/deploy) is resumed, not skipped, whenever
+ * the processing lock is free. Serialized against the manual endpoint via
+ * the same 'sms-sealed-eval' advisory lock and the one-running unique index.
+ *
+ * Ends with ONE digest bell per sweep that actually ran an exam — including
+ * a pointer at pending pathology patch proposals, which the new baselines
+ * exist to grade.
+ */
+async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
+  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  const { runExclusive, isLocked } = require('../utils/cron-lock');
+
+  const legs = {};
+  let ran = 0;
+
+  // Crash recovery comes FIRST — never skip on a stranded row. A
+  // status='running' row with nobody holding the processing lock is a
+  // crash/deploy leftover, and skipping would wedge the sweep forever (the
+  // one-running index blocks every new create while it sits). Resume it:
+  // runSealedExam completes a same-version run and retires a stale-version
+  // one. Only a lock actually HELD means a sitting is genuinely in progress.
+  const inFlight = await dbi('sms_sealed_eval_runs')
+    .where({ status: 'running' })
+    .first('id', 'provider_leg', 'prompt_version');
+  if (inFlight) {
+    if (await isLocked('sms-sealed-eval')) {
+      return { skipped: 'run_in_progress', version: currentVersion };
+    }
+    try {
+      const result = await runExclusive('sms-sealed-eval',
+        () => examRunner({ runId: inFlight.id, dbi }), { recordHealth: false });
+      if (result && result.skipped) {
+        return { skipped: 'run_in_progress', version: currentVersion };
+      }
+      // Only claim the leg when the stranded run examined the CURRENT
+      // version — a retired stale-version row must not shadow this leg's
+      // fresh run below.
+      if (inFlight.prompt_version === currentVersion) {
+        if (result && result.status === 'complete') {
+          legs[inFlight.provider_leg] = { outcome: 'resumed_stranded', runId: inFlight.id };
+          ran += 1;
+        } else {
+          // Ended failed again — leave it for tomorrow's failed-run resume
+          // rather than re-billing a flapping provider twice in one night.
+          legs[inFlight.provider_leg] = { outcome: 'exam_failed', error: result && result.error };
+          logger.error(`[sealed-eval] stranded-run resume (${inFlight.provider_leg} leg) ended failed: ${result && result.error}`);
+        }
+      }
+    } catch (err) {
+      // The stale-version resume path retires the row then throws by
+      // contract — the retirement is the recovery; the loop below starts
+      // fresh current-version runs.
+      logger.warn(`[sealed-eval] stranded-run recovery (${String(inFlight.id).slice(0, 8)}): ${err.message}`);
+    }
+  }
+
+  const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
+  const active = Number(activeCount) || 0;
+
+  for (const leg of EXAM_LEGS) {
+    if (legs[leg]) continue; // settled by stranded recovery above
+    // A completed run for this (leg, version) always wins — a NEWER failed
+    // manual rerun must not trick the sweep into re-spending on a version
+    // that is already covered.
+    const complete = await dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'complete' })
+      .first('id');
+    if (complete) {
+      legs[leg] = { outcome: 'already_examined', runId: complete.id };
+      continue;
+    }
+    const failed = await dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'failed' })
+      .orderBy('started_at', 'desc')
+      .first('id');
+    // Spend rails gate NEW runs only. A resume finishes an already-created,
+    // partially paid run whose cohort was FROZEN at creation — today's pool
+    // size is irrelevant to it, and blocking it would strand paid results.
+    if (!failed) {
+      if (active < AUTO_EXAM_MIN_ITEMS) {
+        legs[leg] = { outcome: 'pool_too_small', active };
+        continue;
+      }
+      if (active > AUTO_EXAM_MAX_ITEMS) {
+        logger.warn(`[sealed-eval] auto-run refused (${leg} leg): ${active} active items exceeds the spend cap of ${AUTO_EXAM_MAX_ITEMS} (SEALED_EXAM_AUTO_MAX_ITEMS) — run manually from the UI or raise the cap`);
+        legs[leg] = { outcome: 'spend_cap', active };
+        continue;
+      }
+    }
+    try {
+      // Same lock the manual endpoint holds while processing — a concurrent
+      // manual sitting makes this leg wait until tomorrow, never double-run.
+      const result = await runExclusive('sms-sealed-eval', () => (
+        failed
+          ? examRunner({ runId: failed.id, dbi })
+          : examRunner({ providerLeg: leg, triggeredBy: 'auto:prompt-watch', dbi })
+      ), { recordHealth: false });
+      if (result && result.skipped) {
+        legs[leg] = { outcome: 'lock_busy' };
+        continue;
+      }
+      // runSealedExam resolves { status: 'failed' } on its internal bail-out
+      // paths (provider outage, no-progress batch) — that is NOT a success
+      // and must not count toward the digest.
+      if (result && result.status === 'failed') {
+        legs[leg] = { outcome: 'exam_failed', error: result.error };
+        logger.error(`[sealed-eval] auto exam (${leg} leg) ended failed: ${result.error}`);
+        continue;
+      }
+      legs[leg] = { outcome: failed ? 'resumed' : 'ran' };
+      ran += 1;
+    } catch (err) {
+      if (err && err.code === 'RUN_IN_PROGRESS') {
+        legs[leg] = { outcome: 'run_in_progress' };
+      } else {
+        legs[leg] = { outcome: 'error', error: err.message };
+        logger.error(`[sealed-eval] auto exam (${leg} leg) failed: ${err.message}`);
+      }
+    }
+  }
+
+  if (ran > 0) {
+    try {
+      const summary = await summaryFn({ dbi });
+      const lines = EXAM_LEGS.map((leg) => {
+        const run = summary.legs[leg];
+        if (!run) return `${leg}: no completed run yet`;
+        const pct = run.unsafeRate != null ? ` (${Math.round(run.unsafeRate * 100)}%)` : '';
+        let sig = '';
+        if (run.significance?.significant) {
+          sig = run.significance.direction === 'regressed'
+            ? ` — REGRESSION vs baseline (p=${run.significance.pValue})`
+            : ` — significant improvement vs baseline (p=${run.significance.pValue})`;
+        } else if (run.baselineRunId) {
+          sig = ' — no significant change vs baseline';
+        }
+        return `${leg}: ${run.unsafeCount}/${run.itemsJudged} unsafe${pct}${sig}`;
+      });
+      let proposalNote = '';
+      try {
+        const pending = await dbi('sms_patch_proposals').where({ status: 'pending' }).count({ n: '*' }).first();
+        const n = Number(pending?.n) || 0;
+        if (n > 0) {
+          proposalNote = ` ${n} pathology patch proposal${n === 1 ? '' : 's'} pending review — these results are the report card to grade them against.`;
+        }
+      } catch {
+        // proposals table optional context only — never block the digest
+      }
+      await require('./notification-service').notifyAdmin(
+        'agents',
+        `Sealed exam auto-run complete: ${currentVersion}`,
+        `${lines.join(' · ')}.${proposalNote}`,
+        { link: '/admin/agents?tab=shadow', metadata: { version: currentVersion, legs } },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[sealed-eval] auto-run digest notify failed (non-blocking): ${notifyErr.message}`);
+    }
+  }
+
+  return { version: currentVersion, active, ran, legs };
+}
+
 module.exports = {
   sealEvalItems,
   createExamRun,
@@ -689,6 +869,7 @@ module.exports = {
   computeSignificance,
   getSealedExamSummary,
   evaluateExamGate,
+  runAutoExamSweep,
   EXAM_LEGS,
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,

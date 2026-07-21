@@ -240,6 +240,13 @@ const gates = {
   // pattern.
   smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
 
+  // Sealed-exam AUTO-RUN — nightly sweep runs the exam for any drafter
+  // PROMPT_VERSION that lacks a completed run per leg (first baselines +
+  // every prompt bump). Spends LLM calls on its own, so it follows the
+  // auto-writer pattern: opt-in in EVERY environment, kill = unset.
+  // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
+  smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
+
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and
   // feeds them to the existing judge, compressing months of per-intent
