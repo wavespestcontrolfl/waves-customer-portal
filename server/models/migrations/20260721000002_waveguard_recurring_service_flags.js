@@ -36,12 +36,10 @@ exports.up = async function up(knex) {
     .update({ is_waveguard: true, updated_at: knex.fn.now() });
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('services'))) return;
-  if (!(await knex.schema.hasColumn('services', 'is_waveguard'))) return;
-
-  await knex('services')
-    .whereIn('service_key', SERVICE_KEYS)
-    .where('is_waveguard', true)
-    .update({ is_waveguard: false, updated_at: knex.fn.now() });
-};
+// Deliberate no-op. `up` skips rows already set to true so an admin edit in
+// /admin/services survives, which means a blanket flip back to false here
+// would erase exactly the edits `up` promised to preserve. There is no audit
+// table on `services` to record which rows this migration actually changed, so
+// there is no provenance to revert against. Reverting the flags is a data
+// decision, not a schema one — do it in /admin/services.
+exports.down = async function down() {};
