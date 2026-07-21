@@ -9656,6 +9656,15 @@ export function CompletionPanel({
             visitOutcome,
             serviceType: service.serviceType,
             areasTreated: areasServiced,
+            // Tech-chosen solutions feed the AI recap prompt on every line
+            // (owner directive 2026-07-21) — context only, the prompt rules
+            // keep product names out of the customer copy.
+            products: selectedProducts.map((p) => ({
+              productId: p.productId,
+              name: p.displayName || p.name,
+              applicationMethod: p.applicationMethod || null,
+              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+            })),
             willInvoice,
             willReview: reviewSendsWithCompletionSms,
           }),
@@ -9719,6 +9728,12 @@ export function CompletionPanel({
           visitOutcome,
           serviceType: service.serviceType,
           areasTreated: areasServiced,
+          products: selectedProducts.map((p) => ({
+            productId: p.productId,
+            name: p.displayName || p.name,
+            applicationMethod: p.applicationMethod || null,
+            targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+          })),
           willInvoice,
           willReview: reviewSendsWithCompletionSms,
           force: true,
@@ -11078,6 +11093,14 @@ export function CompletionPanel({
               values: findingsValues,
             },
             nextStepChips: typedNextStepChips,
+            // Tech-chosen solutions feed the draft prompt; productId lets
+            // the server derive the T&S treatment chips from the catalog.
+            products: selectedProducts.map((p) => ({
+              productId: p.productId,
+              name: p.displayName || p.name,
+              applicationMethod: p.applicationMethod || null,
+              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+            })),
             includeCustomerComms: typedAiIncludeComms,
           }),
         },

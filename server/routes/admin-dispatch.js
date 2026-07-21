@@ -7760,11 +7760,12 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
 router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const { technicianNotes, areasTreated } = req.body || {};
+    const { technicianNotes, areasTreated, products } = req.body || {};
     const result = await PestRecap.draftRecapMessage({
       serviceId: req.params.serviceId,
       technicianNotes,
       areasTreated,
+      products: Array.isArray(products) ? products : [],
       includeCustomerComms: req.body?.includeCustomerComms === true,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
@@ -7812,7 +7813,27 @@ const { dispatchWithFallback } = require('../services/llm/call');
 // unbounded builder is retired.
 const { buildCompletionCommsContext } = require('../services/completion-comms-context');
 
-function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext }) {
+// Tech-chosen solutions for the typed-findings draft prompt — same contract
+// as completion-recap's safeProducts: context only, output rules keep
+// product names out of the customer copy (owner directive 2026-07-21).
+function findingsDraftProductLines(products) {
+  if (!Array.isArray(products)) return [];
+  return products
+    .map((p) => {
+      const name = String(p?.name || p?.product_name || '').trim().slice(0, 80);
+      if (!name) return null;
+      const method = String(p?.applicationMethod || p?.application_method || '').trim().slice(0, 40);
+      const targets = Array.isArray(p?.targets)
+        ? p.targets.map((t) => String(t || '').trim()).filter(Boolean).slice(0, 6)
+        : [];
+      const parts = [method, targets.length ? `targets: ${targets.join(', ')}` : ''].filter(Boolean);
+      return `- ${name}${parts.length ? ` (${parts.join('; ')})` : ''}`;
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [] }) {
   const fieldLines = (schema.fields || [])
     .map((field) => {
       const value = values?.[field.key];
@@ -7820,6 +7841,7 @@ function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsCon
       return `${field.label}: ${String(value).trim()}`;
     })
     .filter(Boolean);
+  const productLines = findingsDraftProductLines(products);
   return `Write a short customer-facing "recommendations" paragraph (2-4 sentences) for a Waves Pest Control & Lawn Care service report.
 
 Rules:
@@ -7833,6 +7855,8 @@ Service type: ${serviceType || schema.label}
 Findings type: ${schema.label}
 Findings:
 ${fieldLines.length ? fieldLines.join('\n') : '[none recorded]'}
+Solutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):
+${productLines.length ? productLines.join('\n') : '[none recorded]'}
 Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}
 Recent customer communications:
 ${commsContext || '[not provided]'}
@@ -8053,6 +8077,7 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     const { structuredFindings, nextStepChips, includeCustomerComms } = req.body || {};
+    const draftProducts = Array.isArray(req.body?.products) ? req.body.products : [];
     const findingsType = structuredFindings?.type;
     if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
       return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
@@ -8092,12 +8117,32 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     const commsContext = commsContextResult.text
       ? `${commsContextResult.promptHint}\n${commsContextResult.text}`
       : '';
+    // T&S derives its treatment chips from the recorded products at
+    // completion — the draft runs BEFORE completion, so derive here too or
+    // the AI writes recommendations blind to what was applied (owner
+    // directive 2026-07-21). Catalog rows are authoritative for the
+    // classification; client-sent names only feed the context lines.
+    const draftValues = { ...(structuredFindings?.values || {}) };
+    if (findingsType === 'tree_shrub' && draftProducts.length) {
+      try {
+        const ids = draftProducts.map((p) => p?.productId).filter(Boolean);
+        const rows = ids.length
+          ? await db('products_catalog').whereIn('id', ids)
+          : [];
+        const derived = deriveTreeShrubTreatments({
+          products: draftProducts.filter((p) => p?.productId),
+          productRows: rows,
+        });
+        if (derived) draftValues.treatments_completed = derived;
+      } catch { /* draft is polish — never block on derivation */ }
+    }
     const basePrompt = buildFindingsRecapPrompt({
       schema,
-      values: structuredFindings?.values || {},
+      values: draftValues,
       chips,
       serviceType: svc.service_type,
       commsContext,
+      products: draftProducts,
     });
     // Sol first, Opus backup. The validator rejects empty or promissory copy,
     // causing the shared dispatcher to cross providers before returning.

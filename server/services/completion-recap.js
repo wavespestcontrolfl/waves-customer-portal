@@ -129,11 +129,41 @@ function deterministicRecap(input = {}) {
   ]);
 }
 
+// Tech-chosen solutions, normalized for the prompt (owner directive
+// 2026-07-21: the products the tech records must feed the AI recap on every
+// line — pest, lawn, mosquito, T&S). Context only: the output rules still
+// forbid naming products/chemicals to the customer. Accepts both the panel
+// shape ({name, applicationMethod, targets}) and the recap-modal shape
+// ({product_name, product_category}).
+function safeProducts(products) {
+  if (!Array.isArray(products)) return [];
+  return products
+    .map((p) => {
+      const name = cleanText(p?.name || p?.product_name).slice(0, 80);
+      if (!name) return null;
+      const method = cleanText(p?.applicationMethod || p?.application_method).slice(0, 40);
+      const targets = Array.isArray(p?.targets)
+        ? p.targets.map(cleanText).filter(Boolean).slice(0, 6)
+        : [];
+      return { name, method, targets };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function productPromptLines(products) {
+  return products.map((p) => {
+    const parts = [p.method, p.targets.length ? `targets: ${p.targets.join(', ')}` : ''].filter(Boolean);
+    return `- ${p.name}${parts.length ? ` (${parts.join('; ')})` : ''}`;
+  }).join('\n');
+}
+
 function buildPrompt(input = {}) {
   const serviceType = cleanText(input.serviceType) || 'service';
   const areas = safeAreas(input.areasTreated || input.areasServiced);
   const notes = cleanText(input.notes || input.technicianNotes);
   const outcome = normalizeOutcome(input.visitOutcome);
+  const products = safeProducts(input.products);
 
   return `Write one customer-facing SMS recap for a Waves Pest Control & Lawn Care service visit.
 
@@ -152,7 +182,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
+Technician notes: ${notes || 'not specified'}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }

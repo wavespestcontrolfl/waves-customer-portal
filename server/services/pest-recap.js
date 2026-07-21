@@ -158,7 +158,7 @@ async function buildRecapContext(serviceId, knex = db) {
 }
 
 /** Draft the customer-facing recap SMS copy via the shared recap generator. */
-async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, includeCustomerComms = false, knex = db }) {
+async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, products = [], includeCustomerComms = false, knex = db }) {
   const { ok, reason, svc, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   if (!eligible) return { ok: false, reason: 'not_pest_control' };
@@ -185,6 +185,9 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, inc
     serviceType: svc.service_type,
     technicianNotes,
     areasTreated,
+    // Tech-chosen solutions feed the AI prompt (context only — the recap
+    // rules keep product names out of the customer copy).
+    products,
     visitOutcome: 'completed',
     commsContext,
   });
