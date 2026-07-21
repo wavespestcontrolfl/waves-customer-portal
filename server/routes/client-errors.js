@@ -33,12 +33,18 @@ const safePath = (value) => {
 
 // The free-form fields (message, stack, componentStack, context) can embed a
 // tokenized URL, a JWT, or customer PII that a component threw into an error
-// string — never persist those in Sentry. Redact token-route paths (any token
-// length), JWTs, long opaque tokens, and email addresses.
-const TOKEN_ROUTE_RE = /(\/(?:report|estimate|pay|receipt|track|contract|card|prep|rate|recap|review|secure|reschedule|price-change|lawn-report|pest-report|service-outlines|book)\/)[^\s"'?)/\\]+/gi;
+// string — never persist those in Sentry. Redaction, in order:
+//  - token-route paths, browser AND /api/ forms, whole tail incl. nested
+//    segments (so /pay/statement/abc and /api/estimates/abc/data both redact
+//    the token regardless of length);
+//  - JWTs and long opaque tokens;
+//  - email addresses and phone numbers.
+const TOKEN_ROUTE_ROOTS = 'reports?|estimates?|pay|receipts?|track|contracts?|card|prep|rate|recap|reviews?|secure|reschedule|price-change|lawn-report|pest-report|service-outlines|book';
+const TOKEN_ROUTE_RE = new RegExp(`(\\/(?:api\\/)?(?:${TOKEN_ROUTE_ROOTS})\\/)[^\\s"'?)]+`, 'gi');
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g;
 const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/g;
 const EMAIL_RE = /[^\s@<>()"]+@[^\s@<>()"]+\.[^\s@<>()"]+/g;
+const PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
 const scrubText = (value, max) => {
   const text = clip(value, max);
   if (!text) return undefined;
@@ -46,7 +52,8 @@ const scrubText = (value, max) => {
     .replace(TOKEN_ROUTE_RE, '$1:token')
     .replace(JWT_RE, ':jwt')
     .replace(LONG_TOKEN_RE, ':token')
-    .replace(EMAIL_RE, ':email');
+    .replace(EMAIL_RE, ':email')
+    .replace(PHONE_RE, ':phone');
 };
 
 // POST /api/client-errors  { message, stack, componentStack, context, url }
@@ -64,7 +71,6 @@ router.post('/', limiter, (req, res) => {
           url: safePath(url),
           stack: scrubText(stack, 4000),
           componentStack: scrubText(componentStack, 4000),
-          userAgent: clip(req.headers['user-agent'], 300),
         },
       },
     });

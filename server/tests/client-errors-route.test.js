@@ -60,17 +60,22 @@ describe('POST /api/client-errors', () => {
     expect(captureContext.contexts.client_error.url).toBe('/estimate/:token');
   });
 
-  test('redacts tokens/JWTs/emails embedded in free-form message + stack', async () => {
+  test('redacts tokens (browser+api+nested), JWTs, emails, phones in free-form fields', async () => {
     await post({
-      message: 'Failed to load /report/AbC123secretTOKEN for jane@example.com',
-      stack: 'Error at /pay/xyz789tok\nBearer eyJhbGciOi.J9payload.sigsigsig here',
+      message: 'Failed to load /report/AbC123secretTOKEN for jane@example.com call 941-555-1234',
+      stack: [
+        'GET /api/estimates/abc/data 401', // api form, short token, nested
+        '/pay/statement/xyztok401', // nested — whole tail must go
+        'Bearer eyJhbGciOi.J9payload.sigsigsig',
+      ].join('\n'),
     });
     const [error, captureContext] = mockCapture.mock.calls[0];
-    expect(error.message).toBe('Failed to load /report/:token for :email');
-    const scrubbedStack = captureContext.contexts.client_error.stack;
-    expect(scrubbedStack).toContain('/pay/:token');
-    expect(scrubbedStack).toContain(':jwt');
-    expect(scrubbedStack).not.toMatch(/eyJhbGciOi/);
+    expect(error.message).toBe('Failed to load /report/:token for :email call :phone');
+    const stack = captureContext.contexts.client_error.stack;
+    expect(stack).toContain('/api/estimates/:token');
+    expect(stack).toContain('/pay/:token');
+    expect(stack).not.toMatch(/statement|xyztok|abc\/data|eyJhbGciOi/);
+    expect(captureContext.contexts.client_error.userAgent).toBeUndefined();
   });
 
   test('a missing message still reports (never 500s)', async () => {
