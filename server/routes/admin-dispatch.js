@@ -5944,7 +5944,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           amount: mintInvoiceAmount,
           description: svc.service_type,
           taxRate: mintInvoiceTaxRate,
-          useScheduledReplay: true,
+          // Frozen-money mints bypass scheduled replay (Codex P0, fix round
+          // 11): with the flag on, createFromService REBUILDS the line items
+          // from the CURRENT scheduled-service row + add-ons + stored line
+          // discounts (buildScheduledServiceInvoiceLines) and the amount
+          // param degrades to a fallback — so a post-commit price/add-on/
+          // discount edit changed the minted total despite the round-10
+          // freeze, and even the FIRST run could mint a replay total (gross
+          // − stored discounts) different from the cents it had just frozen,
+          // leaving a resume to re-mint a different number than run one.
+          // Every backfill mint is a REQUIRED mint (the round-9 posture
+          // governs every branch: posture false never reaches this block),
+          // so under backfill the mint is a single line at the frozen
+          // amount, BOTH first run and resume — one code path, no
+          // first-run-vs-resume divergence; subtotal ≡ the frozen cents and
+          // total ≡ cents + tax at the frozen rate by construction (no
+          // discount inputs, deposit credit + accrual skipped below;
+          // create()'s residential-never-taxed policy can only ever zero
+          // the tax, never move the subtotal). The single line keeps the
+          // reviewer-facing label (service type); line-level fidelity is
+          // deliberately traded for provable money — the reviewer edits or
+          // void+re-creates for itemization. Live completions keep replay.
+          useScheduledReplay: !isBackfillCompletion,
           // Backfill: record.service_date is the backdated visit day — using
           // it here would mint the invoice instantly overdue and light up the
           // dunning/overdue surfaces for a quiet backlog closeout. Due today

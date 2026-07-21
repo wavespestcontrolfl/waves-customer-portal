@@ -1591,6 +1591,38 @@ describe('frozen required-mint MONEY — the amount can neither vanish nor chang
     })).toBe(false);
   });
 
+  test('every backfill mint IS a required mint — the replay bypass therefore covers 100% of backfill mints (fix round 11)', () => {
+    // The route always passes a boolean posture for a backfill (the commit
+    // derivation first-run, the frozen value on resume) — never null — and
+    // a FALSE posture returns before any branch can mint. So there is no
+    // "non-required backfill mint": under backfill, reaching the mint block
+    // implies posture true, and the frozen-money shape (single line at the
+    // frozen amount, replay off) is the only backfill mint shape. Pinned
+    // across every mint signal at once:
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      createInvoiceOnComplete: true,
+      waveguardTier: 'gold',
+      explicitMembership: true,
+      explicitPerVisitLane: true,
+      autoInvoicePricedVisits: true,
+      typedOneTimeBilling: true,
+      hasVisitPrice: true,
+      invoiceAmount: 129,
+      isBackfillCompletion: true,
+      backfillMintRequired: false,
+    })).toBe(false);
+    // …and the same all-signals shape with posture true mints, priced by
+    // the frozen amount the route threads (source pins above).
+    expect(shouldAutoInvoiceCompletion({
+      ...suppressorFree,
+      createInvoiceOnComplete: true,
+      invoiceAmount: 129,
+      isBackfillCompletion: true,
+      backfillMintRequired: true,
+    })).toBe(true);
+  });
+
   test('the WRONG-amount leg: an edited price cannot change the resumed mint — the frozen cents win over the live derivation', () => {
     const frozen = frozenResumeCompletionState(
       { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 35000, backfillMintTaxRate: 0.07 },
@@ -1852,6 +1884,18 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // …and the mint itself reads the SAME pair — never the live values.
       expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*amount: mintInvoiceAmount,\s*\n\s*description: svc\.service_type,\s*\n\s*taxRate: mintInvoiceTaxRate,/);
       expect(source).not.toMatch(/amount: invoiceAmount,/);
+      // Frozen-money mints bypass scheduled replay (Codex P0, fix round
+      // 11): with the flag on, createFromService rebuilds the line items
+      // from the CURRENT scheduled row/add-ons/discounts and the frozen
+      // amount degrades to a fallback — a post-commit edit changed the
+      // minted total despite the freeze. Backfill mints (all REQUIRED —
+      // the posture governs every branch) mint a single line at the frozen
+      // amount on BOTH first run and resume; live completions keep replay.
+      expect(source).toMatch(/taxRate: mintInvoiceTaxRate,\s*\n(?:\s*\/\/[^\n]*\n)*\s*useScheduledReplay: !isBackfillCompletion,/);
+      // No unconditional replay remains anywhere on this route — the other
+      // replay callers (billing-recovery bill, card-hold charge) live in
+      // files the backfill quiet path never mints through.
+      expect((source.match(/useScheduledReplay: true/g) || []).length).toBe(0);
       // A required resume MISSING its frozen amount refuses to mint a
       // recomputed number — the throw sits INSIDE the try, before the mint,
       // so the existing release/503 catch owns the outcome.
@@ -2377,7 +2421,7 @@ describe('completion route wiring (source contracts)', () => {
 
   test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
     // The route passes the opt-out on the completion mint…
-    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,1600}skipDepositCredit: isBackfillCompletion,/);
+    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,3600}skipDepositCredit: isBackfillCompletion,/);
     // …and logs the unapplied balance for review, like the prepaid skip.
     expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
     // The service honors the opt-out BEFORE any ledger read: the
@@ -2393,7 +2437,7 @@ describe('completion route wiring (source contracts)', () => {
   test('the backfill mint opts out of payer-statement accrual and leaves the reviewer a breadcrumb (fix round 5)', () => {
     // The route passes BOTH opt-outs on the completion mint — the same
     // options object, so the accrual skip rides the deposit skip's gate.
-    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,2400}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\}\);/);
+    expect(source).toMatch(/invoice = await InvoiceService\.createFromService\(record\.id, \{[\s\S]{0,3600}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\}\);/);
     // …and logs the skipped accrual for the reviewer — only when an accrual
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:

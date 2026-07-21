@@ -394,6 +394,180 @@ describe('createFromService — estimate-deposit roll-forward', () => {
   });
 });
 
+describe('createFromService — frozen-money backfill mints bypass scheduled replay (Codex P0, PR #2897 fix round 11)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // The backfill route freezes the required mint's amount+tax at commit
+  // (round 10) — but passed them alongside useScheduledReplay: true, and the
+  // replay path REBUILDS line items from the CURRENT scheduled-service row /
+  // add-ons / stored discounts, degrading the frozen amount to a fallback.
+  // These tests drive the REAL createFromService both ways: replay honors
+  // current-row edits (the hazard), and the frozen path (replay off,
+  // explicit amount, skipDepositCredit) provably mints subtotal ≡ the
+  // frozen cents without ever reading the scheduled row.
+  function setupReplayDb({ customer, scheduledRow, addons = [] }) {
+    let insertedInvoice = null;
+    const tableCalls = [];
+    db.mockImplementation((table) => {
+      tableCalls.push(table);
+      if (table === 'service_records') {
+        const q = {
+          where: jest.fn(() => q),
+          andWhere: jest.fn(() => q),
+          leftJoin: jest.fn(() => q),
+          select: jest.fn(() => q),
+          first: jest.fn(async () => ({
+            id: 'sr-1', customer_id: 'cust-1', scheduled_service_id: 'ss-1',
+            service_type: 'Bed Bug Treatment', technician_id: null,
+            service_date: '2026-06-12', tech_name: null,
+          })),
+        };
+        return q;
+      }
+      if (table === 'service_products' || table === 'service_photos') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          select: jest.fn(async () => []),
+        };
+        return q;
+      }
+      if (table === 'scheduled_services') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => scheduledRow) };
+        return q;
+      }
+      if (table === 'scheduled_service_addons') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => Promise.resolve(addons)),
+        };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => customer) };
+        return q;
+      }
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => null),
+          insert: jest.fn((data) => {
+            insertedInvoice = data;
+            return { returning: jest.fn(async () => [{ id: 'invoice-1', ...data }]) };
+          }),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    return {
+      getInsertedInvoice: () => insertedInvoice,
+      getTableCalls: () => tableCalls,
+    };
+  }
+
+  // The post-commit-edited row: price 350 → 899 after the completion froze
+  // 35000 cents. source_estimate_id null keeps the roll-forward inert for
+  // the replay-ON control (the frozen path skips it via skipDepositCredit).
+  const EDITED_SCHEDULED_ROW = {
+    id: 'ss-1',
+    service_type: 'Bed Bug Treatment',
+    estimated_price: 899,
+    primary_line_price: 899,
+    source_estimate_id: null,
+  };
+
+  it('the hazard is real: scheduled replay mints the EDITED current price — the frozen amount degrades to a fallback', async () => {
+    const { getInsertedInvoice } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+      scheduledRow: EDITED_SCHEDULED_ROW,
+    });
+
+    await InvoiceService.createFromService('sr-1', {
+      amount: 350, // the round-10 frozen amount
+      description: 'Bed Bug Treatment',
+      taxRate: 0,
+      useScheduledReplay: true, // the pre-fix backfill caller shape
+      skipDepositCredit: true,
+    });
+
+    const row = getInsertedInvoice();
+    const lines = JSON.parse(row.line_items);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].amount).toBe(899);
+    expect(row.total).toBe(899); // NOT the frozen 350 — the P0
+  });
+
+  it('frozen path (replay off): a post-commit price-edit resume mints EXACTLY the frozen total, without reading the scheduled row at all', async () => {
+    const { getInsertedInvoice, getTableCalls } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'commercial' },
+      scheduledRow: EDITED_SCHEDULED_ROW, // edited to 899 — must never be consulted
+      addons: [{ id: 'addon-1', service_name: 'Attic add-on', base_price: 50 }],
+    });
+
+    const inv = await InvoiceService.createFromService('sr-1', {
+      amount: 350, // frozen cents / 100
+      description: 'Bed Bug Treatment',
+      taxRate: 0.07, // frozen tax basis
+      useScheduledReplay: false, // the fix: !isBackfillCompletion
+      skipDepositCredit: true,
+      skipAccrual: true,
+    });
+
+    const row = getInsertedInvoice();
+    const lines = JSON.parse(row.line_items);
+    // Single line at the frozen amount, labeled for the reviewer.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      description: 'Bed Bug Treatment',
+      quantity: 1,
+      unit_price: 350,
+      amount: 350,
+    });
+    // Subtotal ≡ frozen cents; total ≡ cents + tax at the frozen rate — no
+    // discount lines, no adjustment lines, no deposit credit.
+    expect(row.subtotal).toBe(350);
+    expect(row.tax_rate).toBe(0.07);
+    expect(row.tax_amount).toBe(24.5);
+    expect(row.total).toBe(374.5);
+    expect(inv.total).toBe(374.5);
+    // Provably atomic BY CONSTRUCTION: the replay builder never ran — its
+    // add-ons read is unique to it and absent (the builder always reads
+    // add-ons once it has the scheduled row, which this mock serves), and
+    // the minted lines are exactly the one frozen line above. The lone
+    // scheduled_services touch left in the flow is payer RESOLUTION
+    // (self-pay/payer columns — no pricing), which cannot move the total.
+    expect(getTableCalls()).not.toContain('scheduled_service_addons');
+  });
+
+  it('frozen path under the residential policy: tax zeroes (never up), the subtotal stays the frozen cents', async () => {
+    // create() forces rate 0 for non-commercial customers regardless of the
+    // caller's taxRate (operator policy: residential never sees tax). A
+    // property flipped commercial→residential post-commit therefore mints
+    // LESS than frozen+tax — policy beats freeze, and only ever downward;
+    // the frozen subtotal itself cannot move.
+    const { getInsertedInvoice } = setupReplayDb({
+      customer: { id: 'cust-1', property_type: 'residential' },
+      scheduledRow: EDITED_SCHEDULED_ROW,
+    });
+
+    await InvoiceService.createFromService('sr-1', {
+      amount: 350,
+      description: 'Bed Bug Treatment',
+      taxRate: 0.07, // frozen commercial basis, customer now residential
+      useScheduledReplay: false,
+      skipDepositCredit: true,
+    });
+
+    const row = getInsertedInvoice();
+    expect(row.subtotal).toBe(350);
+    expect(row.tax_amount).toBe(0);
+    expect(row.total).toBe(350);
+  });
+});
+
 describe('createFromService — payer-statement accrual opt-out (skipAccrual, Codex P1, PR #2897 fix round 5)', () => {
   // The backdated backfill closeout mints a review-only invoice. For a
   // payer-billed NET15/NET30 visit under GATE_PAYER_STATEMENTS, create()
