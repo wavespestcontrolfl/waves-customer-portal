@@ -9699,6 +9699,12 @@ function ServiceTracker() {
     border: `1px solid ${B.slate200 || '#E2E8F0'}`,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
+  // Checklist rows are single-line: long pet plans cut at a word boundary
+  // with an ellipsis, never mid-word ("…during service. Plea").
+  const petPlanRaw = propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan || '';
+  const petPlanShort = petPlanRaw.length <= 40
+    ? petPlanRaw
+    : `${petPlanRaw.slice(0, 40).replace(/\s+\S*$/, '').replace(/[.,;:]$/, '')}…`;
 
   return (
     <div style={{
@@ -9740,9 +9746,11 @@ function ServiceTracker() {
         )}
       </div>
 
-      {/* Main state card. Content depends on step; chrome is constant
-          (sand-bg parent, white card, rounded 16, soft shadow). */}
-      <div style={cardBase}>
+      {/* Main state card. Content depends on step; chrome is constant —
+          a data-glass card so the tracker matches the portal's frosted
+          material (the inline white background is the print/no-theme
+          fallback only). */}
+      <div data-glass="card" style={cardBase}>
         {/* Step 1-2: Scheduled / Confirmed message */}
         {step <= 2 && (
           <>
@@ -9971,14 +9979,14 @@ function ServiceTracker() {
           consults the customer's actual property prefs and service
           type. Shown until the tech is fully servicing (step 5+). */}
       {step < 5 && (
-        <div style={subCardBase}>
+        <div data-glass="soft" style={subCardBase}>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.glassNavy, marginBottom: 8 }}>Before your tech arrives</div>
           {[
             propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
               ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
               : { icon: 'warning', text: 'No gate code on file', ok: false },
             propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
-              ? { icon: 'checkCircle', text: `Pet plan: ${(propertyPrefs.petsSecuredPlan || propertyPrefs.petSecuredPlan).slice(0, 40)}`, ok: true }
+              ? { icon: 'checkCircle', text: `Pet plan: ${petPlanShort}`, ok: true }
               : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
             ...(isLawn ? [
@@ -10011,7 +10019,7 @@ function ServiceTracker() {
 
       {/* Live notes from tech, if any */}
       {notes.length > 0 && (
-        <div style={subCardBase}>
+        <div data-glass="soft" style={subCardBase}>
           <div style={{
             fontSize: 12, fontWeight: 700, letterSpacing: 0,
             textTransform: 'uppercase', color: B.wavesBlue, marginBottom: 8,
@@ -10036,7 +10044,7 @@ function ServiceTracker() {
       {/* Office card — Call / Text. Always shown; the CTA above
           covers en-route specifically, this is the always-available
           contact path. */}
-      <div style={subCardBase}>
+      <div data-glass="soft" style={subCardBase}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontSize: 15, fontWeight: 600, color: B.navy }}>{office.name}</div>
           <div style={{ fontSize: 14, color: B.textCaption }}>Open 24 hrs</div>
@@ -10056,7 +10064,7 @@ function ServiceTracker() {
       {/* Completion summary at step 7 — never for a cancelled visit, where
           any summary data would describe work that didn't happen */}
       {step === 7 && tracker.state !== 'cancelled' && summary && (
-        <div style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
+        <div data-glass="soft" style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, letterSpacing: 0, marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
