@@ -63,8 +63,39 @@ const APP_MODULE = [
   { type: 'image', src: `${IMG}/app-reschedule-slots.png`, alt: 'Waves app — pick a new visit time and confirm in a couple of taps', width: 220, radius: 18 },
 ];
 
+// FAQ module (owner-authored voice 2026-07-21: "a few things folks
+// usually ask"). Answers are per-category slots — the renderer drops
+// empty rows, which is how the no-contract / free-re-service questions
+// vanish for categories that can't truthfully make those claims.
+const FAQ_MODULE = [
+  { type: 'heading', content: 'A few things folks usually ask' },
+  {
+    type: 'details',
+    variant: 'faq',
+    rows: [
+      { label: 'When can I start?', value: '{{faq_start}}' },
+      { label: 'Am I locked in?', value: '{{faq_terms}}' },
+      { label: 'What if I see activity between visits?', value: '{{faq_between_visits}}' },
+      { label: 'Is the price locked in?', value: '{{faq_price}}' },
+    ],
+  },
+];
+// Secondary chip (renders below the primary CTA button) to the public
+// products & safety page (owner 2026-07-21: "link to the safety and
+// protocols"). Static URL — no payload dependency.
+const SAFETY_LINK_CTA = { type: 'cta', label: 'How we treat your home — products & safety', url: 'https://www.wavespestcontrol.com/products-and-safety' };
+// Owner-authored reply line — used on the templates whose category
+// question slot does NOT already prompt a reply, so no email asks twice.
+const BRADENTON_REPLY_NOTE = { type: 'small_note', content: 'Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue.' };
+
 const CATEGORY_VARIABLES = [
   'service_label', 'category_headline', 'category_hook', 'category_benefit', 'category_question',
+  // Substance slots (owner 2026-07-21: "better content for someone getting
+  // an estimate") — what the plan covers / how it works, per category, all
+  // claims echoing the estimate page's own copy packs.
+  'category_included', 'category_process',
+  // FAQ answer slots (optional everywhere — empty string = the row drops).
+  'faq_start', 'faq_terms', 'faq_between_visits', 'faq_price',
 ];
 
 const FIXTURE_CATEGORY = {
@@ -73,6 +104,12 @@ const FIXTURE_CATEGORY = {
   category_hook: 'Your price was built from your home — lot, roofline, and entry points — not somebody else’s.',
   category_benefit: 'No long-term contract, unlimited free callbacks, and a 90-day money-back guarantee.',
   category_question: 'Wondering about pets and kids, interior treatment, or what happens if bugs come back? Reply and ask — real answers in minutes.',
+  category_included: 'Exterior and interior pest protection on a recurring schedule, built around how bugs actually get into your home. And if pests show up between visits, callbacks are free and unlimited — that’s part of the plan, not an upsell.',
+  category_process: 'Approve online, pick a time for your first visit, and your tech protects the outside and inside of your home — with a full report of what was treated and found after every visit.',
+  faq_start: 'Whenever works for you. Most new customers pick a start date within 1–2 weeks.',
+  faq_terms: 'No. We don’t do commitment contracts — you can pause or cancel anytime.',
+  faq_between_visits: 'Free re-service. Reply to a service reminder text and we’re back out.',
+  faq_price: 'Yes — for the quoted service, your price holds until the expiration date on your estimate. We’ll always tell you before anything changes.',
 };
 
 const BASE_FIXTURE = {
@@ -87,19 +124,24 @@ const TEMPLATES = [
     key: 'estimate.engage_unopened',
     name: 'Estimate Engagement — Unopened Nudge',
     description: 'Engagement engine (delivery_unopened_24h): the estimate was delivered 24–48h ago and never opened. One gentle resurface with the category headline; goal is the first open. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'category_headline', 'category_hook', 'category_benefit'],
-    optional: ['category_question'],
+    required: ['first_name', 'estimate_url', 'service_label', 'category_headline', 'category_hook', 'category_benefit', 'category_included'],
+    optional: ['category_question', 'category_process'],
     subject: 'Your Waves estimate is ready when you are',
     preview: 'It’s saved and waiting — take a look whenever suits.',
     blocks: [
       { type: 'heading', content: '{{category_headline}}' },
-      { type: 'paragraph', content: 'Hi {{first_name}}, we sent over your {{service_label}} estimate and wanted to make sure it didn’t get buried. It’s saved and waiting whenever you’re ready.' },
+      { type: 'paragraph', content: 'Hi {{first_name}}, we sent over your {{service_label}} estimate and wanted to follow up personally. No sales pitch — just making sure it landed, and answering anything you’re wondering about.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      { type: 'heading', content: 'What your plan covers' },
+      { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
       ...APP_MODULE,
+      ...FAQ_MODULE,
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'View my estimate', url_variable: 'estimate_url' },
+      SAFETY_LINK_CTA,
+      BRADENTON_REPLY_NOTE,
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -107,13 +149,15 @@ const TEMPLATES = [
     key: 'estimate.engage_return_visit',
     name: 'Estimate Engagement — Return Visit',
     description: 'Engagement engine (return_visit_hot): the customer came back for a second look within 48h of the first. Warm, help-forward — leads with the category question. Spacing-exempt by rule design. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_question', 'category_benefit'],
-    optional: ['category_headline', 'category_hook', 'estimate_url'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_question', 'category_benefit', 'category_process'],
+    optional: ['category_headline', 'category_hook', 'category_included', 'estimate_url'],
     subject: 'Welcome back — questions about your estimate?',
     preview: 'Reply to this email and a real person answers in minutes.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, thanks for taking another look at your {{service_label}} estimate. If anything’s unclear, we’re happy to help.' },
       { type: 'paragraph', content: '{{category_question}}' },
+      { type: 'heading', content: 'How it works' },
+      { type: 'paragraph', content: '{{category_process}}' },
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
@@ -124,19 +168,20 @@ const TEMPLATES = [
     key: 'estimate.engage_high_intent',
     name: 'Estimate Engagement — High Intent',
     description: 'Engagement engine (multi_view_high_intent): three or more visits inside 72h — clearly weighing it. Strongest accept CTA in the set, still no pressure numbers. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit'],
-    optional: ['category_headline', 'category_question', 'estimate_url'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit', 'category_process'],
+    optional: ['category_headline', 'category_question', 'category_included', 'estimate_url'],
     subject: 'Ready when you are — it takes about a minute',
     preview: 'Your estimate is saved. Accepting takes about a minute.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, your {{service_label}} estimate is saved and ready whenever you are — accepting takes about a minute, and we handle the rest.' },
       { type: 'paragraph', content: '{{category_hook}}' },
-      { type: 'paragraph', content: 'Here’s how it goes: accept in about a minute, we schedule your first visit, and after every visit the full report — findings, photos, and all — lands in the Waves app.' },
+      { type: 'heading', content: 'How it works' },
+      { type: 'paragraph', content: '{{category_process}}' },
       ...APP_MODULE,
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
-      { type: 'small_note', content: 'Still weighing it? Reply with any question — a real person answers.' },
+      BRADENTON_REPLY_NOTE,
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -144,17 +189,19 @@ const TEMPLATES = [
     key: 'estimate.engage_return_after_dark',
     name: 'Estimate Engagement — Return After Quiet',
     description: 'Engagement engine (dark_then_return): the customer returned after 3+ days of silence. Re-engagement framing — the plan and pricing are unchanged (the engine only sends while the estimate is unexpired). Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit'],
-    optional: ['category_headline', 'category_question', 'estimate_url'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit', 'category_included'],
+    optional: ['category_headline', 'category_question', 'category_process', 'estimate_url'],
     subject: 'Your estimate is right where you left it',
     preview: 'Nothing has changed — same plan, same pricing, saved for you.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, good to see you back. Your {{service_label}} estimate is right where you left it — same plan, same pricing.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Pick up where I left off', url_variable: 'estimate_accept_url' },
+      BRADENTON_REPLY_NOTE,
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -162,16 +209,19 @@ const TEMPLATES = [
     key: 'estimate.engage_gone_quiet',
     name: 'Estimate Engagement — Gone Quiet',
     description: 'Engagement engine (viewed_gone_quiet_72h): viewed once, then 72–96h of silence. The gentlest touch in the set — a check-in that leads with the category question. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'category_question', 'category_benefit'],
-    optional: ['category_headline', 'category_hook'],
+    required: ['first_name', 'estimate_url', 'service_label', 'category_question', 'category_benefit', 'category_included'],
+    optional: ['category_headline', 'category_hook', 'category_process'],
     subject: 'Any questions about your Waves estimate?',
     preview: 'Reply and ask — real answers in minutes.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, just checking in on your {{service_label}} estimate — no rush at all.' },
       { type: 'paragraph', content: '{{category_question}}' },
+      { type: 'paragraph', content: '{{category_included}}' },
+      ...FAQ_MODULE,
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Take another look', url_variable: 'estimate_url' },
+      SAFETY_LINK_CTA,
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -179,16 +229,18 @@ const TEMPLATES = [
     key: 'estimate.engage_expiring',
     name: 'Estimate Engagement — Expiring (Engaged)',
     description: 'Engagement engine (expiring_engaged): the estimate expires within 2 days and the customer HAS viewed it. Deadline framing with a genuine extension offer — the reply-to-extend line is backed by the real extension flow. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_accept_url', 'service_label', 'expires_date', 'category_benefit'],
-    optional: ['category_headline', 'category_hook', 'category_question', 'estimate_url'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'expires_date', 'category_benefit', 'category_included'],
+    optional: ['category_headline', 'category_hook', 'category_question', 'category_process', 'estimate_url'],
     subject: 'Heads up — your estimate expires soon',
     preview: 'Your pricing holds until the expiration date on your estimate.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, a quick heads up: your {{service_label}} estimate expires on {{expires_date}}. Until then, your pricing is locked in.' },
+      { type: 'paragraph', content: '{{category_included}}' },
       { type: 'paragraph', content: 'Need more time to decide? Just reply — we’re happy to extend it.' },
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Accept before it expires', url_variable: 'estimate_accept_url' },
+      BRADENTON_REPLY_NOTE,
       { type: 'signature', content: '— The Waves Team' },
     ],
     fixture: { expires_date: 'August 1' },
@@ -197,20 +249,25 @@ const TEMPLATES = [
     key: 'estimate.engage_expiring_unseen',
     name: 'Estimate Engagement — Expiring (Never Viewed)',
     description: 'Engagement engine (expiring_never_viewed): the estimate expires within 2 days and was never opened. Distinct copy from the engaged variant — the ask is one look, with the same genuine extension offer. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'expires_date', 'category_headline', 'category_hook', 'category_benefit'],
-    optional: ['category_question'],
+    required: ['first_name', 'estimate_url', 'service_label', 'expires_date', 'category_headline', 'category_hook', 'category_benefit', 'category_included'],
+    optional: ['category_question', 'category_process'],
     subject: 'Worth a look before it expires',
     preview: 'Your estimate was built from your property — one quick look.',
     blocks: [
       { type: 'heading', content: '{{category_headline}}' },
       { type: 'paragraph', content: 'Hi {{first_name}}, your {{service_label}} estimate expires on {{expires_date}} and it doesn’t look like you’ve had a chance to see it yet — worth one quick look before it does.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      { type: 'heading', content: 'What your plan covers' },
+      { type: 'paragraph', content: '{{category_included}}' },
       ...PROTOCOL_MODULE,
       ...APP_MODULE,
       { type: 'paragraph', content: 'Need more time? Just reply — we’re happy to extend it.' },
+      ...FAQ_MODULE,
       REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'See my estimate', url_variable: 'estimate_url' },
+      SAFETY_LINK_CTA,
+      BRADENTON_REPLY_NOTE,
       { type: 'signature', content: '— The Waves Team' },
     ],
     fixture: { expires_date: 'August 1' },

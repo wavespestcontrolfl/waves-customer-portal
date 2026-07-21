@@ -6,7 +6,7 @@
  *   - already-sent rules never re-enqueue;
  *   - the processor re-validates at send time: category (pest/lawn v1),
  *     conversion, reply-pause, active-view hold (defer), the 4-send cap,
- *     12h spacing (hot rules exempt), prefs opt-out;
+ *     12h spacing (ALL rules, hot included — owner 2026-07-21), prefs opt-out;
  *   - gate off = jobs consumed as 'shadow' with the would-send logged —
  *     never claimed, never sent, no post-flip backlog;
  *   - sends claim through the shared ledger and release on failure.
@@ -308,13 +308,14 @@ describe('onEstimateViewed (view-event rules)', () => {
 
 describe('processDueJobs', () => {
   // Happy-path queue for one due job on the gone-quiet rule.
-  function enqueueProcessorHappyPath({ job = pendingJob(), est = baseEstimate() } = {}) {
+  function enqueueProcessorHappyPath({ job = pendingJob(), est = baseEstimate(), rules = [QUIET_RULE, HOT_RULE] } = {}) {
     enqueue('estimate_followup_jobs', { rows: [job] });     // due scan
-    enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
+    enqueue('estimate_followup_rules', { rows: rules });
     enqueue('estimates', { first: est });                   // fresh re-read
     enqueue('notification_prefs', { first: { email_enabled: true } });
     // job status update + estimate bump resolve via builder defaults
   }
+  const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_expiring', params: {} };
 
   test('sends the email, claims the ledger, marks the job done', async () => {
     enqueueProcessorHappyPath();
@@ -481,25 +482,36 @@ describe('processDueJobs', () => {
     expect(defer.payload.status).toBeUndefined(); // stays pending
   });
 
-  test('return_visit_hot is spacing-EXEMPT and still sends', async () => {
+  test('return_visit_hot honors the 12h spacing too (owner 2026-07-21: no emails close together)', async () => {
+    // The hot rule fires ~1 minute after the click, but never lands within
+    // 12h of another send — the spacing defer reschedules it to the
+    // boundary instead of skipping it.
+    const lastSent = new Date(NOW.getTime() - 1 * H);
     enqueueProcessorHappyPath({
       job: pendingJob({ rule_key: 'return_visit_hot' }),
-      est: baseEstimate({ follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 1 * H) }),
+      est: baseEstimate({ follow_up_count: 1, last_follow_up_at: lastSent }),
     });
 
     const result = await Engine.processDueJobs(NOW);
 
-    expect(result.sent).toBe(1);
-    expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
-      'est-1', 'return_visit_hot', 'estimate.engage_return_visit', expect.any(Object),
-      { blockLegacyFlags: [], blockRuleKeys: [] },
-    );
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.due_at.getTime()).toBe(lastSent.getTime() + 12 * H);
+    expect(defer.payload.status).toBeUndefined(); // stays pending
   });
 
-  test('actively-viewing customers defer instead of getting emailed mid-read', async () => {
+  test('actively-viewing customers defer instead of getting emailed mid-read (held rules)', async () => {
+    // expiring_engaged keeps the hold — it has no quiet-window gate of its
+    // own, so an active view 5 minutes ago reaches the hold branch itself.
+    // The exemption below is ONLY for the engaged-moment rules.
     enqueueProcessorHappyPath({
-      job: pendingJob({ rule_key: 'return_visit_hot' }),
-      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
+      job: pendingJob({ rule_key: 'expiring_engaged', template_key: 'estimate.engage_expiring' }),
+      est: baseEstimate({
+        last_viewed_at: new Date(NOW.getTime() - 5 * MIN),
+        expires_at: new Date(NOW.getTime() + 86400000),
+      }),
+      rules: [EXPIRING_RULE],
     });
 
     const result = await Engine.processDueJobs(NOW);
@@ -509,6 +521,18 @@ describe('processDueJobs', () => {
     const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(defer.payload.status).toBeUndefined();
     expect(defer.payload.due_at).toBeInstanceOf(Date);
+  });
+
+  test('engaged-moment rules are hold-exempt — the email sends while they are still on the page (owner 2026-07-21)', async () => {
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(1);
+    expect(followupShared.claimFollowupSend).toHaveBeenCalled();
   });
 
   test('converted customers skip', async () => {

@@ -57,21 +57,30 @@ describe('estimate.engage_* seeds — engine contract', () => {
     }
   });
 
-  test('every template has exactly one CTA on the right URL, and signs off', () => {
+  test('every template has one primary CTA on the right URL (plus at most the safety chip), and signs off', () => {
     // Owner 2026-07-15 (as few clicks as possible): engaged moments ride the
     // accept-intent deep link (?intent=accept scrolls to the accept step);
     // never-viewed moments and the gentle check-in keep the plain view link.
+    // Owner 2026-07-21 amendment: the FAQ-carrying templates also link the
+    // public products & safety page — rendered as a SECONDARY chip below
+    // the primary button, always the same static URL, never a third CTA.
     const ACCEPT_CTA = new Set([
       'estimate.engage_return_visit',
       'estimate.engage_high_intent',
       'estimate.engage_return_after_dark',
       'estimate.engage_expiring',
     ]);
+    const SAFETY_URL = 'https://www.wavespestcontrol.com/products-and-safety';
     for (const t of TEMPLATES) {
       const cta = t.blocks.filter((b) => b.type === 'cta');
-      expect(cta).toHaveLength(1);
+      expect(cta.length).toBeGreaterThanOrEqual(1);
+      expect(cta.length).toBeLessThanOrEqual(2);
       expect(cta[0].url_variable).toBe(ACCEPT_CTA.has(t.key) ? 'estimate_accept_url' : 'estimate_url');
       expect(cta[0].label).toBeTruthy();
+      if (cta.length === 2) {
+        expect(cta[1].url).toBe(SAFETY_URL);
+        expect(cta[1].url_variable).toBeUndefined();
+      }
       expect(t.blocks.some((b) => b.type === 'signature')).toBe(true);
     }
   });

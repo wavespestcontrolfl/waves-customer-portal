@@ -62,15 +62,25 @@ const ENGINE_LIMITS = {
 // admin edit can never leave a rule missing a knob.
 const DEFAULT_RULE_PARAMS = {
   delivery_unopened_24h: { minAgeHours: 24, maxAgeHours: 48, eligibleCategories: ['pest', 'lawn'] },
+  // Engaged-moment rules fire ~1 minute after the triggering click and are
+  // EXEMPT from the mid-read hold (owner 2026-07-21: "send them 1 minute
+  // after they click, for someone that is engaged") — the email lands
+  // while the estimate is still open in front of them, deliberately.
+  // Effective latency is fire delay + the 5-minute cron tick.
   return_visit_hot: {
     minReturnGapMinutes: 15,
     maxSinceFirstSessionHours: 48,
-    fireDelayMinutes: 15,
-    spacingExempt: true,
+    fireDelayMinutes: 1,
+    activeViewHoldExempt: true,
+    // Owner 2026-07-21: 12h minimum spacing applies to EVERY send, hot
+    // included — the fast fire above governs latency from the click, but
+    // never lets two emails land close together (the spacing defer just
+    // reschedules the hot job to the 12h boundary).
+    spacingExempt: false,
     eligibleCategories: ['pest', 'lawn'],
   },
-  multi_view_high_intent: { minSessions: 3, windowHours: 72, fireDelayMinutes: 15, eligibleCategories: ['pest', 'lawn'] },
-  dark_then_return: { minDarkDays: 3, fireDelayMinutes: 15, eligibleCategories: ['pest', 'lawn'] },
+  multi_view_high_intent: { minSessions: 3, windowHours: 72, fireDelayMinutes: 1, activeViewHoldExempt: true, eligibleCategories: ['pest', 'lawn'] },
+  dark_then_return: { minDarkDays: 3, fireDelayMinutes: 1, activeViewHoldExempt: true, eligibleCategories: ['pest', 'lawn'] },
   viewed_gone_quiet_72h: { minQuietHours: 72, maxQuietHours: 96, eligibleCategories: ['pest', 'lawn'] },
   expiring_engaged: { expiresWithinDays: 2, eligibleCategories: ['pest', 'lawn'] },
   expiring_never_viewed: { expiresWithinDays: 2, eligibleCategories: ['pest', 'lawn'] },
@@ -524,8 +534,12 @@ async function processDueBatch(now = new Date()) {
         continue;
       }
       // Mid-read hold: they're literally on the page — try again shortly.
+      // Engaged-moment rules opt OUT via activeViewHoldExempt (owner
+      // 2026-07-21): for those, landing while they're still reading is the
+      // point — strike while the estimate is open.
       const lastView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
-      if (lastView && nowMs - lastView < ENGINE_LIMITS.activeViewHoldMinutes * 60000) {
+      if (rule.params.activeViewHoldExempt !== true
+        && lastView && nowMs - lastView < ENGINE_LIMITS.activeViewHoldMinutes * 60000) {
         await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'active-view-hold');
         continue;
       }

@@ -295,7 +295,23 @@ function renderBlocks(blocks, payload) {
         const valueText = renderInline(row.value, payload, { html: false });
         return { labelHtml, valueHtml, labelText, valueText };
       }).filter((row) => String(row.valueText || '').trim() !== '');
-      if (rows.length) {
+      if (rows.length && block.variant === 'faq') {
+        // Question-over-answer, single column (variant preserved by
+        // normalizeBlocks for exactly this): the two-column money-table
+        // layout below right-aligns values in bold, which mangles
+        // sentence-length answers. Empty answers already dropped above —
+        // that's how truth-scoped FAQ rows (contract/callback claims)
+        // disappear for the categories that can't make the claim.
+        htmlParts.push(`
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;">
+            ${rows.map((row) => `
+              <tr><td style="padding:7px 0 1px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.labelHtml}</td></tr>
+              <tr><td style="padding:0 0 7px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${row.valueHtml}</td></tr>
+            `).join('')}
+          </table>
+        `);
+        textParts.push(rows.map((row) => `${row.labelText}\n${row.valueText}`).join('\n\n'));
+      } else if (rows.length) {
         htmlParts.push(`
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
