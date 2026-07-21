@@ -143,7 +143,7 @@ function initBouncieMileageCrons() {
                 job_id: jobMatch.job_id,
                 is_business: true,
                 classification_notes: `Re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron)`,
-                deduction_amount: parseFloat(trip.distance_miles) * mileageService.getIrsRate(new Date(tripDate).getFullYear()),
+                deduction_amount: parseFloat(trip.distance_miles) * mileageService.getIrsRate(tripDate),
                 updated_at: db.fn.now(),
               });
             matched++;

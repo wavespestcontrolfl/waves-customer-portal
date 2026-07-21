@@ -90,7 +90,7 @@ router.put('/trips/:id', async (req, res, next) => {
       updates.classification_notes = notes || (is_business ? 'Manually classified as business' : 'Manually classified as personal');
 
       // Recalculate deduction
-      const irsRate = mileageService.getIrsRate(new Date(trip.trip_date).getFullYear());
+      const irsRate = mileageService.getIrsRate(trip.trip_date);
       updates.deduction_amount = is_business
         ? parseFloat((parseFloat(trip.distance_miles) * irsRate).toFixed(2))
         : 0;

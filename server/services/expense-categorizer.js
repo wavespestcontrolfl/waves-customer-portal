@@ -82,16 +82,18 @@ Rules:
 
 /**
  * The AI's deductiblePercent is derived from UNTRUSTED input (emailed
- * invoice content can prompt-inject it; the model can hallucinate) —
- * never let it mutate tax_deductible_amount unvalidated. Returns a finite
- * percent in (0, 100) when a partial deduction is legitimately indicated,
- * else null (caller keeps the full amount / leaves the row for review).
+ * invoice content can prompt-inject it; the model can hallucinate) — it may
+ * only SELECT from server-owned partial-deduction policies, never supply an
+ * arbitrary percentage. Today the sole policy is the IRS 50% business-meals
+ * limitation; extend the set only alongside a real policy. Anything else
+ * returns null → the caller keeps the full amount for operator review.
  */
+const ALLOWED_PARTIAL_DEDUCTION_PERCENTS = new Set([50]);
+
 function sanitizeDeductiblePercent(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return null;
-  if (n <= 0 || n >= 100) return null;
-  return n;
+  return ALLOWED_PARTIAL_DEDUCTION_PERCENTS.has(n) ? n : null;
 }
 
 module.exports = { autoCategorizeExpense, sanitizeDeductiblePercent };

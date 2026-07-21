@@ -31,15 +31,37 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 }
 
 /**
- * IRS standard mileage rate for a given tax year
+ * IRS standard business mileage rate, DATE-effective — the IRS changes the
+ * rate mid-year (2026: $0.725 through June 30, $0.76 from July 1), so a
+ * year-keyed map wrote materially wrong deductions for H2 trips. Accepts a
+ * 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass the trip
+ * date); a bare year number resolves at that year's OPENING rate and is
+ * reserved for year-granularity report displays.
+ * ⚠️ 2026 values entered 2026-07-21 — CPA-confirm before relying on them
+ * for filing, and extend the table when the IRS publishes new rates.
  */
-function getIrsRate(year) {
-  const rates = {
-    2024: 0.67,
-    2025: 0.70,
-    2026: 0.70,
-  };
-  return rates[year] || rates[2026];
+const IRS_MILEAGE_RATE_TABLE = [
+  { from: '2024-01-01', rate: 0.67 },
+  { from: '2025-01-01', rate: 0.70 },
+  { from: '2026-01-01', rate: 0.725 },
+  { from: '2026-07-01', rate: 0.76 },
+];
+
+function getIrsRate(tripDate) {
+  let dstr;
+  if (typeof tripDate === 'number') {
+    dstr = `${tripDate}-01-01`;
+  } else if (tripDate instanceof Date) {
+    dstr = `${tripDate.getFullYear()}-${String(tripDate.getMonth() + 1).padStart(2, '0')}-${String(tripDate.getDate()).padStart(2, '0')}`;
+  } else {
+    dstr = String(tripDate || '').slice(0, 10);
+  }
+  let rate = IRS_MILEAGE_RATE_TABLE[0].rate;
+  for (const entry of IRS_MILEAGE_RATE_TABLE) {
+    if (entry.from <= dstr) rate = entry.rate;
+    else break;
+  }
+  return rate;
 }
 
 function tripDateForBouncieStart(startTime) {
@@ -321,8 +343,7 @@ async function processTripWebhook(event) {
       classification.notes = `Job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away)`;
     }
 
-    const year = new Date(tripDate).getFullYear();
-    const irsRate = getIrsRate(year);
+    const irsRate = getIrsRate(tripDate);
     const deductionAmount = classification.is_business
       ? parseFloat((distanceMiles * irsRate).toFixed(2))
       : 0;
@@ -444,8 +465,7 @@ async function computeDailySummary(equipmentId, date) {
       ? Math.max(...odometers.map(t => t.end_odometer || 0))
       : null;
 
-    const year = new Date(date).getFullYear();
-    const irsRate = getIrsRate(year);
+    const irsRate = getIrsRate(date);
     const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
 
     // Count completed jobs and revenue for this vehicle's technician on this date
@@ -543,8 +563,7 @@ async function computeMonthlySummary(equipmentId, monthDate) {
     const fuelCostEstimated = parseFloat((totalFuel * 3.50).toFixed(2)); // ~$3.50/gal estimate
     const avgMpg = totalFuel > 0 ? parseFloat((totalMiles / totalFuel).toFixed(1)) : null;
 
-    const year = new Date(monthStart).getFullYear();
-    const irsRate = getIrsRate(year);
+    const irsRate = getIrsRate(monthStart);
     const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
 
     const hardBrakesTotal = dailies.reduce((s, d) => s + (d.hard_brakes || 0), 0);

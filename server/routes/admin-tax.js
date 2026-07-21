@@ -576,8 +576,8 @@ router.post('/mileage', async (req, res, next) => {
       return res.status(400).json({ error: 'tripDate and distanceMiles are required' });
     }
 
-    const year = new Date(tripDate).getFullYear();
-    const irsRate = irsRateForYear(year);
+    // Date-effective (the IRS changes the rate mid-year).
+    const irsRate = require('../services/bouncie-mileage').getIrsRate(tripDate);
     const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
 
     const [inserted] = await db('mileage_log').insert({
@@ -657,7 +657,9 @@ router.get('/mileage/stats', async (req, res, next) => {
 
     const tripCount = parseInt(totals.trip_count);
     const totalMiles = parseFloat(totals.total_miles);
-    const irsRate = parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
+    // Display-only "current rate" — per-trip deductions are computed at each
+    // trip's date-effective rate and summed from deduction_amount above.
+    const irsRate = mileageService.getIrsRate(etDateString());
     res.json({
       year,
       totalMiles,
@@ -682,25 +684,27 @@ router.get('/mileage/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// IRS standard-mileage rate for a trip's year (mirrors POST /mileage).
-const IRS_RATE_MAP = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
-function irsRateForYear(year) {
-  return IRS_RATE_MAP[year] || parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
-}
+// Date-effective IRS rate + canonical summary recompute live in the shared
+// mileage service (the IRS changes the rate MID-YEAR — a year-keyed rate
+// wrote wrong deductions for H2 trips).
+const mileageService = require('../services/bouncie-mileage');
 const MILEAGE_PURPOSES = ['business', 'personal', 'unclassified'];
 
 // Classify trips (single or bulk) — the geofence classifier is RETIRED, so
 // every Bouncie trip lands 'unclassified' at $0 deduction and this is the
-// ONLY way to claim the miles. business → deduction at the trip-year IRS
+// ONLY way to claim the miles. business → deduction at the TRIP-DATE IRS
 // rate; personal/unclassified → $0. Substantiation (which trips are
 // business) is the operator's call — nothing here auto-classifies.
 async function classifyTrips(ids, purpose) {
-  const rows = await db('mileage_log').whereIn('id', ids).select('id', 'trip_date', 'distance_miles');
+  const rows = await db('mileage_log')
+    .whereIn('id', ids)
+    .select('id', 'trip_date', 'distance_miles', 'equipment_id');
   let updated = 0;
   let deductionTotal = 0;
+  const summaryKeys = new Set();
   for (const row of rows) {
-    const year = Number(String(dateCellStr(row.trip_date)).slice(0, 4));
-    const rate = irsRateForYear(year);
+    const tripDay = dateCellStr(row.trip_date);
+    const rate = mileageService.getIrsRate(tripDay);
     const miles = parseFloat(row.distance_miles) || 0;
     const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
     await db('mileage_log').where({ id: row.id }).update({
@@ -714,8 +718,19 @@ async function classifyTrips(ids, purpose) {
       deduction_amount: deduction,
       updated_at: new Date(),
     });
+    if (row.equipment_id && tripDay) summaryKeys.add(`${row.equipment_id}|${tripDay}`);
     updated++;
     deductionTotal += deduction;
+  }
+  // Recompute the affected daily summaries so mileage dashboards agree with
+  // the reclassification (same call the admin-mileage PUT path makes).
+  for (const key of summaryKeys) {
+    const [equipmentId, day] = key.split('|');
+    try {
+      await mileageService.computeDailySummary(equipmentId, day);
+    } catch (err) {
+      logger.warn(`[tax] mileage summary recompute failed for ${equipmentId} ${day}: ${err.message}`);
+    }
   }
   return { updated, deductionTotal: Math.round(deductionTotal * 100) / 100 };
 }
