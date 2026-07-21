@@ -40,8 +40,8 @@ export const STATUS = {
   good: { label: 'Good', color: COLORS.green },
   stable: { label: 'Stable', color: COLORS.green },
   watch: { label: 'Watch', color: COLORS.orange },
-  needs_attention: { label: 'Needs attention', color: COLORS.red },
-  urgent: { label: 'Action needed', color: COLORS.red },
+  needs_attention: { label: 'Attention', color: COLORS.red },
+  urgent: { label: 'Urgent', color: COLORS.red },
   tracking: { label: 'Tracking', color: COLORS.grayMid },
 };
 export function statusMeta(key) { return STATUS[key] || STATUS.tracking; }
@@ -152,8 +152,12 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
   );
 }
 
+// Watch / Attention / Urgent pills pulse their dot (owner 2026-07-21) so the
+// states that need eyes read as live. Reduced-motion users get a steady dot.
+const PULSE_STATUSES = new Set(['watch', 'needs_attention', 'urgent']);
 export function StatusPill({ status, small = false }) {
   const meta = statusMeta(status);
+  const pulse = PULSE_STATUSES.has(String(status || ''));
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 7,
@@ -161,7 +165,16 @@ export function StatusPill({ status, small = false }) {
       background: CARD, border: `1px solid ${BORDER}`,
       fontFamily: FONTS.heading, fontWeight: 700, fontSize: small ? 12 : 14, color: TEXT,
     }}>
-      <span style={{ width: small ? 8 : 10, height: small ? 8 : 10, borderRadius: 999, background: meta.color, flex: 'none' }} />
+      {pulse ? (
+        <style>{'@keyframes wavesPillPulse{0%,100%{opacity:1}50%{opacity:.25}}@media (prefers-reduced-motion: reduce){.waves-pill-pulse{animation:none !important}}'}</style>
+      ) : null}
+      <span
+        className={pulse ? 'waves-pill-pulse' : undefined}
+        style={{
+          width: small ? 8 : 10, height: small ? 8 : 10, borderRadius: 999, background: meta.color, flex: 'none',
+          ...(pulse ? { animation: 'wavesPillPulse 1.6s ease-in-out infinite' } : {}),
+        }}
+      />
       {meta.label}
     </span>
   );
@@ -297,7 +310,7 @@ export function TreeShrubInsightCards({ insights = [], limit = 3 }) {
   if (!top.length) return null;
   return (
     <Card>
-      <CardTitle sub="The few things that actually matter from today’s visit.">Top plant insights</CardTitle>
+      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
       <div style={{ display: 'grid', gap: 12 }}>
         {top.map((it, i) => {
           const meta = statusMeta(it.status || 'tracking');
@@ -356,7 +369,7 @@ export function TreeShrubVisualDiagnosisBars({ categories = [] }) {
   if (!cats.length) return null;
   return (
     <Card>
-      <CardTitle sub="What our cameras and AI scored from today’s photos. Tap a row for the details.">Photo Diagnosis</CardTitle>
+      <CardTitle sub="Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.">Plant Health Analysis</CardTitle>
       <div ref={barsRef} style={{ display: 'grid', gap: 8 }}>
         {cats.map((c, i) => {
           const status = c.status || scoreStatus(c.score);
@@ -513,7 +526,7 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
   if (!pics.length && !summary) return null;
   return (
     <Card>
-      <CardTitle sub="What your technician documented on site today.">Plant photos</CardTitle>
+      <CardTitle sub="Conditions your technician identified and photographed during today’s inspection — each one is tracked visit to visit as part of your plant health program.">Plant Health Documentation</CardTitle>
       <div style={{ display: 'grid', gridTemplateColumns: print ? '1fr 1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
         {pics.map((p, i) => (
           <figure key={i} style={{ margin: 0 }}>

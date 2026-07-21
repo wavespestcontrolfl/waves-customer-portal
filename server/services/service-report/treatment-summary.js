@@ -29,9 +29,17 @@ function buildTreatmentSummary(treatment) {
   const main = products.filter((p) => !isSupportProduct(p));
   if (!main.length) return null;
 
+  // Active ingredient, not brand name (owner 2026-07-21 — brand names live
+  // on the product cards; the narrative speaks in actives). Strip the label
+  // percentage ("Dinotefuran 20%" → "dinotefuran"); fall back to the product
+  // name when no active is recorded.
+  const activeName = (p) => {
+    const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
+    return active ? active.toLowerCase() : p.name;
+  };
   const names = main.map((p) => {
     const method = METHOD_PHRASES[String(p.method || '').toLowerCase()] || null;
-    return `${p.name}${method ? ` (${method})` : ''}`;
+    return `${activeName(p)}${method ? ` (${method})` : ''}`;
   });
   const list = names.length === 1
     ? names[0]

@@ -61,7 +61,8 @@ Explain the treatment like a knowledgeable, friendly plant-health professional:
 
 Rules:
 - 3 to 5 sentences, one paragraph, plain text only. No headings, bullets, greeting, or sign-off.
-- Product names are fine. NEVER include application rates, quantities, prices, EPA details, or the word "chemical".
+- NEVER use brand or trade names. Refer to each product by its active ingredient in plain language (e.g. "a dinotefuran soil drench", "a spirotetramat foliar treatment") — the product cards elsewhere on the report carry the brand names.
+- NEVER include application rates, quantities, prices, EPA details, or the word "chemical".
 - Never say safe, non-toxic, eliminated, guaranteed, pest-free, or cured. Never promise results — use "designed to", "should", "you can expect".
 - Ground every claim in the findings and products below. Do not invent findings, pests, or products.
 

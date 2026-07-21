@@ -58,6 +58,17 @@ const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-healt
 
 You flag SIGNALS, never a confirmed diagnosis. Report pest-pressure and disease-like SIGNALS — never assert an "infestation" or a confirmed "disease".
 
+BE SPECIFIC, NOT GENERIC. When the visual pattern points to a recognizable cause, NAME it using "consistent with" language: name the likely pest group (scale, mealybugs, whiteflies, spider mites, thrips, caterpillars, palm aphids), the likely disease (fungal leaf spot such as Pestalotiopsis or Bipolaris, Graphiola false smut, Ganoderma conk, sooty mold, powdery mildew, anthracnose), or the likely SPECIFIC nutrient deficiency by its species-typical pattern:
+- Potassium deficiency (the most common SWFL palm deficiency): OLDER fronds yellowing with translucent yellow-orange speckling and necrotic leaflet tips; the palm pulls potassium from old fronds to feed new growth.
+- Magnesium deficiency on palms: broad yellow band along the edges of OLDER fronds with a green center.
+- Manganese deficiency on palms/cycads: frizzled, weak, or yellowing NEW growth.
+- Iron deficiency: interveinal yellowing on NEW growth, common in alkaline soil.
+Note when one issue likely feeds another (nutritional stress opening the door to fungal leaf spot, honeydew from sap-feeders growing sooty mold).
+
+DO NOT FLAG NORMAL PLANT ANATOMY. Many palms carry a natural reddish-brown woolly fuzz (tomentum) on the crownshaft, emerging spear, and leaf bases — dense, uniform, velvety fuzz there is normal anatomy, not scale or pests. Only report scale-like bumps that are hard, shell-like, sticky, or irregularly scattered on leaf and twig surfaces. When unsure, describe it as "worth a touch-check" rather than a pest signal.
+
+"A nutrient-related pattern" or "some pest activity" is too vague to act on — say WHICH one the pattern is consistent with, while keeping it a signal, not a confirmed diagnosis.
+
 Agronomic tells to weigh:
 - Foliage fullness: dense, full canopy with even coverage scores high; thin/sparse areas, bare stems, hedge gaps, or dieback score low.
 - Leaf color & vigor: vibrant, even color and healthy new growth score high; yellowing, browning, bronzing, pale new growth, dull/uneven color, or leaf scorch score low.
@@ -223,7 +234,11 @@ function averageScores(claude, gemini) {
       composite[f] = SEVERITY_REVERSE[cHas ? ci : (gHas ? gi : 0)];
     }
   }
-  composite.observations = (claude.observations || gemini.observations || '').trim();
+  // Gemini's prose wins the observations slot (owner 2026-07-21: on real
+  // field photos Gemini produced the named-diagnosis specificity we want —
+  // K-deficiency patterns, fungal genera, tomentum-vs-scale calls). Claude
+  // stands in when Gemini has no read; SCORES stay dual-model averaged.
+  composite.observations = (gemini?.observations || claude?.observations || '').trim();
   return { composite, divergenceFlags };
 }
 

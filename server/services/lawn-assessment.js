@@ -42,6 +42,8 @@ Agronomic tells to weigh:
 - Uniform scalped strips, tire ruts, or shredded blade tips indicate MECHANICAL damage (scalping, mower, or foot/vehicle traffic).
 - Name specific weeds when identifiable (e.g., nutsedge, crabgrass, dollarweed) instead of just "weeds".
 
+BE SPECIFIC, NOT GENERIC. When a visual pattern points to a recognizable cause, NAME it using "consistent with" language: the likely disease (brown patch, gray leaf spot, dollar spot, take-all root rot), the likely insect (chinch bugs, sod webworms, armyworms, grubs), the likely specific deficiency (iron chlorosis — yellowing with green veins, common in alkaline SWFL soil; nitrogen — pale, even yellowing of older blades), or the specific weed. "Some stress" or "a nutrient issue" is too vague to act on — say WHICH one the pattern is consistent with, while keeping it a signal, not a confirmed diagnosis.
+
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
 
 Set "overwatering_signal" true only when the photo shows a DIRECT sign of excess water — mushrooms/toadstools/fungal fruiting bodies, standing water, algae, or moss — not merely lush growth.
@@ -357,7 +359,11 @@ function averageScores(claudeResult, geminiResult) {
   // disagreement is already captured in divergenceFlags.
   composite.observationsClaude = claudeResult.observations || null;
   composite.observationsGemini = geminiResult.observations || null;
-  composite.observations = String(claudeResult.observations || geminiResult.observations || '').trim();
+  // Gemini's prose wins the observations slot (owner 2026-07-21 — same
+  // preference as tree-shrub: Gemini gave the named-diagnosis specificity on
+  // real field photos). Claude stands in when Gemini has no read; scores
+  // stay dual-model averaged.
+  composite.observations = String(geminiResult?.observations || claudeResult?.observations || '').trim();
 
   // Either model seeing a direct overwatering tell (mushrooms/standing water/
   // algae) flags it — this cross-checks the water-balance surplus on the report.

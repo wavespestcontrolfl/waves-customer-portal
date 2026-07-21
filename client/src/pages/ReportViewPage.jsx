@@ -496,7 +496,14 @@ export function cleanVisitSummary(value) {
 }
 
 function visitSummaryCopy(data = {}) {
-  return cleanVisitSummary(data.summary) || 'Your routine service is complete.';
+  const cleaned = cleanVisitSummary(data.summary);
+  if (cleaned) return cleaned;
+  // V2 reports carry full diagnostics below — the summary line should frame
+  // the professional record, not shrug (owner 2026-07-21).
+  if (data.reportV2) {
+    return 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.';
+  }
+  return 'Your routine service is complete.';
 }
 
 export function customerInteractionCopy(value) {
@@ -804,6 +811,15 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
     return 'Lawn treatment application';
   }
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
+  if (serviceLine === 'tree_shrub') {
+    if (/surfactant|adjuvant|wetting/.test(`${product} ${category}`)) return 'Spray coverage aid';
+    if (method.includes('drench')) return 'Systemic root-zone treatment';
+    if (method.includes('inject')) return 'Trunk injection';
+    if (category.includes('fung')) return 'Disease control application';
+    if (category.includes('insect') || category.includes('mitic')) return 'Insect & mite control';
+    if (category.includes('fert') || product.includes('fert')) return 'Plant nutrition application';
+    return 'Plant health treatment';
+  }
   if (serviceLine === 'termite' || serviceLine === 'rodent') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
@@ -827,6 +843,19 @@ function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   if (purpose === 'Targeted ant bait') return 'Placed for light ant activity at the documented active zone.';
   if (purpose === 'Targeted treatment') return 'Applied only where activity or conditions called for treatment.';
   if (purpose === 'Mosquito pressure reduction') return 'Applied to reduce resting adult mosquito pressure around target areas.';
+  const targets = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean);
+  const targetText = targets.length ? targets.join(', ').toLowerCase() : '';
+  if (purpose === 'Systemic root-zone treatment') {
+    return `Applied at the root zone so the active ingredient moves up through the plant's vascular system${targetText ? ` to control the ${targetText} activity documented today` : ''}.`;
+  }
+  if (purpose === 'Insect & mite control') {
+    return `Applied to the affected foliage and stems${targetText ? ` to control the ${targetText} activity documented today` : ''}.`;
+  }
+  if (purpose === 'Trunk injection') return 'Delivered directly into the trunk so the treatment moves with the tree’s own vascular flow.';
+  if (purpose === 'Disease control application') return 'Applied to protect foliage where disease-like signals or seasonal conditions called for it.';
+  if (purpose === 'Plant nutrition application') return 'Applied to correct the documented deficiency pattern and support color, density, and new growth.';
+  if (purpose === 'Spray coverage aid') return 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.';
+  if (purpose === 'Plant health treatment') return 'Applied as part of the documented plant health program for this visit.';
   return 'Application recorded for this visit.';
 }
 
@@ -848,6 +877,22 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
 
   if (serviceLine === 'lawn') {
     details.push(`${productName} was documented as part of today’s lawn treatment plan. The treatment is interpreted against turf density, weed pressure, fungus signal, color health, thatch, irrigation context, and recent lawn history so the next visit can track response instead of treating each visit as isolated.`);
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  if (serviceLine === 'tree_shrub') {
+    const isSurfactant = /surfactant|adjuvant|wetting/i.test(`${productName} ${active}`);
+    const isSystemic = method.includes('drench') || method.includes('inject')
+      || /dinotefuran|imidacloprid|spirotetramat|systemic/i.test(active);
+    if (isSurfactant) {
+      details.push(`${productName} is a spray adjuvant, not a pesticide. It lowers the surface tension of the spray so the treatment spreads evenly and holds on waxy leaves, stems, and the protective coatings of pests like scale and mealybugs — improving the coverage and performance of the products it is mixed with.`);
+    } else if (isSystemic) {
+      details.push(`${productName} is a systemic treatment${active ? ` (active ingredient: ${active})` : ''}. It is absorbed into the plant and moved through its vascular system, so sap-feeding pests such as scale, mealybugs, and whiteflies take it in as they feed — including pests concealed under waxy coverings or tucked into branch crotches where contact sprays cannot reach. Systemic protection builds over days to weeks and keeps working between visits.`);
+    } else {
+      details.push(`${productName} was applied to the affected plants${active ? ` (active ingredient: ${active})` : ''} per its label directions, targeting the documented activity while minimizing impact on the surrounding landscape.`);
+    }
+    details.push('The application is tracked against this property’s plant inventory, photo history, and prior treatments so the next visit measures response rather than starting over.');
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -2697,6 +2742,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                       <p>{active}</p>
                     </div>
                   )}
+                  {epa && (
+                    <div>
+                      <div className="sr-cell-label">EPA Reg. No.</div>
+                      <p>{epa}</p>
+                    </div>
+                  )}
                 </div>
                 <div className="product-why">
                   <div className="sr-cell-label">Why used today</div>
@@ -2706,6 +2757,16 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                       : why}
                   </p>
                 </div>
+                {/* Label-derived safety protocol, visible on the card face —
+                    not buried in Details (owner 2026-07-21). Sourced from the
+                    approved per-product label facts only. */}
+                {(precautionSummary || reentrySummary) && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">Safety &amp; re-entry</div>
+                    {precautionSummary && <p>{precautionSummary}</p>}
+                    {reentrySummary && <p>{reentrySummary}</p>}
+                  </div>
+                )}
                 {productSummary && (
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
@@ -2726,8 +2787,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     {applicationTechnicalExplanation(app, data.serviceLine).map((detail) => (
                       <p key={detail}>{detail}</p>
                     ))}
-                    {precautionSummary && <p>{precautionSummary}</p>}
-                    {reentrySummary && <p>{reentrySummary}</p>}
                     {watering && (
                       <div className="product-watering-guidance">
                         <div className="sr-cell-label">Watering after this application</div>

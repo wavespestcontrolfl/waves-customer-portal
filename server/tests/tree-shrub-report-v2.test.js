@@ -50,13 +50,15 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
 describe('buildTreatmentSummary (owner 2026-07-21)', () => {
   test('names products with methods and targets; surfactant becomes coverage copy', () => {
     const out = buildTreatmentSummary({ products: [
-      { name: 'Safari 20 SG', kind: 'systemic', targets: ['Scale', 'Mealybugs'], method: 'soil_drench' },
-      { name: 'Kontos Insecticide/Miticide', kind: 'insecticide', targets: ['Scale', 'Mites'], method: 'foliar_spray' },
+      { name: 'Safari 20 SG', kind: 'systemic', activeIngredient: 'Dinotefuran 20%', targets: ['Scale', 'Mealybugs'], method: 'soil_drench' },
+      { name: 'Kontos Insecticide/Miticide', kind: 'insecticide', activeIngredient: 'Spirotetramat', targets: ['Scale', 'Mites'], method: 'foliar_spray' },
       { name: 'LESCO 90/10 Nonionic Surfactant', kind: 'other', targets: [], method: 'foliar_spray' },
     ] });
-    expect(out).toContain('Safari 20 SG (soil drench)');
-    expect(out).toContain('Kontos Insecticide/Miticide (foliar spray)');
+    // Actives, not brand names (owner 2026-07-21) — brands live on the cards.
+    expect(out).toContain('dinotefuran (soil drench)');
+    expect(out).not.toContain('Safari');
     expect(out).toContain('scale, mealybugs and mites');
+    expect(out).toContain('spirotetramat (foliar spray)');
     expect(out).toContain('surfactant added');
     expect(out).toContain('systemic products are absorbed');
     // Surfactant is coverage copy, never a listed treatment.
