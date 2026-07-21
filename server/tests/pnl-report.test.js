@@ -23,17 +23,8 @@ const {
   dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
   OUTFLOW_REPORTING_CATEGORIES,
-  CATEGORYLESS_TXN_TYPES,
 } = require('../services/pnl-report');
 
-describe('CATEGORYLESS_TXN_TYPES', () => {
-  test('types that legitimately carry no reporting_category never mark a payout stale', () => {
-    // Without this set, one synced ACH reversal (null category by design)
-    // would flag its payout for re-sync forever and pin the P&L coverage
-    // warning on permanently.
-    expect(CATEGORYLESS_TXN_TYPES).toEqual(['payment_reversal', 'payment_failure_refund']);
-  });
-});
 
 describe('OUTFLOW_REPORTING_CATEGORIES', () => {
   test('classifies by canonical reporting_category with the exact allowed set', () => {

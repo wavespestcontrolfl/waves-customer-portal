@@ -12,11 +12,12 @@
  * Data sources (verified against the live schema):
  *   revenue      — all recorded cash inflows for the window (payments
  *                  ledger + paid-Stripe-invoice gap rows + estimate-deposit
- *                  cash) MINUS per-refund balance transactions from
+ *                  cash) MINUS refund/dispute balance transactions from
  *                  stripe_payout_transactions in the window they occurred.
- *                  See paidRevenueForWindow for the full basis and the
- *                  refund-ledger sync-coverage caveat. Disputes/chargebacks
- *                  are not yet ledgered and are out of scope here.
+ *                  The ledger fills via the GLOBAL balance-transaction sync
+ *                  (stripe-banking syncBalanceTransactions — Stripe refuses
+ *                  per-payout listing for manual payouts); coverage below
+ *                  discloses when the sync hasn't yet passed the window end.
  *   labor        — NO imputed labor: the sole technician is the OWNER, and
  *                  an owner/sole-proprietor's own labor is not a deductible
  *                  expense. Real payroll/contract-labor spend flows through
@@ -315,16 +316,6 @@ function missingTableOnly(fallback) {
 const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal'];
 
 /**
- * Balance-transaction TYPES that legitimately carry no reporting_category —
- * a NULL category on these rows is normal, not "synced before the
- * reporting_category column". Excluded from the stale-row predicates in
- * both the coverage check and the payout-sync healing pass; without this,
- * one synced ACH reversal would flag its payout stale forever (permanent
- * coverage warning + endless re-syncs).
- */
-const CATEGORYLESS_TXN_TYPES = ['payment_reversal', 'payment_failure_refund'];
-
-/**
  * The outflow rows netted against revenue for [startDate, endDate] (ET
  * days). One query definition shared by the P&L netting and the tax
  * package's refunds.csv, so the export always reconciles to the report.
@@ -577,74 +568,33 @@ async function buildPnlReport(db, startDate, endDate) {
   });
 
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
-  // synced payout-transaction ledger, which lags until each payout is paid
-  // AND synced. FAIL CLOSED: the window is proven complete only when
-  // (a) no paid payout still needs its transaction (re)sync, (b) no payout
-  // anywhere is still unsettled (an unsettled payout — whatever its own
-  // creation date — can hold in-window transactions the ledger lacks), and
-  // (c) a SYNCED PAID payout exists that was created AFTER the window end,
-  // proving Stripe's chronological sweep has passed the cutoff. Anything
-  // weaker (e.g. the newest transaction date) can label incomplete figures
-  // final.
-  const [ledgerHead, backlogRow, unsettledRow, sweepRow] = await Promise.all([
-    db('stripe_payout_transactions')
-      .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
-      .first()
-      .catch(missingTableOnly({ through: null })),
-    // Same predicate as syncPayouts' self-healing pass. NULL category only
-    // marks a row stale when its TYPE is supposed to carry one —
-    // CATEGORYLESS_TXN_TYPES rows are complete as-is.
-    db('stripe_payouts as sp')
-      .where('sp.status', 'paid')
-      .where(function needsResync() {
-        this.whereNull('sp.transaction_count')
-          .orWhere('sp.transaction_count', 0)
-          .orWhereExists(function preCategoryRows() {
-            this.select(db.raw('1'))
-              .from('stripe_payout_transactions as t')
-              .whereRaw('t.payout_id = sp.id')
-              .whereNull('t.reporting_category')
-              .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
-          });
-      })
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-    db('stripe_payouts')
-      .whereNotIn('status', ['paid', 'canceled', 'failed'])
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-    db('stripe_payouts')
-      .where('status', 'paid')
-      .where('transaction_count', '>', 0)
-      .whereRaw(
-        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') > ?::date",
-        [endDate],
-      )
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-  ]);
-  const outflowLedgerThrough = ledgerHead?.through || null;
-  const backlogCount = parseInt(backlogRow?.n || 0, 10);
-  const unsettledCount = parseInt(unsettledRow?.n || 0, 10);
-  const sweptPastWindow = parseInt(sweepRow?.n || 0, 10) > 0;
+  // globally synced balance-transaction ledger (syncBalanceTransactions).
+  // The window is proven complete only when a successful global sync ran
+  // AFTER the window ended: that sync captured every balance transaction
+  // created on or before the cutoff, so nothing in-window can still be
+  // missing. Anything weaker labels incomplete figures final.
+  let lastBalanceSyncAt = null;
+  try {
+    const syncState = await db('stripe_sync_state')
+      .where('sync_type', 'balance_transactions')
+      .first();
+    if (syncState?.last_sync_at) lastBalanceSyncAt = new Date(syncState.last_sync_at);
+  } catch (e) {
+    if (e?.code !== '42P01') throw e; /* missing table in dev only */
+  }
+  // "After the window ended" at ET-day granularity: the sync's ET calendar
+  // day must be strictly later than the window's last day, which guarantees
+  // the sync ran after every in-window transaction already existed.
+  const syncedPastWindow = !!(lastBalanceSyncAt
+    && etDateString(lastBalanceSyncAt) > endDate);
   let coverageNote = null;
-  if (!outflowLedgerThrough) {
+  if (!lastBalanceSyncAt) {
     coverageNote = 'Refund/dispute/fee ledger has never been synced — outflows and processing fees are NOT reflected in these figures. Run Banking → Sync, then regenerate.';
-  } else if (backlogCount > 0) {
-    coverageNote = `${backlogCount} paid payout(s) still await transaction sync — outflow and fee figures are incomplete. Run Banking → Sync (repeat until it reports no backfill), then regenerate.`;
-  } else if (unsettledCount > 0) {
-    coverageNote = `${unsettledCount} payout(s) are still settling — their refunds/disputes/fees are not in the ledger yet. Figures firm up once they pay out and sync.`;
-  } else if (!sweptPastWindow) {
-    coverageNote = `Stripe's payout sweep has not yet passed ${endDate} — outflows and fees near the window end may not be in the ledger. Figures firm up once the next payout after the cutoff pays out and syncs.`;
+  } else if (!syncedPastWindow) {
+    coverageNote = `Refund/dispute/fee ledger last synced ${etDateString(lastBalanceSyncAt)} (ET) — a sync after ${endDate} is needed before outflow and fee figures for this window are final. Run Banking → Sync, then regenerate.`;
   }
   report.coverage = {
-    outflowLedgerThrough,
-    backlogCount,
-    unsettledCount,
-    sweptPastWindow,
+    lastBalanceSyncAt: lastBalanceSyncAt ? lastBalanceSyncAt.toISOString() : null,
     complete: !coverageNote,
     note: coverageNote,
   };
@@ -665,6 +615,5 @@ module.exports = {
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
   OUTFLOW_REPORTING_CATEGORIES,
-  CATEGORYLESS_TXN_TYPES,
   outflowTransactionsQuery,
 };
