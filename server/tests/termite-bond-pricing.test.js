@@ -482,13 +482,53 @@ describe('codex #2915 r3 hardening', () => {
     expect(parsed.engineResult.summary.recurringAnnualAfterDiscount).toBe(before - 180);
   });
 
-  test('a stale OPTIONS snapshot fails the save closed even with no bond selected', () => {
+  test('a stale UNSELECTED options snapshot is restamped to live rates, never bricked (r4)', () => {
     const data = mapV1ToLegacyShape(generateEstimate(termiteInput()));
     const estimateData = { result: data };
+    const tenYear = data.results.tmBait.bondOptions.find((o) => o.key === '10yr');
+    tenYear.perApp = 40; // browser bundle baked before an admin rate edit
+    tenYear.annual = 160;
+    // Nothing selected → server-authoritative correction instead of a 422
+    // that would brick every fallback termite save until a redeploy.
     expect(() => assertLiveTermiteBondRates(estimateData)).not.toThrow();
-    data.results.tmBait.bondOptions.find((o) => o.key === '10yr').perApp = 40;
+    expect(tenYear.perApp).toBe(45);
+    expect(tenYear.annual).toBe(180);
+    expect(tenYear.monthly).toBe(15);
+    // Unknown term keys still fail closed — the server never guesses a rate.
+    data.results.tmBait.bondOptions.push({ key: '3yr', perApp: 50 });
     let status;
     try { assertLiveTermiteBondRates(estimateData); } catch (err) { status = err.statusCode || err.status; }
     expect(status).toBe(422);
+  });
+});
+
+describe('codex #2915 r4 hardening', () => {
+  const { applySelectedTermiteBondToEstimateData } = require('../routes/estimate-public');
+
+  test('raw switcher syncs the replayable engineInputs term (bundle/accept replay parity)', () => {
+    const engineResult = generateEstimate(termiteInput({ termiteBondTerm: '10yr' }));
+    const parsed = {
+      engineInputs: { services: { termite: { system: 'advance', monitoringTier: 'basic', bondTerm: '10yr' } } },
+      engineResult,
+    };
+    applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(parsed.engineInputs.services.termite.bondTerm).toBe('1yr');
+    applySelectedTermiteBondToEstimateData(parsed, 'none');
+    expect('bondTerm' in parsed.engineInputs.services.termite).toBe(false);
+  });
+
+  test('mapped switcher syncs engineRequest + form inputs so re-prices replay the chosen term', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteBondTerm: '10yr' })));
+    const parsed = {
+      inputs: { svcTermiteBait: true, termiteBondTerm: '10yr' },
+      engineRequest: { services: { termite: { system: 'advance', monitoringTier: 'basic', bondTerm: '10yr' } } },
+      result: mapped,
+    };
+    applySelectedTermiteBondToEstimateData(parsed, '1yr');
+    expect(parsed.inputs.termiteBondTerm).toBe('1yr');
+    expect(parsed.engineRequest.services.termite.bondTerm).toBe('1yr');
+    applySelectedTermiteBondToEstimateData(parsed, 'none');
+    expect(parsed.inputs.termiteBondTerm).toBe('none');
+    expect('bondTerm' in parsed.engineRequest.services.termite).toBe(false);
   });
 });

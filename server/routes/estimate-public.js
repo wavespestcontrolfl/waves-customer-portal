@@ -10036,6 +10036,28 @@ function termiteBondOptionsFromEstimateData(parsedData = {}) {
   return null;
 }
 
+// A term switch must reach every REPLAYABLE input shape too (codex #2915
+// r4): the bundle/accept path replays extractEngineInputs(estData) through
+// the live engine, so a rewrite that only touched the stored rows/result
+// would let the replay resurrect the OLD term into pricingBundle
+// frequencies — displaying the new selection while accept locks and bills
+// the old amount. Engine shapes carry services.termite.bondTerm; v1 admin
+// saves carry the form field inputs.termiteBondTerm.
+function syncBondTermIntoReplayableInputs(parsedData = {}, termKey) {
+  for (const shape of [parsedData?.engineInputs, parsedData?.engineRequest]) {
+    const termite = shape?.services?.termite;
+    if (termite && typeof termite === 'object') {
+      if (termKey) termite.bondTerm = termKey;
+      else delete termite.bondTerm;
+    }
+  }
+  const formInputs = parsedData?.inputs;
+  if (formInputs && typeof formInputs === 'object'
+    && ('termiteBondTerm' in formInputs || formInputs.svcTermiteBait !== undefined)) {
+    formInputs.termiteBondTerm = termKey || 'none';
+  }
+}
+
 function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
   const result = parsedData?.result && typeof parsedData.result === 'object' ? parsedData.result : null;
   const stats = result?.results?.tmBait || null;
@@ -10089,6 +10111,7 @@ function applySelectedTermiteBondToEstimateData(parsedData = {}, termKey) {
     }
   }
   if (stats) stats.selectedBondTerm = option ? option.key : null;
+  syncBondTermIntoReplayableInputs(parsedData, option ? option.key : null);
   const changed = monthlyDelta !== 0 || annualDelta !== 0
     || Boolean(currentRow) !== Boolean(option)
     || Boolean(currentRow && option && currentRow.bondTerm !== option.key);
@@ -10149,6 +10172,7 @@ function applySelectedTermiteBondToRawEngineData(parsedData = {}, option) {
   }
   const bait = engineResult.lineItems.find((li) => li && li.service === 'termite_bait');
   if (bait) bait.selectedBondTerm = option ? option.key : null;
+  syncBondTermIntoReplayableInputs(parsedData, option ? option.key : null);
   const changed = monthlyDelta !== 0 || annualDelta !== 0
     || Boolean(currentLine) !== Boolean(option)
     || Boolean(currentLine && option && currentLine.bondTerm !== option.key);

@@ -702,8 +702,14 @@ function assertLiveTermiteBondRates(estimateData) {
 
   // The quote-time OPTIONS snapshot must be live too (codex #2915 r3): a
   // "No bond" save still persists selectable rates, and PUT /:token/bond
-  // later charges from that snapshot — a stale one would sell yesterday's
-  // price. Both persisted shapes (v1 stats + raw engine bait line).
+  // later charges from that snapshot. But REJECTING an unselected stale
+  // snapshot would brick every legacy-fallback termite save after an admin
+  // rate edit until the client bundle redeploys (codex #2915 r4 — the
+  // fallback engine bakes its table at build time). Nothing was chosen, no
+  // total depends on it, and the builder shows term-only labels — so the
+  // server RESTAMPS unselected snapshots to the live rates instead
+  // (server-authoritative correction; both persisted shapes). Selected
+  // rows above still fail closed — those the operator saw priced.
   const optionLists = [
     estimateData?.result?.results?.tmBait?.bondOptions,
     ...[estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
@@ -714,9 +720,14 @@ function assertLiveTermiteBondRates(estimateData) {
   for (const options of optionLists) {
     if (!Array.isArray(options)) continue;
     for (const opt of options) {
-      const quarterly = Number(TERMITE.bond?.[opt?.key]?.quarterly);
-      const optRate = Number(opt?.perApp ?? opt?.quarterly);
-      if (!(quarterly > 0) || !(Math.abs(optRate - quarterly) <= 0.005)) throw staleError();
+      const cfg = TERMITE.bond?.[opt?.key];
+      const quarterly = Number(cfg?.quarterly);
+      if (!(quarterly > 0)) throw staleError(); // unknown term — never guess a rate
+      const annual = Math.round(quarterly * 4 * 100) / 100;
+      opt.quarterly = quarterly;
+      opt.perApp = quarterly;
+      opt.annual = annual;
+      opt.monthly = Math.round((annual / 12) * 100) / 100;
     }
   }
 }
