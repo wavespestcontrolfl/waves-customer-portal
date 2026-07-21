@@ -46,7 +46,8 @@ describe('POST /api/client-errors', () => {
   });
 
   test('truncates oversized fields before forwarding', async () => {
-    const res = await post({ message: 'm'.repeat(2000), stack: 's'.repeat(9000) });
+    // Spaced words (not one long token) so truncation, not redaction, is under test.
+    const res = await post({ message: 'word '.repeat(500), stack: 'at frame '.repeat(2000) });
     expect(res.status).toBe(204);
     const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error.message.length).toBe(500);
@@ -57,6 +58,19 @@ describe('POST /api/client-errors', () => {
     await post({ message: 'x', url: '/estimate/short3' });
     const [, captureContext] = mockCapture.mock.calls[0];
     expect(captureContext.contexts.client_error.url).toBe('/estimate/:token');
+  });
+
+  test('redacts tokens/JWTs/emails embedded in free-form message + stack', async () => {
+    await post({
+      message: 'Failed to load /report/AbC123secretTOKEN for jane@example.com',
+      stack: 'Error at /pay/xyz789tok\nBearer eyJhbGciOi.J9payload.sigsigsig here',
+    });
+    const [error, captureContext] = mockCapture.mock.calls[0];
+    expect(error.message).toBe('Failed to load /report/:token for :email');
+    const scrubbedStack = captureContext.contexts.client_error.stack;
+    expect(scrubbedStack).toContain('/pay/:token');
+    expect(scrubbedStack).toContain(':jwt');
+    expect(scrubbedStack).not.toMatch(/eyJhbGciOi/);
   });
 
   test('a missing message still reports (never 500s)', async () => {

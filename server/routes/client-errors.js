@@ -31,6 +31,24 @@ const safePath = (value) => {
   return segments.length <= 1 ? path : `/${segments[0]}/:token`;
 };
 
+// The free-form fields (message, stack, componentStack, context) can embed a
+// tokenized URL, a JWT, or customer PII that a component threw into an error
+// string — never persist those in Sentry. Redact token-route paths (any token
+// length), JWTs, long opaque tokens, and email addresses.
+const TOKEN_ROUTE_RE = /(\/(?:report|estimate|pay|receipt|track|contract|card|prep|rate|recap|review|secure|reschedule|price-change|lawn-report|pest-report|service-outlines|book)\/)[^\s"'?)/\\]+/gi;
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g;
+const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/g;
+const EMAIL_RE = /[^\s@<>()"]+@[^\s@<>()"]+\.[^\s@<>()"]+/g;
+const scrubText = (value, max) => {
+  const text = clip(value, max);
+  if (!text) return undefined;
+  return text
+    .replace(TOKEN_ROUTE_RE, '$1:token')
+    .replace(JWT_RE, ':jwt')
+    .replace(LONG_TOKEN_RE, ':token')
+    .replace(EMAIL_RE, ':email');
+};
+
 // POST /api/client-errors  { message, stack, componentStack, context, url }
 router.post('/', limiter, (req, res) => {
   try {
@@ -38,14 +56,14 @@ router.post('/', limiter, (req, res) => {
     // @sentry/node 10.x: the second arg is a CaptureContext OBJECT, not a
     // scope-mutator callback (a callback is silently ignored, dropping the tag
     // and context).
-    Sentry.captureException(new Error(clip(message, 500) || 'Client error (no message)'), {
+    Sentry.captureException(new Error(scrubText(message, 500) || 'Client error (no message)'), {
       tags: { source: 'client' },
       contexts: {
         client_error: {
-          context: clip(context, 200),
+          context: scrubText(context, 200),
           url: safePath(url),
-          stack: clip(stack, 4000),
-          componentStack: clip(componentStack, 4000),
+          stack: scrubText(stack, 4000),
+          componentStack: scrubText(componentStack, 4000),
           userAgent: clip(req.headers['user-agent'], 300),
         },
       },
