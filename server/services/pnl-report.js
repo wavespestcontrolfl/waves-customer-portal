@@ -10,14 +10,13 @@
  * time_entry_daily_summary.total_cost). 2026-07-20 financial-reporting audit.
  *
  * Data sources (verified against the live schema):
- *   revenue      — cash received in the window (payment_date, an ET-stamped
- *                  DATE; statuses 'paid' + 'refunded' so a later refund can't
- *                  erase the original receipt) MINUS per-refund balance
- *                  transactions from stripe_payout_transactions in the window
- *                  they occurred. See paidRevenueForWindow for the full
- *                  refund-ledger rationale and its sync-coverage caveat.
- *                  Disputes/chargebacks are not yet ledgered and are out of
- *                  scope here.
+ *   revenue      — all recorded cash inflows for the window (payments
+ *                  ledger + paid-Stripe-invoice gap rows + estimate-deposit
+ *                  cash) MINUS per-refund balance transactions from
+ *                  stripe_payout_transactions in the window they occurred.
+ *                  See paidRevenueForWindow for the full basis and the
+ *                  refund-ledger sync-coverage caveat. Disputes/chargebacks
+ *                  are not yet ledgered and are out of scope here.
  *   labor        — time_entry_daily_summary.total_job_minutes × the loaded
  *                  labor rate from company_financials (the same rate per-visit
  *                  job costing uses; the summary table stores minutes, not
@@ -206,19 +205,29 @@ function missingTableOnly(fallback) {
  */
 /**
  * Cash received in the window minus cash refunded in the window.
- * - Received: payments whose payment_date (ET-stamped DATE) falls in the
- *   window, at FULL amount, including rows later flipped to
- *   status='refunded' — the cash really arrived in that period. A
- *   status='paid'-only filter made fully-refunded payments vanish
- *   retroactively from their original month.
+ *
+ * Received — every cash inflow the portal records, so the refund side below
+ * can never subtract money that was never counted:
+ *   1. payments rows (payment_date, an ET-stamped DATE), at FULL amount and
+ *      including rows later flipped to status='refunded' — the cash really
+ *      arrived in that period; a status='paid'-only filter made
+ *      fully-refunded payments vanish retroactively from their month.
+ *   2. Paid-Stripe-invoice GAP rows — invoices paid via Stripe whose
+ *      stripe_payment_intent_id has no matching payments row. Same query
+ *      shape and credit_applied netting as the dashboard's
+ *      paidRevenueTotal (admin-dashboard.js), so the two surfaces agree.
+ *   3. Estimate-deposit cash (estimate_deposits.received_at) — deposits
+ *      deliberately have NO payments row (estimate-deposits.js); cash in
+ *      is face amount + card surcharge.
  * - Refunded: per-refund balance transactions from
  *   stripe_payout_transactions (type='refund'), each with its own Stripe
  *   occurrence timestamp bucketed to an ET calendar day. This is the only
  *   durable PER-REFUND ledger in the DB: payments.refund_amount is a
- *   cumulative stamp (webhook-maintained, but one number can't allocate
- *   multiple partial refunds across periods) and payments.refunded_at is
- *   never written by the Stripe refund paths. Refund amounts are negative
- *   in balance transactions, hence SUM(-amount).
+ *   cumulative stamp (one number can't allocate multiple partial refunds
+ *   across periods) and payments.refunded_at is never written by the
+ *   Stripe refund paths. It covers deposit refunds too — consistent,
+ *   because deposit receipts are on the received side. Refund amounts are
+ *   negative in balance transactions, hence SUM(-amount).
  *   Coverage caveat: rows exist once the payout containing the refund has
  *   been synced (POST /api/admin/banking/sync); an unsynced tail lags until
  *   the next sync, exactly like the Banking fees/payout views built on the
@@ -226,22 +235,68 @@ function missingTableOnly(fallback) {
  * Exported so /revenue/reconcile reports the same revenue basis.
  */
 async function paidRevenueForWindow(db, startDate, endDate) {
-  const received = await db('payments')
-    .whereIn('status', ['paid', 'refunded'])
-    .whereBetween('payment_date', [startDate, endDate])
-    .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
-    .first()
-    .catch(missingTableOnly({ total: '0' }));
-  const refunded = await db('stripe_payout_transactions')
-    .where('type', 'refund')
-    .whereRaw(
-      "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
-      [startDate, endDate],
+  const etWindow = (qb, column) => qb
+    .whereRaw(`${column} >= ?::timestamp AT TIME ZONE 'America/New_York'`, [`${startDate}T00:00:00`])
+    .whereRaw(`${column} < (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'`, [`${endDate}T00:00:00`]);
+
+  const [ledger, invoiceGaps, deposits, refunded] = await Promise.all([
+    db('payments')
+      .whereIn('status', ['paid', 'refunded'])
+      .whereBetween('payment_date', [startDate, endDate])
+      .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+    etWindow(
+      db('invoices as i')
+        .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
+        .whereNotNull('i.stripe_payment_intent_id')
+        .whereNotExists(function gapGuard() {
+          this.select(db.raw('1'))
+            .from('payments as p')
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
+        }),
+      'i.paid_at',
     )
-    .select(db.raw("COALESCE(SUM(-amount)::text, '0') as total"))
-    .first()
-    .catch(missingTableOnly({ total: '0' }));
-  return round2(parseFloat(received?.total || 0) - parseFloat(refunded?.total || 0));
+      .select(db.raw('COALESCE(SUM(GREATEST(i.total - COALESCE(i.credit_applied, 0), 0))::text, \'0\') as total'))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+    etWindow(
+      db('estimate_deposits').whereNotNull('received_at'),
+      'received_at',
+    )
+      .select(db.raw("COALESCE(SUM(amount + COALESCE(card_surcharge, 0))::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+    db('stripe_payout_transactions')
+      .where('type', 'refund')
+      .whereRaw(
+        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+        [startDate, endDate],
+      )
+      .select(db.raw("COALESCE(SUM(-amount)::text, '0') as total"))
+      .first()
+      .catch(missingTableOnly({ total: '0' })),
+  ]);
+
+  return round2(
+    parseFloat(ledger?.total || 0)
+    + parseFloat(invoiceGaps?.total || 0)
+    + parseFloat(deposits?.total || 0)
+    - parseFloat(refunded?.total || 0),
+  );
+}
+
+/**
+ * DATE cell → 'YYYY-MM-DD' via LOCAL getters. node-postgres parses DATE
+ * columns to local-midnight Date objects, so etDateString/toISOString would
+ * shift them a day depending on the server zone (same trap and fix as
+ * admin-revenue.js effectiveDateStr). Strings pass through by prefix.
+ */
+function dateCellStr(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.slice(0, 10);
+  const d = new Date(v);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 /**
@@ -252,13 +307,11 @@ async function paidRevenueForWindow(db, startDate, endDate) {
 function rateAsOf(rateRows, dateStr) {
   let rate = DEFAULT_LOADED_LABOR_RATE;
   for (const r of rateRows || []) {
-    const eff = typeof r.effective_date === 'string'
-      ? r.effective_date.slice(0, 10)
-      : etDateString(new Date(r.effective_date));
-    if (eff <= dateStr) {
+    const eff = dateCellStr(r.effective_date);
+    if (eff && eff <= dateStr) {
       const v = Number(r.loaded_labor_rate);
       if (Number.isFinite(v) && v > 0) rate = v;
-    } else break;
+    } else if (eff) break;
   }
   return rate;
 }
@@ -272,9 +325,7 @@ function costLaborByDay(summaryRows, rateRows) {
   let minutes = 0;
   let cost = 0;
   for (const row of summaryRows || []) {
-    const day = typeof row.work_date === 'string'
-      ? row.work_date.slice(0, 10)
-      : etDateString(new Date(row.work_date));
+    const day = dateCellStr(row.work_date);
     const mins = parseFloat(row.total_job_minutes) || 0;
     minutes += mins;
     cost += (mins / 60) * rateAsOf(rateRows, day);
@@ -321,10 +372,17 @@ async function buildPnlReport(db, startDate, endDate) {
       .select(db.raw("COALESCE(SUM(deduction_amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
-    // No active/disposed filter: disposal caps the proration window (see
-    // prorateDepreciation) instead of deleting the asset's history.
+    // Active assets, PLUS disposed ones — disposal caps the proration window
+    // (see prorateDepreciation) instead of deleting the asset's history.
+    // Rows merely deactivated (active=false, never disposed — archived /
+    // non-business) stay excluded, matching every other tax surface.
     db('equipment_register')
       .whereNotNull('annual_depreciation')
+      .where(function activeOrDisposed() {
+        this.where('active', true)
+          .orWhere('disposed', true)
+          .orWhereNotNull('disposal_date');
+      })
       .select('annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date')
       .catch(missingTableOnly([])),
   ]);
@@ -350,6 +408,7 @@ module.exports = {
   prorateDepreciation,
   rateAsOf,
   costLaborByDay,
+  dateCellStr,
   missingTableOnly,
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,

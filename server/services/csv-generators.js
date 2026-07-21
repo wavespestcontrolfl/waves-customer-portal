@@ -224,6 +224,30 @@ function geoGridToCSV(pins, meta = {}) {
   return lines.join('\n');
 }
 
+/**
+ * Refund balance transactions (stripe_payout_transactions type='refund').
+ * Ships in the tax package so the refund-netted pnl.csv is reconcilable:
+ * a refund landing in a later period than its payment appears here even
+ * though transactions.csv (payments by payment_date) has no row for it.
+ * Balance-transaction refund amounts are negative; export the outflow as
+ * a positive number.
+ */
+function refundsToCSV(refunds) {
+  const headers = ['Date (ET)', 'Amount Refunded', 'Fee Reversed', 'Customer', 'Description', 'Stripe Txn ID'];
+  const lines = [row(headers)];
+  for (const r of refunds) {
+    lines.push(row([
+      r.refund_date_et || r.created_at_stripe || '',
+      r.amount != null ? Math.abs(parseFloat(r.amount)).toFixed(2) : '',
+      r.fee != null ? parseFloat(r.fee).toFixed(2) : '',
+      r.customer_name || '',
+      r.description || '',
+      r.stripe_txn_id || '',
+    ]));
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   transactionsToCSV,
   expensesToCSV,
@@ -231,6 +255,7 @@ module.exports = {
   depreciationToCSV,
   laborToCSV,
   pnlToCSV,
+  refundsToCSV,
   generateReadme,
   geoGridToCSV,
 };

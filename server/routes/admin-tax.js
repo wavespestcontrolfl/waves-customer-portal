@@ -5,7 +5,8 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf } = require('../services/pnl-report');
+const { buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr } = require('../services/pnl-report');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -895,7 +896,13 @@ router.get('/accounts-receivable', async (req, res, next) => {
     const now = new Date();
     let totalOutstanding = 0, current = 0, over30 = 0, over60 = 0, over90 = 0;
     const items = invoices.map(inv => {
-      const amount = parseFloat(inv.amount || inv.total || inv.amount_due || 0);
+      // Invoice rows carry `total`: net applied account/deposit credit so
+      // A/R totals (and the SMS reminder) ask for the COLLECTIBLE amount,
+      // matching every other receivable query. The payments-table fallback
+      // rows keep the raw-amount path.
+      const amount = inv.total != null
+        ? invoiceAmountDue(inv)
+        : parseFloat(inv.amount || inv.amount_due || 0);
       const dueDate = inv.due_date || inv.created_at;
       const daysOverdue = dueDate ? Math.max(0, Math.floor((now - new Date(dueDate)) / 86400000)) : 0;
       let bucket = 'current';
@@ -1043,7 +1050,10 @@ router.get('/export/pnl', async (req, res, next) => {
     // is byte-for-byte the same numbers the page shows. (The old version
     // HTTP-fetched its own endpoint and fell back to a divergent inline
     // recomputation that ignored the period parameter.)
-    const period = req.query.period || 'ytd';
+    // ExportsTab sends bare start_date/end_date with no period — honor the
+    // picked range as a custom window instead of silently exporting YTD.
+    const period = req.query.period
+      || (req.query.start_date && req.query.end_date ? 'custom' : 'ytd');
     const range = getPeriodRange(period, req.query);
     if (!range) {
       return res.status(400).json({ error: 'start_date and end_date required for custom period' });
@@ -1076,8 +1086,36 @@ router.get('/export/tax-package', async (req, res, next) => {
     let trips = [];
     try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch { /* */ }
 
+    // Refund ledger for the same window (ET days) — pnl.csv nets these, so
+    // the package must include the rows that explain the outflow (a refund
+    // in a later period than its payment has no transactions.csv row).
+    let refunds = [];
+    try {
+      refunds = await db('stripe_payout_transactions')
+        .where('type', 'refund')
+        .whereRaw(
+          "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [sd, ed],
+        )
+        .select(
+          '*',
+          db.raw("TO_CHAR(created_at_stripe AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as refund_date_et"),
+        )
+        .orderBy('created_at_stripe', 'desc');
+    } catch { /* table may not exist in dev */ }
+
+    // Same predicate as the P&L builder: active assets PLUS disposed ones,
+    // so depreciation.csv lists every asset whose prorated depreciation
+    // appears in pnl.csv (a disposed-this-year asset previously showed in
+    // the P&L but was missing from the supporting schedule).
     let equipment = [];
-    try { equipment = await db('equipment_register').where('active', true).where(function () { this.whereNull('disposed').orWhere('disposed', false); }).orderBy('name'); } catch { /* */ }
+    try {
+      equipment = await db('equipment_register')
+        .where(function activeOrDisposed() {
+          this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
+        })
+        .orderBy('name');
+    } catch { /* */ }
 
     // Labor detail. The summary table stores MINUTES (work_date keyed), not a
     // cost column — the old query filtered a nonexistent `date` column, so
@@ -1100,7 +1138,9 @@ router.get('/export/tax-package', async (req, res, next) => {
         .orderBy('s.work_date', 'desc')
         .select('s.*', 't.name as technician_name');
       laborSummaries = rows.map(r => {
-        const day = typeof r.work_date === 'string' ? r.work_date.slice(0, 10) : etDateString(new Date(r.work_date));
+        // dateCellStr: node-postgres DATE cells are local-midnight Dates —
+        // etDateString(new Date(...)) printed the previous calendar day.
+        const day = dateCellStr(r.work_date);
         const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
         const dayRate = rateAsOf(rateRows, day);
         return {
@@ -1133,6 +1173,7 @@ router.get('/export/tax-package', async (req, res, next) => {
     archive.pipe(res);
 
     archive.append(csv.transactionsToCSV(payments), { name: 'transactions.csv' });
+    archive.append(csv.refundsToCSV(refunds), { name: 'refunds.csv' });
     archive.append(csv.expensesToCSV(expenses), { name: 'expenses.csv' });
     archive.append(csv.mileageToCSV(trips), { name: 'mileage.csv' });
     archive.append(csv.depreciationToCSV(equipment), { name: 'depreciation.csv' });

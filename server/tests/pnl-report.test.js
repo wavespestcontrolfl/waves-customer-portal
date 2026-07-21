@@ -20,8 +20,22 @@ const {
   missingTableOnly,
   rateAsOf,
   costLaborByDay,
+  dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
 } = require('../services/pnl-report');
+
+describe('dateCellStr', () => {
+  test('renders node-postgres DATE cells (local-midnight Dates) without a day shift', () => {
+    // node-postgres parses DATE '2026-07-01' to local midnight — LOCAL
+    // getters must yield the same calendar day in any server zone.
+    expect(dateCellStr(new Date(2026, 6, 1))).toBe('2026-07-01');
+  });
+
+  test('passes strings through by prefix and empties nulls', () => {
+    expect(dateCellStr('2026-07-01T00:00:00.000Z')).toBe('2026-07-01');
+    expect(dateCellStr(null)).toBe('');
+  });
+});
 
 describe('rateAsOf / costLaborByDay', () => {
   const rates = [
