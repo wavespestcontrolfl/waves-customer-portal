@@ -43,6 +43,15 @@
  * state (never finalized succeeded) with an actionable 503, the resume
  * claim re-attempts the mint from frozen/hash-pinned/row inputs, and every
  * non-required mint failure keeps the non-blocking behavior exactly.
+ * Fix round 8 (Codex P0 + P1): the required-mint POSTURE is frozen into
+ * structured_notes inside the completion transaction (the billing profile
+ * is mutable DB state the request hash cannot pin — a live recomputation
+ * on resume could flip false after a profile edit/removal and finalize the
+ * closeout uninvoiced), resume reads it back via frozenResumeCompletionState
+ * and shouldAutoInvoiceCompletion honors it in BOTH directions; and the
+ * route checks releaseCompletionAttemptForResume's outcome — a no-op
+ * release answers with the real stale-window retry horizon instead of
+ * promising an immediate retry the claim would 409.
  */
 const fs = require('fs');
 const path = require('path');
@@ -795,6 +804,26 @@ describe('frozenResumeCompletionState — resume derives mode AND duration from 
     const out = frozenResumeCompletionState({ backfill: 'true', timeOnSite: 45 }, { requestBackfill: false });
     expect(out.isBackfillCompletion).toBe(false);
   });
+
+  test('the REQUIRED-mint posture rides the freeze — a flagless retry still surfaces it (fix round 8)', () => {
+    const out = frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, timeOnSite: 45 },
+      { requestBackfill: false },
+    );
+    expect(out.isBackfillCompletion).toBe(true);
+    expect(out.backfillMintRequired).toBe(true);
+  });
+
+  test('posture is strict-boolean and gated on the frozen backfill mode — nothing can smuggle a requirement in', () => {
+    // Absent stamp = not required (legacy committed records included).
+    expect(frozenResumeCompletionState({ backfill: true }, {}).backfillMintRequired).toBe(false);
+    // Truthy-string stamp is not a posture (mirrors the backfill flag rule).
+    expect(frozenResumeCompletionState({ backfill: true, backfillMintRequired: 'true' }, {}).backfillMintRequired).toBe(false);
+    // A NORMAL completion's record can never carry a mint requirement, even
+    // with a stray stamp — the posture only exists under the frozen mode.
+    expect(frozenResumeCompletionState({ backfillMintRequired: true }, {}).backfillMintRequired).toBe(false);
+    expect(frozenResumeCompletionState(null, {}).backfillMintRequired).toBe(false);
+  });
 });
 
 describe('backfillTimeOnSiteMinutes — the shared workday-cap sanitizer (Codex P1, PR #2897)', () => {
@@ -996,10 +1025,14 @@ describe('backfillTypedOneTimeMintRequired — ONE predicate decides the mint AN
     expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, serviceType: 'Bed Bug Follow-Up Visit' })).toBe(false);
   });
 
-  test('full-lattice equivalence with the mint decision — for the signal-free base, required ⇔ mints', () => {
+  test('full-lattice equivalence with the mint decision — for the signal-free base, required ⇔ mints, and a supplied posture governs (fix round 8)', () => {
     // Suppressor-free, no other billing signal (no scheduler flag, no tier,
     // no explicit lane, priced-visits gate off): the ONLY branch that can
     // mint is the typed backfill branch, which delegates to the predicate.
+    // The frozen dimension: backfillMintRequired null (live/legacy) must
+    // decide exactly like the predicate; a supplied boolean posture must
+    // decide the branch ENTIRELY — true mints for any backfill combo (even
+    // one whose live profile inputs no longer agree), false never mints.
     const base = {
       recapReviewOnly: false,
       alreadyPaid: false,
@@ -1018,24 +1051,72 @@ describe('backfillTypedOneTimeMintRequired — ONE predicate decides the mint AN
       annualPrepayCovered: false,
     };
     const bools = [true, false];
-    for (const isBackfillCompletion of bools) {
-      for (const typedOneTimeBilling of bools) {
-        for (const hasVisitPrice of bools) {
-          for (const visitPerformed of bools) {
-            for (const isCallback of bools) {
-              for (const serviceType of ['Bed Bug Treatment', 'Bed Bug Follow-Up Visit']) {
-                const combo = {
-                  isBackfillCompletion, typedOneTimeBilling, hasVisitPrice,
-                  visitPerformed, isCallback, serviceType,
-                };
-                expect(shouldAutoInvoiceCompletion({ ...base, ...combo }))
-                  .toBe(backfillTypedOneTimeMintRequired(combo));
+    for (const backfillMintRequired of [null, true, false]) {
+      for (const isBackfillCompletion of bools) {
+        for (const typedOneTimeBilling of bools) {
+          for (const hasVisitPrice of bools) {
+            for (const visitPerformed of bools) {
+              for (const isCallback of bools) {
+                for (const serviceType of ['Bed Bug Treatment', 'Bed Bug Follow-Up Visit']) {
+                  const combo = {
+                    isBackfillCompletion, typedOneTimeBilling, hasVisitPrice,
+                    visitPerformed, isCallback, serviceType,
+                  };
+                  const expected = backfillMintRequired == null
+                    ? backfillTypedOneTimeMintRequired(combo)
+                    : (backfillMintRequired === true && isBackfillCompletion);
+                  expect(shouldAutoInvoiceCompletion({ ...base, ...combo, backfillMintRequired }))
+                    .toBe(expected);
+                }
               }
             }
           }
         }
       }
     }
+  });
+
+  test('the frozen posture survives a CHANGED live profile — the P0 sequence mints on resume (fix round 8)', () => {
+    const base = {
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      createInvoiceOnComplete: false,
+      waveguardTier: null,
+      invoiceAmount: 350,
+      autoInvoicePricedVisits: false,
+      annualPrepayCovered: false,
+      isBackfillCompletion: true,
+      hasVisitPrice: true,
+      visitPerformed: true,
+      isCallback: false,
+      serviceType: 'Bed Bug Treatment',
+    };
+    // Profile edited/removed between the released mint failure and the
+    // retry: typedOneTimeBilling recomputes FALSE live — the frozen posture
+    // still mints the owed review invoice.
+    expect(shouldAutoInvoiceCompletion({
+      ...base, typedOneTimeBilling: false, backfillMintRequired: true,
+    })).toBe(true);
+    // Suppressors still win over the posture: an invoice already in place
+    // (the partial-mint convergence) IS the promise kept — never a double
+    // mint.
+    expect(shouldAutoInvoiceCompletion({
+      ...base, typedOneTimeBilling: false, backfillMintRequired: true,
+      existingCompletionInvoice: { id: 'inv' },
+    })).toBe(false);
+    // The reverse mutation cannot surprise-bill: committed NOT-required, a
+    // profile flipped INTO one_time before the resume — the posture governs
+    // and the branch declines (a return, never a tier fall-through).
+    expect(shouldAutoInvoiceCompletion({
+      ...base, typedOneTimeBilling: true, backfillMintRequired: false,
+    })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({
+      ...base, typedOneTimeBilling: true, backfillMintRequired: false, waveguardTier: 'gold',
+    })).toBe(false);
   });
 
   test('non-required mints exist and stay OUT of the fail-closed scope — a scheduler-flag backfill mint is not "required"', () => {
@@ -1199,23 +1280,20 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
     const body = { idempotencyKey: 'k', visitOutcome: 'completed', oneTimeRecapOnly: false, structuredFindings: { severity: 'high' } };
     expect(hashCompletionRequest({ ...body, visitOutcome: 'inspection_only' })).not.toBe(hashCompletionRequest(body));
     expect(hashCompletionRequest({ ...body, oneTimeRecapOnly: true })).not.toBe(hashCompletionRequest(body));
-    // …the completion MODE comes from the structured_notes freeze even on a
-    // flagless retry…
-    const frozen = frozenResumeCompletionState({ backfill: true, timeOnSite: 45 }, { requestBackfill: false });
+    // …the completion MODE **and the REQUIRED-mint posture** come from the
+    // structured_notes freeze even on a flagless retry (fix round 8: the
+    // posture is stamped in the commit transaction because the billing
+    // profile is MUTABLE DB state the hash cannot pin)…
+    const frozen = frozenResumeCompletionState(
+      { backfill: true, backfillMintRequired: true, timeOnSite: 45 },
+      { requestBackfill: false },
+    );
     expect(frozen.isBackfillCompletion).toBe(true);
-    // …and with the remaining inputs row/profile-derived (estimated_price,
-    // is_callback, service_type, followup_included, profile billingType),
-    // the resumed run re-derives the SAME required mint: no invoice was
-    // created, so no suppressor blocks the retry.
-    const resumedCombo = {
-      isBackfillCompletion: frozen.isBackfillCompletion,
-      typedOneTimeBilling: true,
-      hasVisitPrice: true,
-      visitPerformed: true,
-      isCallback: false,
-      serviceType: 'Bed Bug Treatment',
-    };
-    expect(backfillTypedOneTimeMintRequired(resumedCombo)).toBe(true);
+    expect(frozen.backfillMintRequired).toBe(true);
+    // …and the resumed decision honors the FROZEN posture — here with the
+    // live profile CHANGED since commit (typedOneTimeBilling recomputes
+    // false) — so the mint still retries: no invoice was created, no
+    // suppressor blocks it, the owed review invoice mints.
     expect(shouldAutoInvoiceCompletion({
       recapReviewOnly: false,
       alreadyPaid: false,
@@ -1228,33 +1306,87 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       invoiceAmount: 350,
       autoInvoicePricedVisits: false,
       annualPrepayCovered: false,
-      ...resumedCombo,
+      isBackfillCompletion: frozen.isBackfillCompletion,
+      backfillMintRequired: frozen.backfillMintRequired,
+      typedOneTimeBilling: false, // profile removed post-commit
+      hasVisitPrice: true,
+      visitPerformed: true,
+      isCallback: false,
+      serviceType: 'Bed Bug Treatment',
     })).toBe(true);
   });
 
   describe('route wiring (source contracts)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
-    test('the invoice catch fail-closes on the shared predicate with the SAME input sources as the mint decision', () => {
-      // Same named flag, same row columns the shouldInvoice call reads —
-      // the enforcement can never gate a different population than the one
-      // whose pre-gate was bypassed.
-      expect(source).toMatch(/const reviewInvoiceMintRequired = backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*serviceType: svc\.service_type,\s*\n\s*\}\);/);
-      // And the decision side delegates to the same function.
-      expect(source).toMatch(/if \(isBackfillCompletion && typedOneTimeBilling && hasVisitPrice\) \{[\s\S]{0,400}return backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback,\s*\n\s*serviceType,\s*\n\s*\}\);/);
+    test('the posture derives ONCE at commit from the same input sources as the mint decision, and is FROZEN in the record transaction (fix round 8)', () => {
+      // Commit-time derivation: same named flag, same row columns the
+      // shouldInvoice call reads — the frozen posture can never describe a
+      // different population than the one whose pre-gate was bypassed.
+      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*serviceType: svc\.service_type,\s*\n\s*\}\);/);
+      // The stamp lives in the SAME structured_notes object the completion
+      // transaction inserts — between the trx open and the serialize — so a
+      // crash can never leave a committed-but-unfrozen record.
+      const stamp = '...(isBackfillCompletion && backfillMintRequiredAtCommit ? { backfillMintRequired: true } : {}),';
+      const stampAt = source.indexOf(stamp);
+      expect(stampAt).toBeGreaterThan(-1);
+      // The COMPLETION transaction is the nearest trx open above the stamp
+      // (the file has other, earlier transactions on other routes).
+      const trxAt = source.lastIndexOf("await db.transaction(async (trx) => {", stampAt);
+      const serializeAt = source.indexOf('structured_notes: serializeJsonb(structuredNotes),');
+      expect(stampAt).toBeGreaterThan(trxAt);
+      expect(serializeAt).toBeGreaterThan(stampAt);
+      // The commit derivation itself sits BEFORE the transaction — it reads
+      // the profile the operator saw, and the hoisted inputs it shares with
+      // the invoice block are derived exactly once.
+      const deriveAt = source.indexOf('const backfillMintRequiredAtCommit = backfillTypedOneTimeMintRequired({');
+      expect(deriveAt).toBeGreaterThan(-1);
+      expect(trxAt).toBeGreaterThan(deriveAt);
+      expect((source.match(/const hasVisitPrice = /g) || []).length).toBe(1);
+      expect((source.match(/const visitPerformed = /g) || []).length).toBe(1);
+      // The decision side still delegates to the same predicate on the live
+      // path…
+      expect(source).toMatch(/if \(isBackfillCompletion && typedOneTimeBilling && hasVisitPrice\) \{[\s\S]{0,900}return backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback,\s*\n\s*serviceType,\s*\n\s*\}\);/);
+      // …and honors a supplied posture ahead of it, in both directions.
+      expect(source).toMatch(/if \(isBackfillCompletion && backfillMintRequired === true\) return true;/);
+      expect(source).toMatch(/if \(backfillMintRequired != null\) return false;/);
+    });
+
+    test('resume swaps the live posture for the FROZEN one before any consumer — invoice decision included (fix round 8)', () => {
+      // The resume block assigns the frozen posture alongside the frozen
+      // mode/duration…
+      const resumeAssign = 'backfillReviewMintRequired = frozenResume.backfillMintRequired;';
+      const resumeAssignAt = source.indexOf(resumeAssign);
+      expect(resumeAssignAt).toBeGreaterThan(source.indexOf('const frozenResume = frozenResumeCompletionState('));
+      // …before the invoice decision reads it…
+      const invoiceDecisionAt = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion({');
+      expect(invoiceDecisionAt).toBeGreaterThan(resumeAssignAt);
+      // …and the decision call carries the effective posture.
+      expect(source).toMatch(/const shouldInvoice = shouldAutoInvoiceCompletion\(\{[\s\S]*?backfillMintRequired: backfillReviewMintRequired,[\s\S]*?\}\);/);
+      // No consumer recomputes the predicate from the live profile past the
+      // commit derivation: exactly two backfillTypedOneTimeMintRequired call
+      // sites exist in the file — the commit-time derivation and the
+      // decision helper's own live path — plus the function definition.
+      expect((source.match(/backfillTypedOneTimeMintRequired\(\{/g) || []).length).toBe(3);
+      expect((source.match(/function backfillTypedOneTimeMintRequired\(\{/g) || []).length).toBe(1);
+      expect((source.match(/= backfillTypedOneTimeMintRequired\(\{/g) || []).length).toBe(1);
+      expect((source.match(/return backfillTypedOneTimeMintRequired\(\{/g) || []).length).toBe(1);
     });
 
     test('required + no invoice row → release for immediate resume + actionable 503; the attempt is never finalized succeeded', () => {
       const catchBlock = source.match(/\} catch \(invErr\) \{([\s\S]*?)\n {6}\}\n {4}\} else if \(preMintedInvoice\) \{/);
       expect(catchBlock).not.toBeNull();
       const body = catchBlock[1];
-      // Fail-closed only when the mint is required AND no invoice row exists
-      // (a partial createFromService that DID insert converges on resume via
-      // the existing-invoice suppressors).
-      const guardAt = body.indexOf("if (reviewInvoiceMintRequired && !invoice?.id) {");
+      // Fail-closed on the ROUTE-LEVEL effective posture (frozen on resume)
+      // and only when no invoice row exists (a partial createFromService
+      // that DID insert converges on resume via the existing-invoice
+      // suppressors).
+      const guardAt = body.indexOf("if (backfillReviewMintRequired && !invoice?.id) {");
       expect(guardAt).toBeGreaterThan(-1);
-      // Release BEFORE the response, inside the guard.
-      const releaseAt = body.indexOf('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+      // The catch never recomputes the predicate from the live profile.
+      expect(body).not.toContain('backfillTypedOneTimeMintRequired');
+      // Release BEFORE the response, inside the guard — outcome CHECKED.
+      const releaseAt = body.indexOf('const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
       expect(releaseAt).toBeGreaterThan(guardAt);
       // Actionable error: names the state (saved but NOT finalized) and the
       // action (retry), with a machine code + the committed record id.
@@ -1269,6 +1401,27 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       const nonBlockingAt = body.indexOf('Auto-invoice failed (non-blocking)');
       expect(nonBlockingAt).toBeGreaterThan(returnAt);
       expect(body).not.toContain('markCompletionAttemptSucceeded');
+    });
+
+    test('a no-op release answers with the REAL retry horizon, echoed from the stale-window constant (Codex P1, fix round 8)', () => {
+      const catchBlock = source.match(/\} catch \(invErr\) \{([\s\S]*?)\n {6}\}\n {4}\} else if \(preMintedInvoice\) \{/);
+      const body = catchBlock[1];
+      // The release outcome branches the response: released → "retry now";
+      // not released → the closeout stays claimed until the stale window
+      // reclaims it, so the copy and a machine-readable retryAfterMs say so
+      // — both derived from the exported constant, never a literal.
+      expect(body).toContain('if (!released) {');
+      expect(body).toMatch(/error: released\s*\n\s*\? 'The review invoice could not be created — the closeout is saved but NOT finalized\. Retry the closeout to mint the invoice\.'\s*\n\s*: `The review invoice could not be created — the closeout is saved but NOT finalized\. It will become retryable within about \$\{Math\.ceil\(CompletionAttempts\.STALE_SIDE_EFFECTS_MS \/ 60000\)\} minutes — retry the closeout then\.`/);
+      expect(body).toContain('...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),');
+      // Loud log on the no-op path, naming the horizon too.
+      expect(body).toMatch(/if \(!released\) \{[\s\S]{0,900}logger\.error\(`\[dispatch\] release-for-resume did NOT release attempt \$\{completionAttempt\?\.id\}/);
+      // No hardcoded minutes anywhere in the catch — the echo follows the
+      // constant if the window ever changes.
+      expect(body).not.toMatch(/10 minutes|ten minutes/i);
+      // And the constant is really exported for the route to read.
+      const attempts = require('../services/completion-attempts');
+      expect(Number.isInteger(attempts.STALE_SIDE_EFFECTS_MS)).toBe(true);
+      expect(attempts.STALE_SIDE_EFFECTS_MS).toBeGreaterThan(0);
     });
 
     test('success finalizes exist only at the two legitimate sites — none reachable from the fail-closed return', () => {
@@ -1650,10 +1803,11 @@ describe('completion route wiring (source contracts)', () => {
       'payer-statement accrual SKIPPED',
       // job-costing labor guard
       'untrustedLifecycleSpan: true',
-      // required-mint fail-closed guard (fix round 7) — must read the
-      // re-derived (frozen) mode, or a flagless resumed retry of a failed
-      // required mint would evaluate as non-required and finalize uninvoiced
-      'const reviewInvoiceMintRequired = backfillTypedOneTimeMintRequired({',
+      // required-mint fail-closed guard (fix rounds 7-8) — reads the
+      // route-level posture the resume block swaps to the FROZEN value, so a
+      // flagless resumed retry of a failed required mint can neither
+      // evaluate as non-required nor finalize uninvoiced
+      'if (backfillReviewMintRequired && !invoice?.id) {',
     ];
     for (const gate of postCommitGates) {
       const at = source.indexOf(gate);

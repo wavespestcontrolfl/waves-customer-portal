@@ -600,4 +600,9 @@ module.exports = {
   markCompletionAttemptSideEffectsPending,
   releaseCompletionAttemptForResume,
   storeResolvedSnapshot,
+  // Exported so the completion route can ECHO the real retry horizon when a
+  // release-for-resume does not apply (the attempt then stays
+  // side_effects_running until this window reclaims it) — the client copy
+  // must never promise an immediate retry the claim would 409.
+  STALE_SIDE_EFFECTS_MS,
 };
