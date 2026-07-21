@@ -2,31 +2,22 @@
 // forwards to Sentry server-side. Must NEVER throw into the caller — a broken
 // reporter can't be allowed to break an error boundary or a handler catch.
 //
+// The endpoint is public, so the SERVER strictly transforms every field into a
+// non-sensitive shape (validated error name, allowlisted route root, validated
+// context label, component-name-only stack). We therefore send ONLY those
+// structured fields — never the free-form error message or stack, which can
+// carry bearer tokens, card/SSN data, or PII.
+//
 // reportError(error, context)
 //   context: a string label, or { context, componentStack } from a boundary.
-// Public routes carry long-lived bearer tokens in the path (/report/:token,
-// /estimate/:token, /pay/:token, … — and legacy estimate slugs can be as short
-// as 3 chars, so a length heuristic is unsafe). Telemetry must never ship a
-// token. Policy by ROUTE STRUCTURE, not length: the admin/tech surfaces have no
-// path tokens, so keep them for triage; every other route keeps only its root
-// segment and redacts whatever follows.
-export function safePath(pathname) {
-  if (typeof pathname !== 'string' || !pathname) return undefined;
-  if (/^\/(admin|tech)(\/|$)/.test(pathname)) return pathname;
-  const segments = pathname.split('/').filter(Boolean);
-  if (segments.length <= 1) return pathname;
-  return `/${segments[0]}/:token`;
-}
-
 export function reportError(error, context) {
   try {
     const meta = typeof context === 'string' ? { context } : context || {};
     const payload = JSON.stringify({
-      message: error?.message || String(error || 'Unknown error'),
-      stack: error?.stack,
-      componentStack: meta.componentStack,
+      name: error?.name,
       context: meta.context,
-      url: typeof window !== 'undefined' ? safePath(window.location?.pathname) : undefined,
+      route: typeof window !== 'undefined' ? window.location?.pathname : undefined,
+      componentStack: meta.componentStack,
     });
 
     // sendBeacon survives page unload (the typical case for a crash) but returns

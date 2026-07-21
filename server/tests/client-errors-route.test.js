@@ -1,9 +1,9 @@
 /**
- * P2 (07-19 admin audit): there was no client-side error telemetry — React
- * boundary crashes and admin handler failures only hit console/alert. This
- * receiver forwards a client error to Sentry (server-side), tagged source=client,
- * with every field truncated. Unauthenticated by design (an anonymous page can
- * crash too) but rate-limited.
+ * P2 (07-19 admin audit): there was no client-side error telemetry. This
+ * receiver forwards a client error to Sentry (server-side), tagged
+ * source=client. It is PUBLIC and rate-limited, so every attacker-controllable
+ * field is strictly TRANSFORMED into a non-sensitive shape — no free-form text
+ * (which could carry tokens, PANs, SSNs, emails, PII) is ever forwarded.
  */
 
 const mockCapture = jest.fn();
@@ -27,60 +27,64 @@ beforeEach(() => mockCapture.mockClear());
 const post = (body) => fetch(`${baseUrl}/api/client-errors`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
+const ctxOf = () => mockCapture.mock.calls[0][1].contexts.client_error;
 
 describe('POST /api/client-errors', () => {
-  test('forwards to Sentry tagged source=client (CaptureContext object) and returns 204', async () => {
-    const res = await post({ message: 'Boom', stack: 'at x', componentStack: 'in <App>', context: 'PageErrorBoundary', url: '/admin/banking' });
+  test('forwards a well-formed report tagged source=client and returns 204', async () => {
+    const res = await post({
+      name: 'TypeError', context: 'PageErrorBoundary', route: '/admin/banking',
+      componentStack: '\n    in BankingPage\n    in div\n    in Router',
+    });
     expect(res.status).toBe(204);
-    expect(mockCapture).toHaveBeenCalledTimes(1);
-
     const [error, captureContext] = mockCapture.mock.calls[0];
-    expect(error).toBeInstanceOf(Error);
-    expect(error.message).toBe('Boom');
-    // @sentry/node 10.x: object form, not a scope callback.
-    expect(typeof captureContext).toBe('object');
+    expect(error.name).toBe('TypeError');
     expect(captureContext.tags).toEqual({ source: 'client' });
-    expect(captureContext.contexts.client_error).toMatchObject({
-      context: 'PageErrorBoundary', url: '/admin/banking',
+    expect(ctxOf()).toEqual({
+      context: 'PageErrorBoundary',
+      route: 'admin',
+      componentStack: 'in BankingPage\nin div\nin Router',
     });
   });
 
-  test('truncates oversized fields before forwarding', async () => {
-    // Spaced words (not one long token) so truncation, not redaction, is under test.
-    const res = await post({ message: 'word '.repeat(500), stack: 'at frame '.repeat(2000) });
-    expect(res.status).toBe(204);
-    const [error, captureContext] = mockCapture.mock.calls[0];
-    expect(error.message.length).toBe(500);
-    expect(captureContext.contexts.client_error.stack.length).toBe(4000);
+  test('reduces the route to an allowlisted root — token/PII tails never persist', async () => {
+    await post({ name: 'E', route: '/report/AbC123secretTOKEN' });
+    expect(ctxOf().route).toBe('report');
+    mockCapture.mockClear();
+    await post({ name: 'E', route: '/estimate/abc' }); // legacy short slug
+    expect(ctxOf().route).toBe('estimate');
+    mockCapture.mockClear();
+    // an attacker cannot smuggle a PAN through the admin passthrough
+    await post({ name: 'E', route: '/admin/4242424242424242' });
+    expect(ctxOf().route).toBe('admin');
+    mockCapture.mockClear();
+    await post({ name: 'E', route: '/evil/4242424242424242' });
+    expect(ctxOf().route).toBe('other');
   });
 
-  test('scrubs a token-route url server-side (defense in depth)', async () => {
-    await post({ message: 'x', url: '/estimate/short3' });
-    const [, captureContext] = mockCapture.mock.calls[0];
-    expect(captureContext.contexts.client_error.url).toBe('/estimate/:token');
-  });
-
-  test('redacts tokens (browser+api+nested), JWTs, emails, phones in free-form fields', async () => {
+  test('rejects non-conforming name and context (no attacker text echoed)', async () => {
     await post({
-      message: 'Failed to load /report/AbC123secretTOKEN for jane@example.com call 941-555-1234',
-      stack: [
-        'GET /api/estimates/abc/data 401', // api form, short token, nested
-        '/pay/statement/xyztok401', // nested — whole tail must go
-        'Bearer eyJhbGciOi.J9payload.sigsigsig',
-      ].join('\n'),
+      name: '4242424242424242',       // a PAN in the name field
+      context: '123-45-6789',          // an SSN in the context field
+      route: '/admin/x',
     });
-    const [error, captureContext] = mockCapture.mock.calls[0];
-    expect(error.message).toBe('Failed to load /report/:token for :email call :phone');
-    const stack = captureContext.contexts.client_error.stack;
-    expect(stack).toContain('/api/estimates/:token');
-    expect(stack).toContain('/pay/:token');
-    expect(stack).not.toMatch(/statement|xyztok|abc\/data|eyJhbGciOi/);
-    expect(captureContext.contexts.client_error.userAgent).toBeUndefined();
+    const [error] = mockCapture.mock.calls[0];
+    expect(error.name).toBe('Error');
+    expect(ctxOf().context).toBeUndefined();
   });
 
-  test('a missing message still reports (never 500s)', async () => {
+  test('componentStack keeps only "in/at ComponentName" tokens, dropping injected PII', async () => {
+    await post({
+      name: 'E', route: '/admin/x',
+      componentStack: 'in BankingPage\nSSN 123-45-6789 card 4242424242424242\n at PayoutModal',
+    });
+    const stack = ctxOf().componentStack;
+    expect(stack).toBe('in BankingPage\nat PayoutModal');
+    expect(stack).not.toMatch(/123-45-6789|4242/);
+  });
+
+  test('a missing/empty body still returns 204 (never 500s)', async () => {
     const res = await post({});
     expect(res.status).toBe(204);
-    expect(mockCapture.mock.calls[0][0].message).toBe('Client error (no message)');
+    expect(mockCapture.mock.calls[0][0].name).toBe('Error');
   });
 });

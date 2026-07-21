@@ -10,49 +10,27 @@ describe('reportError', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  test('beacons the error to /api/client-errors with message + context', async () => {
-    reportError(new Error('Boom'), { context: 'PageErrorBoundary', componentStack: 'in <App>' });
+  const beaconBody = async () => JSON.parse(await sendBeacon.mock.calls[0][1].text());
+
+  test('beacons only the structured, non-free-form fields', async () => {
+    reportError(new TypeError('Boom'), { context: 'PageErrorBoundary', componentStack: 'in <App>' });
     expect(sendBeacon).toHaveBeenCalledTimes(1);
-    const [url, blob] = sendBeacon.mock.calls[0];
-    expect(url).toBe('/api/client-errors');
-    const body = JSON.parse(await blob.text());
-    expect(body).toMatchObject({
-      message: 'Boom',
+    expect(sendBeacon.mock.calls[0][0]).toBe('/api/client-errors');
+    const body = await beaconBody();
+    // The free-form message/stack are NOT sent — the server transforms the rest.
+    expect(body).toEqual({
+      name: 'TypeError',
       context: 'PageErrorBoundary',
+      route: '/admin/banking',
       componentStack: 'in <App>',
-      url: '/admin/banking',
     });
-  });
-
-  test('redacts token routes regardless of token length', async () => {
-    for (const [path, expected] of [
-      ['/report/AbC123dEf456GhI789jkL', '/report/:token'],
-      ['/estimate/abc', '/estimate/:token'], // legacy 3-char slug
-      ['/pay/statement/xyz789', '/pay/:token'],
-      ['/receipt/ZZZ', '/receipt/:token'],
-    ]) {
-      sendBeacon.mockClear();
-      vi.stubGlobal('window', { location: { pathname: path } });
-      reportError(new Error('crash'));
-      const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
-      expect(body.url).toBe(expected);
-    }
-  });
-
-  test('keeps token-free admin/tech paths intact for triage', async () => {
-    for (const path of ['/admin/banking', '/tech/route', '/login', '/']) {
-      sendBeacon.mockClear();
-      vi.stubGlobal('window', { location: { pathname: path } });
-      reportError(new Error('crash'));
-      const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
-      expect(body.url).toBe(path);
-    }
+    expect(body).not.toHaveProperty('message');
+    expect(body).not.toHaveProperty('stack');
   });
 
   test('accepts a plain string context', async () => {
     reportError(new Error('x'), 'banking:payout');
-    const body = JSON.parse(await sendBeacon.mock.calls[0][1].text());
-    expect(body.context).toBe('banking:payout');
+    expect((await beaconBody()).context).toBe('banking:payout');
   });
 
   test('falls back to keepalive fetch when sendBeacon returns false', () => {
@@ -71,7 +49,6 @@ describe('reportError', () => {
     const fetchMock = vi.fn(() => Promise.resolve());
     vi.stubGlobal('fetch', fetchMock);
     reportError(new Error('x'));
-    expect(sendBeacon).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
