@@ -495,6 +495,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:35AM — Data Hygiene auto-apply (green normalization proposals
+  // only; exceptions stay pending for review). Runs after the 3:15 scan so
+  // fresh proposals apply same-night. Gate is opt-in in EVERY environment
+  // (auto-writer pattern); kill = unset GATE_DATA_HYGIENE_AUTO_APPLY.
+  // =========================================================================
+  cron.schedule('35 3 * * *', async () => {
+    if (!isEnabled('dataHygieneAutoApply')) return;
+    logger.info('Running: Data Hygiene auto-apply sweep');
+    try {
+      await runExclusive('data-hygiene-auto-apply', () =>
+        require('./data-hygiene/auto-apply').runAutoApplySweep());
+    } catch (err) {
+      logger.error(`Data Hygiene auto-apply sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays

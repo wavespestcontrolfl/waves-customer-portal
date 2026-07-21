@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { CheckCircle2, DatabaseZap, Eye, EyeOff, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -16,7 +17,7 @@ const D = {
   blue: "#1D4ED8",
 };
 
-const STATUSES = ["pending", "approved", "reverted", "rejected", "stale", "all"];
+const STATUSES = ["pending", "auto_applied", "approved", "reverted", "rejected", "stale", "all"];
 
 function Chip({ children, tone = "neutral" }) {
   const colors = {
@@ -56,7 +57,7 @@ function valueText(value) {
 }
 
 function statusTone(status) {
-  if (status === "approved") return "green";
+  if (status === "approved" || status === "auto_applied") return "green";
   if (status === "reverted") return "blue";
   if (status === "rejected" || status === "stale") return "red";
   return "amber";
@@ -73,7 +74,19 @@ function percent(value) {
 }
 
 export default function DataHygienePage({ embedded = false } = {}) {
-  const [status, setStatus] = useState("pending");
+  const location = useLocation();
+  const [status, setStatus] = useState(() => {
+    // Digest bells deep-link to ?status=auto_applied.
+    const fromUrl = new URLSearchParams(window.location.search).get("status");
+    return STATUSES.includes(fromUrl) ? fromUrl : "pending";
+  });
+  // The Agents hub keeps this page mounted across tab/URL changes — a digest
+  // click while already on the tab only updates the query string, so the
+  // initializer never reruns. Follow ?status= whenever the URL changes.
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(location.search).get("status");
+    if (fromUrl && STATUSES.includes(fromUrl)) setStatus(fromUrl);
+  }, [location.search]);
   const [data, setData] = useState({ proposals: [] });
   const [metrics, setMetrics] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -381,7 +394,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
                     </button>
                   </div>
                 )}
-                {selected.status === "approved" && (
+                {(selected.status === "approved" || selected.status === "auto_applied") && (
                   <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                     <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-300 bg-white text-13 font-medium text-zinc-900" onClick={() => revert(selected)} disabled={busyId === selected.id}>
                       <RotateCcw size={14} /> Revert

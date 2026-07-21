@@ -15,6 +15,11 @@ const {
   vaultAttachAuditLog,
   vaultReadSensitive,
 } = require('../services/data-hygiene/sensitive-vault');
+const {
+  applyNormalizationProposal,
+  NORMALIZATION_TABLES,
+  NORMALIZATION_FIELDS,
+} = require('../services/data-hygiene/auto-apply');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -219,6 +224,18 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         err.status = 404;
         throw err;
       }
+      if (canApplyNormalization(proposal)) {
+        // Stale outcome must COMMIT (the proposal is re-marked inside the
+        // applier) — signal it via the return value, never a throw.
+        const { outcome } = await applyNormalizationProposal({
+          trx,
+          proposal,
+          reviewedVia: 'ui',
+          reviewerId: req.technicianId,
+        });
+        const refreshed = await trx('data_hygiene_proposals').where({ id: proposal.id }).first();
+        return { __outcome: outcome, proposal: refreshed };
+      }
       if (!canApplyProposal(proposal)) {
         const err = new Error('This proposal type is not allowlisted for apply yet');
         err.status = 422;
@@ -294,6 +311,15 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
       return updatedProposal;
     });
 
+    if (result && result.__outcome) {
+      if (result.__outcome === 'stale') {
+        return res.status(409).json({
+          error: 'Live value changed since this proposal was created; marked stale.',
+          proposal: formatProposal(result.proposal),
+        });
+      }
+      return res.json({ proposal: formatProposal(result.proposal) });
+    }
     res.json({ proposal: formatProposal(result) });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
@@ -309,10 +335,13 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
         .forUpdate()
         .first();
 
-      if (!proposal || proposal.status !== 'approved') {
-        const err = new Error('Approved proposal not found');
+      if (!proposal || !['approved', 'auto_applied'].includes(proposal.status)) {
+        const err = new Error('Applied proposal not found');
         err.status = 404;
         throw err;
+      }
+      if (canApplyNormalization(proposal)) {
+        return revertNormalizationProposal({ trx, proposal, revertedBy: req.technicianId });
       }
       if (!canApplyProposal(proposal)) {
         const err = new Error('This proposal type is not allowlisted for revert yet');
@@ -438,6 +467,78 @@ function canApplyProposal(proposal) {
     && proposal.scope_type === 'customer'
     && proposal.is_sensitive === true
     && PROPERTY_PREF_APPLY_FIELDS.has(proposal.field);
+}
+
+// Shape check only (status is the caller's concern): non-sensitive
+// normalization proposal on an allowlisted table+field.
+function canApplyNormalization(proposal) {
+  return proposal.source === 'normalization'
+    && proposal.is_sensitive !== true
+    && Boolean(NORMALIZATION_TABLES[proposal.resource_type])
+    && NORMALIZATION_FIELDS[proposal.resource_type].has(proposal.field);
+}
+
+// Revert for a non-sensitive normalization apply: restore current_value,
+// guarded on the live value still equaling proposed_value. Runs inside the
+// route's transaction; proposal row already locked forUpdate.
+async function revertNormalizationProposal({ trx, proposal, revertedBy }) {
+  const table = NORMALIZATION_TABLES[proposal.resource_type];
+  const target = await trx(table)
+    .where({ id: proposal.resource_id })
+    .forUpdate()
+    .first();
+  if (!target) {
+    const err = new Error('Applied row not found');
+    err.status = 404;
+    throw err;
+  }
+  const actual = target[proposal.field] === undefined ? null : target[proposal.field];
+  if (!valuesEqual(actual, proposal.proposed_value)) {
+    const err = new Error('Cannot revert; current field value changed after apply');
+    err.status = 409;
+    throw err;
+  }
+
+  await trx(table)
+    .where({ id: proposal.resource_id })
+    .update({
+      [proposal.field]: proposal.current_value,
+      updated_at: db.fn.now(),
+    });
+
+  await auditHygieneProposalRevert({
+    trx,
+    proposal_id: proposal.id,
+    rule_id: proposal.rule_id,
+    rule_version: proposal.rule_version,
+    source: proposal.source,
+    field: proposal.field,
+    resource_type: proposal.resource_type,
+    resource_id: proposal.resource_id,
+    scope_type: proposal.scope_type,
+    scope_id: proposal.scope_id,
+    before_redacted: proposal.proposed_value,
+    after_redacted: proposal.current_value,
+    before_hash: null,
+    after_hash: null,
+    vault_id: null,
+    original_audit_id: null,
+    reverted_by: revertedBy,
+    is_sensitive: false,
+    reviewed_via: 'ui',
+  });
+
+  const [updatedProposal] = await trx('data_hygiene_proposals')
+    .where({ id: proposal.id })
+    .update({
+      status: 'reverted',
+      reviewer_id: revertedBy,
+      reviewed_via: 'ui',
+      reviewed_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    })
+    .returning('*');
+  return updatedProposal;
 }
 
 async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
