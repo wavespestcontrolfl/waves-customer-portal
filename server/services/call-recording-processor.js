@@ -5550,7 +5550,20 @@ const CallRecordingProcessor = {
             }
           }
 
+          // Account layer: attach-or-create so the new lead profile is
+          // login-complete (portal refresh sessions FK customer_accounts).
+          // Lazy require: route module from a service (load-cycle risk).
+          const { ensureCustomerAccount } = require('../routes/admin-customers');
+          const account = await ensureCustomerAccount(db, {
+            firstName: extracted.first_name,
+            lastName: extracted.last_name || null,
+            phone,
+            email: extracted.email || null,
+          });
           const [newCust] = await db('customers').insert(applyContactNormalization({
+            account_id: account.accountId,
+            is_primary_profile: !account.existingCustomer,
+            profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
             first_name: extracted.first_name,
             last_name: extracted.last_name || null,
             phone,

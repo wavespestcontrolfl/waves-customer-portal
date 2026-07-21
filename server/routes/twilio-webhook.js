@@ -361,7 +361,20 @@ router.post('/sms', async (req, res) => {
       const inboundContactName = extractContactNameFromSms(Body);
 
       try {
+        // Account layer: attach-or-create so the new lead profile is
+        // login-complete (portal refresh sessions FK customer_accounts).
+        // Lazy require: admin-customers is a route module (load-cycle risk).
+        const { ensureCustomerAccount } = require('./admin-customers');
+        const account = await ensureCustomerAccount(db, {
+          firstName: inboundContactName?.firstName || 'Unknown',
+          lastName: inboundContactName?.lastName || '',
+          phone: From,
+          email: null,
+        });
         const [newCust] = await db('customers').insert(applyContactNormalization({
+          account_id: account.accountId,
+          is_primary_profile: !account.existingCustomer,
+          profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
           first_name: inboundContactName?.firstName || 'Unknown',
           last_name: inboundContactName?.lastName || '',
           phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',

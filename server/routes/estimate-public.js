@@ -8465,7 +8465,21 @@ router.put('/:token/accept', async (req, res, next) => {
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+          // Account layer: attach-or-create BEFORE the profile insert — portal
+          // login's refresh session FKs customer_accounts, and the account is
+          // the phone-grouping key (same primitive as proposal-win / quick-add).
+          // Lazy require: admin-customers is a route module (load-cycle risk).
+          const { ensureCustomerAccount } = require('./admin-customers');
+          const account = await ensureCustomerAccount(trx, {
+            firstName: nameParts[0] || 'New',
+            lastName: nameParts.slice(1).join(' ') || 'Customer',
+            phone: estimate.customer_phone,
+            email: estimate.customer_email || null,
+          });
           const [newCust] = await trx('customers').insert(applyContactNormalization({
+            account_id: account.accountId,
+            is_primary_profile: !account.existingCustomer,
+            profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
             first_name: nameParts[0] || 'New',
             last_name: nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,

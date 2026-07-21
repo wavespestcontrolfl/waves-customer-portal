@@ -1540,7 +1540,21 @@ async function createSelfBooking(payload = {}) {
     // detected under the advisory locks.)
     let createdCustomerId = null;
     if (willCreateCustomer) {
+      // Account layer: attach-or-create so the new profile is login-complete
+      // (portal refresh sessions FK customer_accounts). The phone-on-file gate
+      // above means this almost always mints a fresh account. Lazy require:
+      // admin-customers is a route module (load-cycle risk).
+      const { ensureCustomerAccount } = require('./admin-customers');
+      const account = await ensureCustomerAccount(db, {
+        firstName: new_customer.first_name,
+        lastName: new_customer.last_name || '',
+        phone: phoneDigits,
+        email: new_customer.email || null,
+      });
       const [created] = await db('customers').insert(applyContactNormalization({
+        account_id: account.accountId,
+        is_primary_profile: !account.existingCustomer,
+        profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
         first_name: new_customer.first_name,
         last_name: new_customer.last_name || '',
         phone: phoneDigits,

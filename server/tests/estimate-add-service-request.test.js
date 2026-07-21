@@ -48,6 +48,9 @@ function makeDb(tables) {
         notInFilters.push({ column, values });
         return query;
       },
+      orderBy() {
+        return query;
+      },
       select() {
         return Promise.resolve(rows.filter((row) => matches(row, filters, notInFilters, rawFilters)));
       },
@@ -91,6 +94,11 @@ function makeDb(tables) {
           },
           catch(handler) {
             return insertResult.returning().catch(handler);
+          },
+          // Awaited inserts without .returning() (ensureCustomerAccount's
+          // onConflict('id').ignore() account adoption) resolve like knex.
+          then(resolve, reject) {
+            return insertResult.returning().then(resolve, reject);
           },
         };
         return insertResult;
