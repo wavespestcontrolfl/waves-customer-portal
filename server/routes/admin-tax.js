@@ -7,7 +7,7 @@ const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, REFUND_TXN_TYPES, DISPUTE_REPORTING_CATEGORIES,
+  prorateAssetDepreciation, outflowTransactionsQuery,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1210,23 +1210,14 @@ router.get('/export/tax-package', async (req, res, next) => {
     // in a later period than its payment has no transactions.csv row).
     let refunds = [];
     try {
-      refunds = await db('stripe_payout_transactions')
-        // Same predicate pnl.csv nets — refunds by specific TYPE, dispute
-        // movements by canonical reporting_category — so every outflow
-        // figure in the P&L has a supporting row here.
-        .where(function refundsOrDisputes() {
-          this.whereIn('type', REFUND_TXN_TYPES)
-            .orWhereIn('reporting_category', DISPUTE_REPORTING_CATEGORIES);
-        })
-        .whereRaw(
-          "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
-          [sd, ed],
-        )
+      // The EXACT query the P&L nets (shared definition) — every outflow
+      // figure in pnl.csv has a supporting row here by construction.
+      refunds = await outflowTransactionsQuery(db, sd, ed)
         .select(
-          '*',
-          db.raw("TO_CHAR(created_at_stripe AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as refund_date_et"),
+          'spt.*',
+          db.raw("TO_CHAR(spt.created_at_stripe AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as refund_date_et"),
         )
-        .orderBy('created_at_stripe', 'desc');
+        .orderBy('spt.created_at_stripe', 'desc');
     } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // Same predicate as the P&L builder: active assets PLUS disposed ones,

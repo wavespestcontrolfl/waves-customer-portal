@@ -287,31 +287,45 @@ function missingTableOnly(fallback) {
  * Exported so /revenue/reconcile reports the same revenue basis.
  */
 /**
- * Stripe balance-transaction types that move refund money AGAINST cash the
- * receipt side counted: 'refund' (card), 'payment_refund' (bank/local
- * methods), and 'refund_failure' — a bounced refund RETURNING funds to the
- * merchant as a positive amount, which SUM(-amount) correctly nets back out.
- * Deliberately NOT 'payment_failure_refund': Stripe creates that when a
- * PENDING ACH/local payment fails — the corresponding payments row is
- * status='failed' and never entered the receipt side, so subtracting the
- * reversal would remove cash that was never counted (double subtraction).
+ * Outflow classification is Stripe's canonical reporting_category — never
+ * bare `type` ('adjustment' is an umbrella; 'refund' also covers
+ * partial-capture reversals, whose receipt already reflects only the
+ * captured amount and must not be re-subtracted).
+ *   refund            — cash returned for a counted receipt (subtract)
+ *   refund_failure    — bounced refund returning to the merchant (positive
+ *                       amount; SUM(-amount) nets it back)
+ *   dispute           — chargeback withdrawal on open (subtract)
+ *   dispute_reversal  — dispute won, funds reinstated (adds back; lost =
+ *                       no further row, stays subtracted)
+ *   payment_reversal  — bank return clawing back already-credited ACH funds
+ * Explicitly NOT listed: partial_capture_reversal, charge_failure, fee,
+ * payout, and every other category.
+ *
+ * Belt-and-braces guard applied in outflowTransactionsQuery: an outflow
+ * whose LINKED payments row is status='failed' is excluded — its receipt
+ * was never counted on the revenue side (e.g. a reversal of a failed ACH,
+ * however Stripe categorizes it), so subtracting it would remove money
+ * that was never added.
  */
-const REFUND_TXN_TYPES = ['refund', 'payment_refund', 'refund_failure'];
+const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal', 'payment_reversal'];
 
 /**
- * Dispute/chargeback movements are identified by Stripe's canonical
- * reporting_category — NEVER by type: the dispute withdrawal rides the
- * umbrella type 'adjustment', which also covers unrelated balance activity.
- * 'dispute' is the NEGATIVE withdrawal when a dispute opens; a won dispute
- * posts a POSITIVE 'dispute_reversal' (lost = no further transaction).
- * SUM(-amount) therefore subtracts on open, adds back on win, and stays
- * subtracted on loss — covering deposit chargebacks too (the deposit's
- * receipt stays on the received side; the loss shows here in its period).
- * Note refunds stay TYPE-based (REFUND_TXN_TYPES): 'payment_failure_refund'
- * reports under category 'refund', so a category filter for refunds would
- * re-admit failed-ACH reversals and recreate the double-subtraction bug.
+ * The outflow rows netted against revenue for [startDate, endDate] (ET
+ * days). One query definition shared by the P&L netting and the tax
+ * package's refunds.csv, so the export always reconciles to the report.
  */
-const DISPUTE_REPORTING_CATEGORIES = ['dispute', 'dispute_reversal'];
+function outflowTransactionsQuery(db, startDate, endDate) {
+  return db('stripe_payout_transactions as spt')
+    .leftJoin('payments as lp', 'spt.payment_id', 'lp.id')
+    .whereIn('spt.reporting_category', OUTFLOW_REPORTING_CATEGORIES)
+    .where(function receiptWasCounted() {
+      this.whereNull('lp.id').orWhereNot('lp.status', 'failed');
+    })
+    .whereRaw(
+      "DATE(spt.created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+      [startDate, endDate],
+    );
+}
 
 async function paidRevenueForWindow(db, startDate, endDate) {
   const etWindow = (qb, column) => qb
@@ -392,19 +406,10 @@ async function paidRevenueForWindow(db, startDate, endDate) {
       .select(db.raw("COALESCE(SUM(amount + COALESCE(card_surcharge, 0))::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
-    // Refunds (by specific TYPE) and dispute movements (by canonical
-    // reporting_category) — every outflow against counted cash, in the
-    // period it occurred.
-    db('stripe_payout_transactions')
-      .where(function refundsOrDisputes() {
-        this.whereIn('type', REFUND_TXN_TYPES)
-          .orWhereIn('reporting_category', DISPUTE_REPORTING_CATEGORIES);
-      })
-      .whereRaw(
-        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
-        [startDate, endDate],
-      )
-      .select(db.raw("COALESCE(SUM(-amount)::text, '0') as total"))
+    // Every outflow against counted cash, in the period it occurred — see
+    // OUTFLOW_REPORTING_CATEGORIES for the classification contract.
+    outflowTransactionsQuery(db, startDate, endDate)
+      .select(db.raw("COALESCE(SUM(-spt.amount)::text, '0') as total"))
       .first()
       .catch(missingTableOnly({ total: '0' })),
   ]);
@@ -631,6 +636,6 @@ module.exports = {
   missingTableOnly,
   COGS_CATEGORIES,
   DEFAULT_LOADED_LABOR_RATE,
-  REFUND_TXN_TYPES,
-  DISPUTE_REPORTING_CATEGORIES,
+  OUTFLOW_REPORTING_CATEGORIES,
+  outflowTransactionsQuery,
 };

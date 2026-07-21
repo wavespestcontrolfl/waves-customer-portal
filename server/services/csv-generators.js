@@ -266,7 +266,7 @@ function refundsToCSV(refunds) {
   for (const r of refunds) {
     lines.push(row([
       r.refund_date_et || r.created_at_stripe || '',
-      r.type || '',
+      r.reporting_category || r.type || '',
       r.amount != null ? parseFloat(r.amount).toFixed(2) : '',
       r.fee != null ? parseFloat(r.fee).toFixed(2) : '',
       r.customer_name || '',

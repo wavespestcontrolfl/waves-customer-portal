@@ -22,34 +22,31 @@ const {
   costLaborByDay,
   dateCellStr,
   DEFAULT_LOADED_LABOR_RATE,
-  REFUND_TXN_TYPES,
-  DISPUTE_REPORTING_CATEGORIES,
+  OUTFLOW_REPORTING_CATEGORIES,
 } = require('../services/pnl-report');
 
-describe('outflow transaction type sets', () => {
-  test('refunds net card/bank refunds and bounced-refund reversals, never failed-payment reversals', () => {
-    expect(REFUND_TXN_TYPES).toEqual(expect.arrayContaining(['refund', 'payment_refund', 'refund_failure']));
-    // payment_failure_refund reverses a PENDING ACH payment whose payments
-    // row is status='failed' and was never counted as a receipt — including
-    // it would subtract cash the revenue side never added (double
-    // subtraction, can drive revenue negative). Regression for the round-3
-    // pre-push P0.
-    expect(REFUND_TXN_TYPES).not.toContain('payment_failure_refund');
+describe('OUTFLOW_REPORTING_CATEGORIES', () => {
+  test('classifies by canonical reporting_category with the exact allowed set', () => {
+    // Never bare `type`: 'adjustment' is an umbrella, and type 'refund' also
+    // covers partial-capture reversals whose receipt already reflects only
+    // the captured amount (subtracting them would double-count).
+    expect(OUTFLOW_REPORTING_CATEGORIES).toEqual([
+      'refund', 'refund_failure', 'dispute', 'dispute_reversal', 'payment_reversal',
+    ]);
+    // Poison categories stay out: partial-capture reversals and charge
+    // failures never net against revenue.
+    expect(OUTFLOW_REPORTING_CATEGORIES).not.toContain('partial_capture_reversal');
+    expect(OUTFLOW_REPORTING_CATEGORIES).not.toContain('charge_failure');
+    expect(OUTFLOW_REPORTING_CATEGORIES).not.toContain('adjustment');
+    // (Reversals of FAILED payments — receipts never counted — are excluded
+    // by the linked-payment status guard in outflowTransactionsQuery,
+    // covered by the query-level DB validation.)
   });
 
-  test('disputes filter on reporting_category, never the umbrella adjustment type', () => {
-    // Stripe carries dispute money under type 'adjustment' — an umbrella
-    // type that also covers unrelated balance activity — so the filter must
-    // use the canonical reporting_category (round-4 pre-push P0). SUM(-amount)
-    // semantics: 'dispute' posts NEGATIVE on open (subtract), 'dispute_reversal'
-    // posts POSITIVE on win (net to zero), lost posts nothing (stays
-    // subtracted). Deposit chargebacks are covered because deposit receipts
-    // stay on the received side and the loss shows here in its own period.
-    expect(DISPUTE_REPORTING_CATEGORIES).toEqual(['dispute', 'dispute_reversal']);
-    expect(DISPUTE_REPORTING_CATEGORIES).not.toContain('adjustment');
+  test('SUM(-amount) sign semantics: open subtracts, reversal adds back, lost stays', () => {
     const sumNegated = (rows) => rows.reduce((s, r) => s - r.amount, 0);
-    expect(sumNegated([{ amount: -150 }])).toBe(150); // open: revenue down
-    expect(sumNegated([{ amount: -150 }, { amount: 150 }])).toBe(0); // won
+    expect(sumNegated([{ amount: -150 }])).toBe(150); // refund/dispute open
+    expect(sumNegated([{ amount: -150 }, { amount: 150 }])).toBe(0); // won / bounced back
     expect(sumNegated([{ amount: -150 }])).toBe(150); // lost: no reversal row
   });
 });
