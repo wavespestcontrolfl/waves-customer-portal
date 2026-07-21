@@ -36,6 +36,13 @@
  * the exported frozenResumeCompletionState; and the backfill mint opts out
  * of payer-statement accrual (skipAccrual) so a NET-terms review invoice
  * never lands on the payer's open consolidated statement before review.
+ * Fix round 7 (Codex P0): the typed one-time backfill's REQUIRED mint is
+ * fail-closed — the shared backfillTypedOneTimeMintRequired predicate
+ * decides both the mint and the enforcement, a required-mint failure
+ * releases the attempt to the immediately-resumable side_effects_pending
+ * state (never finalized succeeded) with an actionable 503, the resume
+ * claim re-attempts the mint from frozen/hash-pinned/row inputs, and every
+ * non-required mint failure keeps the non-blocking behavior exactly.
  */
 const fs = require('fs');
 const path = require('path');
@@ -51,13 +58,18 @@ const {
   BACKFILL_LIFECYCLE_END_FIELDS,
   BACKFILL_RECORD_END_FIELDS,
   shouldAutoInvoiceCompletion,
+  backfillTypedOneTimeMintRequired,
   shouldCaptureApplicationConditions,
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
-const { hashCompletionRequest } = require('../services/completion-attempts');
+const {
+  hashCompletionRequest,
+  claimCompletionAttempt,
+  releaseCompletionAttemptForResume,
+} = require('../services/completion-attempts');
 
 // Fix round 6 (Codex P2): the recap-delivery refusal tests drive the real
 // sendRecap against a knex mock — the SMS provider module is mocked so an
@@ -960,6 +972,320 @@ describe('shouldAutoInvoiceCompletion — typed one-time backfill mints the revi
   });
 });
 
+describe('backfillTypedOneTimeMintRequired — ONE predicate decides the mint AND the fail-closed enforcement (Codex P0, fix round 7)', () => {
+  // The population whose fail-closed pre-gate the backfill bypassed. The
+  // route's invoice catch fail-closes on exactly this function, and the
+  // shouldAutoInvoiceCompletion backfill branch delegates to it — so what
+  // mints and what refuses to finalize without a mint cannot drift.
+  const REQUIRED = {
+    isBackfillCompletion: true,
+    typedOneTimeBilling: true,
+    hasVisitPrice: true,
+    visitPerformed: true,
+    isCallback: false,
+    serviceType: 'Bed Bug Treatment',
+  };
+
+  test('the required shape is required; every single-leg flip is not', () => {
+    expect(backfillTypedOneTimeMintRequired(REQUIRED)).toBe(true);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, isBackfillCompletion: false })).toBe(false);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, typedOneTimeBilling: false })).toBe(false);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, hasVisitPrice: false })).toBe(false);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, visitPerformed: false })).toBe(false);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, isCallback: true })).toBe(false);
+    expect(backfillTypedOneTimeMintRequired({ ...REQUIRED, serviceType: 'Bed Bug Follow-Up Visit' })).toBe(false);
+  });
+
+  test('full-lattice equivalence with the mint decision — for the signal-free base, required ⇔ mints', () => {
+    // Suppressor-free, no other billing signal (no scheduler flag, no tier,
+    // no explicit lane, priced-visits gate off): the ONLY branch that can
+    // mint is the typed backfill branch, which delegates to the predicate.
+    const base = {
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      createInvoiceOnComplete: false,
+      waveguardTier: null,
+      explicitMembership: false,
+      explicitPerVisitLane: false,
+      perApplicationBilling: false,
+      annualPrepayBilling: false,
+      invoiceAmount: 350,
+      autoInvoicePricedVisits: false,
+      annualPrepayCovered: false,
+    };
+    const bools = [true, false];
+    for (const isBackfillCompletion of bools) {
+      for (const typedOneTimeBilling of bools) {
+        for (const hasVisitPrice of bools) {
+          for (const visitPerformed of bools) {
+            for (const isCallback of bools) {
+              for (const serviceType of ['Bed Bug Treatment', 'Bed Bug Follow-Up Visit']) {
+                const combo = {
+                  isBackfillCompletion, typedOneTimeBilling, hasVisitPrice,
+                  visitPerformed, isCallback, serviceType,
+                };
+                expect(shouldAutoInvoiceCompletion({ ...base, ...combo }))
+                  .toBe(backfillTypedOneTimeMintRequired(combo));
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test('non-required mints exist and stay OUT of the fail-closed scope — a scheduler-flag backfill mint is not "required"', () => {
+    // A non-typed backfill whose mint rides create_invoice_on_complete (the
+    // prepaid-override shape above) still mints — but its failure keeps
+    // today's non-blocking behavior: the predicate refuses it.
+    const schedulerFlagBackfill = {
+      isBackfillCompletion: true,
+      typedOneTimeBilling: false,
+      hasVisitPrice: true,
+      visitPerformed: true,
+      isCallback: false,
+      serviceType: 'Quarterly Pest Control Service',
+    };
+    expect(backfillTypedOneTimeMintRequired(schedulerFlagBackfill)).toBe(false);
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      createInvoiceOnComplete: true,
+      waveguardTier: null,
+      invoiceAmount: 129,
+      autoInvoicePricedVisits: false,
+      ...schedulerFlagBackfill,
+    })).toBe(true);
+    // Live completions are never required here either — the live pre-gate
+    // still owns them.
+    expect(backfillTypedOneTimeMintRequired({
+      ...schedulerFlagBackfill, typedOneTimeBilling: true, isBackfillCompletion: false,
+    })).toBe(false);
+  });
+});
+
+describe('required-mint failure leaves the closeout resumable — fail-closed bypass leg (Codex P0, fix round 7)', () => {
+  // Behavioral leg drives the real completion-attempts machinery against an
+  // ops-queue knex mock (same style as completion-attempts.test.js): a
+  // released attempt must be claimable IMMEDIATELY — that claim is what
+  // makes "retry the closeout" true, and the re-entered route re-derives
+  // the mint from the frozen/hash-pinned inputs (composition test below).
+  function makeOpsKnex(ops) {
+    const calls = [];
+    const knex = jest.fn((table) => {
+      const op = ops.shift();
+      if (!op) throw new Error(`Unexpected table call: ${table}`);
+      calls.push({ table, op });
+      const chain = {
+        where: jest.fn((criteria) => { op.whereCriteria = criteria; return chain; }),
+        whereIn: jest.fn((col, values) => { op.whereIn = { col, values }; return chain; }),
+        andWhere: jest.fn((...args) => { op.andWhereArgs = args; return chain; }),
+        orderBy: jest.fn(() => chain),
+        update: jest.fn((payload) => {
+          if (op.updateError) throw op.updateError;
+          op.updatePayload = payload;
+          return chain;
+        }),
+        returning: jest.fn(async () => op.returning || []),
+        first: jest.fn(async () => op.first),
+      };
+      return chain;
+    });
+    knex.calls = calls;
+    return knex;
+  }
+
+  test('release flips the running claim to side_effects_pending and records the mint error — never failed, never succeeded', async () => {
+    const knex = makeOpsKnex([{ returning: [{ id: 'attempt-1', status: 'side_effects_pending' }] }]);
+    const ok = await releaseCompletionAttemptForResume(
+      { id: 'attempt-1' },
+      new Error('invoice mint blew up'),
+      knex,
+    );
+    expect(ok).toBe(true);
+    const op = knex.calls[0].op;
+    // Conditional on the running status — a finalized attempt can never be
+    // flipped back by a late release.
+    expect(op.whereCriteria).toEqual({ id: 'attempt-1', status: 'side_effects_running' });
+    expect(op.updatePayload.status).toBe('side_effects_pending');
+    expect(op.updatePayload.error).toBe('invoice mint blew up');
+    expect(op.updatePayload.updated_at).toBeInstanceOf(Date);
+  });
+
+  test('release is guarded and swallowing: zero-row match → false, update throw → false, no attempt → knex untouched', async () => {
+    const guarded = makeOpsKnex([{ returning: [] }]);
+    await expect(releaseCompletionAttemptForResume({ id: 'attempt-1' }, new Error('x'), guarded))
+      .resolves.toBe(false);
+    const throwing = makeOpsKnex([{ updateError: new Error('db down') }]);
+    await expect(releaseCompletionAttemptForResume({ id: 'attempt-1' }, new Error('x'), throwing))
+      .resolves.toBe(false);
+    const untouched = makeOpsKnex([]);
+    await expect(releaseCompletionAttemptForResume(null, new Error('x'), untouched))
+      .resolves.toBe(false);
+    expect(untouched.calls.length).toBe(0);
+  });
+
+  const RELEASED_ROW = {
+    id: 'attempt-1',
+    service_id: 'svc-1',
+    status: 'side_effects_pending',
+    service_record_id: 'rec-1',
+    request_hash: 'hash-1',
+    updated_at: new Date(), // seconds old — NO stale wait required
+  };
+
+  test('a released attempt claims as an immediate resume — no stale-window wait, straight back into the side effects', async () => {
+    const knex = makeOpsKnex([
+      { first: undefined },      // no prior success
+      { first: RELEASED_ROW },   // resumable lookup finds the released row
+      { returning: [{ ...RELEASED_ROW, status: 'side_effects_running' }] }, // the claim
+    ]);
+    const result = await claimCompletionAttempt(
+      { serviceId: 'svc-1', idempotencyKey: 'key-2', requestHash: 'hash-1' },
+      knex,
+    );
+    expect(result.action).toBe('resume');
+    expect(result.serviceRecordId).toBe('rec-1');
+    const claimOp = knex.calls[2].op;
+    expect(claimOp.whereCriteria).toEqual({ id: 'attempt-1', status: 'side_effects_pending' });
+    // The pending state carries NO stale-cutoff clause — that gate exists
+    // only for side_effects_running. This is the machinery fact the whole
+    // fail-closed shape rests on.
+    expect(claimOp.andWhereArgs).toBeUndefined();
+    expect(claimOp.updatePayload.status).toBe('side_effects_running');
+  });
+
+  test('contrast: WITHOUT the release, a fresh running row 409s the retry for the whole stale window', async () => {
+    const knex = makeOpsKnex([
+      { first: undefined },
+      { first: { ...RELEASED_ROW, status: 'side_effects_running' } },
+    ]);
+    const result = await claimCompletionAttempt(
+      { serviceId: 'svc-1', idempotencyKey: 'key-2', requestHash: 'hash-1' },
+      knex,
+    );
+    expect(result.action).toBe('conflict');
+    expect(result.payload.code).toBe('completion_side_effects_running');
+  });
+
+  test('the resume claim is hash-guarded — a retry with a DIFFERENT body cannot claim the released attempt', async () => {
+    // Frozen-inputs enforcement: every request-body input to the required
+    // predicate (visitOutcome, oneTimeRecapOnly, structuredFindings, …) is
+    // part of the request hash, so a resumed run can only ever re-derive the
+    // SAME predicate the committed run used.
+    const knex = makeOpsKnex([
+      { first: undefined },
+      { first: RELEASED_ROW },
+    ]);
+    const result = await claimCompletionAttempt(
+      { serviceId: 'svc-1', idempotencyKey: 'key-2', requestHash: 'hash-DIFFERENT' },
+      knex,
+    );
+    expect(result.action).toBe('conflict');
+    expect(result.payload.code).toBe('completion_resume_payload_mismatch');
+  });
+
+  test('frozen-inputs pin: the predicate body inputs split the hash; mode is frozen; the resumed decision re-mints', () => {
+    // The hash pins the body inputs (a changed visitOutcome/oneTimeRecapOnly
+    // can never ride a resume claim)…
+    const body = { idempotencyKey: 'k', visitOutcome: 'completed', oneTimeRecapOnly: false, structuredFindings: { severity: 'high' } };
+    expect(hashCompletionRequest({ ...body, visitOutcome: 'inspection_only' })).not.toBe(hashCompletionRequest(body));
+    expect(hashCompletionRequest({ ...body, oneTimeRecapOnly: true })).not.toBe(hashCompletionRequest(body));
+    // …the completion MODE comes from the structured_notes freeze even on a
+    // flagless retry…
+    const frozen = frozenResumeCompletionState({ backfill: true, timeOnSite: 45 }, { requestBackfill: false });
+    expect(frozen.isBackfillCompletion).toBe(true);
+    // …and with the remaining inputs row/profile-derived (estimated_price,
+    // is_callback, service_type, followup_included, profile billingType),
+    // the resumed run re-derives the SAME required mint: no invoice was
+    // created, so no suppressor blocks the retry.
+    const resumedCombo = {
+      isBackfillCompletion: frozen.isBackfillCompletion,
+      typedOneTimeBilling: true,
+      hasVisitPrice: true,
+      visitPerformed: true,
+      isCallback: false,
+      serviceType: 'Bed Bug Treatment',
+    };
+    expect(backfillTypedOneTimeMintRequired(resumedCombo)).toBe(true);
+    expect(shouldAutoInvoiceCompletion({
+      recapReviewOnly: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      createInvoiceOnComplete: false,
+      waveguardTier: null,
+      invoiceAmount: 350,
+      autoInvoicePricedVisits: false,
+      annualPrepayCovered: false,
+      ...resumedCombo,
+    })).toBe(true);
+  });
+
+  describe('route wiring (source contracts)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+    test('the invoice catch fail-closes on the shared predicate with the SAME input sources as the mint decision', () => {
+      // Same named flag, same row columns the shouldInvoice call reads —
+      // the enforcement can never gate a different population than the one
+      // whose pre-gate was bypassed.
+      expect(source).toMatch(/const reviewInvoiceMintRequired = backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*serviceType: svc\.service_type,\s*\n\s*\}\);/);
+      // And the decision side delegates to the same function.
+      expect(source).toMatch(/if \(isBackfillCompletion && typedOneTimeBilling && hasVisitPrice\) \{[\s\S]{0,400}return backfillTypedOneTimeMintRequired\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*typedOneTimeBilling,\s*\n\s*hasVisitPrice,\s*\n\s*visitPerformed,\s*\n\s*isCallback,\s*\n\s*serviceType,\s*\n\s*\}\);/);
+    });
+
+    test('required + no invoice row → release for immediate resume + actionable 503; the attempt is never finalized succeeded', () => {
+      const catchBlock = source.match(/\} catch \(invErr\) \{([\s\S]*?)\n {6}\}\n {4}\} else if \(preMintedInvoice\) \{/);
+      expect(catchBlock).not.toBeNull();
+      const body = catchBlock[1];
+      // Fail-closed only when the mint is required AND no invoice row exists
+      // (a partial createFromService that DID insert converges on resume via
+      // the existing-invoice suppressors).
+      const guardAt = body.indexOf("if (reviewInvoiceMintRequired && !invoice?.id) {");
+      expect(guardAt).toBeGreaterThan(-1);
+      // Release BEFORE the response, inside the guard.
+      const releaseAt = body.indexOf('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+      expect(releaseAt).toBeGreaterThan(guardAt);
+      // Actionable error: names the state (saved but NOT finalized) and the
+      // action (retry), with a machine code + the committed record id.
+      const returnAt = body.indexOf('return res.status(503).json({');
+      expect(returnAt).toBeGreaterThan(releaseAt);
+      expect(body).toContain('saved but NOT finalized. Retry the closeout');
+      expect(body).toContain("code: 'backfill_invoice_mint_failed',");
+      expect(body).toContain('serviceRecordId: record.id,');
+      // The return exits the handler before any success finalize — and the
+      // non-blocking log is the FALLTHROUGH for every non-required shape,
+      // preserved verbatim after the guard.
+      const nonBlockingAt = body.indexOf('Auto-invoice failed (non-blocking)');
+      expect(nonBlockingAt).toBeGreaterThan(returnAt);
+      expect(body).not.toContain('markCompletionAttemptSucceeded');
+    });
+
+    test('success finalizes exist only at the two legitimate sites — none reachable from the fail-closed return', () => {
+      // The incomplete-visit early return and the end-of-route finalize.
+      expect((source.match(/markCompletionAttemptSucceeded\(completionAttempt/g) || []).length).toBe(2);
+    });
+
+    test('the release helper really parks the attempt in the immediately-claimable state', () => {
+      const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
+      expect(attemptsSource).toMatch(/\.where\(\{ id: attempt\.id, status: 'side_effects_running' \}\)\s*\n\s*\.update\(\{\s*\n\s*status: 'side_effects_pending',/);
+      // claimSideEffectsRun applies the stale-window clause ONLY to running
+      // rows — a pending row claims unconditionally (behavioral proof above).
+      expect(attemptsSource).toMatch(/if \(row\.status === 'side_effects_running'\) \{\s*\n\s*query = query\.andWhere\('updated_at', '<', staleCutoff\);\s*\n\s*\}/);
+    });
+  });
+});
+
 describe('completion route wiring (source contracts)', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
@@ -1324,6 +1650,10 @@ describe('completion route wiring (source contracts)', () => {
       'payer-statement accrual SKIPPED',
       // job-costing labor guard
       'untrustedLifecycleSpan: true',
+      // required-mint fail-closed guard (fix round 7) — must read the
+      // re-derived (frozen) mode, or a flagless resumed retry of a failed
+      // required mint would evaluate as non-required and finalize uninvoiced
+      'const reviewInvoiceMintRequired = backfillTypedOneTimeMintRequired({',
     ];
     for (const gate of postCommitGates) {
       const at = source.indexOf(gate);

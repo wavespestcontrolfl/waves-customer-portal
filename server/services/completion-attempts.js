@@ -456,6 +456,43 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
   });
 }
 
+// Release a post-commit side-effects claim so the NEXT retry resumes
+// IMMEDIATELY (Codex P0, PR #2897 fix round: the typed one-time backfill
+// review-invoice mint is a REQUIRED side effect — see admin-dispatch's
+// backfillTypedOneTimeMintRequired — and its failure must leave the attempt
+// resumable, never finalized succeeded). 'side_effects_pending' is the
+// machinery's explicit resumable-at-side-effects state: claimSideEffectsRun
+// claims it with NO stale-window gate, unlike a stranded
+// 'side_effects_running' row which 409s (completion_side_effects_running)
+// for STALE_SIDE_EFFECTS_MS before a retry can take over. Conditional on the
+// running status so it can never flip back an attempt another path already
+// finalized; failures are swallowed (the caller is already surfacing the
+// side-effect error — at worst the row stays 'side_effects_running' and the
+// stale-window reclaim recovers it, still never a false success).
+async function releaseCompletionAttemptForResume(attempt, err, knex = db) {
+  if (!attempt?.id) return false;
+  try {
+    const [released] = await knex('service_completion_attempts')
+      .where({ id: attempt.id, status: 'side_effects_running' })
+      .update({
+        status: 'side_effects_pending',
+        error: err?.message || String(err || 'Completion side effect failed'),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!released) {
+      logger.warn(
+        `[completion-attempts] release-for-resume found attempt ${attempt.id} not in side_effects_running — leaving it untouched`
+      );
+      return false;
+    }
+    return true;
+  } catch (updateErr) {
+    logger.error(`[completion-attempts] release-for-resume failed for attempt ${attempt.id}: ${updateErr.message}`);
+    return false;
+  }
+}
+
 // Volatile fields that exist on the snapshot for audit purposes but
 // MUST NOT influence the preview→submit handshake hash. Without this
 // canonicalization, the resolver-side hash (preview at T=0) and the
@@ -561,5 +598,6 @@ module.exports = {
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,
   markCompletionAttemptSideEffectsPending,
+  releaseCompletionAttemptForResume,
   storeResolvedSnapshot,
 };

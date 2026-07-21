@@ -5818,6 +5818,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           codePrefix: invoiceShortCodePrefix(invoice),
         });
       } catch (invErr) {
+        // Fail-closed leg of the typed one-time backfill bypass (Codex P0,
+        // PR #2897 fix round). The pre-transaction billing gate this
+        // population skipped was FAIL-CLOSED (a lookup error 503'd,
+        // completion_billing_check_failed) — the promise that justified the
+        // bypass is that the mint above stands in for it. So when the mint
+        // is REQUIRED (the shared predicate — same inputs, same sources as
+        // the shouldInvoice call above) and NO invoice row exists (a partial
+        // createFromService that did insert one converges on resume via the
+        // existing-invoice suppressors), the completion must NOT finalize
+        // succeeded: release the attempt's side-effects claim back to
+        // 'side_effects_pending' — the machinery's immediately-resumable
+        // state — and 503 with a retry instruction. The service_record
+        // transaction is already committed, so the retry re-enters via the
+        // resume claim: the frozen structured_notes backfill mode + the
+        // hash-pinned body + row/profile inputs re-derive the same predicate
+        // and shouldInvoice, and the mint retries. Every NON-required shape
+        // (live completions, non-typed backfills, scheduler-flag or
+        // lane-driven mints) keeps the non-blocking behavior below exactly.
+        const reviewInvoiceMintRequired = backfillTypedOneTimeMintRequired({
+          isBackfillCompletion,
+          typedOneTimeBilling: typedOneTimeBillingProfile,
+          hasVisitPrice,
+          visitPerformed,
+          isCallback: svc.is_callback,
+          serviceType: svc.service_type,
+        });
+        if (reviewInvoiceMintRequired && !invoice?.id) {
+          logger.error(`[dispatch] backfill typed one-time review-invoice mint FAILED for ${svc.id} — closeout NOT finalized, attempt released for immediate retry: ${invErr.message}`);
+          await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return res.status(503).json({
+            error: 'The review invoice could not be created — the closeout is saved but NOT finalized. Retry the closeout to mint the invoice.',
+            code: 'backfill_invoice_mint_failed',
+            serviceRecordId: record.id,
+          });
+        }
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
       }
     } else if (preMintedInvoice) {
@@ -8984,6 +9019,33 @@ function completionSavedCardFallbackPolicy({
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
 
+// REQUIRED-mint predicate for the typed one-time backfill bypass (Codex P0,
+// PR #2897 fix round). The population whose fail-closed billing pre-gate
+// (completion_billing_required, 409 → checkout detour) is bypassed under
+// backfill on the promise that shouldAutoInvoiceCompletion's backfill branch
+// mints the open review invoice instead: typed one-time profile
+// (typedOneTimeBillingProfile at the route), the row's own price
+// (hasVisitPrice — the resolver's amount basis), performed, non-callback,
+// non-always-free work. For exactly this population the mint is REQUIRED —
+// a transient mint failure must NOT let the completion finalize succeeded
+// with no invoice (lost AR, no retry path; the old pre-gate was
+// fail-closed). ONE function decides both the mint (the backfill branch in
+// shouldAutoInvoiceCompletion delegates here) and the fail-closed
+// enforcement (the route's invoice catch), so the two can never drift.
+function backfillTypedOneTimeMintRequired({
+  isBackfillCompletion = false,
+  typedOneTimeBilling = false,
+  hasVisitPrice = false,
+  visitPerformed = true,
+  isCallback = false,
+  serviceType,
+}) {
+  return Boolean(
+    isBackfillCompletion && typedOneTimeBilling && hasVisitPrice
+    && visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType),
+  );
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -9095,7 +9157,17 @@ function shouldAutoInvoiceCompletion({
   // annual-prepay coverage, autopay dues) still win, so already-billed work
   // never double-mints.
   if (isBackfillCompletion && typedOneTimeBilling && hasVisitPrice) {
-    return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
+    // Delegated to the shared REQUIRED-mint predicate (defined above): the
+    // route's invoice catch fail-closes on the same function, so what mints
+    // here and what refuses to finalize without a mint are one condition.
+    return backfillTypedOneTimeMintRequired({
+      isBackfillCompletion,
+      typedOneTimeBilling,
+      hasVisitPrice,
+      visitPerformed,
+      isCallback,
+      serviceType,
+    });
   }
   // An explicit monthly_membership lane stands in for the tier here just as
   // it does in the coverage predicate: a tier-less explicit member whose
@@ -9272,6 +9344,7 @@ module.exports._test = {
   serviceReportEmailEligible,
   membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,
+  backfillTypedOneTimeMintRequired,
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
