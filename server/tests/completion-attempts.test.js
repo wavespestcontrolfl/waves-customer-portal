@@ -796,3 +796,27 @@ describe('completion attempts', () => {
     })();
   });
 });
+
+describe('request hash fits its column', () => {
+  // Regression: the fix-round-10 two-segment hash (`<core>:<mode>`, 129
+  // chars) shipped while service_completion_attempts.request_hash was still
+  // varchar(64) — every completion INSERT then 500'd with "value too long
+  // for type character varying(64)" across all service types (lawn, tree &
+  // shrub, pest share the one /complete route). Migration
+  // 20260722000002_widen_completion_request_hash widened the column to 160.
+  // If the hash format ever grows again, this must fail until a widening
+  // migration ships with it.
+  const REQUEST_HASH_COLUMN_WIDTH = 160;
+
+  test('composite hash length is stable and within varchar(160)', () => {
+    const hash = hashCompletionRequest({
+      notes: 'x'.repeat(50000), // hash length must not scale with payload size
+      products: Array.from({ length: 200 }, (_, i) => ({ id: i })),
+      backfill: true,
+      timeOnSite: 95,
+    });
+    expect(hash).toMatch(/^[0-9a-f]{64}:[0-9a-f]{64}$/);
+    expect(hash.length).toBe(129);
+    expect(hash.length).toBeLessThanOrEqual(REQUEST_HASH_COLUMN_WIDTH);
+  });
+});
