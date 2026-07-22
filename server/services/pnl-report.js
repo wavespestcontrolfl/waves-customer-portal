@@ -185,9 +185,13 @@ function toUTCDay(v) {
  * half-year schedule x business_use_pct — see below), and straight-line
  * (annual_depreciation). Disposal CAPS the window rather than excluding the
  * asset — filtering disposed assets out silently deleted their depreciation
- * from every historical P&L. NOTE: the MACRS disposal-year half-convention
- * (half the normal percentage in the year of sale) is not modeled — a CPA
- * adjustment on disposal; the sole vehicle is not disposed.
+ * from every historical P&L. MACRS specifics: depreciates only the basis
+ * REMAINING after any §179/bonus (or the two double-count); FAILS CLOSED
+ * (returns 0) for listed property at ≤50% business use, which requires ADS
+ * straight-line + possible recapture (Pub 946) — a CPA case, not GDS; and a
+ * report window ending before the in-service date contributes nothing.
+ * NOT modeled: the MACRS disposal-year half-convention (a CPA adjustment on
+ * sale; the sole vehicle is not disposed).
  */
 function prorateAssetDepreciation(asset, startDate, endDate) {
   const periodStart = toUTCDay(startDate);
@@ -212,33 +216,40 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
 
   // MACRS: year-varying declining balance (e.g. a 5-year vehicle is 20/32/
   // 19.2/11.52/11.52/5.76% of basis). A flat annual_depreciation can't model
-  // it, which is why MACRS assets (annual NULL) showed $0 in the P&L. The
-  // half-year convention is baked into the percentages, so the IN-SERVICE year
-  // gets its full percentage regardless of the in-service date — proration is
-  // by the REPORT WINDOW only (Jan 1 of the in-service year onward), never by
-  // the in-service day. business_use_pct (listed property, e.g. vehicles)
-  // scales the deduction; disposal caps the window.
+  // it, which is why MACRS assets (annual NULL) showed $0 in the P&L.
   if (MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
-    const basis = parseFloat(asset?.purchase_cost || 0) || 0;
-    const inSvcYear = inService ? inService.getUTCFullYear() : null;
     const bizUse = businessUseFraction(asset?.business_use_pct);
-    if (basis > 0 && inSvcYear) {
-      // Coverage starts at Jan 1 of the in-service year (half-year handles the
-      // mid-year start), not the in-service DATE.
-      const macrsStart = new Date(Date.UTC(inSvcYear, 0, 1));
-      const effStartM = macrsStart > periodStart ? macrsStart : periodStart;
-      const effEndM = disposed && disposed < periodEnd ? disposed : periodEnd;
-      if (effStartM <= effEndM) {
-        for (let y = effStartM.getUTCFullYear(); y <= effEndM.getUTCFullYear(); y++) {
-          const yearAmount = macrsYearAmount(asset.irs_class, basis, inSvcYear, y) * bizUse;
-          if (yearAmount <= 0) continue;
-          const yStart = new Date(Date.UTC(y, 0, 1));
-          const yEnd = new Date(Date.UTC(y, 11, 31));
-          const s = effStartM > yStart ? effStartM : yStart;
-          const e = effEndM < yEnd ? effEndM : yEnd;
-          const days = (e - s) / 86400000 + 1;
-          if (days > 0) total += yearAmount * (days / daysInYear(y));
-        }
+    // Listed property (vehicles) used ≤50% for business must use ADS
+    // straight-line, NOT this GDS declining-balance schedule, and may trigger
+    // recapture (Pub 946). FAIL CLOSED — surface it for CPA/ADS treatment
+    // rather than report a wrong GDS figure.
+    if (bizUse <= 0.5) return total;
+    // §179/bonus already expensed part of the cost immediately (added above);
+    // MACRS depreciates only the REMAINING basis, or the two double-count.
+    const s179Immediate = (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
+      ? (parseFloat(asset?.section_179_amount ?? asset?.purchase_cost) || 0) : 0;
+    const basis = Math.max(0, (parseFloat(asset?.purchase_cost || 0) || 0) - s179Immediate);
+    const inSvcYear = inService ? inService.getUTCFullYear() : null;
+    if (basis > 0 && inSvcYear && inService) {
+      for (let y = periodStart.getUTCFullYear(); y <= periodEnd.getUTCFullYear(); y++) {
+        // The year's MACRS amount (half-year convention baked into the %).
+        const yearAmount = macrsYearAmount(asset.irs_class, basis, inSvcYear, y) * bizUse;
+        if (yearAmount <= 0) continue;
+        const yEnd = new Date(Date.UTC(y, 11, 31));
+        // The asset's COVERAGE in year y: in-service date (later years: Jan 1)
+        // through disposal/year-end. A window ending before in-service gets
+        // NOTHING; the full year's amount is attributed across coverage days,
+        // so a full-year window keeps the whole half-year-convention amount
+        // while partial windows prorate consistently.
+        const covStart = inService > new Date(Date.UTC(y, 0, 1)) ? inService : new Date(Date.UTC(y, 0, 1));
+        const covEnd = disposed && disposed < yEnd ? disposed : yEnd;
+        if (covStart > covEnd) continue;
+        const covDays = (covEnd - covStart) / 86400000 + 1;
+        const ovStart = periodStart > covStart ? periodStart : covStart;
+        const ovEnd = periodEnd < covEnd ? periodEnd : covEnd;
+        if (ovStart > ovEnd) continue;
+        const ovDays = (ovEnd - ovStart) / 86400000 + 1;
+        total += yearAmount * (ovDays / covDays);
       }
     }
     return total; // MACRS handled — don't also read annual_depreciation

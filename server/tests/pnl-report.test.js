@@ -317,6 +317,35 @@ describe('prorateDepreciation', () => {
     test('unknown recovery class contributes nothing (fail closed)', () => {
       expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
     });
+
+    test('§179 + MACRS depreciates only the REMAINING basis (no double-count)', () => {
+      // $35k asset, $10k §179 elected, then MACRS on the rest. In 2025 (in-
+      // service year): $10k immediate + 20% × ($35k−$10k)=$5,000 → $15,000.
+      const hybrid = van({
+        placed_in_service_date: '2025-01-01',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      expect(prorateDepreciation([hybrid], '2025-01-01', '2025-12-31')).toBeCloseTo(15000, 2);
+      // 2026: MACRS year-2 on the $25k remaining basis = 32% × 25k = $8,000.
+      expect(prorateDepreciation([hybrid], '2026-01-01', '2026-12-31')).toBeCloseTo(8000, 2);
+    });
+
+    test('business use ≤50% FAILS CLOSED (ADS/CPA territory, not GDS)', () => {
+      expect(prorateDepreciation([van({ business_use_pct: '50' })], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(prorateDepreciation([van({ business_use_pct: '40' })], '2026-01-01', '2026-12-31')).toBe(0);
+      // Just above the threshold still computes (GDS × use).
+      expect(prorateDepreciation([van({ business_use_pct: '51' })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(11200 * 0.51, 2);
+    });
+
+    test('a report window ending BEFORE in-service gets nothing', () => {
+      const julyAsset = van({ placed_in_service_date: '2026-07-01' });
+      // Jan–Mar 2026 P&L: asset not yet in service → $0.
+      expect(prorateDepreciation([julyAsset], '2026-01-01', '2026-03-31')).toBe(0);
+      // Full 2026: in-service year takes the FULL year-1 20% = $7,000 (half-year
+      // convention — not day-prorated from July).
+      expect(prorateDepreciation([julyAsset], '2026-01-01', '2026-12-31')).toBeCloseTo(7000, 2);
+    });
   });
 });
 
