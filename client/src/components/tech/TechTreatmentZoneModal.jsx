@@ -25,6 +25,7 @@ import {
   pxToFeet,
   startSprayEngine,
   staticMapUrl,
+  exportMapPng,
 } from './treatmentZoneSpray';
 
 const DARK = {
@@ -199,12 +200,9 @@ export default function TechTreatmentZoneModal({
     setSuggesting(true);
     setSuggestNote('');
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = MAP_WIDTH;
-      canvas.height = MAP_HEIGHT;
-      canvas.getContext('2d').drawImage(mapState.image, 0, 0, MAP_WIDTH, MAP_HEIGHT);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-      if (!blob) throw new Error('Could not read the map image.');
+      // Same taint fallback the snapshot save uses (codex P2): a
+      // non-canvas-readable map image re-fetches as a bitmap.
+      const blob = await exportMapPng(mapState.image, mapState.url);
       const form = new FormData();
       form.append('map', blob, 'map.png');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone/suggest`, {

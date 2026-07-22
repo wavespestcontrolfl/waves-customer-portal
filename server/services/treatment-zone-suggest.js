@@ -12,7 +12,7 @@
  * the tech's adjusted trace goes through the existing save route.
  */
 const MODELS = require('../config/models');
-const logger = require('../utils/logger');
+const logger = require('./logger');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* optional in some test envs */ }
