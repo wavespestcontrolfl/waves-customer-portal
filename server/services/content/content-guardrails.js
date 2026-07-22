@@ -618,14 +618,14 @@ const SERVICE_KEYWORD_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   "\\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
-  + '|serving|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
+  + '|(?:^|,)\\s*serving\\b|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
   + '|same.day|we offer|free (?:quote|estimate|inspection)'
   + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
   + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
-  + '|\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
+  + '|\\b(?:waves\\w*|waveguard|(?:our|this|the)\\s+(?:\\w+\\s+){0,2}?(?:service|plan|program|membership|treatment)s?)\\b[^.!?]{0,20}?\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
   + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es)\\b(?!\\s+up\\b)|serving|servic\\w+|treats?|covers?|works? in|operates? in)"
   + '|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
   'i',
@@ -710,7 +710,7 @@ const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)
 // disclaimer half hides an affirmative half. "and" splits ONLY before a
 // new we/our subject: a bare ", and" boundary would sever the tail of an
 // Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our)\b)/i;
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)|,\s+(?=(?:we|our|waves|waveguard)\b)/i;
 
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a
