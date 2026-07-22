@@ -750,7 +750,7 @@ const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|w
 // separator (a short trailing qualifier like "year-round" is tolerated); a
 // fragment with real lowercase prose is a clause and stays split — "We serve Sarasota; Tampa mosquito season starts earlier" must
 // NOT glue Tampa onto the claim.
-const LIST_FRAGMENT_RE = /^\s*(?:(?:and|or|nor)\s+|[A-Z][A-Za-z'.&-]*[\s,–—-]*)+(?:[a-z-]+[\s,]*){0,2}\.?\s*$/;
+const LIST_FRAGMENT_RE = /^\s*(?:(?:and|or|nor)\s+|[A-Z][A-Za-z'.&-]*[\s,–—-]*)+(?:(?:year-round|weekly|monthly|quarterly|seasonally|daily|too|as well|and more)[\s,]*)?\.?\s*$/;
 
 function rejoinListSemicolons(sentence) {
   const out = [];

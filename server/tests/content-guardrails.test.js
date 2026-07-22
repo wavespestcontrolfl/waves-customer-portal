@@ -1954,3 +1954,13 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const editorial = guardrails.evaluate({ body: 'We provide pest control educational resources for Naples homeowners.' }, {});
     expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
+
+  test('short factual clauses after a semicolon are NOT list continuations (qualifier allowlist)', () => {
+    for (const body of [
+      'We serve Sarasota; Tampa is dangerous.',
+      'We serve Sarasota; Tampa weather differs.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
