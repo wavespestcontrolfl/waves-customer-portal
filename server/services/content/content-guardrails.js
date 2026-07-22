@@ -628,7 +628,7 @@ const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed
 // The optional trailing "services/plans/programs" keeps compound phrasings
 // like "pest control services in Naples" inside one keyword match — the
 // in/near/for context arm anchors right after the keyword.
-const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?)?`;
+const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?(?!\\s+guides?\\b))?`;
 // "serve up"/"serving up" is the editorial idiom ("serving up a
 // Naples-vs-Sarasota comparison") — guarded on every serve-form arm.
 // offer/provide/deliver assert operation like serve/treat, but ONLY when a
