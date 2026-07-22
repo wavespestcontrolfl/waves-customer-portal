@@ -5641,6 +5641,10 @@ export default function Customer360ProfileV2({
                     {payments.length > 0 ? (
                       payments.slice(0, 3).map((p, i) => {
                         const isRefund = !!p.refund_status;
+                        // Non-collected rows (upcoming/processing/failed) were
+                        // indistinguishable from paid ones, so the list read as
+                        // more collected revenue than Lifetime Rev counts.
+                        const isCollected = !p.status || p.status === "paid";
                         return (
                           <div
                             key={i}
@@ -5650,13 +5654,18 @@ export default function Customer360ProfileV2({
                             <span
                               className={cn(
                                 "u-nums flex-shrink-0",
-                                isRefund
+                                isRefund || !isCollected
                                   ? "text-ink-secondary"
                                   : "text-zinc-900",
                               )}
                             >
                               {fmtCurrency(p.amount)}
                             </span>{" "}
+                            {!isCollected && !isRefund && (
+                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
+                                {p.status}
+                              </span>
+                            )}{" "}
                             <span className="text-ink-secondary truncate">
                               {p.card_brand
                                 ? `${p.card_brand} …${p.last_four}`

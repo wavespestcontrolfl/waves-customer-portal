@@ -108,6 +108,8 @@ const FIXTURES = {
     summary: {
       total_billable: 173,
       autopay_active: 38,
+      autopay_chargeable: 36,
+      autopay_unchargeable: 2,
       autopay_paused: 2,
       autopay_disabled: 133,
       no_payment_method: 36,

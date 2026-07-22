@@ -207,27 +207,24 @@ function DashboardTab({ token }) {
       <div style={sTableWrap}>
         {" "}
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          {" "}
           <thead>
-            {" "}
             <tr>
               {["Date", "Product", "Customer", "Technician"].map((h) => (
                 <th key={h} style={thS}>
                   {h}
                 </th>
               ))}
-            </tr>{" "}
-          </thead>{" "}
+            </tr>
+          </thead>
           <tbody>
             {data.recentApplications?.map((a) => (
               <tr key={a.id}>
-                {" "}
-                <td style={tdS}>{a.date}</td>{" "}
+                <td style={tdS}>{a.date}</td>
                 <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                   {a.product || "—"}
-                </td>{" "}
-                <td style={tdS}>{a.customer || "—"}</td>{" "}
-                <td style={tdS}>{a.tech || "—"}</td>{" "}
+                </td>
+                <td style={tdS}>{a.customer || "—"}</td>
+                <td style={tdS}>{a.tech || "—"}</td>
               </tr>
             ))}
             {!data.recentApplications?.length && (
@@ -245,7 +242,7 @@ function DashboardTab({ token }) {
                 </td>
               </tr>
             )}
-          </tbody>{" "}
+          </tbody>
         </table>{" "}
       </div>{" "}
     </div>
@@ -356,9 +353,7 @@ function ApplicationLogTab({ token }) {
                   minWidth: 900,
                 }}
               >
-                {" "}
                 <thead>
-                  {" "}
                   <tr>
                     {[
                       "Date",
@@ -374,34 +369,33 @@ function ApplicationLogTab({ token }) {
                         {h}
                       </th>
                     ))}
-                  </tr>{" "}
-                </thead>{" "}
+                  </tr>
+                </thead>
                 <tbody>
                   {data?.applications?.map((a) => (
                     <tr key={a.id}>
-                      {" "}
                       <td style={{ ...tdS, whiteSpace: "nowrap" }}>
                         {a.applicationDate}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                         {a.productName}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                         {a.activeIngredient || "—"}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                         {a.epaRegNumber || "—"}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 12 }}>
                         {a.applicationRate
                           ? `${a.applicationRate} ${a.rateUnit || ""}`
                           : "—"}
-                      </td>{" "}
-                      <td style={tdS}>{a.customerName || "—"}</td>{" "}
-                      <td style={tdS}>{a.techName || "—"}</td>{" "}
+                      </td>
+                      <td style={tdS}>{a.customerName || "—"}</td>
+                      <td style={tdS}>{a.techName || "—"}</td>
                       <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                         {a.applicationMethod || "—"}
-                      </td>{" "}
+                      </td>
                     </tr>
                   ))}
                   {!data?.applications?.length && (
@@ -419,7 +413,7 @@ function ApplicationLogTab({ token }) {
                       </td>
                     </tr>
                   )}
-                </tbody>{" "}
+                </tbody>
               </table>{" "}
             </div>{" "}
           </div>{" "}
@@ -560,9 +554,7 @@ function ProductLimitsTab({ token }) {
           <div style={sTableWrap}>
             {" "}
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              {" "}
               <thead>
-                {" "}
                 <tr>
                   {[
                     "Type",
@@ -576,19 +568,18 @@ function ProductLimitsTab({ token }) {
                       {h}
                     </th>
                   ))}
-                </tr>{" "}
-              </thead>{" "}
+                </tr>
+              </thead>
               <tbody>
                 {result.limits.map((l, i) => (
                   <tr key={i}>
-                    {" "}
-                    <td style={tdS}>{l.limitType?.replace(/_/g, " ")}</td>{" "}
+                    <td style={tdS}>{l.limitType?.replace(/_/g, " ")}</td>
                     <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                       {l.limitValue}
-                    </td>{" "}
+                    </td>
                     <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                       {l.currentUsage}
-                    </td>{" "}
+                    </td>
                     <td style={tdS}>
                       <span
                         style={{
@@ -601,7 +592,7 @@ function ProductLimitsTab({ token }) {
                       >
                         {l.status?.replace(/_/g, " ")}
                       </span>
-                    </td>{" "}
+                    </td>
                     <td
                       style={{
                         ...tdS,
@@ -609,7 +600,7 @@ function ProductLimitsTab({ token }) {
                       }}
                     >
                       {l.severity}
-                    </td>{" "}
+                    </td>
                     <td
                       style={{
                         ...tdS,
@@ -619,10 +610,10 @@ function ProductLimitsTab({ token }) {
                       }}
                     >
                       {l.description}
-                    </td>{" "}
+                    </td>
                   </tr>
                 ))}
-              </tbody>{" "}
+              </tbody>
             </table>{" "}
           </div>{" "}
         </div>
@@ -642,9 +633,7 @@ function ProductLimitsTab({ token }) {
         <div style={sTableWrap}>
           {" "}
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
             <thead>
-              {" "}
               <tr>
                 {[
                   "Customer",
@@ -658,21 +647,20 @@ function ProductLimitsTab({ token }) {
                     {h}
                   </th>
                 ))}
-              </tr>{" "}
-            </thead>{" "}
+              </tr>
+            </thead>
             <tbody>
               {nData.customers.map((c) => (
                 <tr key={c.customerId}>
-                  {" "}
-                  <td style={tdS}>{c.customerName}</td>{" "}
-                  <td style={{ ...tdS, color: D.muted }}>{c.city}</td>{" "}
+                  <td style={tdS}>{c.customerName}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{c.city}</td>
                   <td style={{ ...tdS, color: D.muted }}>
                     {c.county?.replace("_", " ")}
-                  </td>{" "}
-                  <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>{" "}
+                  </td>
+                  <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>
                   <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                     {c.nitrogenAppsYTD}
-                  </td>{" "}
+                  </td>
                   <td style={tdS}>
                     {" "}
                     <span
@@ -686,10 +674,10 @@ function ProductLimitsTab({ token }) {
                     >
                       {c.blackoutActive ? "Active" : "Clear"}
                     </span>{" "}
-                  </td>{" "}
+                  </td>
                 </tr>
               ))}
-            </tbody>{" "}
+            </tbody>
           </table>{" "}
         </div>
       ) : (
@@ -753,9 +741,7 @@ function LicensesTab({ token }) {
     <div style={sTableWrap}>
       {" "}
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        {" "}
         <thead>
-          {" "}
           <tr>
             {[
               "Technician",
@@ -769,18 +755,16 @@ function LicensesTab({ token }) {
                 {h}
               </th>
             ))}
-          </tr>{" "}
-        </thead>{" "}
+          </tr>
+        </thead>
         <tbody>
           {data?.technicians?.map((t) => (
             <tr key={t.id}>
-              {" "}
               <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                 {t.name}
               </td>
               {editing === t.id ? (
                 <>
-                  {" "}
                   <td style={tdS}>
                     {" "}
                     <input
@@ -793,7 +777,7 @@ function LicensesTab({ token }) {
                       }
                       style={{ ...sInput, width: 140 }}
                     />{" "}
-                  </td>{" "}
+                  </td>
                   <td style={tdS}>
                     {" "}
                     <input
@@ -807,9 +791,9 @@ function LicensesTab({ token }) {
                       }
                       style={sInput}
                     />{" "}
-                  </td>{" "}
-                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>—</td>{" "}
-                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>{" "}
+                  </td>
+                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>—</td>
+                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
                   <td style={tdS}>
                     {" "}
                     <button
@@ -842,19 +826,18 @@ function LicensesTab({ token }) {
                     >
                       Cancel
                     </button>{" "}
-                  </td>{" "}
+                  </td>
                 </>
               ) : (
                 <>
-                  {" "}
-                  <td style={tdS}>{t.license || "—"}</td>{" "}
-                  <td style={tdS}>{t.licenseExpiry || "—"}</td>{" "}
+                  <td style={tdS}>{t.license || "—"}</td>
+                  <td style={tdS}>{t.licenseExpiry || "—"}</td>
                   <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                     {Array.isArray(t.licenseCategories)
                       ? t.licenseCategories.join(", ")
                       : "—"}
-                  </td>{" "}
-                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>{" "}
+                  </td>
+                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
                   <td style={tdS}>
                     {" "}
                     <button
@@ -872,12 +855,12 @@ function LicensesTab({ token }) {
                     >
                       Edit
                     </button>{" "}
-                  </td>{" "}
+                  </td>
                 </>
               )}
             </tr>
           ))}
-        </tbody>{" "}
+        </tbody>
       </table>{" "}
     </div>
   );

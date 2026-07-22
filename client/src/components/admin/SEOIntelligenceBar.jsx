@@ -32,8 +32,11 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.message || body.error || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }

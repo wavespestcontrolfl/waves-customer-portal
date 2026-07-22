@@ -282,11 +282,8 @@ export function MarginCalculator() {
           <table
             style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
           >
-            {" "}
             <thead>
-              {" "}
               <tr>
-                {" "}
                 <th
                   style={{
                     padding: "8px 10px",
@@ -298,7 +295,7 @@ export function MarginCalculator() {
                   }}
                 >
                   Service
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -310,7 +307,7 @@ export function MarginCalculator() {
                   }}
                 >
                   Annual Price
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -322,7 +319,7 @@ export function MarginCalculator() {
                   }}
                 >
                   Est. Cost
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -334,7 +331,7 @@ export function MarginCalculator() {
                   }}
                 >
                   Cost Source
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -346,7 +343,7 @@ export function MarginCalculator() {
                   }}
                 >
                   After Discount
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -358,7 +355,7 @@ export function MarginCalculator() {
                   }}
                 >
                   Margin
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     padding: "8px 10px",
@@ -370,16 +367,15 @@ export function MarginCalculator() {
                   }}
                 >
                   Status
-                </th>{" "}
-              </tr>{" "}
-            </thead>{" "}
+                </th>
+              </tr>
+            </thead>
             <tbody>
               {margins.services.map((s) => (
                 <tr
                   key={s.service}
                   style={{ borderBottom: `1px solid ${D.border}22` }}
                 >
-                  {" "}
                   <td
                     style={{
                       padding: "8px 10px",
@@ -390,7 +386,7 @@ export function MarginCalculator() {
                     }}
                   >
                     {s.service.replace(/_/g, " ")}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -400,7 +396,7 @@ export function MarginCalculator() {
                     }}
                   >
                     ${s.annual?.toLocaleString() || "—"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -411,7 +407,7 @@ export function MarginCalculator() {
                     }}
                   >
                     ${s.estimatedCost?.toLocaleString() || "—"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -425,7 +421,7 @@ export function MarginCalculator() {
                     {s.materialPerVisit != null
                       ? ` · $${Number(s.materialPerVisit).toFixed(2)}/visit`
                       : ""}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -435,7 +431,7 @@ export function MarginCalculator() {
                     }}
                   >
                     ${s.afterDiscount?.toLocaleString() || "—"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -447,7 +443,7 @@ export function MarginCalculator() {
                     }}
                   >
                     {s.margin != null ? `${(s.margin * 100).toFixed(1)}%` : "—"}
-                  </td>{" "}
+                  </td>
                   <td style={{ padding: "8px 10px", textAlign: "center" }}>
                     {s.margin != null && (
                       <span
@@ -463,10 +459,10 @@ export function MarginCalculator() {
                         {marginLabel(s.margin)}
                       </span>
                     )}
-                  </td>{" "}
+                  </td>
                 </tr>
               ))}
-            </tbody>{" "}
+            </tbody>
           </table>{" "}
         </div>
       )}
@@ -1057,9 +1053,7 @@ function PestCalibrationPanel() {
                 fontSize: 12,
               }}
             >
-              {" "}
               <thead>
-                {" "}
                 <tr>
                   {["Date", "Customer", "Delta", "Pool", "Lot", "Why"].map(
                     (h) => (
@@ -1079,8 +1073,8 @@ function PestCalibrationPanel() {
                       </th>
                     ),
                   )}
-                </tr>{" "}
-              </thead>{" "}
+                </tr>
+              </thead>
               <tbody>
                 {reviewQueue.slice(0, 8).map((row) => {
                   const why = Array.isArray(row.calibration_review_reasons)
@@ -1091,7 +1085,6 @@ function PestCalibrationPanel() {
                       key={`review-${row.id || row.scheduled_service_id}`}
                       style={{ borderBottom: `1px solid ${D.border}66` }}
                     >
-                      {" "}
                       <td
                         style={{
                           padding: "7px 8px",
@@ -1100,7 +1093,7 @@ function PestCalibrationPanel() {
                         }}
                       >
                         {String(row.service_date || "").slice(0, 10) || "-"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "7px 8px",
@@ -1109,7 +1102,7 @@ function PestCalibrationPanel() {
                         }}
                       >
                         {row.customer_name || row.address_line1 || "Unknown"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "7px 8px",
@@ -1119,7 +1112,7 @@ function PestCalibrationPanel() {
                         }}
                       >
                         {fmtMin(row.delta_minutes || 0)}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "7px 8px",
@@ -1128,7 +1121,7 @@ function PestCalibrationPanel() {
                         }}
                       >
                         {row.pool_cage_size || "-"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "7px 8px",
@@ -1139,14 +1132,14 @@ function PestCalibrationPanel() {
                         {row.lot_sqft
                           ? Number(row.lot_sqft).toLocaleString()
                           : "-"}
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "7px 8px", color: D.muted }}>
                         {why || "-"}
-                      </td>{" "}
+                      </td>
                     </tr>
                   );
                 })}
-              </tbody>{" "}
+              </tbody>
             </table>{" "}
           </div>{" "}
         </div>
@@ -1156,9 +1149,7 @@ function PestCalibrationPanel() {
         <table
           style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
         >
-          {" "}
           <thead>
-            {" "}
             <tr>
               {[
                 "Date",
@@ -1185,8 +1176,8 @@ function PestCalibrationPanel() {
                   {h}
                 </th>
               ))}
-            </tr>{" "}
-          </thead>{" "}
+            </tr>
+          </thead>
           <tbody>
             {records.slice(0, 50).map((row) => {
               const delta = Number(row.delta_minutes || 0);
@@ -1198,7 +1189,6 @@ function PestCalibrationPanel() {
                   key={row.id || row.scheduled_service_id}
                   style={{ borderBottom: `1px solid ${D.border}66` }}
                 >
-                  {" "}
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1207,7 +1197,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {String(row.service_date || "").slice(0, 10) || "-"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1216,7 +1206,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {row.customer_name || row.address_line1 || "Unknown"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1225,7 +1215,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {row.pool_cage_size || "-"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1234,7 +1224,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1243,7 +1233,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {Number(row.predicted_minutes || 0).toFixed(1)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1252,7 +1242,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {Number(row.actual_minutes || 0).toFixed(1)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1267,7 +1257,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {fmtMin(delta)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1276,7 +1266,7 @@ function PestCalibrationPanel() {
                     }}
                   >
                     {row.pricing_confidence || "-"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px 10px",
@@ -1290,23 +1280,22 @@ function PestCalibrationPanel() {
                     title={reasons}
                   >
                     {reasons || "-"}
-                  </td>{" "}
+                  </td>
                 </tr>
               );
             })}
             {!loading && records.length === 0 && (
               <tr>
-                {" "}
                 <td
                   colSpan="9"
                   style={{ padding: 18, textAlign: "center", color: D.muted }}
                 >
                   No calibration samples yet. Completed pest jobs need an
                   accepted estimate link and a completed job timer.
-                </td>{" "}
+                </td>
               </tr>
             )}
-          </tbody>{" "}
+          </tbody>
         </table>{" "}
       </div>{" "}
     </div>

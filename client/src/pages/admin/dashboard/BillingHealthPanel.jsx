@@ -13,10 +13,13 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
   const autopayActive = h.autopay_active || 0; // enabled minus paused
   const paused = h.autopay_paused || 0;
   const enabled = autopayActive + paused; // all autopay-enabled accounts
-  // Autopay-off accounts (billed manually). The backend reports this directly;
-  // fall back to billable − enabled (every billable row is enabled or disabled).
-  const manual = h.autopay_disabled != null ? h.autopay_disabled : Math.max(billable - enabled, 0);
-  const autopayPct = billable > 0 ? Math.round((enabled / billable) * 100) : 0;
+  // Coverage counts CHARGEABLE autopay (shared predicate: default Stripe
+  // method, not paused, not expired) so this card agrees with the Cash KPI
+  // and Action Inbox. Enrollment-only accounts (flag on, no usable card)
+  // surface in the "No card" attention chip instead of inflating coverage.
+  // Fall back to flag-based `enabled` for payloads predating the field.
+  const chargeable = h.autopay_chargeable != null ? h.autopay_chargeable : enabled;
+  const autopayPct = billable > 0 ? Math.round((chargeable / billable) * 100) : 0;
   const seg = (n) => (billable > 0 ? (n / billable) * 100 : 0);
 
   // Every state that means an account WON'T be billed cleanly — not just charge
@@ -25,6 +28,10 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
   // both belong in the verdict, not hidden. Verdict is healthy only when all clear.
   const attention = [
     { label: "No card", value: h.no_payment_method || 0 },
+    // Enrolled but the chargeable predicate fails (bad/expired/non-Stripe
+    // method) — these dropped out of the coverage donut above, so without
+    // this chip the card could read Healthy while billing can't charge them.
+    { label: "Can't charge", value: h.autopay_unchargeable || 0 },
     { label: "Paused", value: paused },
     { label: "Failed", value: h.failed_last_30_days || 0 },
     { label: "In retry", value: h.in_retry_queue || 0 },
@@ -34,12 +41,10 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
   ];
   const healthy = attention.every((a) => a.value === 0);
 
-  // Autopay-enabled vs manual — sums to the billable base, no inference. (We do
-  // NOT split out "has a saved method" because the backend only reports the
-  // no-card count within autopay-enabled accounts, so it can't be derived here.)
+  // Chargeable autopay vs everyone else — sums to the billable base.
   const coverage = [
-    { label: "Autopay", value: enabled, color: CHART_SUCCESS, suffix: ` (${autopayPct}%)` },
-    { label: "Manual", value: manual, color: "#D4D4D8" },
+    { label: "Autopay", value: chargeable, color: CHART_SUCCESS, suffix: ` (${autopayPct}%)` },
+    { label: "Manual", value: Math.max(billable - chargeable, 0), color: "#D4D4D8" },
   ];
 
   // Status-first verdict — green only when every won't-bill state is clear.
@@ -57,7 +62,7 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
 
   const body = (
     <>
-      {/* Autopay coverage — enabled vs manual; sums to the billable base. */}
+      {/* Autopay coverage — chargeable autopay vs manual; sums to the billable base. */}
       <div className="u-label text-ink-tertiary mb-2">Autopay coverage</div>
       <div className="flex h-2.5 rounded-sm overflow-hidden bg-surface-sunken mb-2">
         {coverage.map((r) => (

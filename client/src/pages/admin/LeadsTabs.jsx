@@ -1430,9 +1430,7 @@ export function LeadsSection() {
             <Card style={{ padding: 0, overflow: "hidden" }}>
               {" "}
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                {" "}
                 <thead>
-                  {" "}
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                     {(isMobile
                       ? ["Name / Phone", "Status"]
@@ -1460,8 +1458,8 @@ export function LeadsSection() {
                         {h}
                       </th>
                     ))}
-                  </tr>{" "}
-                </thead>{" "}
+                  </tr>
+                </thead>
                 <tbody>
                   {leads.map((lead) => {
                     const isExpanded = expandedLead === lead.id;
@@ -1479,7 +1477,6 @@ export function LeadsSection() {
                             transition: "background 0.15s",
                           }}
                         >
-                          {" "}
                           <td style={{ padding: "12px 16px" }}>
                             {" "}
                             <div
@@ -1513,7 +1510,7 @@ export function LeadsSection() {
                                 {lead.service_interest}
                               </div>
                             )}{" "}
-                          </td>{" "}
+                          </td>
                           {!isMobile && (
                             <>
                               <td style={{ padding: "12px 16px" }}>
@@ -1533,7 +1530,7 @@ export function LeadsSection() {
                                     --
                                   </span>
                                 )}
-                              </td>{" "}
+                              </td>
                               <td
                                 style={{
                                   padding: "12px 16px",
@@ -1542,7 +1539,7 @@ export function LeadsSection() {
                                 }}
                               >
                                 {lead.service_interest || "--"}
-                              </td>{" "}
+                              </td>
                               <td style={{ padding: "12px 16px" }}>
                                 {" "}
                                 <Badge
@@ -1555,7 +1552,7 @@ export function LeadsSection() {
                                         : C.muted
                                   }
                                 />{" "}
-                              </td>{" "}
+                              </td>
                             </>
                           )}
                           <td
@@ -1585,7 +1582,7 @@ export function LeadsSection() {
                                 </option>
                               ))}
                             </select>{" "}
-                          </td>{" "}
+                          </td>
                           {!isMobile && (
                             <>
                               <td
@@ -1612,7 +1609,7 @@ export function LeadsSection() {
                                 ) : (
                                   fmtTime(lead.response_time_minutes)
                                 )}
-                              </td>{" "}
+                              </td>
                               <td
                                 style={{ padding: "12px 16px" }}
                                 onClick={(e) => e.stopPropagation()}
@@ -1651,7 +1648,7 @@ export function LeadsSection() {
                                     ? "Deleting"
                                     : "Delete"}
                                 </button>
-                              </td>{" "}
+                              </td>
                             </>
                           )}
                         </tr>
@@ -2842,7 +2839,7 @@ export function LeadsSection() {
                       </td>
                     </tr>
                   )}
-                </tbody>{" "}
+                </tbody>
               </table>{" "}
             </Card>
             {/* Pagination */}
@@ -3197,9 +3194,7 @@ export function LeadsSection() {
           <table
             style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}
           >
-            {" "}
             <thead>
-              {" "}
               <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                 {[
                   "Source",
@@ -3228,8 +3223,8 @@ export function LeadsSection() {
                     {h}
                   </th>
                 ))}
-              </tr>{" "}
-            </thead>{" "}
+              </tr>
+            </thead>
             <tbody>
               {sources.map((src) => {
                 const monthLeads = parseInt(src.month_leads || 0);
@@ -3274,7 +3269,6 @@ export function LeadsSection() {
                         opacity: src.is_active ? 1 : 0.5,
                       }}
                     >
-                      {" "}
                       <td style={{ padding: "12px 14px" }}>
                         {" "}
                         <div
@@ -3291,13 +3285,13 @@ export function LeadsSection() {
                             {src.domain}
                           </div>
                         )}
-                      </td>{" "}
+                      </td>
                       <td style={{ padding: "12px 14px" }}>
                         <Badge
                           label={src.source_type?.replace(/_/g, " ")}
                           color={C.teal}
                         />
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3306,7 +3300,7 @@ export function LeadsSection() {
                         }}
                       >
                         {src.channel || "--"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3316,7 +3310,7 @@ export function LeadsSection() {
                         }}
                       >
                         {fmtMoney(mc)}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3326,7 +3320,7 @@ export function LeadsSection() {
                         }}
                       >
                         {monthLeads}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3336,7 +3330,7 @@ export function LeadsSection() {
                         }}
                       >
                         {monthConv}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3351,7 +3345,7 @@ export function LeadsSection() {
                         }}
                       >
                         {fmtPct(convRate)}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3361,7 +3355,7 @@ export function LeadsSection() {
                         }}
                       >
                         {cpl > 0 ? fmtMoney(cpl) : "--"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3371,7 +3365,7 @@ export function LeadsSection() {
                         }}
                       >
                         {cpa > 0 ? fmtMoney(cpa) : "--"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           padding: "12px 14px",
@@ -3382,7 +3376,7 @@ export function LeadsSection() {
                         }}
                       >
                         {hasRoiSignal ? fmtPct(roi) : "--"}
-                      </td>{" "}
+                      </td>
                     </tr>
                     {isExp && detail && (
                       <tr>
@@ -3479,7 +3473,7 @@ export function LeadsSection() {
                   </React.Fragment>
                 );
               })}
-            </tbody>{" "}
+            </tbody>
           </table>{" "}
         </Card>{" "}
       </>
@@ -4048,9 +4042,7 @@ export function LeadsSection() {
           <table
             style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}
           >
-            {" "}
             <thead>
-              {" "}
               <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                 {[
                   "Number",
@@ -4075,12 +4067,11 @@ export function LeadsSection() {
                     {h}
                   </th>
                 ))}
-              </tr>{" "}
-            </thead>{" "}
+              </tr>
+            </thead>
             <tbody>
               {phoneROI.map((s, i) => (
                 <tr key={i} style={{ borderBottom: `1px solid ${C.border}` }}>
-                  {" "}
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4090,7 +4081,7 @@ export function LeadsSection() {
                     }}
                   >
                     {s.source?.twilio_phone_number}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4099,7 +4090,7 @@ export function LeadsSection() {
                     }}
                   >
                     {s.source?.name?.slice(0, 30)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4109,7 +4100,7 @@ export function LeadsSection() {
                     }}
                   >
                     {fmtMoney(s.totalCost)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4119,7 +4110,7 @@ export function LeadsSection() {
                     }}
                   >
                     {s.totalLeads}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4129,7 +4120,7 @@ export function LeadsSection() {
                     }}
                   >
                     {s.conversions}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4139,7 +4130,7 @@ export function LeadsSection() {
                     }}
                   >
                     {fmtMoney(s.totalRevenue)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "10px 14px",
@@ -4150,7 +4141,7 @@ export function LeadsSection() {
                     }}
                   >
                     {s.roi > 0 ? fmtPct(s.roi) : "--"}
-                  </td>{" "}
+                  </td>
                 </tr>
               ))}
               {phoneROI.length === 0 && (
@@ -4163,7 +4154,7 @@ export function LeadsSection() {
                   </td>
                 </tr>
               )}
-            </tbody>{" "}
+            </tbody>
           </table>{" "}
         </Card>{" "}
       </>
