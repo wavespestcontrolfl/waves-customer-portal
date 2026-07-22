@@ -241,6 +241,10 @@ router.get('/equipment', async (req, res, next) => {
         currentBookValue: parseFloat(e.current_book_value || 0),
         section179Elected: e.section_179_elected,
         section179Amount: e.section_179_amount ? parseFloat(e.section_179_amount) : null,
+        // Listed-property business use + MACRS averaging convention — the CPA-
+        // adjustable inputs to the depreciation schedule.
+        businessUsePct: e.business_use_pct != null ? parseFloat(e.business_use_pct) : 100,
+        depreciationConvention: e.depreciation_convention || 'half_year',
         serialNumber: e.serial_number, makeModel: e.make_model,
         location: e.location, active: e.active,
         disposed: e.disposed, disposalDate: e.disposal_date,
@@ -251,6 +255,7 @@ router.get('/equipment', async (req, res, next) => {
 });
 
 const VALID_DEPRECIATION_METHODS = ['MACRS', 'SL', 'section_179', 'bonus_100'];
+const VALID_DEPRECIATION_CONVENTIONS = ['half_year', 'mid_quarter'];
 // IRS Section 179 annual election limits. Update each tax year.
 const SECTION_179_LIMITS = { 2024: 1160000, 2025: 1220000, 2026: 1250000 };
 
@@ -306,6 +311,16 @@ router.put('/equipment/:id', async (req, res, next) => {
     if (fields.depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(fields.depreciationMethod)) {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
     }
+    // business_use_pct must be 0–100; convention must be an allow-listed value.
+    if (fields.businessUsePct !== undefined) {
+      const p = parseFloat(fields.businessUsePct);
+      if (!Number.isFinite(p) || p < 0 || p > 100) {
+        return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
+      }
+    }
+    if (fields.depreciationConvention !== undefined && !VALID_DEPRECIATION_CONVENTIONS.includes(fields.depreciationConvention)) {
+      return res.status(400).json({ error: `Invalid depreciation convention. Must be one of: ${VALID_DEPRECIATION_CONVENTIONS.join(', ')}` });
+    }
     const update = { updated_at: new Date() };
     const map = {
       name: 'name', description: 'description', assetCategory: 'asset_category',
@@ -314,6 +329,7 @@ router.put('/equipment/:id', async (req, res, next) => {
       serialNumber: 'serial_number', makeModel: 'make_model', location: 'location',
       notes: 'notes', active: 'active', disposed: 'disposed', disposalDate: 'disposal_date',
       disposalProceeds: 'disposal_proceeds',
+      businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
     await db('equipment_register').where({ id: req.params.id }).update(update);

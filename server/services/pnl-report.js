@@ -210,13 +210,23 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   const bizUse = businessUseFraction(asset?.business_use_pct);
   const gdsEligible = bizUse > 0.5;
 
+  // Business basis: cost scaled by business use. §179/bonus and MACRS both work
+  // off this (listed property can't deduct the personal-use portion).
+  const cost = parseFloat(asset?.purchase_cost || 0) || 0;
+  const businessBasis = cost * bizUse;
+
   // Immediate expensing (§179 / 100% bonus): the WHOLE deduction is recognized
   // in the placed-in-service year — never day-prorated. (annual NULL, so
   // filtering on the annual field alone silently dropped it from the P&L / CPA
-  // package.) The elected amount is the business figure the CPA entered.
+  // package.) CAPPED at the business basis, so a partial-use vehicle (or the
+  // purchase-cost fallback when no explicit amount is entered) can't deduct
+  // more than its business share.
   const method = String(asset?.depreciation_method || '');
-  const s179Immediate = gdsEligible && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
-    ? (parseFloat(asset?.section_179_amount ?? asset?.purchase_cost) || 0) : 0;
+  const s179Eligible = gdsEligible && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected);
+  const s179Elected = s179Eligible ? (parseFloat(asset?.section_179_amount ?? cost) || 0) : 0;
+  // Cap at the business basis ONLY when a cost basis is known — a CPA-entered
+  // amount without a recorded purchase_cost is trusted as its own basis.
+  const s179Immediate = businessBasis > 0 ? Math.min(s179Elected, businessBasis) : s179Elected;
   if (s179Immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
     total += s179Immediate;
   }
@@ -234,8 +244,7 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     // fails closed for CPA computation rather than silently using half-year.
     const convention = String(asset?.depreciation_convention || 'half_year');
     if (convention !== 'half_year') return total;
-    const cost = parseFloat(asset?.purchase_cost || 0) || 0;
-    const macrsBasis = Math.max(0, cost * bizUse - s179Immediate);
+    const macrsBasis = Math.max(0, businessBasis - s179Immediate);
     const inSvcYear = inService ? inService.getUTCFullYear() : null;
     const disposalYear = disposed ? disposed.getUTCFullYear() : null;
     // Property placed in service AND disposed in the SAME tax year is not

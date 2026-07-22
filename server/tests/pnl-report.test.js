@@ -330,6 +330,21 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation([hybrid], '2026-01-01', '2026-12-31')).toBeCloseTo(8000, 2);
     });
 
+    test('§179/bonus immediate expensing is capped at the business basis', () => {
+      // Full-cost §179 fallback on an 80%-business-use $35k vehicle: the §179
+      // deduction is capped at $35k×80% = $28,000, not $35,000.
+      const s179Vehicle = {
+        depreciation_method: 'section_179', section_179_elected: true,
+        section_179_amount: null, purchase_cost: '35000',
+        placed_in_service_date: '2026-01-01', business_use_pct: '80',
+      };
+      expect(prorateDepreciation([s179Vehicle], '2026-01-01', '2026-12-31')).toBeCloseTo(28000, 2);
+      // ≤50% use disqualifies §179 entirely.
+      expect(prorateDepreciation(
+        [{ ...s179Vehicle, business_use_pct: '45' }], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
     test('hybrid §179/MACRS applies business use to the BASIS, not the schedule', () => {
       const hybrid80 = van({
         placed_in_service_date: '2025-01-01', business_use_pct: '80',
