@@ -307,7 +307,15 @@ function checkMetaDescriptionComplete(draft, brief) {
   const m = refreshMeta || blogMeta;
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
-  if (refreshMeta || brief?.page_type === 'metadata') return { ok: true, reason: 'snippet_style_meta_allowed' };
+  // Full sentence check applies only to BLOG-contract metas: a snake_case
+  // blog draft, or a metadata rewrite whose TARGET is a blog post
+  // (target_page_type rides on the wrapped metadata brief). Everything else
+  // — service/location refresh casings and non-blog metadata rewrites — is
+  // legitimate snippet style, gated on truncation only above.
+  const isBlogTarget = brief?.page_type === 'metadata'
+    ? brief?.target_page_type === 'supporting-blog'
+    : Boolean(blogMeta) && !refreshMeta;
+  if (!isBlogTarget) return { ok: true, reason: 'snippet_style_meta_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
   const beforePunct = core.replace(/[.!?]+$/, '').trim();

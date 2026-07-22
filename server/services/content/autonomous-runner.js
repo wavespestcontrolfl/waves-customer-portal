@@ -1777,7 +1777,10 @@ class AutonomousRunner {
         meta_description: draft.meta_description,
       },
     };
-    const metadataBrief = { ...brief, page_type: 'metadata' };
+    // target_page_type preserves what the rewrite TARGETS — a blog post's
+    // meta keeps the blog completeness contract even under the metadata
+    // bundle; service/location targets stay snippet-style.
+    const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: brief.page_type };
     const qualityContext = {
       siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
       previewBuildSuccess: true,

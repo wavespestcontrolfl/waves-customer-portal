@@ -615,11 +615,16 @@ const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| do
 // years/decades-of-experience phrasing is a false claim regardless of the
 // number. Deterministic backstop to the prompt's BRAND FACTS ban.
 const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+years?|a decade|decades?)\s+(?:of\s+)?(?:\w+\s+){0,4}?(?:experience|expertise|know-?how|in business|in the industry|serving\b)/i;
+// Company-history fabrications: "serving Sarasota since 2012", "founded in
+// 2010", "family-owned since 1998". Scoped to COMPANY context so factual
+// regulatory/history copy ("since 2019, Florida has required…") passes.
+const TENURE_SINCE_RE = /\b(?:serving\b[^.!?]{0,40}?|in business\b[^.!?]{0,20}?|family[- ]owned\b[^.!?]{0,20}?|trusted\b[^.!?]{0,30}?|established\b[^.!?]{0,15}?|founded\b[^.!?]{0,15}?)since (?:19\d\d|20[01]\d|202[0-3])\b|\b(?:founded|established) in (?:19\d\d|20[01]\d|202[0-3])\b/i;
 
 function tenureClaimFinding(text) {
-  const m = String(text || '').match(TENURE_CLAIM_RE);
+  const s = String(text || '');
+  const m = s.match(TENURE_CLAIM_RE) || s.match(TENURE_SINCE_RE);
   if (!m) return null;
-  return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/experience claim ("${m[0].trim()}") — Waves was founded in 2024; any years-of-experience figure is fabricated (owner hard rule).`);
+  return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/company-history claim ("${m[0].trim()}") — Waves was founded in 2024; any earlier tenure or founding figure is fabricated (owner hard rule).`);
 }
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
@@ -873,7 +878,13 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = nu
       if (hubHostSet().has(u.hostname.toLowerCase())) candidate = u.pathname || '/';
     } catch { /* not absolute — use as-is */ }
     const norm = normalizeInternalPath(candidate);
-    if (norm) allowed.add(norm);
+    if (!norm) continue;
+    // A brief-supplied CITY-SERVICE link still has to be a real page — a
+    // brief bug ("/pest-control-oneco-fl/" for a served town with no page)
+    // must not become an allowance for a dead link.
+    const allowanceCity = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+    if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
+    allowed.add(norm);
   }
   for (const { dest, norm } of collectInternalDestinations(text)) {
     if (allowed.has(norm)) continue;
@@ -1384,6 +1395,7 @@ module.exports = {
   // what these gates enforce at publish.
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
+  PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
   outOfAreaCities,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },

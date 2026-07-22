@@ -1556,6 +1556,25 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
   });
 
+  test('brief-supplied dead city links are not honored as allowances (Codex round 8)', () => {
+    const body = 'See our [Oneco page](/pest-control-oneco-fl/).';
+    const r = guardrails.evaluate({ body }, { allowedInternalLinks: ['/pest-control-oneco-fl/'] });
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
+  test('since-year and founded-year company claims are P0; factual since-year passes (Codex round 8)', () => {
+    for (const body of [
+      'Serving Sarasota since 2012 with quarterly pest plans.',
+      'Waves was founded in 2010 by a local family.',
+      'Family-owned and operated since 1998.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(true);
+    }
+    const fine = guardrails.evaluate({ body: 'Since 2019, Florida has required annual termite disclosures on resale homes.' }, {});
+    expect(fine.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(false);
+  });
+
   test('tenure/experience claims are P0 (Codex round 7 — founded 2024)', () => {
     for (const body of [
       'Our technicians bring over a decade of Southwest Florida pest control experience.',
