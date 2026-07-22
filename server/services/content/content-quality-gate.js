@@ -291,18 +291,20 @@ const DANGLING_META_ENDINGS = new Set([
   'its', 'his', 'her', 'my',
 ]);
 
-function checkMetaDescriptionComplete(draft) {
-  // Two meta contracts. snake_case meta_description is the BLOG contract —
-  // complete sentences, full check. camelCase metaDescription is the
-  // service/location refresh casing, where snippet-style metas without
-  // terminal punctuation are legitimate — only authored TRUNCATION
-  // (ellipsis) is a hard fail there.
+function checkMetaDescriptionComplete(draft, brief) {
+  // Two meta contracts. snake_case meta_description on a BLOG draft gets
+  // the full complete-sentence check. Snippet-style metas are legitimate on
+  // the non-blog surfaces — camelCase metaDescription (service/location
+  // refresh casing) AND metadata-only rewrites (page_type 'metadata', whose
+  // emit_metadata_only result is copied into top-level meta_description
+  // regardless of target page type) — there only authored TRUNCATION
+  // (ellipsis) is a hard fail.
   const blogMeta = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
   const refreshMeta = (draft.metaDescription || draft.frontmatter?.metaDescription || '').trim();
   const m = blogMeta || refreshMeta;
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
-  if (!blogMeta) return { ok: true, reason: 'refresh_meta_snippet_style_allowed' };
+  if (!blogMeta || brief?.page_type === 'metadata') return { ok: true, reason: 'snippet_style_meta_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
   const beforePunct = core.replace(/[.!?]+$/, '').trim();

@@ -477,7 +477,12 @@ function clampMetaDescription(meta) {
     if ('.!?'.includes(window[i])
       && (i + 1 >= s.length || /[\s"'”’)\]]/.test(s[i + 1]))
       && !META_ABBREVIATION_TAIL_RE.test(window.slice(0, i + 1))) {
-      return window.slice(0, i + 1).trim();
+      // Carry adjacent closing quotes/brackets so a sentence ending inside
+      // a quotation ships whole ('…the silent lawn killer."', not a
+      // dangling open quote). Still bounded by the window (<= max).
+      let end = i + 1;
+      while (end < window.length && /["'”’)\]]/.test(window[end])) end += 1;
+      return window.slice(0, end).trim();
     }
   }
   const wordCut = clampToWordBoundary(s, META_DESCRIPTION_MAX - 1); // leave room for the closing period

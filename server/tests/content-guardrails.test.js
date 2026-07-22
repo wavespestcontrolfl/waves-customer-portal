@@ -1537,6 +1537,25 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
   });
 
+  test('attributive "call" is not claim context; CTA call is (Codex round 4)', () => {
+    const attributive = guardrails.evaluate({ body: 'Researchers call Fort Myers one of the early tegu hotspots.' }, {});
+    expect(attributive.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const cta = guardrails.evaluate({ body: 'Call us today about your Naples home.' }, {});
+    expect(cta.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('Oxford-comma service lists flag their tail city; negated city lists fully exempt (astro r7 parity)', () => {
+    const list = guardrails.evaluate({ body: 'We serve Sarasota, Venice, and Naples.' }, {});
+    expect(list.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const negated = guardrails.evaluate({ body: "We don't serve Naples, Tampa, or Miami." }, {});
+    expect(negated.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('bare hub URLs with trailing punctuation normalize cleanly (Codex round 4)', () => {
+    const r = guardrails.evaluate({ body: 'Reach us at https://www.wavespestcontrol.com/contact/, then book online.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
   test('future-tense claims, Tampa Bay geography, contracted disclaimers, wrapped blockquotes (astro r6 parity)', () => {
     const future = guardrails.evaluate({ body: "In Tampa, we'll treat the infestation at the source." }, {});
     expect(future.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);

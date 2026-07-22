@@ -595,7 +595,11 @@ function outOfAreaCities() {
 // factual reference, not a service claim.
 // Third-person brand claims ("Waves Pest Control is now serving …") assert
 // operation exactly like "we serve".
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
+// "call" alone is NOT claim context — "Researchers call Fort Myers an
+// early tegu hotspot" is attribution, not a CTA. Only CTA usage counts
+// (call us / call Waves / call now|today / call for a quote / give us a
+// call).
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
@@ -608,9 +612,11 @@ const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|
 
 // "…does not include Tampa", "we no longer serve Naples" — the negated
 // verb's object (within a few words) is this specific city.
+// The gap after the negated verb tolerates list separators so every city in
+// "we don't serve Naples, Tampa, or Miami" is exempt, not just the first.
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to)?|reach|treat|visit)(?:\\s+\\w+){0,3}?\\s+${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    `(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to)?|reach|treat|visit)[^.!?;]{0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
     'i',
   );
 }
@@ -655,9 +661,10 @@ function markdownSegments(body) {
 // the claim scope — fails closed. Clause split mirrors the astro-side gate.
 const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)\s+/;
 // Bare adversatives and "and we/our …" split too — the joints where a
-// disclaimer half hides an affirmative half. Noun-phrase "and" ("lawns and
-// shrubs") does not split, so a claim verb keeps its full object list.
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|and|yet|however|though|while)\s+|\s+(?:but|however|yet|though)\s+|\s+and\s+(?=(?:we|our)\b)/i;
+// disclaimer half hides an affirmative half. "and" splits ONLY before a
+// new we/our subject: a bare ", and" boundary would sever the tail of an
+// Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|while)\s+|\s+(?:but|however|yet|though)\s+|,?\s+and\s+(?=(?:we|our)\b)/i;
 
 function offFootprintCityFinding(text) {
   const s = String(text || '');
@@ -788,8 +795,12 @@ function collectInternalDestinations(text) {
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
   while ((m = abs.exec(s)) !== null) {
+    // Bare URLs in prose drag trailing punctuation into the match
+    // ("…/contact/, then…") — trim it so a valid allowlisted route never
+    // normalizes to "/contact/," and false-parks the draft.
+    const raw = m[0].replace(/[),.;:!?'"\]]+$/, '');
     try {
-      const u = new URL(m[0]);
+      const u = new URL(raw);
       if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
     } catch { /* malformed URL — the external gate owns it */ }
   }
