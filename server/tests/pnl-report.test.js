@@ -18,6 +18,7 @@ const {
   prorateDepreciation,
   macrsYearAmount,
   annotateMidQuarter,
+  isDepreciationUncomputed,
   getPeriodRange,
   missingTableOnly,
   rateAsOf,
@@ -317,6 +318,22 @@ describe('prorateDepreciation', () => {
 
     test('unknown recovery class contributes nothing (fail closed)', () => {
       expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
+    });
+
+    test('isDepreciationUncomputed flags ALL fail-closed reasons, only in-window', () => {
+      const win = ['2026-01-01', '2026-12-31'];
+      // Computable half-year van → NOT uncomputed.
+      expect(isDepreciationUncomputed(van(), ...win)).toBe(false);
+      // Unknown class → uncomputed.
+      expect(isDepreciationUncomputed(van({ irs_class: '20-year' }), ...win)).toBe(true);
+      // ≤50% vehicle → uncomputed.
+      expect(isDepreciationUncomputed(van({ business_use_pct: '40' }), ...win)).toBe(true);
+      // Mid-quarter (marked) → uncomputed.
+      expect(isDepreciationUncomputed(van({ depreciation_convention: 'mid_quarter' }), ...win)).toBe(true);
+      // Out of window: placed in service AFTER the window → not flagged.
+      expect(isDepreciationUncomputed(van({ irs_class: '20-year', placed_in_service_date: '2027-01-01' }), ...win)).toBe(false);
+      // Past its recovery period (5-year van in service 2018, but mid-quarter) → computes 0 legitimately.
+      expect(isDepreciationUncomputed(van({ depreciation_convention: 'mid_quarter', placed_in_service_date: '2018-01-01' }), ...win)).toBe(false);
     });
 
     test('an ineligible MACRS asset NEVER falls through to a stale annual_depreciation', () => {

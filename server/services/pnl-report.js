@@ -358,6 +358,35 @@ function annotateMidQuarter(assets) {
   });
 }
 
+// True when a MACRS asset's regular depreciation FAILS CLOSED (mid-quarter
+// convention, unknown recovery class, or a listed vehicle ≤50% business use)
+// AND it would otherwise contribute in [startDate, endDate] — i.e. in service
+// by window end, not disposed before window start, and still within its
+// recovery period (known classes; unknown-class assets are flagged
+// conservatively). Used to decide whether the depreciation total is FINAL. Pure.
+function isDepreciationUncomputed(asset, startDate, endDate) {
+  if (String(asset?.depreciation_method || '') !== 'MACRS') return false;
+  const periodStart = toUTCDay(startDate);
+  const periodEnd = toUTCDay(endDate);
+  const inService = toUTCDay(asset?.placed_in_service_date) || toUTCDay(asset?.purchase_date);
+  if (!periodStart || !periodEnd || !inService) return false;
+  if (inService > periodEnd) return false;                       // not yet in service
+  const disposed = toUTCDay(asset?.disposal_date);
+  if (disposed && disposed < periodStart) return false;          // disposed before window
+  const inSvcYear = inService.getUTCFullYear();
+  if (disposed && disposed.getUTCFullYear() === inSvcYear) return false; // same-year: not depreciable, computes 0 correctly
+  const cls = String(asset?.irs_class || '').trim();
+  const known = !!MACRS_HALF_YEAR[cls];
+  const isListed = String(asset?.asset_category || '') === 'vehicle';
+  const bizUse = businessUseFraction(asset?.business_use_pct);
+  const failsClosed = String(asset?.depreciation_convention || 'half_year') !== 'half_year'
+    || !known || (isListed && bizUse <= 0.5);
+  if (!failsClosed) return false;
+  // Past the recovery period a known-class asset legitimately computes 0.
+  if (known && periodStart.getUTCFullYear() > inSvcYear + MACRS_HALF_YEAR[cls].length - 1) return false;
+  return true;
+}
+
 /** Sum of prorateAssetDepreciation over the asset list. Pure. */
 function prorateDepreciation(assets, startDate, endDate) {
   let total = 0;
@@ -921,23 +950,24 @@ async function buildPnlReport(db, startDate, endDate) {
     };
   }
 
-  // Depreciation completeness — a MACRS asset in a mid-quarter year (or any
-  // uncomputable convention) FAILS CLOSED to $0 above. Surface that explicitly
-  // so the depreciation total is NOT presented as final: it's understated until
-  // a CPA computes the mid-quarter schedule for these assets.
-  const uncomputedDepreciation = depreciableAssets.filter((a) =>
-    String(a?.depreciation_method || '') === 'MACRS'
-    && String(a?.depreciation_convention || 'half_year') !== 'half_year');
+  // Depreciation completeness — any MACRS asset whose regular depreciation
+  // FAILS CLOSED to $0 for THIS window (mid-quarter, unknown recovery class, or
+  // a ≤50%-use vehicle) is surfaced explicitly, so the depreciation total is
+  // never presented as final when it's understated. Scoped to the window so an
+  // out-of-period asset raises no false warning.
+  const uncomputedDepreciation = depreciableAssets.filter(
+    (a) => isDepreciationUncomputed(a, startDate, endDate),
+  );
   if (uncomputedDepreciation.length) {
     report.deductions.depreciationComplete = false;
     report.depreciationDisclosure = {
-      reason: 'mid_quarter_convention',
+      reason: 'uncomputed_macrs',
       assets: uncomputedDepreciation.map((a) => a.name).filter(Boolean),
-      note: `${uncomputedDepreciation.length} MACRS asset(s) fall in a mid-quarter `
-        + 'year (>40% of that year\'s depreciable basis placed in service in Q4). '
-        + 'The mid-quarter schedule is not auto-computed — their regular '
-        + 'depreciation reads $0 here, so the depreciation total is NOT final and '
-        + 'needs CPA computation.',
+      note: `${uncomputedDepreciation.length} MACRS asset(s) could not be auto-`
+        + 'computed for this period (mid-quarter convention, an unsupported '
+        + 'recovery class, or a vehicle at ≤50% business use). Their regular '
+        + 'depreciation reads $0 here, so the depreciation total is NOT final '
+        + 'and needs CPA computation.',
     };
   } else {
     report.deductions.depreciationComplete = true;
@@ -986,6 +1016,7 @@ module.exports = {
   prorateAssetDepreciation,
   macrsYearAmount,
   annotateMidQuarter,
+  isDepreciationUncomputed,
   rateAsOf,
   costLaborByDay,
   dateCellStr,
