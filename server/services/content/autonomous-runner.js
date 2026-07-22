@@ -614,13 +614,14 @@ class AutonomousRunner {
       try {
         guardOptions = await this._deriveGuardrailOptions(opp, brief);
       } catch (err) {
-        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED') throw err;
+        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED' && err.code !== 'REFRESH_PRIOR_BODY_LOAD_FAILED') throw err;
+        const skipReason = err.code === 'REFRESH_DOMAINS_LOAD_FAILED' ? 'refresh_domains_load_failed' : 'refresh_prior_body_load_failed';
         const finalized = await finalize(run, t0, {
           outcome: 'skipped_gate_fail',
-          skip_reason: 'refresh_domains_load_failed',
-          reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+          skip_reason: skipReason,
+          reviewer_notes: `${err.message} — routed to review (fail-closed, infra load failure not a writer mistake).`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken });
         return finalized;
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
@@ -2791,8 +2792,11 @@ class AutonomousRunner {
     // Refresh drafts rewrite an EXISTING live body. The structure gates
     // grandfather what that prior body already carried but police writer
     // ADDITIONS — so the prior body itself is part of the guard options.
-    // Load failure → null → the gates skip (the quality gate's
-    // improvement_over_prior check independently refuses such a publish).
+    // A load failure is INFRA, not a writer mistake: throw the same class
+    // of fail-closed error as the domains load above so the caller parks
+    // the run for review instead of burning a redraft retry. (The
+    // guardrails' P1 REFRESH_PRIOR_BODY_UNAVAILABLE stays as the backstop
+    // for callers that pass isRefresh without this derivation.)
     let priorBody = null;
     if (isRefresh) {
       const publisher = getAstroPublisher();
@@ -2802,6 +2806,12 @@ class AutonomousRunner {
         } catch (err) {
           logger.warn(`[autonomous-runner] prior-body load for refresh guardrails failed: ${err.message}`);
         }
+      }
+      if (!priorBody) {
+        const e = new Error(`Could not read the live prior body for ${brief.target_url || opp.page_url} — the refresh structure gates cannot grandfather preserved content (fail closed)`);
+        e.code = 'REFRESH_PRIOR_BODY_LOAD_FAILED';
+        e.statusCode = 422;
+        throw e;
       }
     }
     return {

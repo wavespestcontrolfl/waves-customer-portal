@@ -744,7 +744,12 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
 // "quote-sarasota"). The city capture is validated against the real
 // footprint below — "/pest-control-fort-myers-fl/" is a dead out-of-area
 // link, not a pass.
-const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
+// NOTE: "pest-control-services" is deliberately ABSENT — it is the hub slug
+// (/pest-control-services/), never a city-page prefix; the canonical city
+// slug for pest pages is "pest-control" (content-brief-builder
+// SERVICE_CITY_SLUG), so /pest-control-services-bradenton-fl/ is a dead
+// invented route and must park.
+const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
 
 // City slugs a generated city-service link may target — the cities that
 // actually HAVE published city-service pages (astro-publisher SERVICE_AREAS),

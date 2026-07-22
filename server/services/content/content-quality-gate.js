@@ -301,10 +301,13 @@ function checkMetaDescriptionComplete(draft, brief) {
   // (ellipsis) is a hard fail.
   const blogMeta = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
   const refreshMeta = (draft.metaDescription || draft.frontmatter?.metaDescription || '').trim();
-  const m = blogMeta || refreshMeta;
+  // When BOTH casings exist, camelCase is the RENDERED service/location
+  // field (publishMetadataRewrite treats snake_case duplicates as dead
+  // fields) — judge the rendered value, snippet-style.
+  const m = refreshMeta || blogMeta;
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
-  if (!blogMeta || brief?.page_type === 'metadata') return { ok: true, reason: 'snippet_style_meta_allowed' };
+  if (refreshMeta || brief?.page_type === 'metadata') return { ok: true, reason: 'snippet_style_meta_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
   const beforePunct = core.replace(/[.!?]+$/, '').trim();

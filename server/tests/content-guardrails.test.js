@@ -1534,6 +1534,11 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
+  test('hub-slug city variants are dead routes (Codex round 6)', () => {
+    const r = guardrails.evaluate({ body: '[services](/pest-control-services-bradenton-fl/)' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
   test('underscore component identifiers are caught (Codex round 3)', () => {
     const r = guardrails.evaluate({ body: 'Note: <Pro_Tip title="x" /> here.' }, {});
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
