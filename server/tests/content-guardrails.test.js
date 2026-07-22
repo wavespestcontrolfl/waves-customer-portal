@@ -1869,3 +1869,48 @@ describe('footprint/tenure/citation — round-13 hardening (Codex findings)', ()
     expect(bareGlyph.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
   });
 });
+
+describe('footprint gate — astro round-13 parity (long lists, idiom, semicolons, repeats, offer/provide)', () => {
+  test('long pre-disclaimer city lists pass', () => {
+    const r = guardrails.evaluate({ body: 'Naples, Fort Myers, Cape Coral, Bonita Springs, Estero, and Marco Island are outside our service area.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('serving-up idiom passes on brand and standalone arms', () => {
+    for (const body of [
+      'Waves is serving up a Naples-vs-Sarasota comparison.',
+      'Now serving up fresh insights on Naples termite season.',
+      'We are serving up a Tampa-vs-Bradenton pressure breakdown.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('a factual clause after a semicolon is not glued onto a claim list', () => {
+    const factual = guardrails.evaluate({ body: 'We serve Sarasota; Tampa mosquito season starts earlier than ours.' }, {});
+    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const list = guardrails.evaluate({ body: 'We serve Sarasota; Venice; and Naples.' }, {});
+    expect(list.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('a repeated city after its disclaimer is examined as its own claim', () => {
+    const r = guardrails.evaluate({ body: 'Naples is outside our service area — our techs service Naples homes on request.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const honest = guardrails.evaluate({ body: "We don't serve Naples, Tampa, or Miami." }, {});
+    expect(honest.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('offer/provide claims with a service object flag; editorial objects pass', () => {
+    for (const body of [
+      'We offer pest control services in Naples.',
+      'We provide service in Tampa year-round.',
+      'Waves offers termite inspection plans for Cape Coral homes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    const editorial = guardrails.evaluate({ body: 'We provide this checklist so Naples homeowners can compare notes.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+});

@@ -625,19 +625,28 @@ function outOfAreaCities() {
 // Lead nouns chain through conjunctions — "tree and shrub care", "lawn &
 // pest control" are single service phrases, not two failed half-matches.
 const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)';
-const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?`;
+// The optional trailing "services/plans/programs" keeps compound phrasings
+// like "pest control services in Naples" inside one keyword match — the
+// in/near/for context arm anchors right after the keyword.
+const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?)?`;
+// "serve up"/"serving up" is the editorial idiom ("serving up a
+// Naples-vs-Sarasota comparison") — guarded on every serve-form arm.
+// offer/provide/deliver assert operation like serve/treat, but ONLY with a
+// service-shaped object nearby — "we provide this checklist for Naples
+// homeowners" is editorial, "we provide service in Tampa" is a claim.
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
-  "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
+  "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv(?:e|es|ed|ing)\\b(?!\\s+up\\b)|servic\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
-  + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b|(?:now|currently|still|also) serving\\b|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
+  + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
   + '|same.day|we offer|free (?:quote|estimate|inspection)'
+  + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?=[^.!?]{0,40}\\b(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bug|wdo|control|care|treatment|service|plan|program|inspection|removal|exterminat))"
   + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
   + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
   + '|\\b(?:waves\\w*|waveguard|(?:our|this|the)\\s+(?:\\w+\\s+){0,2}?(?:service|plan|program|membership|treatment)s?)\\b[^.!?]{0,20}?\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
-  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving|servic\\w+|treat(?:s|ed)?|cover(?:s|ed)?|work(?:s|ed)? in|operat(?:es|ed)? in)"
+  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|treat(?:s|ed)?|cover(?:s|ed)?|work(?:s|ed)? in|operat(?:es|ed)? in)"
   + '|(?:is|are|has been|have been) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
   'i',
 );
@@ -735,7 +744,21 @@ const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|w
 // it. A semicolon before a new claim subject ("…; We also serve Tampa") or
 // lowercase prose still splits. Case-sensitive on purpose: the capital is
 // the list-item signal.
-const LIST_SEMICOLON_RE = /;\s*(?=(?:and\s+|or\s+)?(?!We\b|Our\b|Waves|WaveGuard|\{\{)[A-Z])/g;
+// A semicolon whose following fragment is NOTHING BUT list glue (optionally
+// "and"/"or" plus capitalized place words and separators) is a list
+// separator; a fragment with any lowercase prose is a real clause and stays
+// split — "We serve Sarasota; Tampa mosquito season starts earlier" must
+// NOT glue Tampa onto the claim.
+const LIST_FRAGMENT_RE = /^\s*(?:(?:and|or|nor)\s+)?(?:[A-Z][A-Za-z'.&-]*[\s,–—-]*)+\.?\s*$/;
+
+function rejoinListSemicolons(sentence) {
+  const out = [];
+  for (const part of String(sentence || '').split(/;\s*/)) {
+    if (out.length && LIST_FRAGMENT_RE.test(part)) out[out.length - 1] += `, ${part}`;
+    else out.push(part);
+  }
+  return out;
+}
 
 // Glue allowed between a footprint disclaimer and a city it exempts when the
 // disclaimer comes FIRST ("Outside our service area: Naples, Fort Myers, and
@@ -743,6 +766,13 @@ const LIST_SEMICOLON_RE = /;\s*(?=(?:and\s+|or\s+)?(?!We\b|Our\b|Waves|WaveGuard
 // only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
 // glue and the trailing city flags. Case-sensitive on purpose.
 const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
+
+// City list BEFORE the disclaimer: "Naples, Fort Myers, Cape Coral, Bonita
+// Springs, Estero, and Marco Island are outside our service area." — the
+// first city sits far past any fixed window, so the pre-disclaimer
+// exemption also accepts an arbitrarily long run of pure list glue plus the
+// linking verb between the city and the disclaimer phrase.
+const PRE_DISCLAIMER_GLUE_RE = /^[\s,;:–—-]*(?:(?:and|or|nor|all|both|are|is|sit|sits|fall|falls|lie|lies|remain|remains|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
 
 // A markdown list item ("- Naples", "2) Venice") — used to re-attach a
 // colon-terminated claim intro ("We serve these cities:") to each item.
@@ -765,7 +795,7 @@ function offFootprintCityFinding(text) {
     const source = city === 'St. Petersburg'
       ? '(?:St\\.?|Saint)\\s+Pete(?:rsburg)?'
       : escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
-    return { city, re: new RegExp(`\\b${source}\\b`, 'i'), negationRe: cityNegationRe(source) };
+    return { city, re: new RegExp(`\\b${source}\\b`, 'gi'), negationRe: cityNegationRe(source) };
   });
   // Markdown segmentation first — blocks/marker lines split, soft-wrapped
   // prose re-joins so a hard-wrapped paragraph is scanned as the one
@@ -788,9 +818,11 @@ function offFootprintCityFinding(text) {
   }
   const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
   for (const sentence of sentences) {
-    // List semicolons are rejoined first so "We serve Sarasota; Venice; and
-    // Naples" scans as one claim clause (see LIST_SEMICOLON_RE).
-    for (const clause of sentence.replace(LIST_SEMICOLON_RE, ', ').split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
+    // Semicolon list fragments are rejoined first so "We serve Sarasota;
+    // Venice; and Naples" scans as one claim clause, while a semicolon
+    // followed by real prose stays a clause boundary (rejoinListSemicolons).
+    for (const semiUnit of rejoinListSemicolons(sentence)) {
+    for (const clause of semiUnit.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
       const normalized = clause.replace(/[‘’]/g, "'");
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
       // Footprint disclaimers exempt PER CITY, not per clause: in "Naples is
@@ -799,27 +831,39 @@ function offFootprintCityFinding(text) {
       // Tampa still flags.
       const disclaimerMatch = normalized.match(FOOTPRINT_DISCLAIMER_RE);
       for (const { city, re, negationRe } of cityRes) {
-        const cityMatch = normalized.match(re);
-        if (!cityMatch) continue;
-        if (disclaimerMatch) {
-          if (cityMatch.index < disclaimerMatch.index
-            && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
-          // Disclaimer-FIRST list form: "Outside our service area: Naples,
-          // Fort Myers, and Cape Coral." Cities after the disclaimer are
-          // exempt only while the ENTIRE clause tail after the disclaimer is
-          // pure list glue — testing only the text up to the city would
-          // exempt "Outside our service area: Tampa homes are serviced by
-          // our team" (claim CONTINUES after the city). A lowercase claim
-          // verb anywhere in the tail re-arms the gate.
-          const disclaimerEnd = disclaimerMatch.index + disclaimerMatch[0].length;
-          if (cityMatch.index >= disclaimerEnd
-            && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd))) continue;
+        // EVERY occurrence of the city is examined, not just the first —
+        // "Naples is outside our service area — our techs service Naples
+        // homes" repeats the city in an affirmative claim after the honest
+        // disclaimer. Negation exemptions are occurrence-scoped the same
+        // way: only a city INSIDE the negation match's span is the denial's
+        // object; a repeat elsewhere in the clause is its own claim.
+        const negationRanges = [...normalized.matchAll(new RegExp(negationRe.source, 'gi'))]
+          .map((m) => [m.index, m.index + m[0].length]);
+        for (const cityMatch of normalized.matchAll(re)) {
+          const cityStart = cityMatch.index;
+          const cityEnd = cityStart + cityMatch[0].length;
+          if (negationRanges.some(([ns, ne]) => cityStart >= ns && cityEnd <= ne)) continue;
+          if (disclaimerMatch) {
+            const disclaimerStart = disclaimerMatch.index;
+            const disclaimerEnd = disclaimerStart + disclaimerMatch[0].length;
+            // City BEFORE the disclaimer: exempt within the close window, or
+            // across an arbitrarily long pure-list run ("Naples, Fort
+            // Myers, …, and Marco Island are outside our service area.").
+            if (cityStart < disclaimerStart
+              && (disclaimerStart - cityEnd <= 60
+                || PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, disclaimerStart)))) continue;
+            // Disclaimer-FIRST list form: "Outside our service area: Naples,
+            // Fort Myers, and Cape Coral." Cities after the disclaimer are
+            // exempt only while the ENTIRE clause tail after the disclaimer
+            // is pure list glue — a lowercase claim continuation anywhere in
+            // the tail re-arms the gate.
+            if (cityStart >= disclaimerEnd
+              && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd))) continue;
+          }
+          return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
         }
-        // Negation scoped to THIS city ("does not include Tampa") exempts
-        // only this city — a negation about some other service does not.
-        if (negationRe.test(normalized)) continue;
-        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
       }
+    }
     }
   }
   return null;
