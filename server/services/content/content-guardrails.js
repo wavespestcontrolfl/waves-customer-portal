@@ -599,7 +599,7 @@ function outOfAreaCities() {
 // early tegu hotspot" is attribution, not a CTA. Only CTA usage counts
 // (call us / call Waves / call now|today / call for a quote / give us a
 // call).
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
@@ -671,11 +671,15 @@ function offFootprintCityFinding(text) {
   if (!s) return null;
   const cities = outOfAreaCities();
   const cityRes = cities.map((city) => {
-    // "St." may be written without the period; multi-word cities may wrap.
-    // The trailing lookahead keeps regional/water-body phrases out — "Tampa
-    // Bay" is geography, not the city of Tampa as a service target.
-    const source = escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
-    return { city, re: new RegExp(`\\b${source}\\b(?!\\s+bay\\b)`, 'i'), negationRe: cityNegationRe(source) };
+    // "St." may be written without the period; multi-word cities may wrap;
+    // St. Petersburg matches its local "St. Pete" abbreviation. No "Bay"
+    // exemption — "we service Tampa Bay" targets an out-of-footprint region
+    // and must flag; factual water-body mentions pass because they carry no
+    // claim context (the claim gate does that discrimination).
+    const source = city === 'St. Petersburg'
+      ? '(?:St\\.?|Saint)\\s+Pete(?:rsburg)?'
+      : escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
+    return { city, re: new RegExp(`\\b${source}\\b`, 'i'), negationRe: cityNegationRe(source) };
   });
   // Markdown segmentation first — blocks/marker lines split, soft-wrapped
   // prose re-joins so a hard-wrapped paragraph is scanned as the one
@@ -764,7 +768,9 @@ function normalizeInternalPath(dest) {
 // reference links render exactly like inline ones and shipped a dead
 // destination would be just as dead. (Absolute URLs are the external gate's
 // job.)
-const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)/gim;
+// Arms: markdown destinations, QUOTED href/src, reference definitions, and
+// UNQUOTED href/src (legal in HTML — `<a href=/pest-library/fleas/>`).
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src)\s*=\s*(\/[^\s>"'`]+)/gim;
 
 // EVERY absolute URL in the text — markdown destinations, href/src,
 // reference definitions, CommonMark autolinks (<https://…>), and bare GFM
@@ -791,7 +797,7 @@ function collectInternalDestinations(text) {
   const dests = [];
   let m;
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
-  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3]);
+  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3] || m[4]);
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
   while ((m = abs.exec(s)) !== null) {
@@ -821,7 +827,15 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = nu
   if (!text) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
   for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
-    const norm = normalizeInternalPath(link);
+    // Briefs may mandate a link as an ABSOLUTE hub URL; body occurrences
+    // normalize to pathnames, so the allowance must too or it silently
+    // never matches.
+    let candidate = String(link || '');
+    try {
+      const u = new URL(candidate);
+      if (hubHostSet().has(u.hostname.toLowerCase())) candidate = u.pathname || '/';
+    } catch { /* not absolute — use as-is */ }
+    const norm = normalizeInternalPath(candidate);
     if (norm) allowed.add(norm);
   }
   for (const { dest, norm } of collectInternalDestinations(text)) {
@@ -1290,7 +1304,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // surfaced by check_existing_content ride on the draft payload
     // (checked_existing_routes) so the stored-draft revalidation grants the
     // same allowance the original run did.
-    (isRefresh && !refreshPriorBody) ? null : uncatalogedComponentFinding(body, refreshExemptComponents),
+    // A refresh with NO prior body cannot separate preserved-legacy from
+    // writer additions — fail CLOSED (park for review) rather than skipping
+    // the structure gates; a transient load failure here must not become a
+    // publish window for dead routes or uncataloged components.
+    (isRefresh && !refreshPriorBody)
+      ? finding('P1', 'REFRESH_PRIOR_BODY_UNAVAILABLE', 'Refresh draft arrived without the live prior body, so the component/internal-route gates cannot grandfather preserved-legacy content — routed to review (fail closed).')
+      : uncatalogedComponentFinding(body, refreshExemptComponents),
     (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),

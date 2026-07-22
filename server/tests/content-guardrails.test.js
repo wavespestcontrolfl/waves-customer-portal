@@ -1491,9 +1491,11 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
-  test('refresh without a prior body skips the internal-route gate (quality gate blocks that publish anyway)', () => {
+  test('refresh without a prior body fails CLOSED with a P1 park (Codex round 5)', () => {
     const r = guardrails.evaluate({ body: 'Old page links to [legacy](/some-2019-era-page/).' }, { isRefresh: true });
     expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    expect(r.findings.some((f) => f.code === 'REFRESH_PRIOR_BODY_UNAVAILABLE' && f.severity === 'P1')).toBe(true);
+    expect(r.pass).toBe(false);
   });
 
   test('refresh grandfathers prior-body links/components but gates writer additions (Codex round 3)', () => {
@@ -1537,6 +1539,28 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
   });
 
+  test('absolute-hub brief links are honored as allowances (Codex round 5)', () => {
+    const body = 'Curated: [special](/lawn-care/fall-armyworm-outbreak/).';
+    const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/'] });
+    expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('unquoted href attributes are policed (Codex round 5)', () => {
+    const r = guardrails.evaluate({ body: 'Visit <a href=/pest-library/fleas/>the flea page</a>.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
+  test('modal auxiliaries, St. Pete alias, Tampa Bay service claims (astro r8 parity)', () => {
+    const can = guardrails.evaluate({ body: 'We can service Naples on request.' }, {});
+    expect(can.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const pete = guardrails.evaluate({ body: 'We treat St. Pete lawns on the same schedule.' }, {});
+    expect(pete.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const bayClaim = guardrails.evaluate({ body: 'We treat Tampa Bay properties year-round.' }, {});
+    expect(bayClaim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const bayFact = guardrails.evaluate({ body: 'Runoff drains to Tampa Bay after summer storms.' }, {});
+    expect(bayFact.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
   test('attributive "call" is not claim context; CTA call is (Codex round 4)', () => {
     const attributive = guardrails.evaluate({ body: 'Researchers call Fort Myers one of the early tegu hotspots.' }, {});
     expect(attributive.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
@@ -1559,7 +1583,9 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
   test('future-tense claims, Tampa Bay geography, contracted disclaimers, wrapped blockquotes (astro r6 parity)', () => {
     const future = guardrails.evaluate({ body: "In Tampa, we'll treat the infestation at the source." }, {});
     expect(future.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
-    const bay = guardrails.evaluate({ body: 'Around Tampa Bay, we treat heavier salt pressure on ornamentals.' }, {});
+    // r8 note: claim verbs near "Tampa Bay" now FLAG (region is out of
+    // footprint) — only claim-free factual mentions pass.
+    const bay = guardrails.evaluate({ body: 'Around Tampa Bay, salt pressure runs heavier on ornamentals.' }, {});
     expect(bay.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     const contracted = guardrails.evaluate({ body: "Naples isn't in our service area." }, {});
     expect(contracted.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
