@@ -9633,6 +9633,14 @@ export function CompletionPanel({
     setShowDraftPrompt(false);
   }
 
+  // Serialized product context for the recap auto-draft dependency: id +
+  // method + targets per product (rate edits excluded — they never reach
+  // the prompt).
+  const recapProductsKey = JSON.stringify(selectedProducts.map((p) => [
+    p.productId,
+    p.applicationMethod || null,
+    Array.isArray(p.targets) ? p.targets.join('|') : '',
+  ]));
   useEffect(() => {
     if (!canAutoDraftRecap) return;
     if (recapSource === "manual") {
@@ -9695,7 +9703,11 @@ export function CompletionPanel({
   }, [
     canAutoDraftRecap,
     notes,
-    selectedProducts.length,
+    // Full product CONTEXT, not just the count — a method or target edit
+    // after drafting must mark the recap for redraft, or the customer copy
+    // describes the previous product context (codex P2 2026-07-22). The
+    // debounce above absorbs per-keystroke churn.
+    recapProductsKey,
     visitOutcome,
     areasServiced,
     service.serviceType,

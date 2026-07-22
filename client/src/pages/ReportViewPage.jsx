@@ -500,9 +500,13 @@ function visitSummaryCopy(data = {}) {
   const cleaned = cleanVisitSummary(data.summary);
   if (cleaned) return cleaned;
   // V2 reports carry full diagnostics below — the summary line should frame
-  // the professional record, not shrug (owner 2026-07-21).
+  // the professional record, not shrug (owner 2026-07-21). Treatment wording
+  // only when products were actually applied: an inspection-only visit must
+  // not claim treatment above a snapshot saying otherwise (codex P2).
   if (data.reportV2) {
-    return 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.';
+    return (data.applications || []).length
+      ? 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.'
+      : 'Today’s inspection is complete. The diagnostics and findings below document the condition of your property and what we observed on this visit.';
   }
   return 'Your routine service is complete.';
 }
@@ -872,7 +876,7 @@ function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   }
   if (purpose === 'Trunk injection') return 'Delivered directly into the trunk so the treatment moves with the tree’s own vascular flow.';
   if (purpose === 'Disease control application') return 'Applied to protect foliage where disease-like signals or seasonal conditions called for it.';
-  if (purpose === 'Plant nutrition application') return 'Applied to correct the documented deficiency pattern and support color, density, and new growth.';
+  if (purpose === 'Plant nutrition application') return 'Applied to feed the documented plants — supporting color, density, root development, and new growth within the plant health program.';
   if (purpose === 'Spray coverage aid') return 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.';
   if (purpose === 'Plant health treatment') return 'Applied as part of the documented plant health program for this visit.';
   return 'Application recorded for this visit.';

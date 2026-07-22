@@ -25,6 +25,9 @@ const REQUEST_BUDGET_MS = 4000;
 // plus rate/registration leakage ("2 oz", "EPA Reg. No.").
 const FORBIDDEN = [
   /\b(safe|non-?toxic|harmless|eliminated?|eradicated?|guaranteed?|pest-?free|cure[sd]?|permanent(ly)?)\b/i,
+  // Confirmed-diagnosis vocabulary — the narrative stays signals-scoped even
+  // if the vision observations leak an overclaim (codex P2 2026-07-22).
+  /\b(infestation|infested|infection|infected|diseased)\b/i,
   /\bchemicals?\b/i,
   /\b\d+(\.\d+)?\s*(oz|ounces?|ml|gal|gallons?|lbs?|pounds?)\b/i,
   /\bepa\b/i,
@@ -41,16 +44,25 @@ function cleanLine(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+// Products are identified to the model by ACTIVE INGREDIENT (label
+// percentage stripped) or kind — never the trade name, so the model cannot
+// echo a brand into the customer copy (codex P2 2026-07-22).
+function activeIdentifier(p = {}) {
+  const active = cleanLine(p.activeIngredient).replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
+  if (active) return active.toLowerCase();
+  if (p.kind && p.kind !== 'other') return `a ${p.kind.replace(/_/g, ' ')} product`;
+  return 'a treatment product';
+}
+
 function productFactLines(products = []) {
   return products.map((p) => {
     const parts = [
       p.kind && p.kind !== 'other' ? p.kind.replace(/_/g, ' ') : null,
-      p.activeIngredient ? `active: ${cleanLine(p.activeIngredient)}` : null,
       p.method ? `method: ${METHOD_PHRASES[String(p.method).toLowerCase()] || cleanLine(p.method).replace(/_/g, ' ')}` : null,
       (p.targets || []).length ? `targets: ${p.targets.map(cleanLine).join(', ')}` : null,
       p.whatItDoes ? `role: ${cleanLine(p.whatItDoes)}` : null,
     ].filter(Boolean);
-    return `- ${cleanLine(p.name)}${parts.length ? ` — ${parts.join('; ')}` : ''}`;
+    return `- ${activeIdentifier(p)}${parts.length ? ` — ${parts.join('; ')}` : ''}`;
   }).join('\n');
 }
 
@@ -81,11 +93,27 @@ Photo observations (context): ${cleanLine(photoSummary) || '[none]'}
 Return only the paragraph.`;
 }
 
-function validateNarrative(text) {
+const GENERIC_NAME_TOKENS = new Set([
+  'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
+  'concentrate', 'spray', 'nonionic', 'surfactant', 'miticide', 'insect',
+  'control', 'plus', 'pro', 'max', 'maxx', 'lawn', 'turf', 'palm', 'tree',
+  'shrub', 'weed', 'grass', 'pest', 'oil', 'emulsion', 'systemic',
+]);
+
+function validateNarrative(text, productNames = []) {
   const t = String(text || '').trim();
   if (!t) return 'empty';
   if (t.length > 1200) return 'too_long';
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
+  // Brand-name echo check: any distinctive token of a recorded product name
+  // appearing in the copy fails the actives-only contract (codex P3).
+  const hay = t.toLowerCase();
+  const echoed = productNames.some((name) => String(name || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
+    .some((token) => hay.includes(token)));
+  if (echoed) return 'trade_name';
   const banned = findBannedCustomerCopy(t);
   if (banned.length) return `banned:${banned.join(',')}`;
   return null;
@@ -152,13 +180,14 @@ async function buildTreatmentNarrative({
         findingsText: facts.findingsText,
         photoSummary: facts.photoSummary,
       });
+      const productNames = products.map((p) => p.name).filter(Boolean);
       const generated = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.report,
         { text: prompt, jsonMode: false, maxTokens: 400 },
-        { validate: (result) => validateNarrative(result.text) },
+        { validate: (result) => validateNarrative(result.text, productNames) },
       );
       const text = generated.ok ? String(generated.text || '').trim() : '';
-      const problem = text ? validateNarrative(text) : 'generation_failed';
+      const problem = text ? validateNarrative(text, productNames) : 'generation_failed';
       const finalText = problem ? fallback : text;
       await knex('service_report_ai_summaries').where(keyWhere).update({
         model: problem ? null : 'text_policy:report',

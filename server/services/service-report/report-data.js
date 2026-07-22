@@ -2743,7 +2743,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             serviceRecordId: service.id,
             serviceLine: 'tree_shrub',
             treatment: reportV2.treatment,
-            findingsText: treeShrubAssessment.observations || '',
+            // The SCRUBBED summary, not raw observations — a vision overclaim
+            // ("scale infestation") must not reach the narrative prompt
+            // (codex P2 2026-07-22); the validator also rejects the terms.
+            findingsText: reportV2.photoSummary || '',
             photoSummary: reportV2.photoSummary || '',
             knex,
           });

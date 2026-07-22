@@ -30,7 +30,10 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
     expect(prompt).toContain('WHY each product was chosen');
     expect(prompt).toContain('WHAT each product does');
     expect(prompt).toContain('BENEFIT');
-    expect(prompt).toContain('Safari 20 SG — systemic; active: Dinotefuran 20%; method: soil drench; targets: Scale, Mealybugs');
+    // Actives-only identifiers — the model never sees the trade name
+    // (codex P2 2026-07-22).
+    expect(prompt).toContain('dinotefuran — systemic; method: soil drench; targets: Scale, Mealybugs');
+    expect(prompt).not.toContain('Safari');
     expect(prompt).toContain('Scale and mealybug activity on the arboricola');
     expect(prompt).toContain('Do not invent findings');
     expect(prompt).toContain('NEVER include application rates');
@@ -42,8 +45,11 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
     expect(validateNarrative('These chemicals knock down the pests.')).toBeTruthy();
     expect(validateNarrative('')).toBe('empty');
     expect(validateNarrative(
-      'Safari was applied as a soil drench — it is absorbed by the roots and carried through the plant, so the scale and mealybugs feeding on the stems take it in over the coming weeks. You should see the cottony buildup dry up as new growth comes in.',
+      'A dinotefuran soil drench is absorbed by the roots and carried through the plant, so the scale and mealybugs feeding on the stems take it in over the coming weeks. You should see the cottony buildup dry up as new growth comes in.',
     )).toBe(null);
+    // Trade-name echoes and confirmed-diagnosis terms fail validation.
+    expect(validateNarrative('Safari was applied as a soil drench today.', ['Safari 20 SG'])).toBe('trade_name');
+    expect(validateNarrative('We treated the scale infestation on the palms.')).toBe('forbidden_copy');
   });
 });
 

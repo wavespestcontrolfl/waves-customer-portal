@@ -101,7 +101,10 @@ function buildTreatment({ applications = [], actions = [] } = {}) {
       whatItDoes: cls.whatItDoes,
       targets,
       area,
-      method: app.applicationMethod || app.application_method || null,
+      // app.method is the normalized field on persisted service_products
+      // payloads (codex P2 2026-07-22) — without it drench/injection context
+      // never reached the narrative for stored reports.
+      method: app.applicationMethod || app.application_method || app.method || null,
     };
   }).filter(Boolean);
 

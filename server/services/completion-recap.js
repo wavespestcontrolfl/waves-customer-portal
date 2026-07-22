@@ -200,6 +200,25 @@ async function aiRecap(input = {}) {
   return result.ok ? cleanText(result.text) : null;
 }
 
+// True when the generated copy mentions any recorded product by name —
+// matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
+// echoes ("we applied Talstar around...") are caught too.
+function containsProductName(text, products) {
+  const hay = String(text || '').toLowerCase();
+  if (!hay) return false;
+  return safeProducts(products).some((p) => String(p.name || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
+    .some((token) => hay.includes(token)));
+}
+const GENERIC_NAME_TOKENS = new Set([
+  'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
+  'concentrate', 'spray', 'nonionic', 'surfactant', 'miticide', 'insect',
+  'control', 'plus', 'pro', 'max', 'maxx', 'lawn', 'turf', 'palm', 'tree',
+  'shrub', 'weed', 'grass', 'pest', 'bait', 'dust', 'emulsion',
+]);
+
 async function generateRecap(input = {}) {
   const outcome = normalizeOutcome(input.visitOutcome);
   if (DETERMINISTIC_OUTCOMES.has(outcome)) {
@@ -208,7 +227,14 @@ async function generateRecap(input = {}) {
 
   try {
     const recap = await aiRecap(input);
-    if (recap) return { recap: sanitizeRecap(recap), source: 'ai' };
+    // The prompt forbids product names, but the contract is enforced here:
+    // a generated recap that echoes any recorded product name falls back to
+    // the deterministic copy (codex P3 2026-07-22).
+    if (recap && containsProductName(recap, input.products)) {
+      logger.warn('[completion-recap] AI recap echoed a product name — using fallback');
+    } else if (recap) {
+      return { recap: sanitizeRecap(recap), source: 'ai' };
+    }
   } catch (err) {
     logger.warn(`[completion-recap] AI recap failed, using fallback: ${err.message}`);
   }
