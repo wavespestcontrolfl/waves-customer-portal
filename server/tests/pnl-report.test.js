@@ -319,6 +319,17 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
     });
 
+    test('an ineligible MACRS asset NEVER falls through to a stale annual_depreciation', () => {
+      // A MACRS row carrying a leftover annual_depreciation must fail closed,
+      // not claim that straight-line amount — MACRS is handled entirely.
+      expect(prorateDepreciation(
+        [van({ irs_class: '20-year', annual_depreciation: '9999' })], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+      expect(prorateDepreciation(
+        [van({ business_use_pct: '40', annual_depreciation: '9999' })], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
     test('§179 + MACRS depreciates only the REMAINING basis (no double-count)', () => {
       // $35k, $10k §179, 100% business use. 2025: $10k immediate + 20%×($35k−
       // $10k)=$5,000 → $15,000. 2026: 32%×$25k=$8,000.

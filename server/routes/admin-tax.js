@@ -312,11 +312,15 @@ router.put('/equipment/:id', async (req, res, next) => {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
     }
     // business_use_pct must be 0–100; convention must be an allow-listed value.
+    // STRICT coercion (Number, not parseFloat) so "50junk" is rejected rather
+    // than validated-then-persisted as a string that Postgres 500s on.
+    let businessUsePctNormalized;
     if (fields.businessUsePct !== undefined) {
-      const p = parseFloat(fields.businessUsePct);
+      const p = Number(fields.businessUsePct);
       if (!Number.isFinite(p) || p < 0 || p > 100) {
         return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
       }
+      businessUsePctNormalized = p;
     }
     if (fields.depreciationConvention !== undefined && !VALID_DEPRECIATION_CONVENTIONS.includes(fields.depreciationConvention)) {
       return res.status(400).json({ error: `Invalid depreciation convention. Must be one of: ${VALID_DEPRECIATION_CONVENTIONS.join(', ')}` });
@@ -332,6 +336,8 @@ router.put('/equipment/:id', async (req, res, next) => {
       businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
+    // Persist the NORMALIZED number, not the raw string.
+    if (businessUsePctNormalized !== undefined) update.business_use_pct = businessUsePctNormalized;
     await db('equipment_register').where({ id: req.params.id }).update(update);
     res.json({ success: true });
   } catch (err) { next(err); }

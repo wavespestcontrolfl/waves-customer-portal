@@ -231,17 +231,19 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     total += s179Immediate;
   }
 
-  // MACRS: year-varying declining balance on the BUSINESS basis remaining after
-  // §179. Order matters for a partial-use hybrid: business basis = cost ×
-  // business-use%, THEN minus §179 (already in the basis, so the schedule
-  // isn't scaled again). A flat annual_depreciation can't model the schedule,
-  // which is why MACRS assets showed $0.
-  if (gdsEligible && MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
-    // Only the HALF-YEAR convention is modeled. The mid-quarter convention is
-    // mandatory when >40% of the YEAR's aggregate basis is placed in service in
-    // Q4 — a cross-asset determination made in buildPnlReport, which fails
-    // closed for those years. A per-asset override other than 'half_year' also
-    // fails closed for CPA computation rather than silently using half-year.
+  // MACRS is handled ENTIRELY here — a MACRS asset never falls through to the
+  // straight-line annual_depreciation path (a stale value must not leak in).
+  // Year-varying declining balance on the BUSINESS basis remaining after §179:
+  // business basis = cost × business-use%, THEN minus §179. Any ineligible or
+  // unsupported case (≤50% use, unknown class, non-half-year convention) FAILS
+  // CLOSED at the current `total` (just the §179, which is 0 when ineligible).
+  if (method === 'MACRS') {
+    if (!gdsEligible) return total;                                       // ≤50% → ADS/CPA
+    if (!MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()]) return total; // unknown class
+    // The mid-quarter convention is mandatory when >40% of the YEAR's aggregate
+    // basis is placed in service in Q4 — a cross-asset determination made in
+    // buildPnlReport, which sets the convention on those assets. Only half-year
+    // is computed; anything else fails closed for CPA rather than mis-computing.
     const convention = String(asset?.depreciation_convention || 'half_year');
     if (convention !== 'half_year') return total;
     const macrsBasis = Math.max(0, businessBasis - s179Immediate);
