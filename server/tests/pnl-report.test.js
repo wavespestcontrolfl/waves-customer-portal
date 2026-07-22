@@ -350,11 +350,22 @@ describe('prorateDepreciation', () => {
       // 2026 (before disposal): full year-2 $11,200.
       expect(prorateDepreciation([disposedVan], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
       // 2027 (disposal year): HALF the year-3 amount = 0.5 × 19.2% × $35k =
-      // $3,360 (half-year disposition convention, not a day fraction — a
-      // Dec-31 disposal must NOT take the full annual %).
+      // $3,360 (half-year disposition convention, not a day fraction).
       expect(prorateDepreciation([disposedVan], '2027-01-01', '2027-12-31')).toBeCloseTo(3360, 2);
       // After the disposal year: nothing.
       expect(prorateDepreciation([disposedVan], '2028-01-01', '2028-12-31')).toBe(0);
+    });
+
+    test('disposal-year amount does NOT leak into post-disposal windows', () => {
+      // Disposed mid-year: the $3,360 half-year amount is earned Jan 1–Jun 30.
+      const midDisposal = van({ disposal_date: '2027-06-30', disposed: true });
+      // Full 2027 window still totals the whole $3,360 (window covers all coverage).
+      expect(prorateDepreciation([midDisposal], '2027-01-01', '2027-12-31')).toBeCloseTo(3360, 2);
+      // Q1 (Jan–Mar) = 90 of the 181 coverage days.
+      expect(prorateDepreciation([midDisposal], '2027-01-01', '2027-03-31'))
+        .toBeCloseTo(3360 * 90 / 181, 2);
+      // Q3 (Jul–Sep), entirely AFTER the June 30 disposal → $0, no leak.
+      expect(prorateDepreciation([midDisposal], '2027-07-01', '2027-09-30')).toBe(0);
     });
 
     test('the ≤50% guard gates ONLY GDS/§179 — a CPA-entered straight-line amount flows through', () => {

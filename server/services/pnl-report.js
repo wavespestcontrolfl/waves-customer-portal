@@ -247,17 +247,20 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
         // any gain is separate and remains a CPA adjustment on the sale.
         if (disposalYear != null && y === disposalYear) yearAmount *= 0.5;
         if (yearAmount <= 0) continue;
-        // Attribute across the asset's coverage in year y (in-service date, or
-        // Jan 1 for later years, through year-end), prorated by the report
-        // window's overlap: a full-year window keeps the whole convention
-        // amount; a window ending before in-service gets nothing.
+        // Attribute across the asset's coverage in year y — in-service date (or
+        // Jan 1 for later years) through year-end, but CAPPED at the disposal
+        // date in the disposal year so a post-disposal quarter gets nothing —
+        // prorated by the report window's overlap. A full-year window keeps the
+        // whole convention amount; windows before in-service or after disposal
+        // get zero.
         const yStart = new Date(Date.UTC(y, 0, 1));
         const yEnd = new Date(Date.UTC(y, 11, 31));
         const covStart = inService > yStart ? inService : yStart;
-        if (covStart > yEnd) continue;
-        const covDays = (yEnd - covStart) / 86400000 + 1;
+        const covEnd = (disposalYear === y && disposed) ? disposed : yEnd;
+        if (covStart > covEnd) continue;
+        const covDays = (covEnd - covStart) / 86400000 + 1;
         const ovStart = periodStart > covStart ? periodStart : covStart;
-        const ovEnd = periodEnd < yEnd ? periodEnd : yEnd;
+        const ovEnd = periodEnd < covEnd ? periodEnd : covEnd;
         if (ovStart > ovEnd) continue;
         const ovDays = (ovEnd - ovStart) / 86400000 + 1;
         total += yearAmount * (ovDays / covDays);
