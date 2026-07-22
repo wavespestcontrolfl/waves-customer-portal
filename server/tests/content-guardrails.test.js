@@ -1841,3 +1841,31 @@ describe('refresh gates — round-12 hardening (Codex findings)', () => {
     expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
 });
+
+describe('footprint/tenure/citation — round-13 hardening (Codex findings)', () => {
+  test('a claim CONTINUING after a disclaimer-first city still flags (P1)', () => {
+    const r = guardrails.evaluate({ body: 'Outside our service area: Tampa homes are serviced by our team.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const pureList = guardrails.evaluate({ body: 'Outside our service area: Naples, Fort Myers, and Cape Coral.' }, {});
+    expect(pureList.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('post-founding company-history years block; the truthful 2024 stays allowed', () => {
+    for (const body of [
+      'Waves was founded in 2025 by a local family.',
+      'Family-owned and operated since 2026.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(true);
+    }
+    const truthful = guardrails.evaluate({ body: 'Waves is family-owned and operated, founded in 2024 right here in Bradenton.' }, {});
+    expect(truthful.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(false);
+  });
+
+  test('OpenAI private-use citation glyphs are citation residue', () => {
+    const withGlyphs = guardrails.evaluate({ body: 'Chinch bugs thrive in dry turf.citeturn0search0' }, {});
+    expect(withGlyphs.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+    const bareGlyph = guardrails.evaluate({ body: 'Dry turf invites chinch bugs.' }, {});
+    expect(bareGlyph.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+  });
+});

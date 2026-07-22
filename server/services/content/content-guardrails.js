@@ -560,7 +560,11 @@ function uncatalogedComponentFinding(body, exemptComponentCounts = null) {
 // Covers HTML cite tags, quoted AND unquoted index=N props, markdown
 // footnotes, and the raw model-tooling artifacts (citeturn…, 【N†source】,
 // :contentReference[oaicite:N]) — none has a legitimate published form.
-const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']?\d+|\[\^[^\]]{1,30}\]|\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[|\boaicite\b/i;
+// The Unicode private-use range covers the OpenAI citation GLYPHS
+// themselves (citeturn0search0 wraps its token in U+E200-block
+// characters) — the glyphs are invisible in rendered copy but ship as
+// garbage bytes, and no legitimate draft contains PUA characters.
+const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']?\d+|\[\^[^\]]{1,30}\]|\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[|\boaicite\b|[\uE000-\uF8FF]/i;
 
 function citationResidueFinding(text) {
   const m = String(text || '').match(CITATION_RESIDUE_RE);
@@ -645,7 +649,11 @@ const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+
 // Company-history fabrications: "serving Sarasota since 2012", "founded in
 // 2010", "family-owned since 1998". Scoped to COMPANY context so factual
 // regulatory/history copy ("since 2019, Florida has required…") passes.
-const TENURE_SINCE_RE = /\b(?:serving\b[^.!?]{0,40}?|in business\b[^.!?]{0,20}?|family[- ]owned\b[^.!?]{0,20}?|trusted\b[^.!?]{0,30}?|established\b[^.!?]{0,15}?|founded\b[^.!?]{0,15}?)since (?:19\d\d|20[01]\d|202[0-3])\b|\b(?:founded|established) in (?:19\d\d|20[01]\d|202[0-3])\b/i;
+// Every year EXCEPT 2024 blocks: pre-2024 inflates tenure, post-2024
+// ("founded in 2025") is a false company history in the other direction.
+// 2024 — the truthful founding year — stays allowed so honest copy
+// ("family-owned since 2024") never parks.
+const TENURE_SINCE_RE = /\b(?:serving\b[^.!?]{0,40}?|in business\b[^.!?]{0,20}?|family[- ]owned\b[^.!?]{0,20}?|trusted\b[^.!?]{0,30}?|established\b[^.!?]{0,15}?|founded\b[^.!?]{0,15}?)since (?:19\d\d|20[01]\d|202[0-35-9])\b|\b(?:founded|established) in (?:19\d\d|20[01]\d|202[0-35-9])\b/i;
 
 function tenureClaimFinding(text) {
   const s = String(text || '');
@@ -798,11 +806,14 @@ function offFootprintCityFinding(text) {
             && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
           // Disclaimer-FIRST list form: "Outside our service area: Naples,
           // Fort Myers, and Cape Coral." Cities after the disclaimer are
-          // exempt only while the text between is pure list glue — a
-          // lowercase claim verb in between re-arms the gate.
+          // exempt only while the ENTIRE clause tail after the disclaimer is
+          // pure list glue — testing only the text up to the city would
+          // exempt "Outside our service area: Tampa homes are serviced by
+          // our team" (claim CONTINUES after the city). A lowercase claim
+          // verb anywhere in the tail re-arms the gate.
           const disclaimerEnd = disclaimerMatch.index + disclaimerMatch[0].length;
           if (cityMatch.index >= disclaimerEnd
-            && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd, cityMatch.index))) continue;
+            && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd))) continue;
         }
         // Negation scoped to THIS city ("does not include Tampa") exempts
         // only this city — a negation about some other service does not.
