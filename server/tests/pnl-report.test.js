@@ -168,9 +168,12 @@ describe('assemblePnl', () => {
     });
     expect(out.cogs.total).toBe(1000);
     expect(out.grossProfit).toBe(9000);
-    expect(out.deductions.total).toBe(1000);
-    expect(out.netIncome).toBe(7000);
-    expect(out.netMargin).toBeCloseTo(0.7, 5);
+    // Deductions = depreciation only. Mileage is never auto-counted (actual-
+    // expenses basis); it's disclosed in vehicleDeduction for manual use.
+    expect(out.deductions.total).toBe(300);
+    expect(out.vehicleDeduction.standardMileageComputed).toBe(700);
+    expect(out.netIncome).toBe(7700); // 9000 gross − 1000 opex − 300 depreciation
+    expect(out.netMargin).toBeCloseTo(0.77, 5);
   });
 });
 
@@ -298,5 +301,77 @@ describe('getPeriodRange', () => {
       startDate: '2026-02-01',
       endDate: '2026-02-28',
     });
+  });
+});
+
+describe('assemblePnl — vehicle deduction (actual-expenses basis only)', () => {
+  // The P&L can only cleanly compute the actual-expenses basis: it deducts
+  // every recorded cost and NEVER the standard mileage rate (actual vehicle
+  // costs can't be isolated from shared categories to compute a clean
+  // standard-mileage figure). The mileage is always disclosed, never counted.
+  const inputs = {
+    serviceRevenue: 10000,
+    opexRows: [
+      { category: 'Vehicle Expenses', irs_line: '9', total: '2400.00' },
+      { category: 'Insurance', irs_line: '15', total: '600.00' },
+    ],
+    mileageDeduction: 3300,
+    depreciationTotal: 3200,
+  };
+
+  test('mileage is NEVER counted, under ANY election', () => {
+    for (const vehicleMethod of [null, 'standard_mileage', 'actual_expenses']) {
+      const out = assemblePnl({ ...inputs, vehicleMethod });
+      expect(out.deductions.mileage).toBe(0);
+      expect(out.vehicleDeduction.countedMileage).toBe(0);
+      // ...but it's always disclosed for manual/CPA use.
+      expect(out.vehicleDeduction.standardMileageComputed).toBe(3300);
+      expect(out.vehicleDeduction.basis).toBe('actual_expenses');
+    }
+  });
+
+  test('all recorded costs (vehicle expenses + depreciation) always flow', () => {
+    for (const vehicleMethod of [null, 'standard_mileage', 'actual_expenses']) {
+      const out = assemblePnl({ ...inputs, vehicleMethod });
+      // Vehicle Expenses opex is kept (never excluded) — actual basis.
+      expect(out.operatingExpenses.categories.find(c => c.name === 'Vehicle Expenses')?.amount).toBe(2400);
+      expect(out.operatingExpenses.total).toBe(3000);
+      expect(out.deductions.depreciation).toBe(3200); // full depreciation always kept
+      expect(out.netIncome).toBe(3800); // 10000 - 3000 opex - 3200 depreciation
+    }
+  });
+
+  test('never overstates: the rate is never added beside actual costs', () => {
+    // The dangerous direction (mileage + actual vehicle costs) is structurally
+    // impossible — mileage never enters the total.
+    const out = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage' });
+    expect(out.deductions.total).toBe(3200); // depreciation only; no mileage
+  });
+
+  test('election metadata is reported; barred flag surfaced', () => {
+    const elected = assemblePnl({ ...inputs, vehicleMethod: 'standard_mileage', vehicleMileageBarred: true });
+    expect(elected.vehicleDeduction.method).toBe('standard_mileage');
+    expect(elected.vehicleDeduction.elected).toBe(true);
+    expect(elected.vehicleDeduction.barred).toBe(true);
+
+    const unelected = assemblePnl({ ...inputs });
+    expect(unelected.vehicleDeduction.method).toBeNull();
+    expect(unelected.vehicleDeduction.elected).toBe(false);
+    expect(unelected.vehicleDeduction.barred).toBe(false);
+  });
+
+  test('unrecognized method strings fall back to unelected', () => {
+    for (const bad of ['STANDARD_MILEAGE', 'mileage', '', 'actual', 0, true, {}]) {
+      const out = assemblePnl({ ...inputs, vehicleMethod: bad });
+      expect(out.vehicleDeduction.method).toBeNull();
+      expect(out.deductions.mileage).toBe(0);
+    }
+  });
+
+  test('no mileage → nothing to disclose', () => {
+    const out = assemblePnl({ serviceRevenue: 500, vehicleMethod: 'standard_mileage' });
+    expect(out.vehicleDeduction.standardMileageComputed).toBe(0);
+    expect(out.deductions.total).toBe(0);
+    expect(out.netIncome).toBe(500);
   });
 });

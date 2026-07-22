@@ -31,15 +31,60 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 }
 
 /**
- * IRS standard mileage rate for a given tax year
+ * IRS standard business mileage rate, DATE-effective. The IRS normally sets
+ * ONE rate per calendar year, but occasionally revises it mid-year when fuel
+ * prices spike (2011, 2022, and again 2026) — the date-effective table exists
+ * to model those splits authoritatively rather than assume a single annual
+ * rate. Accepts a 'YYYY-MM-DD' string or Date (per-trip money paths MUST pass
+ * the trip date); a bare year number resolves at that year's OPENING rate and
+ * is reserved for year-granularity report displays.
+ *
+ * 2026 IS a mid-year split: 72.5¢ Jan 1–Jun 30 (Notice 2026-10), then 76¢
+ * from Jul 1 (Announcement 2026-11, IRB 2026-29, effective 2026-07-01 due to
+ * fuel-price increases — supersedes Notice 2026-10 for H2). Verified verbatim
+ * against irs.gov/irb/2026-29_irb. Verify each rate against a real IRS notice
+ * before adding it; per-trip money paths resolve the rate at the trip date so
+ * H1 and H2 trips carry the correct figure.
  */
-function getIrsRate(year) {
-  const rates = {
-    2024: 0.67,
-    2025: 0.70,
-    2026: 0.70,
-  };
-  return rates[year] || rates[2026];
+const IRS_MILEAGE_RATE_TABLE = [
+  { from: '2024-01-01', rate: 0.67 },  // Notice 2024-08
+  { from: '2025-01-01', rate: 0.70 },  // Notice 2025-05
+  { from: '2026-01-01', rate: 0.725 }, // Notice 2026-10
+  { from: '2026-07-01', rate: 0.76 },  // Announcement 2026-11 (IRB 2026-29)
+];
+// The table is authoritative only within [FROM, THROUGH]. The final entry is
+// effective FROM its date but NOT forever — the IRS sets a new rate yearly, so
+// a date past the horizon has no verified rate; and dates before the first
+// entry belong to years with their own (uncarried) rates. FAIL CLOSED (rate 0)
+// on BOTH ends rather than silently reusing an adjacent year's rate. Extend the
+// table and bump these when adding a verified IRS rate.
+const IRS_RATE_COVERED_FROM = '2024-01-01';
+const IRS_RATE_COVERED_THROUGH = '2026-12-31';
+
+function getIrsRate(tripDate) {
+  let dstr;
+  if (typeof tripDate === 'number') {
+    dstr = `${tripDate}-01-01`;
+  } else if (tripDate instanceof Date) {
+    // ET calendar day, NOT the server's local (UTC on Railway) day — an
+    // instant near midnight would otherwise land on the wrong date and, at a
+    // mid-year rate boundary like 2026-07-01, pick the wrong rate.
+    dstr = etDateString(tripDate);
+  } else {
+    dstr = String(tripDate || '').slice(0, 10);
+  }
+  // Outside the verified window (either end) → 0 (fail closed). A visible run
+  // of $0 deductions signals "add the IRS rate", never a silently-wrong figure.
+  if (dstr < IRS_RATE_COVERED_FROM || dstr > IRS_RATE_COVERED_THROUGH) {
+    logger.warn(`[bouncie-mileage] no verified IRS mileage rate for ${dstr} (outside ${IRS_RATE_COVERED_FROM}..${IRS_RATE_COVERED_THROUGH}) — returning 0; add the published rate`);
+    return 0;
+  }
+  let rate = IRS_MILEAGE_RATE_TABLE[0].rate;
+  for (const entry of IRS_MILEAGE_RATE_TABLE) {
+    if (entry.from <= dstr) rate = entry.rate;
+    else break;
+  }
+  return rate;
 }
 
 function tripDateForBouncieStart(startTime) {
@@ -199,13 +244,16 @@ async function matchTripToJob(endLat, endLng, tripDate, options = {}) {
  * - If start OR end is within a 'business' or 'supplier' fence → business
  * - Default: unclassified/non-business until a job or business fence matches
  *
- * @returns {{ is_business: boolean, method: string, notes: string }}
+ * @returns {{ is_business: boolean, purpose: string, method: string, notes: string }}
+ *   purpose is the canonical state the row is written with: 'personal' for a
+ *   personal-fence match (operator-configured, definitive), else 'unclassified'
+ *   (business/suggested/needs-review all await operator confirmation at $0).
  */
 async function classifyTrip(startLat, startLng, endLat, endLng) {
-  const defaultResult = { is_business: false, method: 'needs_review', notes: 'Unclassified: no job or business/personal fence match' };
+  const defaultResult = { is_business: false, purpose: 'unclassified', method: 'needs_review', notes: 'Unclassified: no job or business/personal fence match' };
 
   if (!startLat || !startLng || !endLat || !endLng) {
-    return { is_business: false, method: 'needs_review', notes: 'Unclassified: missing start/end coordinates' };
+    return { is_business: false, purpose: 'unclassified', method: 'needs_review', notes: 'Unclassified: missing start/end coordinates' };
   }
 
   try {
@@ -224,6 +272,7 @@ async function classifyTrip(startLat, startLng, endLat, endLng) {
       if ((startInside || endInside) && fence.fence_type === 'personal') {
         return {
           is_business: false,
+          purpose: 'personal', // definitive — operator-configured personal fence
           method: 'auto',
           notes: `Personal: matched geo-fence "${fence.name}" (${fence.fence_type})`,
         };
@@ -241,10 +290,16 @@ async function classifyTrip(startLat, startLng, endLat, endLng) {
 
       if ((startDist <= radius || endDist <= radius) &&
           (fence.fence_type === 'business' || fence.fence_type === 'supplier' || fence.fence_type === 'customer_zone')) {
+        // SUGGEST, don't auto-deduct. Under the manual-review policy every
+        // synced trip stays unclassified at $0 until an operator confirms it —
+        // a geo-fence proximity match is a hint, not substantiation, so it
+        // must not set is_business/deduction on its own (same rule as job
+        // matches). Personal fences above stay non-business ($0 either way).
         return {
-          is_business: true,
-          method: 'auto',
-          notes: `Business: matched geo-fence "${fence.name}" (${fence.fence_type})`,
+          is_business: false,
+          purpose: 'unclassified', // suggestion only — awaits operator confirm
+          method: 'geo_fence_suggested',
+          notes: `Suggested business — geo-fence "${fence.name}" (${fence.fence_type}). Confirm in Tax Center.`,
         };
       }
     }
@@ -316,13 +371,18 @@ async function processTripWebhook(event) {
     });
 
     if (jobMatch) {
-      classification.is_business = true;
-      classification.method = 'auto';
-      classification.notes = `Job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away)`;
+      // Attach job context for review, but do NOT auto-classify as business
+      // or write a deduction. A proximity job match is a SUGGESTION, not
+      // substantiation — business-vs-personal is an operator/CPA decision
+      // made in the Tax Center mileage review (PR #2931). Auto-deducting on a
+      // geographic match turned false matches into tax deductions with no
+      // review. An operator-configured business geo-fence (classifyTrip above)
+      // still classifies, since that's a deliberate rule the operator set.
+      classification.notes = `Suggested business — job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away). Confirm in Tax Center.`;
+      if (!classification.is_business) classification.method = 'job_match_suggested';
     }
 
-    const year = new Date(tripDate).getFullYear();
-    const irsRate = getIrsRate(year);
+    const irsRate = getIrsRate(tripDate);
     const deductionAmount = classification.is_business
       ? parseFloat((distanceMiles * irsRate).toFixed(2))
       : 0;
@@ -353,7 +413,10 @@ async function processTripWebhook(event) {
         end_address: endAddr,
         distance_miles: distanceMiles,
         duration_minutes: durationMinutes,
-        purpose: classification.is_business ? 'business' : 'unclassified',
+        // Canonical purpose from classifyTrip: 'personal' for a personal-fence
+        // match (definitive), else 'unclassified'. A business classification
+        // is never auto-set (suggestion-only), so is_business here is false.
+        purpose: classification.purpose || (classification.is_business ? 'business' : 'unclassified'),
         irs_rate: irsRate,
         deduction_amount: deductionAmount,
         bouncie_trip_id: tripId,
@@ -387,7 +450,10 @@ async function processTripWebhook(event) {
       })
       .returning('*');
 
-    logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${classification.is_business ? 'business' : 'personal'}`);
+    const logState = classification.is_business
+      ? 'business'
+      : (jobMatch ? 'unclassified (job-match suggested — awaits review)' : 'unclassified');
+    logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${logState}`);
 
     // Update daily summary
     if (assignedVehicle) {
@@ -419,8 +485,11 @@ async function computeDailySummary(equipmentId, date) {
     if (trips.length === 0) return null;
 
     const totalMiles = trips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
-    const businessTrips = trips.filter(t => t.is_business);
-    const personalTrips = trips.filter(t => !t.is_business);
+    // business vs personal are DISTINCT from unclassified: only an explicit
+    // purpose counts, so an unreviewed trip isn't miscounted as personal (which
+    // would misstate the business %). total = business + personal + unclassified.
+    const businessTrips = trips.filter(t => t.is_business === true);
+    const personalTrips = trips.filter(t => t.purpose === 'personal');
     const businessMiles = businessTrips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
     const personalMiles = personalTrips.reduce((sum, t) => sum + parseFloat(t.distance_miles || 0), 0);
     const businessPct = totalMiles > 0 ? parseFloat(((businessMiles / totalMiles) * 100).toFixed(2)) : 100;
@@ -444,9 +513,14 @@ async function computeDailySummary(equipmentId, date) {
       ? Math.max(...odometers.map(t => t.end_odometer || 0))
       : null;
 
-    const year = new Date(date).getFullYear();
-    const irsRate = getIrsRate(year);
-    const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
+    const irsRate = getIrsRate(date);
+    // SUM the persisted per-trip deductions (each already rounded at its own
+    // date-effective rate) rather than recomputing round(businessMiles × rate)
+    // — recomputing drifts by cents from the per-trip totals the P&L, IRS
+    // report, and backfill all use, so the summary must sum the same values.
+    const irsDeduction = parseFloat(
+      trips.reduce((sum, t) => sum + parseFloat(t.deduction_amount || 0), 0).toFixed(2),
+    );
 
     // Count completed jobs and revenue for this vehicle's technician on this date
     const equipment = await db('equipment').where('id', equipmentId).first();
@@ -543,9 +617,14 @@ async function computeMonthlySummary(equipmentId, monthDate) {
     const fuelCostEstimated = parseFloat((totalFuel * 3.50).toFixed(2)); // ~$3.50/gal estimate
     const avgMpg = totalFuel > 0 ? parseFloat((totalMiles / totalFuel).toFixed(1)) : null;
 
-    const year = new Date(monthStart).getFullYear();
-    const irsRate = getIrsRate(year);
-    const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
+    const irsRate = getIrsRate(monthStart);
+    // Sum the daily deductions (which themselves sum persisted per-trip
+    // values) rather than recomputing businessMiles × rate — keeps the monthly
+    // figure equal to the P&L/CSV to the cent and correct across a mid-year
+    // rate change within the month.
+    const irsDeduction = parseFloat(
+      dailies.reduce((s, d) => s + parseFloat(d.irs_deduction || 0), 0).toFixed(2),
+    );
 
     const hardBrakesTotal = dailies.reduce((s, d) => s + (d.hard_brakes || 0), 0);
     const hardAccelsTotal = dailies.reduce((s, d) => s + (d.hard_accels || 0), 0);
@@ -683,7 +762,6 @@ async function getIrsReport(year) {
   try {
     const yearStart = `${year}-01-01`;
     const yearEnd = `${year}-12-31`;
-    const irsRate = getIrsRate(year);
 
     const trips = await db('mileage_log')
       .where('trip_date', '>=', yearStart)
@@ -694,55 +772,77 @@ async function getIrsReport(year) {
     const monthMap = {};
     for (let m = 1; m <= 12; m++) {
       const key = `${year}-${String(m).padStart(2, '0')}`;
-      monthMap[key] = { month: key, total_miles: 0, business_miles: 0, personal_miles: 0, trip_count: 0, irs_deduction: 0 };
+      monthMap[key] = { month: key, total_miles: 0, business_miles: 0, personal_miles: 0, unclassified_miles: 0, trip_count: 0, irs_deduction: 0 };
     }
 
     let ytdTotal = 0;
     let ytdBusiness = 0;
     let ytdPersonal = 0;
+    let ytdUnclassified = 0;
     let ytdTrips = 0;
+    let ytdDeduction = 0;
 
     for (const trip of trips) {
       const tripDate = typeof trip.trip_date === 'string' ? trip.trip_date : trip.trip_date.toISOString().split('T')[0];
       const monthKey = tripDate.slice(0, 7);
       const miles = parseFloat(trip.distance_miles || 0);
-      const isBiz = trip.is_business !== false && trip.purpose !== 'personal';
+      // Canonical business flag — ONLY an explicit is_business=true deducts.
+      // The old `is_business !== false` counted UNCLASSIFIED trips (null) as
+      // business, overstating the report and disagreeing with exportIrsCsv
+      // (which filters is_business=true) and the manual-review policy where
+      // unclassified trips carry $0 until an operator confirms them.
+      const isBiz = trip.is_business === true;
+      // Personal is ONLY an explicit personal classification — an unreviewed
+      // (unclassified) trip is neither business nor personal, or the report
+      // would falsely show most synced mileage as personal.
+      const isPersonal = trip.purpose === 'personal';
+
+      // Use the PERSISTED per-trip deduction (written at the trip-date rate by
+      // every classification path and reconciled by the backfill) — the single
+      // authoritative value the P&L/CSV also use. Recomputing here would zero
+      // pre-2024 trips (getIrsRate fails closed below its table) even though
+      // those rows carry valid persisted deductions.
+      const tripDeduction = isBiz ? parseFloat(trip.deduction_amount || 0) : 0;
 
       if (monthMap[monthKey]) {
         monthMap[monthKey].total_miles += miles;
         monthMap[monthKey].trip_count += 1;
-        if (isBiz) {
-          monthMap[monthKey].business_miles += miles;
-        } else {
-          monthMap[monthKey].personal_miles += miles;
-        }
+        monthMap[monthKey].irs_deduction += tripDeduction;
+        if (isBiz) monthMap[monthKey].business_miles += miles;
+        else if (isPersonal) monthMap[monthKey].personal_miles += miles;
+        else monthMap[monthKey].unclassified_miles += miles;
       }
 
       ytdTotal += miles;
       ytdTrips += 1;
+      ytdDeduction += tripDeduction;
       if (isBiz) ytdBusiness += miles;
-      else ytdPersonal += miles;
+      else if (isPersonal) ytdPersonal += miles;
+      else ytdUnclassified += miles;
     }
 
-    // Calculate deductions
     const months = Object.values(monthMap).map(m => ({
       ...m,
       total_miles: parseFloat(m.total_miles.toFixed(2)),
       business_miles: parseFloat(m.business_miles.toFixed(2)),
       personal_miles: parseFloat(m.personal_miles.toFixed(2)),
-      irs_deduction: parseFloat((m.business_miles * irsRate).toFixed(2)),
+      unclassified_miles: parseFloat(m.unclassified_miles.toFixed(2)),
+      irs_deduction: parseFloat(m.irs_deduction.toFixed(2)),
     }));
 
     return {
       year,
-      irs_rate: irsRate,
+      // Informational: the rate in force at the START of the year (the
+      // per-month/per-trip figures above use each trip's own rate).
+      irs_rate: getIrsRate(year),
       months,
       ytd: {
         total_miles: parseFloat(ytdTotal.toFixed(2)),
         business_miles: parseFloat(ytdBusiness.toFixed(2)),
         personal_miles: parseFloat(ytdPersonal.toFixed(2)),
+        unclassified_miles: parseFloat(ytdUnclassified.toFixed(2)),
         trip_count: ytdTrips,
-        irs_deduction: parseFloat((ytdBusiness * irsRate).toFixed(2)),
+        irs_deduction: parseFloat(ytdDeduction.toFixed(2)),
         business_pct: ytdTotal > 0 ? parseFloat(((ytdBusiness / ytdTotal) * 100).toFixed(1)) : 100,
       },
     };
@@ -765,7 +865,6 @@ async function exportIrsCsv(year) {
   try {
     const yearStart = `${year}-01-01`;
     const yearEnd = `${year}-12-31`;
-    const irsRate = getIrsRate(year);
 
     const trips = await db('mileage_log')
       .where('trip_date', '>=', yearStart)
@@ -781,16 +880,20 @@ async function exportIrsCsv(year) {
       const endAddr = (t.end_address || '').replace(/"/g, '""');
       const miles = parseFloat(t.distance_miles || 0).toFixed(2);
       const purpose = t.classification_notes || t.purpose || 'business';
-      const deduction = parseFloat((parseFloat(t.distance_miles || 0) * irsRate).toFixed(2));
+      // PERSISTED per-trip deduction (authoritative; written at the trip-date
+      // rate and reconciled by the backfill) — same value the P&L sums, and
+      // it preserves pre-2024 rows that getIrsRate would recompute to $0.
+      const deduction = parseFloat(t.deduction_amount || 0).toFixed(2);
       return `${date},"${startAddr}","${endAddr}",${miles},"${purpose.replace(/"/g, '""')}",${deduction}`;
     });
 
     let csv = header + '\n' + rows.join('\n');
 
-    // Add totals row
+    // Totals sum the persisted per-row deductions (same authoritative values
+    // as the rows above; rates vary within a year, so this beats miles×rate).
     const totalMiles = trips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const totalDeduction = parseFloat((totalMiles * irsRate).toFixed(2));
-    csv += `\n\nTOTAL,,,"${totalMiles.toFixed(2)}","IRS Rate: $${irsRate}/mile","$${totalDeduction.toFixed(2)}"`;
+    const totalDeduction = trips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
+    csv += `\n\nTOTAL,,,"${totalMiles.toFixed(2)}","Date-effective IRS rates","$${totalDeduction.toFixed(2)}"`;
 
     return csv;
   } catch (err) {

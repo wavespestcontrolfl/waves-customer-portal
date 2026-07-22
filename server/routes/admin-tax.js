@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const MODELS = require('../config/models');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
@@ -45,12 +44,24 @@ router.get('/dashboard', async (req, res, next) => {
         db.raw('COALESCE(SUM(accumulated_depreciation), 0) as total_depreciation'),
       ).first().catch(() => ({ count: 0, total_cost: 0, book_value: 0, total_depreciation: 0 }));
 
-    // Upcoming deadlines
-    const nextDeadlines = await db('tax_filing_calendar')
-      .where('due_date', '>=', db.fn.now())
-      .whereNot('status', 'filed')
-      .orderBy('due_date').limit(5)
-      .catch(() => []);
+    // Overdue AND upcoming deadlines, fetched SEPARATELY so a pile of old
+    // overdue rows can't crowd out (and hide) current/upcoming filings. Overdue
+    // leads the list most-recent-first (nearest actionable), then upcoming
+    // soonest-first — so the "Next Deadline" headline shows the most pressing
+    // item and both groups always have room.
+    const [overdueDeadlines, upcomingDeadlines] = await Promise.all([
+      db('tax_filing_calendar')
+        .whereNot('status', 'filed')
+        .where('due_date', '<', db.fn.now())
+        .orderBy('due_date', 'desc').limit(3)
+        .catch(() => []),
+      db('tax_filing_calendar')
+        .whereNot('status', 'filed')
+        .where('due_date', '>=', db.fn.now())
+        .orderBy('due_date', 'asc').limit(5)
+        .catch(() => []),
+    ]);
+    const nextDeadlines = [...overdueDeadlines, ...upcomingDeadlines];
 
     // Pending advisor alerts
     const alertCounts = await db('tax_advisor_alerts')
@@ -377,13 +388,7 @@ router.post('/expenses', async (req, res, next) => {
     if (!categoryId && (vendorName || description)) {
       try {
         aiCategory = await autoCategorizeExpense(vendorName, description, amount);
-        if (aiCategory?.categoryId) {
-          categoryId = aiCategory.categoryId;
-          // If AI says partially deductible, adjust
-          if (aiCategory.deductiblePercent !== undefined && aiCategory.deductiblePercent < 100) {
-            deductibleAmount = deductibleAmount ?? parseFloat((amount * aiCategory.deductiblePercent / 100).toFixed(2));
-          }
-        }
+        if (aiCategory?.categoryId) categoryId = aiCategory.categoryId;
       } catch (err) {
         aiCategorizeError = err.message;
         logger.warn(`[tax] AI expense categorization failed: ${err.message}`);
@@ -391,9 +396,30 @@ router.post('/expenses', async (req, res, next) => {
       }
     }
 
+    // tax_deductible_amount MUST be within [0, amount] — a value above the
+    // expense or below zero corrupts the book-to-tax bridge (a negative
+    // non-deductible add-back would understate taxable income).
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return res.status(400).json({ error: 'amount must be a number ≥ 0' });
+    }
+    // Server-owned partial-deduction policy applied to the FINAL category —
+    // whether the operator picked it or AI did — so an explicitly-selected
+    // "Meals & Entertainment" still lands at 50%. An explicit client-supplied
+    // deductibleAmount always wins.
+    if (deductibleAmount == null && categoryId) {
+      const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+      const partial = categoryDeductibleAmount(cat?.name, amt);
+      if (partial !== null) deductibleAmount = partial;
+    }
+    const deductible = deductibleAmount == null ? amt : parseFloat(deductibleAmount);
+    if (!Number.isFinite(deductible) || deductible < 0 || deductible > amt) {
+      return res.status(400).json({ error: 'deductibleAmount must be between 0 and the expense amount' });
+    }
+
     const [inserted] = await db('expenses').insert({
       category_id: categoryId, description, amount,
-      tax_deductible_amount: deductibleAmount ?? amount,
+      tax_deductible_amount: deductible,
       expense_date: expenseDate, vendor_name: vendorName,
       payment_method: paymentMethod, is_recurring: isRecurring || false,
       recurrence_period: recurrencePeriod, tax_year: taxYear, quarter, notes,
@@ -522,76 +548,19 @@ router.post('/advisor/run', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════
 // AI EXPENSE AUTO-CATEGORIZATION
 // ═══════════════════════════════════════════════════════════════
+// Shared with the email invoice-processor — see
+// server/services/expense-categorizer.js (extracted 2026-07-21 so emailed
+// vendor invoices stop landing uncategorized).
+const { autoCategorizeExpense, categoryDeductibleAmount } = require('../services/expense-categorizer');
 
-/**
- * Use Claude to auto-categorize an expense into an IRS Schedule C category.
- * Returns { categoryId, categoryName, irsLine, deductiblePercent, reasoning }
- */
-async function autoCategorizeExpense(vendorName, description, amount) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic();
-
-  // Get expense categories from the DB to match against
-  const categories = await db('expense_categories').orderBy('sort_order');
-  const categoryList = categories.map(c =>
-    `- ${c.name} (IRS Line ${c.irs_line}): ${c.irs_description}${c.notes ? ` — ${c.notes}` : ''}`
-  ).join('\n');
-
-  const prompt = `You are a tax categorization assistant for a pest control / lawn care business in Florida.
-
-Given this expense, categorize it into the correct IRS Schedule C category and determine deductibility.
-
-Expense details:
-- Vendor: ${vendorName || 'Unknown'}
-- Description: ${description || 'None provided'}
-- Amount: $${amount}
-
-Available categories:
-${categoryList}
-
-Respond ONLY with valid JSON (no markdown, no explanation):
-{
-  "categoryName": "exact category name from the list above",
-  "irsLine": "the IRS line number",
-  "deductiblePercent": 100,
-  "reasoning": "one sentence why"
-}
-
-Rules:
-- Business meals are 50% deductible
-- Vehicle expenses: use "Vehicle Expenses" category
-- Software, SaaS, hosting: use "Software & Technology"
-- Chemicals, PPE, equipment supplies: use "Supplies"
-- If truly unclear, use "Office Expenses" as default`;
-
-  const response = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 200,
-    messages: [{ role: 'user', content: prompt }],
-  });
-
-  const text = response.content[0]?.text || '{}';
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Try extracting JSON from response
-    const match = text.match(/\{[\s\S]*\}/);
-    parsed = match ? JSON.parse(match[0]) : {};
-  }
-
-  // Match the AI's category name to an actual DB record
-  if (parsed.categoryName) {
-    const match = categories.find(c =>
-      c.name.toLowerCase() === parsed.categoryName.toLowerCase()
-    );
-    if (match) {
-      parsed.categoryId = match.id;
-    }
-  }
-
-  return parsed;
-}
+// Partial-deduction policy is SERVER-owned and derived from the MATCHED
+// category — never from the model's deductiblePercent. Keying off the model
+// meant a meal the AI correctly filed under "Meals & Entertainment" was
+// deducted at 100% whenever the model omitted the field or answered 100.
+// The policy is derived from the MATCHED category name and lives in the
+// shared expense-categorizer service (categoryDeductibleAmount) so the three
+// call sites — this route's POST /expenses and /expenses/auto-categorize, and
+// the email invoice-processor — share one source of truth.
 
 // ═══════════════════════════════════════════════════════════════
 // MILEAGE LOG (Bouncie GPS Integration)
@@ -641,11 +610,25 @@ router.post('/mileage', async (req, res, next) => {
       return res.status(400).json({ error: 'tripDate and distanceMiles are required' });
     }
 
-    const year = new Date(tripDate).getFullYear();
-    // IRS rates by year (env override for current/future years)
-    const rateMap = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
-    const irsRate = rateMap[year] || parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
-    const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
+    // A hand-entered trip IS an operator classification — mark it as such so
+    // is_business/purpose/method agree (the schema defaults are is_business=
+    // true + classification_method='auto', which left manual entries looking
+    // auto-classified and mis-attributed). ONLY an explicit business purpose
+    // deducts: commuting (home ↔ regular workplace) and personal trips are
+    // nondeductible, so anything other than 'business' is $0.
+    const resolvedPurpose = purpose || 'business';
+    const isBusiness = resolvedPurpose === 'business';
+    // Date-effective (the IRS changes the rate mid-year).
+    const irsRate = isBusiness ? require('../services/bouncie-mileage').getIrsRate(tripDate) : 0;
+    // REFUSE a business trip with no verified rate (a date past the horizon →
+    // rate 0), same as classifyTrips: persisting $0 would look reviewed and
+    // never self-heal when the rate is added (reports sum persisted values).
+    if (isBusiness && !(irsRate > 0)) {
+      return res.status(422).json({
+        error: 'No verified IRS mileage rate for this trip’s date yet — add the published rate before recording a business trip for it.',
+      });
+    }
+    const deductionAmount = isBusiness ? parseFloat((distanceMiles * irsRate).toFixed(2)) : 0;
 
     const [inserted] = await db('mileage_log').insert({
       vehicle_name: vehicleName || 'Manual Entry',
@@ -654,7 +637,9 @@ router.post('/mileage', async (req, res, next) => {
       end_address: endAddress || null,
       distance_miles: distanceMiles,
       duration_minutes: durationMinutes || null,
-      purpose: purpose || 'business',
+      purpose: resolvedPurpose,
+      is_business: isBusiness,
+      classification_method: 'manual',
       irs_rate: irsRate,
       deduction_amount: deductionAmount,
       source: 'manual',
@@ -724,7 +709,9 @@ router.get('/mileage/stats', async (req, res, next) => {
 
     const tripCount = parseInt(totals.trip_count);
     const totalMiles = parseFloat(totals.total_miles);
-    const irsRate = parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
+    // Display-only "current rate" — per-trip deductions are computed at each
+    // trip's date-effective rate and summed from deduction_amount above.
+    const irsRate = mileageService.getIrsRate(etDateString());
     res.json({
       year,
       totalMiles,
@@ -745,6 +732,223 @@ router.get('/mileage/stats', async (req, res, next) => {
         deduction: parseFloat(m.deduction),
         count: parseInt(m.count),
       })),
+    });
+  } catch (err) { next(err); }
+});
+
+// Date-effective IRS rate + canonical summary recompute live in the shared
+// mileage service (the IRS changes the rate MID-YEAR — a year-keyed rate
+// wrote wrong deductions for H2 trips).
+const mileageService = require('../services/bouncie-mileage');
+const MILEAGE_PURPOSES = ['business', 'personal', 'unclassified'];
+
+// Classify trips (single or bulk) — the geofence classifier is RETIRED, so
+// every Bouncie trip lands 'unclassified' at $0 deduction and this is the
+// ONLY way to claim the miles. business → deduction at the TRIP-DATE IRS
+// rate; personal/unclassified → $0. Substantiation (which trips are
+// business) is the operator's call — nothing here auto-classifies.
+async function classifyTrips(ids, purpose) {
+  let updated = 0;
+  let deductionTotal = 0;
+  let skippedNoRate = 0;
+  const summaryKeys = new Set();
+  // ALL the row updates commit together or not at all — up to 500 rows updated
+  // one at a time would otherwise leave deductions half-applied (and summaries
+  // never recomputed) if one update failed midway.
+  await db.transaction(async (trx) => {
+    const rows = await trx('mileage_log')
+      .whereIn('id', ids)
+      .select('id', 'trip_date', 'distance_miles', 'equipment_id');
+    for (const row of rows) {
+      const tripDay = dateCellStr(row.trip_date);
+      const rate = mileageService.getIrsRate(tripDay);
+      // REFUSE to book a business trip with no verified IRS rate (a date past
+      // the rate horizon → rate 0). Persisting $0 would look "reviewed" and
+      // never self-heal when the rate is added (reports sum persisted values),
+      // so leave it UNCLASSIFIED for re-review once the table is extended.
+      if (purpose === 'business' && !(rate > 0)) {
+        skippedNoRate++;
+        continue;
+      }
+      const miles = parseFloat(row.distance_miles) || 0;
+      const deduction = purpose === 'business' ? parseFloat((miles * rate).toFixed(2)) : 0;
+      await trx('mileage_log').where({ id: row.id }).update({
+        purpose,
+        // Keep the canonical classification fields other surfaces read
+        // (admin-mileage filters on is_business) in lockstep with purpose.
+        is_business: purpose === 'business',
+        classification_method: 'manual_review',
+        classification_notes: 'Classified via Tax Center mileage review',
+        irs_rate: purpose === 'business' ? rate : 0,
+        deduction_amount: deduction,
+        updated_at: new Date(),
+      });
+      if (row.equipment_id && tripDay) summaryKeys.add(`${row.equipment_id}|${tripDay}`);
+      updated++;
+      deductionTotal += deduction;
+    }
+  });
+  // Recompute the affected daily AND monthly summaries AFTER the classification
+  // commits — derived state, best-effort, and a recompute failure must not roll
+  // back the now-durable classification. (The monthly cron only regenerates the
+  // PREVIOUS month, so an older trip's month would otherwise stay stale.)
+  let summaryRecomputeFailures = 0;
+  const monthKeys = new Set();
+  for (const key of summaryKeys) {
+    const [equipmentId, day] = key.split('|');
+    try {
+      await mileageService.computeDailySummary(equipmentId, day);
+    } catch (err) {
+      summaryRecomputeFailures++;
+      logger.warn(`[tax] mileage daily summary recompute failed for ${equipmentId} ${day}: ${err.message}`);
+    }
+    monthKeys.add(`${equipmentId}|${day.slice(0, 7)}`);
+  }
+  for (const key of monthKeys) {
+    const [equipmentId, month] = key.split('|');
+    try {
+      await mileageService.computeMonthlySummary(equipmentId, `${month}-01`);
+    } catch (err) {
+      summaryRecomputeFailures++;
+      logger.warn(`[tax] mileage monthly summary recompute failed for ${equipmentId} ${month}: ${err.message}`);
+    }
+  }
+  return {
+    updated,
+    deductionTotal: Math.round(deductionTotal * 100) / 100,
+    skippedNoRate,
+    // Surfaced so the caller/UI knows dashboards may be briefly stale — the
+    // classification itself is durable; only the derived summaries lagged.
+    summaryRecomputeFailures,
+  };
+}
+
+// PUT /mileage/:id — reclassify one trip
+router.put('/mileage/:id', async (req, res, next) => {
+  try {
+    const { purpose } = req.body || {};
+    if (!MILEAGE_PURPOSES.includes(purpose)) {
+      return res.status(400).json({ error: `purpose must be one of: ${MILEAGE_PURPOSES.join(', ')}` });
+    }
+    const result = await classifyTrips([req.params.id], purpose);
+    // A business trip past the IRS-rate horizon is refused, not "not found".
+    if (!result.updated && result.skippedNoRate) {
+      return res.status(422).json({
+        error: 'No verified IRS mileage rate for this trip’s date yet — left unclassified. Add the published rate, then reclassify.',
+        ...result,
+      });
+    }
+    if (!result.updated) return res.status(404).json({ error: 'Trip not found' });
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// POST /mileage/bulk-classify — { ids: [...], purpose }
+router.post('/mileage/bulk-classify', async (req, res, next) => {
+  try {
+    const { ids, purpose } = req.body || {};
+    if (!MILEAGE_PURPOSES.includes(purpose)) {
+      return res.status(400).json({ error: `purpose must be one of: ${MILEAGE_PURPOSES.join(', ')}` });
+    }
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500) {
+      return res.status(400).json({ error: 'ids must be a non-empty array (max 500)' });
+    }
+    const result = await classifyTrips(ids, purpose);
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// POST /expenses/auto-categorize — AI-categorize a batch of uncategorized
+// expenses (oldest first). Operator-triggered from the Expenses tab; results
+// come back per-expense so the picks are reviewable. Failures on one expense
+// never abort the batch.
+// { limit?, year?, ids? } — the scope must match what the operator can SEE.
+// The tab counts its button from the rows it loaded for the selected tax
+// year, so a global oldest-first sweep mutated expenses off-screen and could
+// leave the visible backlog unchanged after a "successful" run.
+router.post('/expenses/auto-categorize', async (req, res, next) => {
+  try {
+    const rawLimit = parseInt(req.body?.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
+    // ids = the exact visible backlog (bounded like bulk-classify); year =
+    // the tab's filter. Neither supplied keeps the old whole-table behavior
+    // for callers with no view to agree with (scripts, IB tools).
+    const { ids, year } = req.body || {};
+    if (ids !== undefined && (!Array.isArray(ids) || ids.length === 0 || ids.length > 500)) {
+      return res.status(400).json({ error: 'ids must be a non-empty array (max 500)' });
+    }
+    if (year !== undefined && !/^\d{4}$/.test(String(year))) {
+      return res.status(400).json({ error: 'year must be a 4-digit year' });
+    }
+    // ONE builder feeds both the batch selection and the `remaining` count —
+    // a differently-scoped count is exactly what let the tab report a
+    // backlog the run never touched.
+    const scoped = () => {
+      let q = db('expenses').whereNull('category_id');
+      if (ids !== undefined) q = q.whereIn('id', ids);
+      if (year !== undefined) q = q.where('tax_year', String(year));
+      return q;
+    };
+    const uncategorized = await scoped()
+      .orderBy('expense_date', 'asc')
+      .limit(limit)
+      .select('id', 'vendor_name', 'description', 'amount');
+    // Canonical category names for the server-owned partial-deduction
+    // policy — resolved from the row the AI matched, never from its echoed
+    // categoryName string.
+    const categoryNames = new Map(
+      (await db('expense_categories').select('id', 'name')).map(c => [String(c.id), c.name]),
+    );
+    const results = [];
+    for (const exp of uncategorized) {
+      try {
+        const ai = await autoCategorizeExpense(exp.vendor_name, exp.description, exp.amount);
+        if (ai?.categoryId) {
+          const update = {
+            category_id: ai.categoryId,
+            updated_at: new Date(),
+            // The description can include text imported from untrusted invoice
+            // emails (prompt-injectable). Categories are allow-listed and the
+            // deductible % is server-owned, so the blast radius is a possibly-
+            // wrong-but-valid category — FLAG the row so the operator verifies
+            // the AI pick rather than trusting it silently. This route is
+            // operator-triggered and returns per-row results for that review.
+            notes: db.raw("COALESCE(notes,'') || ' [AI-categorized — verify]'"),
+          };
+          // Partial deduction follows the MATCHED CATEGORY, not the model's
+          // deductiblePercent — a 50%-limited meal must land at 50% even
+          // when the model omits the field or claims 100.
+          const partial = categoryDeductibleAmount(categoryNames.get(String(ai.categoryId)), exp.amount);
+          if (partial !== null) {
+            update.tax_deductible_amount = partial;
+          }
+          // Re-assert still-uncategorized: the model calls run serially, so an
+          // operator could categorize this row mid-batch — a bare id UPDATE
+          // would clobber that manual choice with a stale AI pick. A zero-row
+          // update means someone got there first; skip it.
+          const changed = await db('expenses')
+            .where({ id: exp.id })
+            .whereNull('category_id')
+            .update(update);
+          if (!changed) {
+            results.push({ id: exp.id, description: exp.description, applied: false, error: 'already categorized' });
+            continue;
+          }
+          results.push({ id: exp.id, description: exp.description, category: ai.categoryName, reasoning: ai.reasoning, applied: true });
+        } else {
+          results.push({ id: exp.id, description: exp.description, applied: false, error: 'no matching category' });
+        }
+      } catch (err) {
+        results.push({ id: exp.id, description: exp.description, applied: false, error: err.message });
+      }
+    }
+    const remaining = await scoped().count('* as n').first();
+    res.json({
+      success: true,
+      processed: results.length,
+      applied: results.filter(r => r.applied).length,
+      remaining: parseInt(remaining?.n || 0, 10),
+      results,
     });
   } catch (err) { next(err); }
 });
@@ -800,8 +1004,12 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       return res.status(400).json({ error: 'quarter parameter required (Q1, Q2, Q3, or Q4)' });
     }
     const now = new Date();
-    // Use ET year so the quarter doesn't roll over to next year late on Dec 31 ET.
-    const year = etParts(now).year;
+    // Optional ?year= pins the estimate to the SELECTED period's year (the
+    // Revenue tab derives quarter+year from its month picker); default stays
+    // the ET year so the quarter doesn't roll over late on Dec 31 ET.
+    const year = /^\d{4}$/.test(String(req.query.year || ''))
+      ? parseInt(req.query.year, 10)
+      : etParts(now).year;
     const qNum = parseInt(quarter.replace('Q', ''));
     const startMonth = (qNum - 1) * 3;
     const pad2 = (n) => String(n).padStart(2, '0');

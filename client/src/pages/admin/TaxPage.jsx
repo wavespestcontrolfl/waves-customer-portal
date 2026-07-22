@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   Truck,
 } from "lucide-react";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -130,7 +130,11 @@ const inputStyle = {
   fontFamily: "inherit",
   outline: "none",
 };
-const fmtD = (d) => (d ? new Date(d).toLocaleDateString() : "—");
+// Date-only values (filing due dates, expense/purchase dates) arrive as
+// UTC-midnight strings — bare toLocaleDateString rendered them one day early
+// in ET, so the DR-15 "Apr 30" deadline printed as 4/29 while the countdown
+// chip beside it said otherwise. formatETDateOnly anchors the calendar day.
+const fmtD = (d) => (d ? formatETDateOnly(d) : "—");
 const fmtM = (n) =>
   n != null
     ? "$" +
@@ -366,6 +370,17 @@ function ServiceTaxabilityTab() {
   }, []);
 
   const toggleTaxable = async (s) => {
+    // A stray click must not silently flip the tax base every future
+    // invoice of this service is built on — confirm the FL taxability
+    // change before writing it.
+    const next = s.isTaxable ? "EXEMPT" : "TAXABLE";
+    if (
+      !window.confirm(
+        `Mark "${s.serviceLabel}" as ${next} for FL sales tax? This changes the tax determination used going forward.`,
+      )
+    ) {
+      return;
+    }
     setToggling(s.id);
     try {
       await adminFetch(`/admin/tax/service-taxability/${s.id}`, {
@@ -794,6 +809,42 @@ function ExpensesTab() {
   const [yearFilter, setYearFilter] = useState(
     String(new Date().getFullYear()),
   );
+  const [categorizing, setCategorizing] = useState(false);
+
+  // YEAR-wide uncategorized count from the summary (grouped by category, so
+  // the null-category bucket is the whole year's backlog) — NOT just the 50
+  // rows this page loaded. Scoping the run by year alone lets it drain the
+  // entire year's backlog across pages instead of stalling after page 1, while
+  // still never touching a different tax year.
+  const uncategorizedCount =
+    summary.find((s) => !s.category)?.count || 0;
+
+  const runAutoCategorize = async () => {
+    if (
+      !window.confirm(
+        `AI-categorize up to 20 of the ${uncategorizedCount} uncategorized ${yearFilter} expenses into Schedule C categories? Each pick is recorded and reviewable — run again to continue through the backlog.`,
+      )
+    ) {
+      return;
+    }
+    setCategorizing(true);
+    try {
+      const r = await adminFetch("/admin/tax/expenses/auto-categorize", {
+        method: "POST",
+        body: JSON.stringify({
+          limit: 20,
+          year: yearFilter,
+        }),
+      });
+      alert(
+        `Categorized ${r.applied} of ${r.processed} — ${r.remaining} uncategorized remaining${r.remaining > 0 ? " (run again to continue)" : ""}`,
+      );
+      load();
+    } catch (e) {
+      alert(`Auto-categorize failed: ${e.message}`);
+    }
+    setCategorizing(false);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -859,11 +910,39 @@ function ExpensesTab() {
             style={{ ...inputStyle, minWidth: 80 }}
           >
             {" "}
-            <option value="2026">2026</option>
-            <option value="2025">2025</option>
-            <option value="2024">2024</option>{" "}
+            {/* Dynamic so the current tax year is always selectable (the
+                hardcoded list dead-ended every January). */}
+            {Array.from(
+              { length: new Date().getFullYear() - 2023 },
+              (_, i) => String(new Date().getFullYear() - i),
+            ).map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}{" "}
           </select>{" "}
         </div>{" "}
+        {uncategorizedCount > 0 && (
+          <button
+            onClick={runAutoCategorize}
+            disabled={categorizing}
+            style={{
+              background: "transparent",
+              border: `1px solid ${D.amber}`,
+              borderRadius: 6,
+              padding: "6px 14px",
+              color: D.amber,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              opacity: categorizing ? 0.5 : 1,
+            }}
+          >
+            {categorizing
+              ? "Categorizing..."
+              : `AI-categorize (${uncategorizedCount} uncategorized shown)`}
+          </button>
+        )}{" "}
         <button
           onClick={() => setShowAdd(!showAdd)}
           style={{
@@ -2024,8 +2103,15 @@ function ExemptionsTab() {
 function MileageTab() {
   const [entries, setEntries] = useState([]);
   const [stats, setStats] = useState(null);
+  const [statsError, setStatsError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  // Classification review: the geofence classifier is retired, so synced
+  // trips sit 'unclassified' at $0 deduction until reviewed here.
+  const [purposeFilter, setPurposeFilter] = useState("all");
+  const [selected, setSelected] = useState(() => new Set());
+  const [classifying, setClassifying] = useState(false);
+
   const [form, setForm] = useState({
     trip_date: etDateString(),
     start_address: "",
@@ -2035,31 +2121,68 @@ function MileageTab() {
     notes: "",
   });
 
-  const load = () => {
+  const load = (filter = purposeFilter) => {
+    const listUrl =
+      filter === "all"
+        ? "/admin/tax/mileage?limit=200"
+        : `/admin/tax/mileage?limit=200&purpose=${filter}`;
     Promise.all([
-      adminFetch("/admin/tax/mileage").catch((err) => {
+      adminFetch(listUrl).catch((err) => {
         console.error("[tax] mileage fetch failed:", err);
         return { entries: [] };
       }),
       adminFetch("/admin/tax/mileage/stats").catch((err) => {
         console.error("[tax] mileage stats failed:", err);
-        return null;
+        return { error: err?.message || "Failed to load" };
       }),
     ]).then(([m, s]) => {
       setEntries((m && (m.entries || m)) || []);
-      setStats(
-        s || {
-          totalMiles: 0,
-          totalDeduction: 0,
-          totalTrips: 0,
-          avgDistance: 0,
-          irsRate: 0.7,
-        },
-      );
+      // A stats failure renders as unknown, never as a confident $0 YTD
+      // deduction at a made-up rate.
+      if (s && s.error) {
+        setStats(null);
+        setStatsError(s.error);
+      } else {
+        setStats(s);
+        setStatsError(null);
+      }
+      setSelected(new Set());
       setLoading(false);
     });
   };
-  useEffect(load, []);
+  useEffect(() => load(purposeFilter), [purposeFilter]);
+
+  const bulkClassify = async (purpose) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (
+      !window.confirm(
+        `Mark ${ids.length} trip${ids.length === 1 ? "" : "s"} as ${purpose.toUpperCase()}?${purpose === "business" ? " Their deduction recomputes at that year's IRS rate." : " Their deduction becomes $0."}`,
+      )
+    ) {
+      return;
+    }
+    setClassifying(true);
+    try {
+      const r = await adminFetch("/admin/tax/mileage/bulk-classify", {
+        method: "POST",
+        body: JSON.stringify({ ids, purpose }),
+      });
+      let msg = `${r.updated} trip${r.updated === 1 ? "" : "s"} marked ${purpose}${purpose === "business" ? ` — ${fmtM(r.deductionTotal)} in deductions` : ""}`;
+      // Surface the honest edges the server reports, rather than a bare success.
+      if (r.skippedNoRate) {
+        msg += `\n\n⚠ ${r.skippedNoRate} trip${r.skippedNoRate === 1 ? "" : "s"} left UNCLASSIFIED — no verified IRS rate for their date yet. Add the published rate, then reclassify.`;
+      }
+      if (r.summaryRecomputeFailures) {
+        msg += `\n\n⚠ Mileage summaries for ${r.summaryRecomputeFailures} day/month bucket${r.summaryRecomputeFailures === 1 ? "" : "s"} could not be recomputed — dashboards may be briefly stale (the classification itself is saved). Re-run Sync to repair.`;
+      }
+      alert(msg);
+      load();
+    } catch (e) {
+      alert(`Classification failed: ${e.message}`);
+    }
+    setClassifying(false);
+  };
 
   const handleSync = async () => {
     setSyncing(true);
@@ -2107,6 +2230,22 @@ function MileageTab() {
   return (
     <div>
       {/* Stats */}
+      {statsError && (
+        <div
+          style={{
+            background: `${D.red}11`,
+            border: `1px solid ${D.red}`,
+            borderRadius: 8,
+            padding: "12px 16px",
+            marginBottom: 16,
+            color: D.red,
+            fontSize: 14,
+          }}
+        >
+          Couldn't load mileage totals ({statsError}) — YTD figures are
+          unknown, not zero.
+        </div>
+      )}
       {stats && (
         <div
           style={{
@@ -2118,7 +2257,7 @@ function MileageTab() {
         >
           {" "}
           <StatCard
-            label="YTD Business Miles"
+            label="YTD Miles Logged"
             value={`${(stats.totalMiles || 0).toLocaleString()} mi`}
             color={D.green}
           />{" "}
@@ -2126,7 +2265,7 @@ function MileageTab() {
             label="YTD Deduction"
             value={fmtM(stats.totalDeduction)}
             color={D.green}
-            sub={`@ $${stats.irsRate || 0.7}/mile`}
+            sub={stats.irsRate != null ? `@ $${stats.irsRate}/mile` : undefined}
           />{" "}
           <StatCard
             label="Total Trips"
@@ -2140,6 +2279,69 @@ function MileageTab() {
           />{" "}
         </div>
       )}
+      {/* Classification review bar */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          marginBottom: 12,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <label style={{ fontSize: 12, color: D.muted }}>Show:</label>
+        <select
+          value={purposeFilter}
+          onChange={(e) => setPurposeFilter(e.target.value)}
+          style={{ ...inputStyle, cursor: "pointer" }}
+        >
+          <option value="all">All trips</option>
+          <option value="unclassified">Unclassified</option>
+          <option value="business">Business</option>
+          <option value="personal">Personal</option>
+        </select>
+        {selected.size > 0 && (
+          <>
+            <span style={{ fontSize: 12, color: D.muted }}>
+              {selected.size} selected
+            </span>
+            <button
+              onClick={() => bulkClassify("business")}
+              disabled={classifying}
+              style={{
+                padding: "6px 12px",
+                background: D.green,
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                opacity: classifying ? 0.5 : 1,
+              }}
+            >
+              Mark business
+            </button>
+            <button
+              onClick={() => bulkClassify("personal")}
+              disabled={classifying}
+              style={{
+                padding: "6px 12px",
+                background: "transparent",
+                color: D.muted,
+                border: `1px solid ${D.border}`,
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                opacity: classifying ? 0.5 : 1,
+              }}
+            >
+              Mark personal
+            </button>
+          </>
+        )}
+      </div>
 
       {/* Sync + Add */}
       <div
@@ -2289,6 +2491,28 @@ function MileageTab() {
             {" "}
             <thead>
               <tr>
+                <th
+                  style={{
+                    padding: "8px 10px",
+                    borderBottom: `1px solid ${D.border}`,
+                    width: 30,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={
+                      entries.length > 0 && selected.size === entries.length
+                    }
+                    onChange={(ev) =>
+                      setSelected(
+                        ev.target.checked
+                          ? new Set(entries.map((e) => e.id))
+                          : new Set(),
+                      )
+                    }
+                    aria-label="Select all listed trips"
+                  />
+                </th>
                 {[
                   "Date",
                   "From",
@@ -2316,14 +2540,31 @@ function MileageTab() {
               </tr>
             </thead>{" "}
             <tbody>
-              {entries.slice(0, 50).map((e, i) => (
+              {/* API fields are camelCase (tripDate/distanceMiles/…) — the old
+                  snake_case reads rendered every cell as a dash. */}
+              {entries.map((e, i) => (
                 <tr
                   key={e.id || i}
                   style={{ borderBottom: `1px solid ${D.border}22` }}
                 >
                   {" "}
+                  <td style={{ padding: "8px 10px" }}>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(e.id)}
+                      onChange={(ev) =>
+                        setSelected((prev) => {
+                          const next = new Set(prev);
+                          if (ev.target.checked) next.add(e.id);
+                          else next.delete(e.id);
+                          return next;
+                        })
+                      }
+                      aria-label="Select trip"
+                    />
+                  </td>{" "}
                   <td style={{ padding: "8px 10px", fontSize: 12 }}>
-                    {fmtD(e.trip_date)}
+                    {fmtD(e.tripDate || e.trip_date)}
                   </td>{" "}
                   <td
                     style={{
@@ -2335,7 +2576,7 @@ function MileageTab() {
                       textOverflow: "ellipsis",
                     }}
                   >
-                    {e.start_address || "—"}
+                    {e.startAddress || e.start_address || "—"}
                   </td>{" "}
                   <td
                     style={{
@@ -2347,7 +2588,7 @@ function MileageTab() {
                       textOverflow: "ellipsis",
                     }}
                   >
-                    {e.end_address || "—"}
+                    {e.endAddress || e.end_address || "—"}
                   </td>{" "}
                   <td
                     style={{
@@ -2357,10 +2598,18 @@ function MileageTab() {
                       color: D.heading,
                     }}
                   >
-                    {parseFloat(e.distance_miles || 0).toFixed(1)}
+                    {parseFloat(e.distanceMiles ?? e.distance_miles ?? 0).toFixed(1)}
                   </td>{" "}
                   <td style={{ padding: "8px 10px" }}>
-                    <Badge color={e.purpose === "business" ? D.green : D.muted}>
+                    <Badge
+                      color={
+                        e.purpose === "business"
+                          ? D.green
+                          : e.purpose === "unclassified"
+                            ? D.amber
+                            : D.muted
+                      }
+                    >
                       {e.purpose}
                     </Badge>
                   </td>{" "}
@@ -2372,7 +2621,7 @@ function MileageTab() {
                       color: D.green,
                     }}
                   >
-                    {fmtM(e.deduction_amount)}
+                    {fmtM(e.deductionAmount ?? e.deduction_amount)}
                   </td>{" "}
                   <td style={{ padding: "8px 10px" }}>
                     <Badge
@@ -2406,21 +2655,20 @@ function RevenueTab() {
 
   const load = () => {
     setLoading(true);
-    const q =
-      new Date().getMonth() < 3
-        ? "Q1"
-        : new Date().getMonth() < 6
-          ? "Q2"
-          : new Date().getMonth() < 9
-            ? "Q3"
-            : "Q4";
+    // Quarter AND year follow the SELECTED month, not browser-local
+    // "today" — the old derivation left the quarterly card frozen on the
+    // current quarter (and the server on the current year), stacking two
+    // different periods as if related.
+    const [selYear, selMonthStr] = String(month).split("-");
+    const selMonth = parseInt(selMonthStr, 10) || 1;
+    const q = `Q${Math.ceil(selMonth / 3)}`;
     Promise.all([
       adminFetch(`/admin/tax/revenue/reconcile?month=${month}`).catch(
         () => null,
       ),
-      adminFetch(`/admin/tax/revenue/quarterly-estimate?quarter=${q}`).catch(
-        () => null,
-      ),
+      adminFetch(
+        `/admin/tax/revenue/quarterly-estimate?quarter=${q}&year=${selYear}`,
+      ).catch(() => null),
     ]).then(([r, qe]) => {
       setReconcile(r);
       setQuarterly(qe);
@@ -2612,6 +2860,7 @@ function PnlTab() {
   const [period, setPeriod] = useState("mtd");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
+  const [savingMethod, setSavingMethod] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2631,6 +2880,36 @@ function PnlTab() {
     load();
   }, [load]);
 
+  // Elect (or un-elect) the vehicle deduction method. Persisted on
+  // company_financials via the canonical revenue-settings writer; a confirm
+  // guards the change because it moves real deduction dollars.
+  const setVehicleMethod = async (value) => {
+    const method = value === "" ? null : value;
+    const labels = {
+      standard_mileage: "Standard mileage",
+      actual_expenses: "Actual vehicle expenses",
+      null: "Not elected",
+    };
+    if (
+      !window.confirm(
+        `Record your intended vehicle deduction method as "${labels[method]}"? This P&L always reports ACTUAL vehicle costs — the setting doesn't change the totals; if you choose standard mileage it just discloses the mileage figure to apply manually with your CPA (line 9 allows one method, not both).`,
+      )
+    ) {
+      return;
+    }
+    setSavingMethod(true);
+    try {
+      await adminFetch("/admin/revenue/settings", {
+        method: "PUT",
+        body: JSON.stringify({ vehicleDeductionMethod: method }),
+      });
+      await load();
+    } catch (e) {
+      alert(`Could not save election: ${e.message || e}`);
+    }
+    setSavingMethod(false);
+  };
+
   const downloadPnl = async () => {
     try {
       let url = `${API_BASE}/admin/tax/export/pnl?period=${period}`;
@@ -2641,6 +2920,8 @@ function PnlTab() {
           Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         },
       });
+      // Never save an error page as a .csv a CPA might open.
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const blob = await resp.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -2879,6 +3160,67 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow label="Total Deductions" value={pnl.deductions?.total} bold />{" "}
+          {pnl.vehicleDeduction && (
+            <div
+              style={{
+                marginTop: 8,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12,
+                color: D.muted,
+              }}
+            >
+              <span>Intended vehicle method (informational — P&amp;L reports actual costs):</span>
+              <select
+                value={pnl.vehicleDeduction.method || ""}
+                disabled={savingMethod}
+                onChange={(e) => setVehicleMethod(e.target.value)}
+                style={{ ...inputStyle, minWidth: 180, opacity: savingMethod ? 0.5 : 1 }}
+              >
+                <option value="">Not elected</option>
+                <option value="standard_mileage">Standard mileage</option>
+                <option value="actual_expenses">Actual vehicle expenses</option>
+              </select>
+            </div>
+          )}{" "}
+          {pnl.vehicleDeduction &&
+            pnl.vehicleDeduction.standardMileageComputed > 0 &&
+            !pnl.vehicleDeduction.methodConflict && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "8px 10px",
+                  border: `1px solid ${D.amber}`,
+                  borderRadius: 6,
+                  color: D.amber,
+                  fontSize: 12,
+                  lineHeight: 1.45,
+                }}
+              >
+                This P&amp;L deducts actual vehicle costs. Standard mileage for
+                the period would be{" "}
+                {fmtM(pnl.vehicleDeduction.standardMileageComputed)} — it is not
+                added here (Schedule&nbsp;C line 9 allows actual expenses OR
+                mileage, not both). Apply it with your CPA in place of the actual
+                vehicle costs only if you use the standard method.
+              </div>
+            )}{" "}
+          {pnl.vehicleDeduction?.methodConflict && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "8px 10px",
+                border: `1px solid ${D.red}`,
+                borderRadius: 6,
+                color: D.red,
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {pnl.vehicleDeduction.methodConflict.note}
+            </div>
+          )}{" "}
           <div style={{ height: 16 }} />{" "}
           <div
             style={{
@@ -3064,9 +3406,14 @@ function ExportsTab() {
               style={{ ...inputStyle, minWidth: 80 }}
             >
               {" "}
-              <option value="2026">2026</option>
-              <option value="2025">2025</option>
-              <option value="2024">2024</option>{" "}
+              {Array.from(
+                { length: new Date().getFullYear() - 2023 },
+                (_, i) => String(new Date().getFullYear() - i),
+              ).map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}{" "}
             </select>{" "}
             <button
               onClick={() =>
@@ -3204,18 +3551,33 @@ function ExportsTab() {
 function AccountsReceivableTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [sending, setSending] = useState(null);
 
   useEffect(() => {
     adminFetch("/admin/tax/accounts-receivable")
       .then((d) => {
         setData(d);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((e) => {
+        // A failed load must never render as "$0.00 / All caught up!" —
+        // that's indistinguishable from genuinely clean receivables.
+        setLoadError(e?.message || "Failed to load");
+        setLoading(false);
+      });
   }, []);
 
   const sendReminder = async (inv) => {
+    // Outbound customer SMS — never one accidental click away.
+    if (
+      !window.confirm(
+        `Text ${inv.customerName} a payment reminder for ${fmtM(inv.amount)} (Invoice #${inv.invoiceNumber})?`,
+      )
+    ) {
+      return;
+    }
     setSending(inv.id);
     try {
       await adminFetch("/admin/sms/send", {
@@ -3236,6 +3598,23 @@ function AccountsReceivableTab() {
     return (
       <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
         Loading A/R...
+      </div>
+    );
+
+  if (loadError)
+    return (
+      <div
+        style={{
+          background: `${D.red}11`,
+          border: `1px solid ${D.red}`,
+          borderRadius: 8,
+          padding: "16px 18px",
+          color: D.red,
+          fontSize: 14,
+        }}
+      >
+        Couldn't load accounts receivable ({loadError}) — outstanding
+        balances are unknown, not zero. Reload to retry.
       </div>
     );
 
@@ -3578,7 +3957,9 @@ export default function TaxPage() {
               label="Next Deadline"
               value={
                 d.nextDeadlines?.[0]
-                  ? `${Math.max(0, daysUntil(d.nextDeadlines[0].dueDate))}d`
+                  ? daysUntil(d.nextDeadlines[0].dueDate) < 0
+                    ? `${Math.abs(daysUntil(d.nextDeadlines[0].dueDate))}d OVERDUE`
+                    : `${daysUntil(d.nextDeadlines[0].dueDate)}d`
                   : "—"
               }
               color={
@@ -3826,16 +4207,22 @@ export default function TaxPage() {
                   )}
                 </>
               ) : (
-                <div
-                  style={{
-                    fontFamily: MONO,
-                    fontSize: 22,
-                    fontWeight: 700,
-                    color: D.green,
-                  }}
-                >
-                  $0.00
-                </div>
+                <>
+                  {/* Not-yet-loaded / failed ≠ zero owed — never a green $0. */}
+                  <div
+                    style={{
+                      fontFamily: MONO,
+                      fontSize: 22,
+                      fontWeight: 700,
+                      color: D.muted,
+                    }}
+                  >
+                    —
+                  </div>
+                  <div style={{ fontSize: 11, color: D.muted }}>
+                    Not loaded
+                  </div>
+                </>
               )}
             </div>
             {/* Download Tax Package */}

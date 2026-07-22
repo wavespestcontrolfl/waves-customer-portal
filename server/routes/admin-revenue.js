@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { VEHICLE_METHODS } = require('../services/pnl-report');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -229,6 +230,18 @@ function buildSettingsRow(latest, body, todayStr, now = new Date()) {
     row[col] = v;
   }
   if (touchedOverhead) row.overhead_entered_at = now;
+
+  // Vehicle deduction method election (Schedule C line 9) — server-owned
+  // allow-list: 'standard_mileage' | 'actual_expenses' | null (un-elect).
+  // The P&L fails closed until this is set; see pnl-report.js.
+  if (body.vehicleDeductionMethod !== undefined) {
+    const m = body.vehicleDeductionMethod;
+    if (m !== null && !VEHICLE_METHODS.includes(m)) {
+      return { error: `vehicleDeductionMethod must be one of ${VEHICLE_METHODS.join(', ')} or null` };
+    }
+    row.vehicle_deduction_method = m;
+    row.vehicle_deduction_method_set_at = now;
+  }
   return { row };
 }
 
