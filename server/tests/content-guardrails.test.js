@@ -2025,3 +2025,14 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const list = guardrails.evaluate({ body: "We don't serve Naples, Tampa, or Miami." }, {});
     expect(list.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
+
+  test('codex r1 on this PR: audience fragments, mixed objects, negated provide', () => {
+    const audience = guardrails.evaluate({ body: 'We serve Sarasota; Naples homes; and Tampa properties.' }, {});
+    expect(audience.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const mixed = guardrails.evaluate({ body: 'We provide pest control advice and services in Naples.' }, {});
+    expect(mixed.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const negated = guardrails.evaluate({ body: 'We do not provide pest control services in Naples.' }, {});
+    expect(negated.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const thirdParty = guardrails.evaluate({ body: 'Local companies provide services in Naples every day.' }, {});
+    expect(thirdParty.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
