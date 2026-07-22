@@ -553,7 +553,10 @@ function uncatalogedComponentFinding(body, exemptComponents = null) {
 // publishable copy — one live draft shipped 12 of them. There is no
 // legitimate use for this markup in a draft: real sourcing is prose
 // attribution plus an allowlisted link.
-const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']\d+["']|\[\^[^\]]{1,30}\]/i;
+// Covers HTML cite tags, quoted AND unquoted index=N props, markdown
+// footnotes, and the raw model-tooling artifacts (citeturn…, 【N†source】,
+// :contentReference[oaicite:N]) — none has a legitimate published form.
+const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']?\d+|\[\^[^\]]{1,30}\]|\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[|\boaicite\b/i;
 
 function citationResidueFinding(text) {
   const m = String(text || '').match(CITATION_RESIDUE_RE);
@@ -579,6 +582,8 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Plant City', 'Clearwater', 'Orlando', 'Miami', 'Jacksonville',
   'Fort Lauderdale', 'Tallahassee', 'Gainesville', 'Lakeland', 'Kissimmee',
   'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
+  // Nearby SWFL towns/islands a regional writer plausibly names.
+  'Sanibel', 'Captiva', 'Arcadia', 'Sebring', 'Immokalee', 'LaBelle',
 ]);
 
 function outOfAreaCities() {
@@ -599,7 +604,23 @@ function outOfAreaCities() {
 // early tegu hotspot" is attribution, not a CTA. Only CTA usage counts
 // (call us / call Waves / call now|today / call for a quote / give us a
 // call).
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
+// The final arm catches SERVICE-KEYWORD framing with no explicit verb —
+// "Need mosquito control in Cape Coral?", "Naples pest control guide" —
+// SEO/service packaging of an out-of-footprint city is a claim even
+// without "we serve". Bare pest words without a service noun ("Miami
+// termite research") stay factual and pass.
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?)|(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\s+(?:control|care|removal|treatment|exterminat\w+|inspection|service)s?\b)\b/i;
+
+// Fabricated-tenure hard gate (owner brand rule — founded 2024): any
+// years/decades-of-experience phrasing is a false claim regardless of the
+// number. Deterministic backstop to the prompt's BRAND FACTS ban.
+const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+years?|a decade|decades?)\s+(?:of\s+)?(?:\w+\s+){0,4}?(?:experience|expertise|know-?how|in business|in the industry|serving\b)/i;
+
+function tenureClaimFinding(text) {
+  const m = String(text || '').match(TENURE_CLAIM_RE);
+  if (!m) return null;
+  return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/experience claim ("${m[0].trim()}") — Waves was founded in 2024; any years-of-experience figure is fabricated (owner hard rule).`);
+}
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
@@ -748,8 +769,12 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
 // (/pest-control-services/), never a city-page prefix; the canonical city
 // slug for pest pages is "pest-control" (content-brief-builder
 // SERVICE_CITY_SLUG), so /pest-control-services-bradenton-fl/ is a dead
-// invented route and must park.
-const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
+// invented route and must park. CORE service families have pages in every
+// published city; the SPECIALTY slugs exist ONLY as the Bradenton pages the
+// legacy optimizer prompt lists — any other specialty-city combination is
+// an invented route.
+const CITY_SERVICE_LINK_RE = /^\/(?:pest-control-quote|termite-control|mosquito-control|rodent-control|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
+const SPECIALTY_CITY_SERVICE_RE = /^\/(?:commercial-pest-control|tree-and-shrub-care|palm-tree-injections|termite-inspection|bed-bug-control|lawn-aeration)-(bradenton)-fl\/$/;
 
 // City slugs a generated city-service link may target — the cities that
 // actually HAVE published city-service pages (astro-publisher SERVICE_AREAS),
@@ -785,14 +810,21 @@ const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["
 // allowlist). Other hosts stay the external gate's job.
 const HUB_URL_CANDIDATE_RE = /https?:\/\/[^\s)\]>"'`]+/g;
 
+// Hub PLUS the whole spoke fleet: an absolute URL on any Waves-owned host
+// is the dead-route class spelled long-form, and the external gate's host
+// allowlist would otherwise wave it through unchecked.
 function hubHostSet() {
+  const hosts = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
   try {
     const h = new URL(process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').hostname.toLowerCase();
     const bare = h.replace(/^www\./, '');
-    return new Set([bare, `www.${bare}`]);
-  } catch {
-    return new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+    hosts.add(bare); hosts.add(`www.${bare}`);
+  } catch { /* defaults above */ }
+  for (const key of SPOKE_SITE_KEYS || []) {
+    const bare = String(key).toLowerCase().replace(/^www\./, '');
+    hosts.add(bare); hosts.add(`www.${bare}`);
   }
+  return hosts;
 }
 
 // Every internal-route candidate in the text, normalized. Shared by the
@@ -848,6 +880,7 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = nu
     if (exemptRoutes && exemptRoutes.has(norm)) continue;
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
+    if (SPECIALTY_CITY_SERVICE_RE.test(norm)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
   }
   return null;
@@ -1300,6 +1333,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // ships (body AND meta) on every lane — neither has a legitimate form.
     citationResidueFinding(publishableText),
     offFootprintCityFinding(publishableText),
+    // Fabricated tenure is a brand hard rule (founded 2024) — deterministic
+    // backstop to the writer prompt's BRAND FACTS ban, body AND meta.
+    tenureClaimFinding(publishableText),
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
@@ -1350,5 +1386,5 @@ module.exports = {
   ALLOWED_INTERNAL_LINKS,
   OUT_OF_AREA_CITY_CANDIDATES,
   outOfAreaCities,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

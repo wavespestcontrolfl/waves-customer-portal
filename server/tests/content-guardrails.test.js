@@ -1262,6 +1262,18 @@ describe('citation-token residue (CITATION_TOKEN_RESIDUE)', () => {
     expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(false);
   });
 
+  test('model-tooling citation artifacts block (Codex round 7)', () => {
+    for (const body of [
+      'Drywood termites swarm in spring.citeturn0search0',
+      'Chinch bugs peak in July.【12†source】',
+      'Sod webworms feed at night.:contentReference[oaicite:0]{index=0}',
+      'Fleas need humidity above 50%.<cite index=3>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+    }
+  });
+
   test('markdown footnote apparatus blocks (marker and definition)', () => {
     for (const body of [
       'Drywood termites swarm in spring.[^1]',
@@ -1542,6 +1554,42 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
   test('underscore component identifiers are caught (Codex round 3)', () => {
     const r = guardrails.evaluate({ body: 'Note: <Pro_Tip title="x" /> here.' }, {});
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+  });
+
+  test('tenure/experience claims are P0 (Codex round 7 — founded 2024)', () => {
+    for (const body of [
+      'Our technicians bring over a decade of Southwest Florida pest control experience.',
+      'With 12 years of local pest control experience, we know sandy soil.',
+      'Backed by decades of turf expertise.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'TENURE_CLAIM' && f.severity === 'P0')).toBe(true);
+    }
+    const fine = guardrails.evaluate({ body: 'Chinch bug pressure has climbed for 10 years across SWFL, and 2 years of drought stress made it worse.' }, {});
+    expect(fine.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(false);
+  });
+
+  test('service-keyword city framing flags; bare pest-word mentions pass (Codex round 7)', () => {
+    for (const body of [
+      'Need mosquito control in Cape Coral? Start with source reduction.',
+      'Your Naples pest control guide for new homeowners.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    const factual = guardrails.evaluate({ body: 'Our team reviewed Miami termite research before writing this guide.' }, {});
+    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('nearby island/town claims are covered; spoke-host absolute URLs and specialty city routes are policed (Codex round 7)', () => {
+    const sanibel = guardrails.evaluate({ body: 'We proudly serve Sanibel homeowners.' }, {});
+    expect(sanibel.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const spoke = guardrails.evaluate({ body: '[fleas](https://bradentonflpestcontrol.com/pest-library/fleas/)' }, {});
+    expect(spoke.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const specialtyInvented = guardrails.evaluate({ body: '[palms](/palm-tree-injections-sarasota-fl/)' }, {});
+    expect(specialtyInvented.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const specialtyReal = guardrails.evaluate({ body: '[palms](/palm-tree-injections-bradenton-fl/)' }, {});
+    expect(specialtyReal.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
   test('absolute-hub brief links are honored as allowances (Codex round 5)', () => {
