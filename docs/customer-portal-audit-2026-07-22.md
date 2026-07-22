@@ -27,7 +27,7 @@ Route table from `client/src/App.jsx:474-647`. "Entry point" = the real-world th
 
 | Route | Component (App.jsx line) | What mints the link |
 |---|---|---|
-| `/estimate/:token` | EstimateViewPage (496) | estimate SMS/email (admin-estimate-persistence.js:36, estimate-follow-up.js:273, etc.) |
+| `/estimate/:token` | **Server-side fork, not always the SPA:** `server/index.js:507-511` routes this path into `handleEstimateView`, which serves the React EstimateViewPage (App.jsx:496) only when `use_v2_view` is true, invoice-mode/card-hold/recurring-card forces React, or a GrowthBook assignment says so — otherwise the **legacy server-rendered HTML estimate** serves on this same URL (estimate-public.js:7167-7209; a GrowthBook holdback deliberately keeps a v1 control group, 7183-7204) | estimate SMS/email (admin-estimate-persistence.js:36, estimate-follow-up.js:273, etc.) |
 | `/pay/:token` | PayPageV2 (485) | invoice SMS/email, accept-success "Pay now" |
 | `/pay/statement/:token` | StatementPayPage (484) | statement sends |
 | `/receipt/:token` | ReceiptPage (486) | post-payment redirect + receipt sends |
@@ -54,7 +54,8 @@ Route table from `client/src/App.jsx:474-647`. "Entry point" = the real-world th
 
 ### Flags
 
-- **Unlinked live surface:** `GET /api/estimates/:token` still serves the full legacy server-rendered estimate HTML (estimate-public.js:7411 `router.get('/:token', handleEstimateView)`). Nothing mints links to it anymore (all senders build `/estimate/:token` SPA URLs), but it remains a second, parallel renderer of the same estimate that can drift from the React page. See finding S4-9.
+- **Two live estimate renderers on the same customer link.** The texted `/estimate/:token` URL is server-forked (see table above): estimates without `use_v2_view` — and GrowthBook experiment holdbacks — get the legacy server-rendered HTML page, not the React page this audit traced. `GET /api/estimates/:token` additionally serves the legacy HTML unconditionally (estimate-public.js:7411). **This audit's estimate journey (Phase 2A) covers the React renderer only; the legacy SSR renderer was not audited** — see UNVERIFIED and finding S4-9.
+- **Self-serve quote API in this repo:** `/api/public/quote` (server/index.js:512, behind a paid-estimator daily limiter) is the no-auth backend of the marketing-site quote wizard — `POST /calculate` (public-quote.js:462) runs the pricing engine, creates/updates lead records, and delivers estimate links, with honeypot + rate-limit + Turnstile-on-step-1 defenses visible at the route head. The wizard UI lives in the astro repo, so the end-to-end journey is not auditable here — see UNVERIFIED.
 - **Staff-data leakage:** none found on customer surfaces. Reports strip internal keys and amounts at egress (reports-public.js:539-544, 621, 660); a targeted search of PortalPage for internal-note/margin/cost fields found only CSS `margin` properties; the estimate `/data` endpoint projects a public boundary (estimate-public.js:17063-17110) and the draft-preview bypass requires a verified staff JWT (estimate-public.js:17108-17110).
 - **Third-party PII exposure by design:** WDO project reports print the homeowner's name/email/phone/address and the same link is emailed to realtor/title companies — explicit owner ruling 2026-07-16, recorded in code (reports-public.js:631-639). Flagged for awareness, not as a defect.
 
@@ -64,7 +65,9 @@ Route table from `client/src/App.jsx:474-647`. "Entry point" = the real-world th
 
 ### A. Cold visitor → estimate link → service cards → accept → pay → book slot → SMS confirmation
 
-Estimates are minted by the office/agents; the cold visitor's entry is the texted/emailed `/estimate/:token` link (there is no self-serve estimate creation on the portal domain — `/estimate` redirects to the marketing quote wizard, App.jsx:507).
+The cold visitor's entry is the texted/emailed `/estimate/:token` link. Estimates reach customers two ways: minted by the office/agents, or self-served through the marketing-site quote wizard — whose UI lives on wavespestcontrol.com but whose backend is this repo's no-auth `POST /api/public/quote/calculate` (server/index.js:512; public-quote.js:462), which prices, creates the lead/estimate records, and delivers the link. The portal-domain `/estimate` path itself only redirects to that wizard (App.jsx:507). The wizard-side journey is not auditable from this repo (see UNVERIFIED).
+
+**Renderer scope:** this trace covers the React `EstimateViewPage` — served when the estimate is v2 (`use_v2_view`), invoice-mode/card-hold/recurring-card forced, or experiment-assigned. Estimates outside that population receive the legacy server-rendered HTML page on the same link (estimate-public.js:7167-7209), which was **not** audited (see UNVERIFIED, finding S4-9).
 
 **Screens/states (EstimateViewPage.jsx):**
 1. **Loading** — skeleton hero + cards (4738-4748). **Load error** — `PublicLoadError` with Try again (4749-4759). **Invalid/expired** — `NotFoundCard` with phone + self-serve 7-day extension when server confirms the token was a real expired estimate (579-708; server gate estimate-public.js:17086-17092). Extension success re-fetches and revives the page in place (4760-4782). *No dead end.*
@@ -220,7 +223,7 @@ Failure handling on save is good (optimistic revert + alert). The consent archit
 
 **Money integrity** — cents at every charge site; the one float path is the portal's *display* balance summing `parseFloat` dollars across rows (billing-v2.js:627, 679) — penny-drift display risk only (S4-7).
 
-**External calls / silent failures** — client fetches consistently surface failures with retry or phone fallback; exceptions: ServiceOutlinePage can render "HTTP 500" with no exit (S2-2), recap deep-link no-ops silently (S3-12), and `/book`'s SMS-sent claim is never checked (S3-4).
+**External calls / silent failures** — client fetches consistently surface failures with retry or phone fallback; exceptions: ServiceOutlinePage can render "HTTP 500" with no exit (S2-2), recap deep-link no-ops silently (S3-12), `/book`'s SMS-sent claim is never checked (S3-4), and `/book` surfaces raw "Unexpected end of JSON input" on non-JSON availability errors (S3-17, render-verified).
 
 ---
 
@@ -237,10 +240,26 @@ Failure handling on save is good (optimistic revert + alert). The consent archit
 
 ---
 
+## PHASE 6.5 — RENDER PASS + OWNER-REPORTED UI ISSUES (added 2026-07-22, same day)
+
+After the code-only pass, a live render pass was run at 390×844 (Chromium, iPhone-class emulation, touch + `pointer: coarse` verified matching) against the Vite dev client and the repo's fixture preview harnesses, plus a code trace of four UI issues the owner reported from a real device.
+
+**Render-verified (real interactions, not just screenshots):**
+- **Estimate happy path renders end-to-end**: frequency pill switch → slot select → payment preference → review card → confirm → "You're booked!" success screen, with the booked date/time carried through (preview harness + endpoint mocks for reserve/accept).
+- **Deposit modal (secondary window)**: opens via the 402 DEPOSIT_REQUIRED path, correct "$49.00 deposit… applied to your first invoice" disclosure, **fits the viewport un-clipped** (measured box 333-582px within a 914px viewport) and **Escape closes it**. The 402 → error banner → re-confirm → modal recovery sequence works as coded.
+- **No horizontal page overflow** on any rendered surface (estimate pest/bundle/lawn/accepted scenarios, service report, project report, /login, /book): `document.scrollWidth == innerWidth` everywhere; the only >viewport-width elements are decorative (glass orbs, review-ticker tracks) inside overflow containers.
+- **The 16px input-zoom override is live on the real SPA**: with `pointer: coarse` matching, the index.css rule (`input, textarea, select { font-size: 16px !important }`) is present in the loaded stylesheet and wins over inline 14-15px styles — /login and /book inputs compute 16px. (Earlier sub-16px readings were taken before Vite's async style injection settled; the dev-preview harnesses don't load index.css at all, which is harness-only.)
+- **Slot staleness guard works as designed**: the fixture's past-dated slots rendered correctly grayed and un-tappable.
+- **Not renderable in this sandbox**: the authenticated portal (My Property, tier explorer, billing) needs a live API + session — the owner's device screenshots below stand in for it, with causes traced in code.
+
+**Owner-reported issues from device screenshots, traced to code:** findings S4-12 through S4-15 and S3-17 below.
+
+---
+
 ## PHASE 7 — COMPLIANCE
 
 **SMS / A2P 10DLC / TCPA**
-- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and an **unwired** HELP template (opt-out-detector.js:46-49, exported but never imported by the webhook — twilio-webhook.js:9). Message frequency and "Msg & data rates may apply" appear nowhere a customer opts in. (S1-3/S1-5)
+- **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and an **unwired** HELP template (opt-out-detector.js:46-49, exported but never imported by the webhook — twilio-webhook.js:9). Message frequency and "Msg & data rates may apply" appear nowhere a customer opts in. (S1-3)
 - **No durable consent record** — no timestamp/source/language capture for SMS consent anywhere; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor. (S1-2)
 - **STOP enforcement is real but architectural only at the wrapper layer** — `TwilioService.sendSMS` itself never checks suppression (twilio.js:320-535, provider call at 488); one live customer path bypasses the wrapper today (estimate-public.js:17013) and any future direct caller silently will too. (S2-4)
 - **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (S1-3)
@@ -467,10 +486,12 @@ Where: `client/src/components/portal/NotificationPreferences.jsx:42-53` (no `r.o
 Blast radius: none live; risk is future re-mounting of a broken save path.
 Fix sketch: delete, or fix the `r.ok` check before any revival. (Per repo rule 5, deletion needs explicit instruction — flagging only.)
 
-**[S4-9] Legacy SSR estimate page is a live, unlinked duplicate renderer**
-Where: `server/routes/estimate-public.js:7411` (`GET /api/estimates/:token` serves full HTML); all links mint the SPA route (`admin-estimate-persistence.js:36`)
-Blast radius: drift risk — two renderers of the money surface; the SSR page shares gates but not UI fixes.
-Fix sketch: redirect it to `/estimate/:token` (keeps any stray old links working) once confirmed nothing depends on the HTML response.
+**[S4-9] Two live renderers serve the estimate money link — only one was audited**
+Where: `server/index.js:507-511` (`/estimate/:token` → `handleEstimateView`); `server/routes/estimate-public.js:7167-7209` (React only when `use_v2_view` / invoice-mode / card-hold / recurring-card forces, or a GrowthBook assignment; otherwise legacy server HTML — with a deliberate experiment holdback keeping a v1 control, 7183-7204); `GET /api/estimates/:token` always serves legacy HTML (7411)
+Repro: 1. Open a customer SMS estimate link for an estimate without `use_v2_view` (or one held back by the experiment). 2. The legacy server-rendered page serves — not the React page whose journeys, error states, and double-submit defenses this audit verified.
+Expected / Actual: one audited renderer on the money surface / a second, live, unaudited renderer sharing the same URL. (The fork is intentional — a v1/v2 lift experiment — so this is a scope/drift risk, not a defect.)
+Blast radius: whatever share of live estimates is v1-or-holdback (needs a prod query — UNVERIFIED); those customers get a page none of this report's estimate findings or positives cover.
+Fix sketch: either audit the legacy renderer separately while the experiment runs, or — once the experiment concludes — retire the SSR path and redirect `/api/estimates/:token` to the SPA route.
 
 **[S4-10] Report review-ask sends every customer to public Google in one tap**
 Where: `client/src/pages/ReportViewPage.jsx:2647-2658`; `ProjectReportEngage.jsx:195-207`
@@ -479,6 +500,31 @@ Note: inconsistent with `/rate`'s gate (S1-1) — and the flip side of it: no pr
 **[S4-11] Estimate deposit "Reserve your appointment" modal Esc/cancel disabled only while submitting — fine — but express-wallet failure copy can be technical**
 Where: `client/src/pages/EstimateViewPage.jsx:2252` ("A card verification is still pending on this deposit — finish it, or wait a moment and try again.")
 Note: accurate but jargon-y for the audience; polish only.
+
+**[S3-17] `/book` shows raw "Unexpected end of JSON input" to the customer when availability returns a non-JSON error** *(render-verified)*
+Where: `client/src/pages/PublicBookingPage.jsx:234-235` (`const data = await res.json();` runs **before** the `res.ok` check), `:263` (`setError(err.message)` puts the parser message in the funnel banner); same parse-before-ok order in `runAiSearch` (:525-526) and `handleConfirm` (:469); contrast the safe pattern already used in `onPickDate` (:567 `res.json().catch(() => ({}))`)
+Repro: 1. Open `/book`, enter an address, reach step 2 while `/api/booking/availability` returns a non-JSON body (edge/proxy 5xx, gateway timeout, dropped connection mid-body). 2. The red banner reads literally "Unexpected end of JSON input". (Reproduced in a live render with the API absent.)
+Expected / Actual: "We couldn't load times right now — try again or call…" / raw JavaScript exception text in the paid-traffic funnel.
+Blast radius: every availability/search/confirm hiccup that isn't well-formed JSON — precisely the moments an anxious first-time booker decides whether to retry or leave.
+Fix sketch: `await res.json().catch(() => ({}))` in the three call sites (the page's own `onPickDate` pattern), with a friendly fallback message.
+
+**[S4-12] My Property cards render a white header strip over a blue-tinted body** *(owner screenshot, cause traced)*
+Where: `client/src/pages/PortalPage.jsx:5469-5521` — `PropertySection` is a `data-glass="card"` surface (the glass engine tints it) while the header `<button>` hardcodes opaque `background: '#fff'` (:5484) and the body div carries no surface of its own (:5520)
+Repro: More → My Property → expand any card (HOA, Scheduling, Irrigation, Technician notes) on a device with the glass scene active. Header band stays white; label/content area shows the blue glass tint — an abrupt two-tone card.
+Expected / Actual: one continuous card surface / white-on-blue banding that reads unfinished.
+Fix sketch: give the header button `background: 'transparent'` (or mark the body `data-glass-clear=""`) so both halves sit on the same surface.
+
+**[S4-13] Tier-explorer Bronze card floats its content in vertical dead space** *(owner screenshot, cause traced)*
+Where: `client/src/pages/PortalPage.jsx:8033` (`minHeight: 142` on the native `<button>` tier card) — a native button vertically centers its content, so Bronze's short content (title + "Base plan" + one service line) floats mid-card with blank space above and below, while fuller Silver/Gold/Platinum cards look normal
+Fix sketch: add `display:flex; flexDirection:'column'; alignItems:'stretch'; justifyContent:'flex-start'` (or drop `minHeight` on the single-column mobile layout).
+
+**[S4-14] Preferred-time pills have no AM/PM** *(owner screenshot, confirmed in code)*
+Where: `client/src/pages/PortalPage.jsx:6387-6389` — labels `'7-9' / '9-11' / '11-1' / '1-4'`
+Note: "11-1" and "1-4" force the reader to infer noon-crossing; trivial copy fix (`7-9 AM`, `9-11 AM`, `11 AM-1 PM`, `1-4 PM`).
+
+**[S4-15] Portal chrome overlap: card content scrolls legibly under the translucent sticky header, and page content peeks out beneath the floating bottom nav** *(owner screenshots)*
+Where: visible in the owner's My Property screenshots (pets-note text half-hidden under the top bar; a stray content line visible below the bottom nav). Header/nav are translucent-glass surfaces; the scroll container appears to lack matching top/bottom clearance. Exact style locations for the portal shell chrome were not pinned down in code during this pass — partially verified; the screenshots are the evidence.
+Fix sketch: add scroll-padding/margins matching the fixed chrome heights (plus `env(safe-area-inset-bottom)` under the nav), or make the chrome surfaces opaque enough that pass-under text doesn't read as a glitch.
 
 ---
 
@@ -497,6 +543,8 @@ Note: accurate but jargon-y for the audience; polish only.
 
 ## UNVERIFIED
 
+- **Legacy SSR estimate renderer journey:** estimates outside the React population (no `use_v2_view`, or GrowthBook holdback) serve the legacy server-HTML page on the same `/estimate/:token` link (estimate-public.js:7167-7209). That renderer's screens, error states, and booking flow were not audited, and the share of live estimates it serves needs a prod query. (See S4-9.)
+- **Public quote wizard journey:** the marketing-site quote wizard posts into this repo's no-auth `/api/public/quote` (`POST /calculate`, public-quote.js:462 — prices, creates lead/estimate records, delivers links). The wizard UI lives in the astro repo, so the end-to-end funnel (copy, consent language at capture, error states) is not auditable here; the 1,677-line API route itself was only characterized at the entry points, not journey-audited.
 - **Twilio account-level config:** whether Messaging Service "Advanced Opt-Out" answers HELP (and supplements STOP) at the account level — would partially offset S1-3. Confirm in the Twilio console.
 - **Opt-in disclosure at capture:** the actual SMS-consent language shown on the marketing-site/astro forms (quote wizard, lawn assessment) lives outside this repo; its CTIA elements can't be audited here. Confirm on the spoke/hub forms.
 - **Guarantee claims vs contract:** "90-day money-back guarantee" and "Unlimited free callbacks" (estimate-glass-copy.js:56) — confirm the service agreement actually grants both, for every service category the micro-line renders under.
@@ -504,7 +552,7 @@ Note: accurate but jargon-y for the audience; polish only.
 - **`rescheduleUrl` coverage** (S3-8): what share of upcoming visits carry a token — needs a prod query.
 - **Dunning behavior after a card update** (S2-1): whether the retry ladder picks up a newly-added card automatically before the next rung — billing-cron's rungs re-charge the default method, but end-to-end timing wasn't traced.
 - **`bank_verification_incomplete` rendered wording** (S3-16): template body is DB-stored; only the key and its role are code-verified.
-- **Real-device rendering:** all size/tap findings are from source px values; no 390×844 device render was performed (read-only audit).
+- **Real-device rendering:** partially closed by the Phase 6.5 render pass (390×844 Chromium emulation: estimate flow end-to-end, deposit modal, /book, /login, report previews — overflow, modal-clipping, and input-zoom checks all pass). Still not rendered: the **authenticated portal** (needs live API + session — the owner's device screenshots plus code tracing stand in, findings S4-12..15) and real-iOS behaviors emulation can't reproduce; size/tap findings for the portal remain source-derived.
 - **Server routes for the diagnostic funnels** (`public-pest-identifier.js`, `public-lawn-diagnostic.js`): client handling verified; server expiry/rate-limit behavior not read.
 - **Joi schema patterns** for referral phone validation (`referrals-v2.js` inviteSchema/submitSchema): schemas exist; exact phone-format rules weren't read.
 
@@ -516,4 +564,4 @@ Note: accurate but jargon-y for the audience; polish only.
 
 ---
 
-*Method note: five parallel read-only sweeps (portal, reports, SMS/consent backend, tokenized pages, billing backend) fed this report; every S1/S2 citation and each load-bearing S3 citation was re-verified against the source before inclusion. One agent claim was corrected during verification: portal inputs specified at 14px do **not** trigger iOS zoom — the global `@media (pointer: coarse)` 16px override (index.css:42-48) covers them; that claim was dropped rather than reported.*
+*Method note: five parallel read-only sweeps (portal, reports, SMS/consent backend, tokenized pages, billing backend) fed this report; every S1/S2 citation and each load-bearing S3 citation was re-verified against the source before inclusion. One agent claim was corrected during verification: portal inputs specified at 14px do **not** trigger iOS zoom — the global `@media (pointer: coarse)` 16px override (index.css:42-48) covers them (later confirmed live in the render pass: rule present, matching, and computing 16px). Same-day revisions: (1) Codex review corrections — the `/estimate/:token` renderer fork and the public-quote API were added to scope statements (Phase 1/2A, S4-9) and a dangling S1-5 cross-reference was fixed; (2) a 390×844 render pass and four owner-reported device screenshots added Phase 6.5 and findings S3-17, S4-12..15.*
