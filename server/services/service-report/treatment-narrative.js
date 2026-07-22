@@ -27,7 +27,7 @@ const FORBIDDEN = [
   /\b(safe|non-?toxic|harmless|eliminated?|eradicated?|guaranteed?|pest-?free|cure[sd]?|permanent(ly)?)\b/i,
   // Confirmed-diagnosis vocabulary — the narrative stays signals-scoped even
   // if the vision observations leak an overclaim (codex P2 2026-07-22).
-  /\b(infestation|infested|infection|infected|diseased)\b/i,
+  /\b(infestations?|infested|infections?|infected|diseased)\b/i,
   /\bchemicals?\b/i,
   /\b\d+(\.\d+)?\s*(oz|ounces?|ml|gal|gallons?|lbs?|pounds?)\b/i,
   /\bepa\b/i,
@@ -231,7 +231,10 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
       .where({ service_record_id: serviceRecordId, prompt_version: PROMPT_VERSION })
       .orderBy('generated_at', 'desc')
       .first('status', 'generated_at');
-    if (!row) return '';
+    // Sentinel, not '': a cached pre-narrative PDF must MISS so the render
+    // that generates the first narrative actually runs (codex P2 r12).
+    // Reports that never grow a row (pest/mosquito) keep '-tn0' stably.
+    if (!row) return '-tn0';
     const stamp = new Date(row.generated_at || 0).getTime();
     return `-tn${row.status || 'x'}${Number.isFinite(stamp) ? stamp : 0}`;
   } catch {

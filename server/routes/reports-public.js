@@ -1235,10 +1235,14 @@ router.get('/:token', async (req, res, next) => {
       }
 
       let pdf;
+      // Same contract as pdf-queue (codex P2 r12): the stored key reflects
+      // the narrative state the PDF was rendered FROM, captured post-build.
+      let tnRenderedSignature = '';
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          tnRenderedSignature = await treatmentNarrativePdfSignature(service.id, db);
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
@@ -1274,13 +1278,8 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        // Same composition as the lookup above — a store without tnSignature
-        // mints a key the expected-key check can never match, re-rendering on
-        // every download (codex P2 r10). Re-read the narrative signature: the
-        // render itself may have claimed/updated the narrative row.
-        const storeTnSignature = await treatmentNarrativePdfSignature(service.id, db);
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + storeTnSignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
