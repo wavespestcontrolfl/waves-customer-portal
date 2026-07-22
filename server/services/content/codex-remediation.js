@@ -1051,6 +1051,40 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       if (refHead !== currentHead) staleMovedPastPark = false;
     }
     if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
+      // Same-head park = held for a human. But a park is a verdict on
+      // remediation's ability to FIX this head, not on Codex REVIEWING it —
+      // if Codex has neither inline findings, a submitted review, nor a
+      // verdict comment for the head, and no "@codex review" request names
+      // it, the poller sits at codex_review_pending forever with nothing in
+      // flight (astro #394/#395, 2026-07-22: a manual fix push and a
+      // remediation push whose re-review request was lost each parked with
+      // an unreviewed head for 24h+). Post the request, still stay parked.
+      // The branch ref must CONFIRM the observed head first (same stale-read
+      // posture as the 'moved past' check above) — a request embedding a
+      // stale SHA would just be noise. Bounded: the posted request embeds
+      // the head SHA, so the next tick sees it and returns plain 'parked'.
+      // Fail-soft: a lookup/post error never blocks the parked hold.
+      if (currentHead) {
+        try {
+          const inlineForHead = parseCodexFindings(await gh.listPrReviewComments(prNumber), headSha);
+          if (inlineForHead.length === 0) {
+            const reviews = typeof gh.listPrReviews === 'function' ? await gh.listPrReviews(prNumber) : [];
+            const issueComments = await gh.listIssueComments(prNumber);
+            const responded = codexRoundCompleted({ reviews, issueComments, headSha });
+            if (!responded && !reviewRequestedForHead(issueComments, headSha)) {
+              let refHead = null;
+              try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+              if (refHead === currentHead) {
+                await gh.createIssueComment(prNumber, buildReviewRequestBody(headSha, { initial: true }));
+                logger.info(`[codex-remediation] parked PR #${prNumber}: requested Codex review for unreviewed head ${shortSha(headSha)} (park stands)`);
+                return { skipped: true, reason: 'parked (requested codex review for unreviewed head)' };
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn(`[codex-remediation] parked review-signal check failed for PR #${prNumber}: ${err.message}`);
+        }
+      }
       return { skipped: true, reason: 'parked' };
     }
     await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });

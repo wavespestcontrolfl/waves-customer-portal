@@ -2728,3 +2728,86 @@ describe('frontmatter date stamping (ET)', () => {
     expect(data.fact_checked).toBeUndefined();
   });
 });
+
+describe('Codex 2026-07 format change (review objects, no issue comments)', () => {
+  test('a clean verdict delivered as a submitted REVIEW OBJECT is recognized', () => {
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'abcdef1234567890abcdef1234567890abcdef12';
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [{
+        user: { login: 'wavespestcontrolfl' },
+        body: `@codex review\n\nReady on head \`${head}\`.`,
+        created_at: '2026-07-22T12:00:00Z',
+      }],
+      reviews: [{
+        user: { login: 'chatgpt-codex-connector[bot]' },
+        state: 'COMMENTED',
+        commit_id: head,
+        body: "### 💡 Codex Review\n\nDidn't find any major issues.\n\n**Reviewed commit:** `abcdef1234`",
+        submitted_at: '2026-07-22T12:05:00Z',
+      }],
+    })).toEqual({ clean: true });
+  });
+
+  test('a findings review object ("automated review suggestions") is NOT clean', () => {
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'abcdef1234567890abcdef1234567890abcdef12';
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [{
+        user: { login: 'wavespestcontrolfl' },
+        body: `@codex review\n\nReady on head \`${head}\`.`,
+        created_at: '2026-07-22T12:00:00Z',
+      }],
+      reviews: [{
+        user: { login: 'chatgpt-codex-connector[bot]' },
+        state: 'COMMENTED',
+        commit_id: head,
+        body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `abcdef1234`',
+        submitted_at: '2026-07-22T12:05:00Z',
+      }],
+    })).toMatchObject({ clean: false });
+  });
+});
+
+describe('latestDeploymentForBranch pagination (astro #396 wedge, 2026-07-22)', () => {
+  const OLD_ENV = { ...process.env };
+  afterEach(() => { process.env = { ...OLD_ENV }; global.fetch = undefined; });
+
+  function deploysPage(items) {
+    return { ok: true, json: async () => ({ result: items }) };
+  }
+  const deploy = (branch, id) => ({ id, deployment_trigger: { metadata: { branch } } });
+
+  test('finds a branch deployment beyond page 1 and stops on a short page', async () => {
+    process.env.CF_API_TOKEN = 't'; process.env.CF_ACCOUNT_ID = 'a';
+    const pages = [
+      deploysPage(Array.from({ length: 25 }, (_, i) => deploy(`other-${i}`, `p1-${i}`))),
+      deploysPage([deploy('content/target-branch', 'the-one'), ...Array.from({ length: 10 }, (_, i) => deploy(`x-${i}`, `p2-${i}`))]),
+    ];
+    const calls = [];
+    global.fetch = jest.fn(async (url) => { calls.push(url); return pages[calls.length - 1] || deploysPage([]); });
+    const hit = await PagesPoll.latestDeploymentForBranch('content/target-branch');
+    expect(hit).toMatchObject({ id: 'the-one' });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain('page=1');
+    expect(calls[1]).toContain('page=2');
+  });
+
+  test('returns null after a short page with no match (no infinite scan)', async () => {
+    process.env.CF_API_TOKEN = 't'; process.env.CF_ACCOUNT_ID = 'a';
+    global.fetch = jest.fn(async () => deploysPage([deploy('unrelated', 'z')]));
+    const hit = await PagesPoll.latestDeploymentForBranch('content/target-branch');
+    expect(hit).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('scans at most 4 pages of full results', async () => {
+    process.env.CF_API_TOKEN = 't'; process.env.CF_ACCOUNT_ID = 'a';
+    global.fetch = jest.fn(async () => deploysPage(Array.from({ length: 25 }, (_, i) => deploy(`other-${i}`, `d${i}`))));
+    const hit = await PagesPoll.latestDeploymentForBranch('content/target-branch');
+    expect(hit).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(4);
+  });
+});

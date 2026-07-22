@@ -2510,7 +2510,14 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   if (/usage limits|reached your Codex usage limits/i.test(latestBody)) {
     return { clean: false, reason: 'Codex review did not complete because usage limits were reached' };
   }
-  if (/Codex Review:\s*Didn'?t find any major issues/i.test(latestBody)) return { clean: true };
+  // Codex posts the clean verdict in two shapes: the issue-comment form
+  // ("Codex Review: Didn't find any major issues. Breezy!") and — since the
+  // 2026-07 format change — a submitted REVIEW OBJECT headed "### 💡 Codex
+  // Review" with the verdict sentence in its body (content PRs #394–#399
+  // received only review-object rounds, no issue comments at all). Anchor
+  // on the header plus the verdict sentence appearing in the head-eligible
+  // codex-authored bodies, whichever artifact carried them.
+  if (/Codex Review/i.test(latestBody) && /Didn'?t find any major issues/i.test(latestBody)) return { clean: true };
   if (/approved/i.test(String(codexReviews.at(-1)?.state || ''))) return { clean: true };
   if (headSha && !requestedAt) return { clean: false, reason: 'Codex review has not been requested for the current PR head' };
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
