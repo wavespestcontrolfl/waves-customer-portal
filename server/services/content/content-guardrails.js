@@ -850,9 +850,14 @@ function offFootprintCityFinding(text) {
             // City BEFORE the disclaimer: exempt within the close window, or
             // across an arbitrarily long pure-list run ("Naples, Fort
             // Myers, …, and Marco Island are outside our service area.").
+            // The long-list glue path additionally requires NO claim
+            // context BEFORE the city — in "We serve Naples, and Fort
+            // Myers, …, are outside our service area." Naples is the claim
+            // verb's object, not part of the disclaimer's subject list.
             if (cityStart < disclaimerStart
               && (disclaimerStart - cityEnd <= 60
-                || PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, disclaimerStart)))) continue;
+                || (PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, disclaimerStart))
+                  && !SERVICE_CLAIM_CONTEXT_RE.test(normalized.slice(0, cityStart))))) continue;
             // Disclaimer-FIRST list form: "Outside our service area: Naples,
             // Fort Myers, and Cape Coral." Cities after the disclaimer are
             // exempt only while the ENTIRE clause tail after the disclaimer
