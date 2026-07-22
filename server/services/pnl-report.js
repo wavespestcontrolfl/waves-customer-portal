@@ -33,9 +33,11 @@
  *                  charges; never hand-enter Stripe fees in expenses or
  *                  they'd double-count).
  *   mileage      — mileage_log.deduction_amount in the window.
- *   depreciation — per-asset annual_depreciation prorated by days in service
- *                  within the window (same proration everywhere, including the
- *                  tax package, which previously summed full-year amounts).
+ *   depreciation — per asset: §179/bonus recognize in full in the in-service
+ *                  year; MACRS uses the year-varying half-year schedule
+ *                  (Pub 946) x business_use_pct; straight-line uses
+ *                  annual_depreciation. All prorated by window days (same
+ *                  proration everywhere, including the tax package).
  *
  * VEHICLE (Schedule C line 9) — the P&L computes the ACTUAL-EXPENSES basis
  * ONLY: it deducts every recorded cost and NEVER the standard mileage rate.
@@ -133,6 +135,39 @@ function daysInYear(y) {
   return ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 366 : 365;
 }
 
+// MACRS depreciation percentages (200% declining balance, HALF-YEAR
+// convention already baked in — that's why year 1 is 20% not 40% for 5-year).
+// Keyed by IRS recovery class. Percentages are of the ORIGINAL cost basis and
+// sum to 100%. Source: IRS Pub 946, Table A-1 (GDS half-year). Add a class
+// here only against that authoritative table.
+const MACRS_HALF_YEAR = {
+  '3-year': [0.3333, 0.4445, 0.1481, 0.0741],
+  '5-year': [0.20, 0.32, 0.192, 0.1152, 0.1152, 0.0576],
+  '7-year': [0.1429, 0.2449, 0.1749, 0.1249, 0.0893, 0.0892, 0.0893, 0.0446],
+};
+
+// The MACRS deduction for ONE calendar year: basis x the class percentage for
+// that recovery year (1-indexed). Returns 0 outside the schedule (before the
+// in-service year or after the asset is fully recovered). The half-year
+// convention means the in-service year gets the full year-1 percentage
+// regardless of the in-service DATE within that year — never day-prorate it.
+function macrsYearAmount(irsClass, basis, inServiceYear, calendarYear) {
+  const table = MACRS_HALF_YEAR[String(irsClass || '').trim()];
+  if (!table || !(basis > 0) || !inServiceYear) return 0;
+  const idx = calendarYear - inServiceYear; // 0-indexed recovery year
+  if (idx < 0 || idx >= table.length) return 0;
+  return basis * table[idx];
+}
+
+// Business-use fraction (listed property like vehicles): clamp to [0,1],
+// default 100% when unset. Non-vehicle MACRS assets are 100% business use.
+function businessUseFraction(v) {
+  if (v == null) return 1;
+  const pct = parseFloat(v);
+  if (!Number.isFinite(pct)) return 1;
+  return Math.min(1, Math.max(0, pct / 100));
+}
+
 // Date-ish (string or node-postgres DATE cell) → UTC-midnight Date, so day
 // arithmetic below is zone-independent.
 function toUTCDay(v) {
@@ -145,10 +180,14 @@ function toUTCDay(v) {
  * placed_in_service_date through disposal_date (when disposed), clamped to
  * the period, sliced per CALENDAR YEAR so each slice divides by that year's
  * actual day count — a full leap year yields exactly the annual amount
- * (a flat /365 paid 366/365ths of it). Pure. Section 179 / bonus assets
- * carry annual_depreciation NULL and contribute nothing. Disposal CAPS the
- * window rather than excluding the asset — filtering disposed assets out
- * silently deleted their depreciation from every historical P&L.
+ * (a flat /365 paid 366/365ths of it). Pure. Handles three methods:
+ * §179/bonus (whole cost in the in-service year), MACRS (year-varying
+ * half-year schedule x business_use_pct — see below), and straight-line
+ * (annual_depreciation). Disposal CAPS the window rather than excluding the
+ * asset — filtering disposed assets out silently deleted their depreciation
+ * from every historical P&L. NOTE: the MACRS disposal-year half-convention
+ * (half the normal percentage in the year of sale) is not modeled — a CPA
+ * adjustment on disposal; the sole vehicle is not disposed.
  */
 function prorateAssetDepreciation(asset, startDate, endDate) {
   const periodStart = toUTCDay(startDate);
@@ -169,6 +208,40 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     if (immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
       total += immediate;
     }
+  }
+
+  // MACRS: year-varying declining balance (e.g. a 5-year vehicle is 20/32/
+  // 19.2/11.52/11.52/5.76% of basis). A flat annual_depreciation can't model
+  // it, which is why MACRS assets (annual NULL) showed $0 in the P&L. The
+  // half-year convention is baked into the percentages, so the IN-SERVICE year
+  // gets its full percentage regardless of the in-service date — proration is
+  // by the REPORT WINDOW only (Jan 1 of the in-service year onward), never by
+  // the in-service day. business_use_pct (listed property, e.g. vehicles)
+  // scales the deduction; disposal caps the window.
+  if (MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
+    const basis = parseFloat(asset?.purchase_cost || 0) || 0;
+    const inSvcYear = inService ? inService.getUTCFullYear() : null;
+    const bizUse = businessUseFraction(asset?.business_use_pct);
+    if (basis > 0 && inSvcYear) {
+      // Coverage starts at Jan 1 of the in-service year (half-year handles the
+      // mid-year start), not the in-service DATE.
+      const macrsStart = new Date(Date.UTC(inSvcYear, 0, 1));
+      const effStartM = macrsStart > periodStart ? macrsStart : periodStart;
+      const effEndM = disposed && disposed < periodEnd ? disposed : periodEnd;
+      if (effStartM <= effEndM) {
+        for (let y = effStartM.getUTCFullYear(); y <= effEndM.getUTCFullYear(); y++) {
+          const yearAmount = macrsYearAmount(asset.irs_class, basis, inSvcYear, y) * bizUse;
+          if (yearAmount <= 0) continue;
+          const yStart = new Date(Date.UTC(y, 0, 1));
+          const yEnd = new Date(Date.UTC(y, 11, 31));
+          const s = effStartM > yStart ? effStartM : yStart;
+          const e = effEndM < yEnd ? effEndM : yEnd;
+          const days = (e - s) / 86400000 + 1;
+          if (days > 0) total += yearAmount * (days / daysInYear(y));
+        }
+      }
+    }
+    return total; // MACRS handled — don't also read annual_depreciation
   }
 
   const annual = parseFloat(asset?.annual_depreciation || 0);
@@ -619,12 +692,14 @@ async function buildPnlReport(db, startDate, endDate) {
     // Rows merely deactivated (active=false, never disposed — archived /
     // non-business) stay excluded, matching every other tax surface.
     // Includes immediate-expensing assets (§179 / bonus — annual NULL):
-    // their whole deduction recognizes in the placed-in-service year.
+    // their whole deduction recognizes in the placed-in-service year. ALSO
+    // includes MACRS assets (annual NULL) — their year-varying schedule is
+    // computed in prorateAssetDepreciation; without this they showed $0.
     db('equipment_register')
       .where(function hasDeduction() {
         this.whereNotNull('annual_depreciation')
           .orWhere('section_179_elected', true)
-          .orWhereIn('depreciation_method', ['section_179', 'bonus_100']);
+          .orWhereIn('depreciation_method', ['section_179', 'bonus_100', 'MACRS']);
       })
       .where(function activeOrDisposed() {
         this.where('active', true)
@@ -638,6 +713,9 @@ async function buildPnlReport(db, startDate, endDate) {
         // election — the rate already embeds a depreciation component, so
         // deducting a vehicle's MACRS/§179 beside it double-counts.
         'asset_category',
+        // MACRS computation inputs: recovery class + listed-property business
+        // use (vehicles). business_use_pct defaults 100 in the schema.
+        'irs_class', 'business_use_pct',
       )
       .catch(missingTableOnly([])),
     // The vehicle-method election (newest financials row, same accessor every
@@ -783,6 +861,7 @@ module.exports = {
   getPeriodRange,
   prorateDepreciation,
   prorateAssetDepreciation,
+  macrsYearAmount,
   rateAsOf,
   costLaborByDay,
   dateCellStr,

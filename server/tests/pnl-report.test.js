@@ -16,6 +16,7 @@
 const {
   assemblePnl,
   prorateDepreciation,
+  macrsYearAmount,
   getPeriodRange,
   missingTableOnly,
   rateAsOf,
@@ -264,6 +265,58 @@ describe('prorateDepreciation', () => {
       year.start, year.end,
     );
     expect(total).toBe(0);
+  });
+
+  // MACRS 5-year vehicle (the Ford Transit case): $35k, in service 2025-01-01.
+  // annual_depreciation is NULL — before this it showed $0; now the year-
+  // varying half-year schedule computes it (20/32/19.2/11.52/11.52/5.76%).
+  describe('MACRS year-varying depreciation', () => {
+    const van = (over = {}) => ({
+      depreciation_method: 'MACRS', irs_class: '5-year',
+      purchase_cost: '35000', annual_depreciation: null,
+      placed_in_service_date: '2025-01-01', asset_category: 'vehicle',
+      ...over,
+    });
+
+    test('macrsYearAmount follows the 5-year half-year table', () => {
+      expect(macrsYearAmount('5-year', 35000, 2025, 2025)).toBeCloseTo(7000, 4);   // 20%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2026)).toBeCloseTo(11200, 4);  // 32%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2027)).toBeCloseTo(6720, 4);   // 19.2%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2030)).toBeCloseTo(2016, 4);   // 5.76%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2031)).toBe(0);                // past recovery
+      expect(macrsYearAmount('5-year', 35000, 2025, 2024)).toBe(0);                // before in-service
+    });
+
+    test('2026 P&L shows the year-2 amount ($11,200), not $0', () => {
+      expect(prorateDepreciation([van()], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+    });
+
+    test('in-service year takes the FULL year-1 % regardless of in-service date (half-year)', () => {
+      // Placed in service mid-year: still the full 20% ($7,000), never day-prorated.
+      expect(prorateDepreciation(
+        [van({ placed_in_service_date: '2025-07-01' })],
+        '2025-01-01', '2025-12-31',
+      )).toBeCloseTo(7000, 2);
+    });
+
+    test('business_use_pct scales the deduction (listed property)', () => {
+      // 80% business use → 80% of the $11,200 year-2 amount.
+      expect(prorateDepreciation([van({ business_use_pct: '80' })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(8960, 2);
+      // Unset defaults to 100%.
+      expect(prorateDepreciation([van({ business_use_pct: null })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(11200, 2);
+    });
+
+    test('a partial REPORT window prorates the year amount by window days', () => {
+      // Q1 2026 = 90 days of 365 → 11200 × 90/365.
+      expect(prorateDepreciation([van()], '2026-01-01', '2026-03-31'))
+        .toBeCloseTo(11200 * 90 / 365, 2);
+    });
+
+    test('unknown recovery class contributes nothing (fail closed)', () => {
+      expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
+    });
   });
 });
 
