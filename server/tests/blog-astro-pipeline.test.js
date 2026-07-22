@@ -2811,3 +2811,30 @@ describe('latestDeploymentForBranch pagination (astro #396 wedge, 2026-07-22)', 
     expect(global.fetch).toHaveBeenCalledTimes(4);
   });
 });
+
+  test('clean markers split ACROSS artifacts do not combine into a false clean', () => {
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'abcdef1234567890abcdef1234567890abcdef12';
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [
+        {
+          user: { login: 'wavespestcontrolfl' },
+          body: `@codex review\n\nReady on head \`${head}\`.`,
+          created_at: '2026-07-22T12:00:00Z',
+        },
+        {
+          user: { login: 'chatgpt-codex-connector' },
+          body: `Follow-up on \`${head}\`: the last pass didn't find any major issues in the frontmatter, but the body review is below.`,
+          created_at: '2026-07-22T12:06:00Z',
+        },
+      ],
+      reviews: [{
+        user: { login: 'chatgpt-codex-connector[bot]' },
+        state: 'COMMENTED',
+        commit_id: head,
+        body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `abcdef1234`',
+        submitted_at: '2026-07-22T12:05:00Z',
+      }],
+    })).toMatchObject({ clean: false });
+  });
