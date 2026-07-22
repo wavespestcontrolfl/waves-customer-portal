@@ -528,21 +528,25 @@ const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
 // (</X>) reuse the same name and need no extra scan.
 const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\b/g;
 
-function collectComponentNames(text) {
-  const names = new Set();
+function collectComponentCounts(text) {
+  const counts = new Map();
   const re = new RegExp(JSX_COMPONENT_TAG_RE.source, JSX_COMPONENT_TAG_RE.flags);
   let m;
-  while ((m = re.exec(String(text || ''))) !== null) names.add(m[1]);
-  return names;
+  while ((m = re.exec(String(text || ''))) !== null) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+  return counts;
 }
 
-// exemptComponents: refresh grandfathering — names already present in the
-// live prior body are preserved-legacy, not writer inventions.
-function uncatalogedComponentFinding(body, exemptComponents = null) {
-  for (const name of collectComponentNames(body)) {
+// exemptComponentCounts: refresh grandfathering, by OCCURRENCE COUNT — a
+// refresh that preserves one legacy <Callout> must not thereby earn a free
+// pass to ADD more of them; only up to the prior body's count of each
+// uncataloged name is preserved-legacy, every occurrence past that is a
+// writer addition and gates like new content.
+function uncatalogedComponentFinding(body, exemptComponentCounts = null) {
+  for (const [name, count] of collectComponentCounts(body)) {
     if (SAFE_MDX_COMPONENT_SET.has(name)) continue;
-    if (exemptComponents && exemptComponents.has(name)) continue;
-    return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${name}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')}) — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
+    const grandfathered = exemptComponentCounts ? (exemptComponentCounts.get(name) || 0) : 0;
+    if (count <= grandfathered) continue;
+    return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${name}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')})${grandfathered ? ` — the draft carries ${count} occurrence(s) but the live page only had ${grandfathered}, so the surplus is a writer addition` : ''} — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
   }
   return null;
 }
@@ -614,11 +618,14 @@ function outOfAreaCities() {
 // SEO/service packaging of an out-of-footprint city is a claim even
 // without "we serve". Bare pest words without a service noun ("Miami
 // termite research") stay factual and pass.
-const SERVICE_KEYWORD_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?';
+// Lead nouns chain through conjunctions — "tree and shrub care", "lawn &
+// pest control" are single service phrases, not two failed half-matches.
+const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)';
+const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?`;
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
-  "\\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
+  "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
-  + '|(?:^|,)\\s*serving\\b|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
+  + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b|(?:now|currently|still|also) serving\\b|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
   + '|same.day|we offer|free (?:quote|estimate|inspection)'
@@ -626,8 +633,8 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
   + '|\\b(?:waves\\w*|waveguard|(?:our|this|the)\\s+(?:\\w+\\s+){0,2}?(?:service|plan|program|membership|treatment)s?)\\b[^.!?]{0,20}?\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
-  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es)\\b(?!\\s+up\\b)|serving|servic\\w+|treats?|covers?|works? in|operates? in)"
-  + '|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
+  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving|servic\\w+|treat(?:s|ed)?|cover(?:s|ed)?|work(?:s|ed)? in|operat(?:es|ed)? in)"
+  + '|(?:is|are|has been|have been) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
   'i',
 );
 
@@ -654,15 +661,17 @@ function tenureClaimFinding(text) {
 // negates a service line, not the footprint — so negation exempts a city
 // only when the city itself is the OBJECT of the negated verb (see
 // cityNegationRe). Tested on apostrophe-normalized text.
-const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint))\b/i;
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:service )?(?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a service area|one of our service areas)\b|beyond our (?:service )?(?:area|footprint)|our service area (?:excludes|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
 
 // "…does not include Tampa", "we no longer serve Naples" — the negated
 // verb's object (within a few words) is this specific city.
 // The gap after the negated verb tolerates list separators so every city in
 // "we don't serve Naples, Tampa, or Miami" is exempt, not just the first.
+// "excludes Naples" and "stops short of Naples" deny service in POSITIVE
+// verb form — same honest boundary copy as the do-not forms.
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to)?|reach|treat|visit)[^.!?;]{0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit)|excludes?|stops? (?:short of|before|at))[^.!?;]{0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
     'i',
   );
 }
@@ -712,6 +721,25 @@ const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)
 // Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
 const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)/i;
 
+// "We serve Sarasota; Venice; and Naples." renders as ONE claim list — a
+// semicolon before a capitalized continuation (optionally "and"/"or") is a
+// list separator, not a clause boundary, so the claim verb must carry across
+// it. A semicolon before a new claim subject ("…; We also serve Tampa") or
+// lowercase prose still splits. Case-sensitive on purpose: the capital is
+// the list-item signal.
+const LIST_SEMICOLON_RE = /;\s*(?=(?:and\s+|or\s+)?(?!We\b|Our\b|Waves|WaveGuard|\{\{)[A-Z])/g;
+
+// Glue allowed between a footprint disclaimer and a city it exempts when the
+// disclaimer comes FIRST ("Outside our service area: Naples, Fort Myers, and
+// Cape Coral."): separators, list connectors, and capitalized place words
+// only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
+// glue and the trailing city flags. Case-sensitive on purpose.
+const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
+
+// A markdown list item ("- Naples", "2) Venice") — used to re-attach a
+// colon-terminated claim intro ("We serve these cities:") to each item.
+const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
+
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a
   // URL is not a rendered claim. Blank them (keeping anchor text) first.
@@ -734,9 +762,27 @@ function offFootprintCityFinding(text) {
   // Markdown segmentation first — blocks/marker lines split, soft-wrapped
   // prose re-joins so a hard-wrapped paragraph is scanned as the one
   // sentence it renders as (the joined meta lines stay separate segments).
-  const sentences = markdownSegments(s).flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+  // "We serve these cities:" followed by "- Naples" bullets is ONE rendered
+  // claim — the intro carries the service verb, each item carries a city, and
+  // neither alone would flag. Re-attach a colon-terminated intro to every
+  // following list item; the intro persists across the whole list (blank
+  // lines included) and clears at the next non-list prose segment.
+  const scanUnits = [];
+  let listIntro = '';
+  for (const segment of markdownSegments(s)) {
+    if (LIST_ITEM_MARKER_RE.test(segment)) {
+      const item = segment.replace(LIST_ITEM_MARKER_RE, '');
+      scanUnits.push(listIntro ? `${listIntro} ${item}` : segment);
+    } else {
+      listIntro = /:\s*$/.test(segment.trim()) ? segment.trim() : '';
+      scanUnits.push(segment);
+    }
+  }
+  const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
   for (const sentence of sentences) {
-    for (const clause of sentence.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
+    // List semicolons are rejoined first so "We serve Sarasota; Venice; and
+    // Naples" scans as one claim clause (see LIST_SEMICOLON_RE).
+    for (const clause of sentence.replace(LIST_SEMICOLON_RE, ', ').split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
       const normalized = clause.replace(/[‘’]/g, "'");
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
       // Footprint disclaimers exempt PER CITY, not per clause: in "Naples is
@@ -747,9 +793,17 @@ function offFootprintCityFinding(text) {
       for (const { city, re, negationRe } of cityRes) {
         const cityMatch = normalized.match(re);
         if (!cityMatch) continue;
-        if (disclaimerMatch
-          && cityMatch.index < disclaimerMatch.index
-          && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
+        if (disclaimerMatch) {
+          if (cityMatch.index < disclaimerMatch.index
+            && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
+          // Disclaimer-FIRST list form: "Outside our service area: Naples,
+          // Fort Myers, and Cape Coral." Cities after the disclaimer are
+          // exempt only while the text between is pure list glue — a
+          // lowercase claim verb in between re-arms the gate.
+          const disclaimerEnd = disclaimerMatch.index + disclaimerMatch[0].length;
+          if (cityMatch.index >= disclaimerEnd
+            && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd, cityMatch.index))) continue;
+        }
         // Negation scoped to THIS city ("does not include Tampa") exempts
         // only this city — a negation about some other service does not.
         if (negationRe.test(normalized)) continue;
@@ -896,9 +950,11 @@ function collectInternalDestinations(text) {
   return normalized;
 }
 
-// exemptRoutes: refresh grandfathering — normalized routes already present
-// in the live prior body are preserved-legacy, not writer inventions.
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = null) {
+// exemptRouteCounts: refresh grandfathering, by OCCURRENCE COUNT — a refresh
+// that preserves one legacy /old/ link must not thereby earn a free pass to
+// ADD more links to that dead route; only up to the prior body's count of
+// each route is preserved-legacy (see uncatalogedComponentFinding).
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
   const text = String(body || '');
   if (!text) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
@@ -920,9 +976,12 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = nu
     if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
     allowed.add(norm);
   }
+  const seenCounts = new Map();
   for (const { dest, norm } of collectInternalDestinations(text)) {
     if (allowed.has(norm)) continue;
-    if (exemptRoutes && exemptRoutes.has(norm)) continue;
+    const seen = (seenCounts.get(norm) || 0) + 1;
+    seenCounts.set(norm, seen);
+    if (exemptRouteCounts && seen <= (exemptRouteCounts.get(norm) || 0)) continue;
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
@@ -1335,19 +1394,33 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // Joined as BLOCKS (blank lines): the markdown-aware scanners re-join
   // consecutive prose lines, so single-newline joins would merge the body's
   // last sentence with the title into one pseudo-sentence.
-  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription', 'hero_image_alt']
+  // Hero-alt is scanned ONLY on lanes that write it: publishRefresh freezes
+  // frontmatter and applies just the title/meta fields, so a refresh draft's
+  // hero_image_alt (often a copied or hallucinated echo of the live page)
+  // never ships — parking a refresh on findings in it would gate text that
+  // will not be committed.
+  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+    .concat(isRefresh ? [] : ['hero_image_alt'])
     .map((f) => frontmatter[f])
-    .concat([frontmatter.hero_image?.alt])
+    .concat(isRefresh ? [] : [frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
     .join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
   // Refresh grandfathering surface: what the live prior body already
-  // carried. Built once here; consumed by the two structure gates below.
+  // carried, by occurrence COUNT — preserving a legacy link/component must
+  // not license adding more of it. Built once here; consumed by the two
+  // structure gates below.
   const refreshPriorBody = isRefresh && typeof priorBody === 'string' && priorBody.trim() ? priorBody : null;
-  const refreshExemptComponents = refreshPriorBody ? collectComponentNames(refreshPriorBody) : null;
-  const refreshExemptRoutes = refreshPriorBody ? new Set(collectInternalDestinations(refreshPriorBody).map((d) => d.norm)) : null;
+  const refreshExemptComponents = refreshPriorBody ? collectComponentCounts(refreshPriorBody) : null;
+  let refreshExemptRoutes = null;
+  if (refreshPriorBody) {
+    refreshExemptRoutes = new Map();
+    for (const { norm } of collectInternalDestinations(refreshPriorBody)) {
+      refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
+    }
+  }
 
   const findings = [
     // Price must cover everything that ships: body AND meta.

@@ -318,10 +318,18 @@ function checkMetaDescriptionComplete(draft, brief) {
   // metadata rewrite's resolved target) gets the full sentence contract;
   // briefs without a page_type fall back to the casing heuristic (legacy
   // scheduler drafts are blogs).
+  // 'refresh' says nothing about the TARGET either — a refresh that
+  // rewrites a blog post's meta_description keeps the full blog contract.
+  // The runner resolves target_page_type from the actual astro file (same
+  // derivation as the metadata lane); a refresh brief that arrives without
+  // it falls back to the casing heuristic (snake_case-only = blog).
   const pt = brief?.page_type;
+  const casingHeuristicIsBlog = Boolean(blogMeta) && !refreshMeta;
   const isBlogTarget = pt === 'metadata'
     ? brief?.target_page_type === 'supporting-blog'
-    : (pt ? pt === 'supporting-blog' : (Boolean(blogMeta) && !refreshMeta));
+    : pt === 'refresh'
+      ? (brief?.target_page_type ? brief.target_page_type === 'supporting-blog' : casingHeuristicIsBlog)
+      : (pt ? pt === 'supporting-blog' : casingHeuristicIsBlog);
   if (!isBlogTarget) return { ok: true, reason: 'snippet_style_meta_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };

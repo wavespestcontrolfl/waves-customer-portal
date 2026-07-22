@@ -877,3 +877,38 @@ describe('checkMetaDescriptionComplete', () => {
     expect(page.hard_failures.map((f) => f.name)).not.toContain('meta_description_complete');
   });
 });
+
+describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12)', () => {
+  const { checkMetaDescriptionComplete } = require('../services/content/content-quality-gate')._internals;
+  const truncated = 'Spot the early signs of chinch bug damage before your';
+
+  test('a refresh RESOLVED to a blog target keeps the full sentence contract', () => {
+    const r = checkMetaDescriptionComplete(
+      { meta_description: truncated },
+      { page_type: 'refresh', target_page_type: 'supporting-blog' },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('meta_missing_terminal_punctuation');
+  });
+
+  test('a refresh RESOLVED to a non-blog page stays snippet-style', () => {
+    const r = checkMetaDescriptionComplete(
+      { meta_description: truncated },
+      { page_type: 'refresh', target_page_type: 'page' },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a refresh WITHOUT a resolved target falls back to the casing heuristic', () => {
+    const snake = checkMetaDescriptionComplete(
+      { meta_description: truncated },
+      { page_type: 'refresh' },
+    );
+    expect(snake.ok).toBe(false);
+    const camel = checkMetaDescriptionComplete(
+      { metaDescription: truncated },
+      { page_type: 'refresh' },
+    );
+    expect(camel.ok).toBe(true);
+  });
+});

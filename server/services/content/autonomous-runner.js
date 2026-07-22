@@ -760,6 +760,7 @@ class AutonomousRunner {
       // refresh fails that check (no_previous_version_to_compare) and can never
       // publish. On load failure we leave previousVersion unset → the hard
       // check fails closed and the refresh routes to review (safe).
+      let gateBrief = brief;
       if (brief.action_type === 'refresh_existing_page') {
         const publisher = getAstroPublisher();
         if (publisher?.loadExistingPageBody) {
@@ -771,9 +772,22 @@ class AutonomousRunner {
             });
           if (prior) ctx.previousVersion = prior;
         }
+        // Same resolved-target derivation as the metadata lane: page_type
+        // 'refresh' says nothing about the target, and a refresh that
+        // rewrites a blog post's meta_description must keep the full blog
+        // meta-completeness contract. Resolution failure fails CLOSED to
+        // the stricter blog contract — such a target cannot publish anyway.
+        let targetPageType = 'supporting-blog';
+        try {
+          const resolved = publisher?.resolveExistingAstroFileForTarget
+            ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
+            : null;
+          if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+        } catch (_) { /* keep the stricter blog contract */ }
+        gateBrief = { ...brief, target_page_type: targetPageType };
       }
       try {
-        qualityResult = qualityGate.evaluate(draft, brief, ctx);
+        qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
       } catch (err) {
         qualityResult = { ok: false, error: err.message };
       }
