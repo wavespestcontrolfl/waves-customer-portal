@@ -3820,13 +3820,16 @@ function TracedTreatmentZoneMap({ traced }) {
           >
             <style>{`
               @keyframes tracedSprayDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+              /* Continuous loop (owner 2026-07-21): each puff blooms briefly
+                 once per cycle, timed to the sprayer head passing it. */
               @keyframes tracedSprayPuff {
                 0% { opacity: 0; transform: scale(0.4); }
-                35% { opacity: 0.5; }
+                6% { opacity: 0.5; }
+                20% { opacity: 0; transform: scale(2.1); }
                 100% { opacity: 0; transform: scale(2.1); }
               }
               .traced-spray-line { animation: tracedSprayDraw 3.2s ease-in-out both; }
-              .traced-spray-puff { opacity: 0; transform-box: fill-box; transform-origin: center; animation: tracedSprayPuff 2.4s ease-out both; }
+              .traced-spray-puff { opacity: 0; transform-box: fill-box; transform-origin: center; animation: tracedSprayPuff 7s linear infinite; }
             `}</style>
             <path
               className="traced-spray-line"
@@ -3849,12 +3852,12 @@ function TracedTreatmentZoneMap({ traced }) {
                 r="22"
                 fill="#AFE1FF"
                 fillOpacity="0.45"
-                style={{ animationDelay: `${(i / Math.max(1, puffs.length - 1)) * 3.2}s` }}
+                style={{ animationDelay: `${(i / Math.max(1, puffs.length)) * 7}s` }}
               />
             ))}
-            {/* sprayer head riding the line as it draws */}
+            {/* sprayer head loops the treated line continuously */}
             <circle r="11" fill="#0A7EC2" stroke="#FFFFFF" strokeWidth="3">
-              <animateMotion dur="3.2s" fill="freeze" path={pathD} calcMode="linear" />
+              <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
             </circle>
           </svg>
         )}
