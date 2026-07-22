@@ -1546,9 +1546,16 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
-  test('hub-slug city variants are dead routes (Codex round 6)', () => {
-    const r = guardrails.evaluate({ body: '[services](/pest-control-services-bradenton-fl/)' }, {});
-    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  test('city-service families match the REAL astro pages (ground truth 2026-07-22)', () => {
+    // pest-control-services-{city}-fl and every specialty slug exist for all
+    // 8 published cities in wavespestcontrol-astro src/content/services —
+    // an earlier round wrongly restricted these.
+    const fine = guardrails.evaluate({
+      body: '[svc](/pest-control-services-bradenton-fl/) [palms](/palm-tree-injections-sarasota-fl/) [aeration](/lawn-aeration-lakewood-ranch-fl/) [bed bugs](/bed-bug-control-venice-fl/)',
+    }, {});
+    expect(fine.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    const dead = guardrails.evaluate({ body: '[svc](/pest-control-services-oneco-fl/)' }, {});
+    expect(dead.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
   test('underscore component identifiers are caught (Codex round 3)', () => {
@@ -1584,6 +1591,8 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'TENURE_CLAIM' && f.severity === 'P0')).toBe(true);
     }
+    const spelled = guardrails.evaluate({ body: 'Our technicians bring three years of Southwest Florida pest control experience.' }, {});
+    expect(spelled.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(true);
     const fine = guardrails.evaluate({ body: 'Chinch bug pressure has climbed for 10 years across SWFL, and 2 years of drought stress made it worse.' }, {});
     expect(fine.findings.some((f) => f.code === 'TENURE_CLAIM')).toBe(false);
   });
@@ -1605,10 +1614,6 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(sanibel.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
     const spoke = guardrails.evaluate({ body: '[fleas](https://bradentonflpestcontrol.com/pest-library/fleas/)' }, {});
     expect(spoke.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
-    const specialtyInvented = guardrails.evaluate({ body: '[palms](/palm-tree-injections-sarasota-fl/)' }, {});
-    expect(specialtyInvented.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
-    const specialtyReal = guardrails.evaluate({ body: '[palms](/palm-tree-injections-bradenton-fl/)' }, {});
-    expect(specialtyReal.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
   test('absolute-hub brief links are honored as allowances (Codex round 5)', () => {

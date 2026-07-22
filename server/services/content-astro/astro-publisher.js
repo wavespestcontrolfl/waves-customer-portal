@@ -2701,6 +2701,7 @@ module.exports = {
   publishRefresh,
   getLiveFrontmatter,
   loadExistingPageBody,
+  resolveExistingAstroFileForTarget,
   canPublishDraftBrief,
   canPublishMetadataRewrite,
   canPublishRefresh,

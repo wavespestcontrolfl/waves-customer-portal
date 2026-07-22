@@ -614,7 +614,7 @@ const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| do
 // Fabricated-tenure hard gate (owner brand rule — founded 2024): any
 // years/decades-of-experience phrasing is a false claim regardless of the
 // number. Deterministic backstop to the prompt's BRAND FACTS ban.
-const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+years?|a decade|decades?)\s+(?:of\s+)?(?:\w+\s+){0,4}?(?:experience|expertise|know-?how|in business|in the industry|serving\b)/i;
+const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+years?|(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|twenty-five|thirty)\s+years?|a decade|decades?)\s+(?:of\s+)?(?:\w+\s+){0,4}?(?:experience|expertise|know-?how|in business|in the industry|serving\b)/i;
 // Company-history fabrications: "serving Sarasota since 2012", "founded in
 // 2010", "family-owned since 1998". Scoped to COMPANY context so factual
 // regulatory/history copy ("since 2019, Florida has required…") passes.
@@ -770,16 +770,13 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
 // "quote-sarasota"). The city capture is validated against the real
 // footprint below — "/pest-control-fort-myers-fl/" is a dead out-of-area
 // link, not a pass.
-// NOTE: "pest-control-services" is deliberately ABSENT — it is the hub slug
-// (/pest-control-services/), never a city-page prefix; the canonical city
-// slug for pest pages is "pest-control" (content-brief-builder
-// SERVICE_CITY_SLUG), so /pest-control-services-bradenton-fl/ is a dead
-// invented route and must park. CORE service families have pages in every
-// published city; the SPECIALTY slugs exist ONLY as the Bradenton pages the
-// legacy optimizer prompt lists — any other specialty-city combination is
-// an invented route.
-const CITY_SERVICE_LINK_RE = /^\/(?:pest-control-quote|termite-control|mosquito-control|rodent-control|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
-const SPECIALTY_CITY_SERVICE_RE = /^\/(?:commercial-pest-control|tree-and-shrub-care|palm-tree-injections|termite-inspection|bed-bug-control|lawn-aeration)-(bradenton)-fl\/$/;
+// GROUND TRUTH (verified against wavespestcontrol-astro src/content/services
+// on 2026-07-22): every service family below has a page for ALL EIGHT
+// published cities — including pest-control-services-{city}-fl and every
+// specialty slug. Alternation is LONGEST-FIRST so the captured city slug
+// never swallows a service suffix. The capture is validated against
+// PAGE_CITY_SLUGS below.
+const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
 
 // City slugs a generated city-service link may target — the cities that
 // actually HAVE published city-service pages (astro-publisher SERVICE_AREAS),
@@ -891,7 +888,6 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRoutes = nu
     if (exemptRoutes && exemptRoutes.has(norm)) continue;
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
-    if (SPECIALTY_CITY_SERVICE_RE.test(norm)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
   }
   return null;

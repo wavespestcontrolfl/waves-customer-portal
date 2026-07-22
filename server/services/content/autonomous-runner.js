@@ -1777,10 +1777,20 @@ class AutonomousRunner {
         meta_description: draft.meta_description,
       },
     };
-    // target_page_type preserves what the rewrite TARGETS — a blog post's
-    // meta keeps the blog completeness contract even under the metadata
-    // bundle; service/location targets stay snippet-style.
-    const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: brief.page_type };
+    // target_page_type is derived from the RESOLVED target file — for
+    // rewrite_title_meta briefs page_type is already 'metadata' (decision
+    // router), so it says nothing about the target. Blog targets keep the
+    // full meta completeness contract; resolution failure fails CLOSED to
+    // the blog contract (stricter) — such a target cannot publish anyway.
+    let targetPageType = 'supporting-blog';
+    try {
+      const publisher = getAstroPublisher();
+      const resolved = publisher?.resolveExistingAstroFileForTarget
+        ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.page_url)
+        : null;
+      if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+    } catch (_) { /* keep the stricter blog contract */ }
+    const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: targetPageType };
     const qualityContext = {
       siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
       previewBuildSuccess: true,
