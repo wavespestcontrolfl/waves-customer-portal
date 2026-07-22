@@ -5526,7 +5526,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const inputLabel = label || placeholder || 'Secure field';
   return (
     <div>
-      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#475569', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
+      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#475569', marginBottom: 8, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -5926,7 +5926,7 @@ function PropertyTab({ customer }) {
     fontSize: 12,
     fontWeight: 850,
     color: muted,
-    marginBottom: 6,
+    marginBottom: 8,
     display: 'block',
     textTransform: 'uppercase',
     letterSpacing: 0,
@@ -5945,7 +5945,7 @@ function PropertyTab({ customer }) {
   const fieldGrid = {
     display: 'grid',
     gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
-    gap: 12,
+    gap: 16,
   };
 
   if (loading) {
@@ -6258,7 +6258,7 @@ function PropertyTab({ customer }) {
           />
           {textInput('sideGateAccess', 'e.g., Side gate - lift latch, no code needed', 'Side Gate / Backyard Access')}
         </div>
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 16 }}>
           <label style={labelStyle}>Parking Notes</label>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
@@ -6339,7 +6339,7 @@ function PropertyTab({ customer }) {
                       />
                     </div>
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
                     <div>
                       <label style={labelStyle}>Type</label>
                       <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
@@ -6365,7 +6365,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
           <div>
             <label style={labelStyle}>Preferred Day</label>
             <PillSelector
@@ -6394,7 +6394,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Irrigation" icon="droplet" summary={irrigationSummary}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, gap: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 12 }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Irrigation system</div>
             <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Watering volume and timing help us read lawn stress correctly.</div>
@@ -6421,7 +6421,7 @@ function PropertyTab({ customer }) {
                 Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
               </div>
             )}
-            <div style={{ marginTop: 14 }}>
+            <div style={{ marginTop: 16 }}>
               <label style={labelStyle}>Watering Days</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
@@ -6447,7 +6447,7 @@ function PropertyTab({ customer }) {
                 })}
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 220px', gap: 14, marginTop: 14, alignItems: 'end' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 220px', gap: 16, marginTop: 16, alignItems: 'end' }}>
               <div>
                 <label style={labelStyle}>System Type</label>
                 <PillSelector
@@ -6471,7 +6471,7 @@ function PropertyTab({ customer }) {
                 <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12, marginTop: 14 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>
               <div>
                 <label style={labelStyle}>Schedule Notes</label>
                 {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
@@ -6494,7 +6494,7 @@ function PropertyTab({ customer }) {
           {textInput('hoaLawnHeight', 'e.g., Must be mowed below 4 inches', 'Lawn Height Requirement')}
           {textInput('hoaInspectionPeriod', 'e.g., March and October', 'Inspection Period')}
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12, marginTop: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>
           <div>
             <label style={labelStyle}>HOA Restrictions</label>
             {textArea('hoaRestrictions', 'e.g., No signs in yard, must notify management 24hr before exterior treatment, no parking on street', 3)}
@@ -6504,14 +6504,14 @@ function PropertyTab({ customer }) {
             {textArea('hoaSignageRules', 'e.g., No lawn signs allowed', 3)}
           </div>
         </div>
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 16 }}>
           <label style={labelStyle}>Application Timing Restrictions</label>
           {textArea('hoaTimingRestrictions', 'e.g., No spray before 9 AM near pool', 2)}
         </div>
       </PropertySection>
 
       <PropertySection title="Technician notes" icon="clipboard" summary="Doorbell, access, and special instructions for the service day.">
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
           <div>
             <label style={labelStyle}>Access Notes</label>
             {textArea('accessNotes', "e.g., Please don't ring doorbell - baby sleeping during morning appointments", 3)}
@@ -13971,7 +13971,7 @@ export default function PortalPage() {
       {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
           that are programmatically focusable — without it the skip link
           scrolls but Tab keeps walking the header. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
+      <main id="portal-main" tabIndex={-1} style={{ padding: `24px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
