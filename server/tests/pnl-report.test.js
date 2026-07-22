@@ -278,6 +278,7 @@ describe('prorateDepreciation', () => {
       purchase_cost: '35000', annual_depreciation: null,
       placed_in_service_date: '2025-01-01', asset_category: 'vehicle',
       business_use_confirmed: true, // owner-confirmed 100% business use
+      luxury_auto_exempt: true,     // heavy cargo van, §280F-exempt
       ...over,
     });
 
@@ -329,6 +330,14 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation([van({ business_use_confirmed: true })], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
     });
 
+    test('a NON-§280F-exempt (passenger) vehicle fails closed until CPA confirms exemption', () => {
+      // A confirmed-business-use car that is NOT exempt from the passenger-auto
+      // caps must not take full MACRS — fail closed + flagged.
+      const passengerAuto = van({ luxury_auto_exempt: false });
+      expect(prorateDepreciation([passengerAuto], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(isDepreciationUncomputed(passengerAuto, '2026-01-01', '2026-12-31')).toBe(true);
+    });
+
     test('isDepreciationUncomputed flags ALL fail-closed reasons, only in-window', () => {
       const win = ['2026-01-01', '2026-12-31'];
       // Computable half-year van → NOT uncomputed.
@@ -356,8 +365,8 @@ describe('prorateDepreciation', () => {
       };
       expect(prorateDepreciation([s179Van], ...win)).toBe(0);
       expect(isDepreciationUncomputed(s179Van, ...win)).toBe(true);
-      // Confirmed → computes and is NOT flagged.
-      const confirmed = { ...s179Van, business_use_confirmed: true, business_use_pct: '100' };
+      // Confirmed (business use + §280F exemption) → computes and is NOT flagged.
+      const confirmed = { ...s179Van, business_use_confirmed: true, luxury_auto_exempt: true, business_use_pct: '100' };
       expect(prorateDepreciation([confirmed], ...win)).toBeCloseTo(20000, 2);
       expect(isDepreciationUncomputed(confirmed, ...win)).toBe(false);
     });

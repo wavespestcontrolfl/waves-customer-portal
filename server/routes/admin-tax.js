@@ -245,6 +245,7 @@ router.get('/equipment', async (req, res, next) => {
         // adjustable inputs to the depreciation schedule.
         businessUsePct: e.business_use_pct != null ? parseFloat(e.business_use_pct) : 100,
         businessUseConfirmed: e.business_use_confirmed === true,
+        luxuryAutoExempt: e.luxury_auto_exempt === true,
         depreciationConvention: e.depreciation_convention || 'half_year',
         serialNumber: e.serial_number, makeModel: e.make_model,
         location: e.location, active: e.active,
@@ -274,7 +275,7 @@ router.post('/equipment', async (req, res, next) => {
   try {
     const { name, description, assetCategory, irsClass, purchaseDate, purchaseCost,
       salvageValue, depreciationMethod, usefulLifeYears, section179Elected,
-      businessUsePct, serialNumber, makeModel, location, notes } = req.body;
+      businessUsePct, luxuryAutoExempt, serialNumber, makeModel, location, notes } = req.body;
 
     if (depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(depreciationMethod)) {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
@@ -325,6 +326,7 @@ router.post('/equipment', async (req, res, next) => {
       section_179_elected: s179, section_179_amount: s179 ? purchaseCost : null,
       business_use_pct: bizUsePct !== undefined ? bizUsePct : 100,
       business_use_confirmed: businessUseConfirmed,
+      luxury_auto_exempt: isVehicle ? !!luxuryAutoExempt : false,
       current_book_value: s179 ? 0 : purchaseCost,
       accumulated_depreciation: s179 ? purchaseCost : 0,
       serial_number: serialNumber, make_model: makeModel, location, notes,
@@ -362,6 +364,7 @@ router.put('/equipment/:id', async (req, res, next) => {
       notes: 'notes', active: 'active', disposed: 'disposed', disposalDate: 'disposal_date',
       disposalProceeds: 'disposal_proceeds',
       businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
+      luxuryAutoExempt: 'luxury_auto_exempt',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
     // Persist the NORMALIZED number, not the raw string. Explicitly setting a
@@ -379,6 +382,7 @@ router.put('/equipment/:id', async (req, res, next) => {
         && businessUsePctNormalized === undefined
         && fields.businessUseConfirmed === undefined) {
       update.business_use_confirmed = false;
+      if (fields.luxuryAutoExempt === undefined) update.luxury_auto_exempt = false;
     }
     // Keep the MACRS class in sync with the recovery life: when the life
     // changes without an explicit class, re-derive it — and CLEAR it (null)

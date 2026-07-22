@@ -40,6 +40,19 @@ exports.up = async function up(knex) {
     // business use (all logged trips are work trips), so it computes immediately.
     await knex('equipment_register').where('asset_category', 'vehicle').update({ business_use_confirmed: true });
   }
+  // Whether a VEHICLE is EXEMPT from the IRS §280F passenger-automobile
+  // depreciation limits. Those caps cover cars and light trucks/vans at ≤6,000
+  // lb GVWR; a heavy vehicle is exempt and takes full MACRS. Default false → a
+  // non-exempt (passenger) vehicle fails closed until a CPA confirms it, so full
+  // MACRS can't silently overstate a capped auto's deduction.
+  if (!(await knex.schema.hasColumn('equipment_register', 'luxury_auto_exempt'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.boolean('luxury_auto_exempt').notNullable().defaultTo(false);
+    });
+    // Grandfather the existing service van: a Ford Transit 250 (GVWR ~8,600 lb,
+    // >6,000) is a heavy cargo van, exempt from the §280F caps.
+    await knex('equipment_register').where('asset_category', 'vehicle').update({ luxury_auto_exempt: true });
+  }
   // Backfill irs_class for existing MACRS rows that never had one (the old
   // equipment form collected useful_life_years but not the IRS class) — derive
   // the supported 3/5/7-year class from the recovery life so those assets
@@ -54,7 +67,7 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  for (const col of ['business_use_pct', 'depreciation_convention', 'business_use_confirmed']) {
+  for (const col of ['business_use_pct', 'depreciation_convention', 'business_use_confirmed', 'luxury_auto_exempt']) {
     if (await knex.schema.hasColumn('equipment_register', col)) {
       await knex.schema.alterTable('equipment_register', (t) => { t.dropColumn(col); });
     }

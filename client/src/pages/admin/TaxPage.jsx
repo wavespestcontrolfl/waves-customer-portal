@@ -509,10 +509,15 @@ function EquipmentTab() {
       alert("Enter a number between 0 and 100.");
       return;
     }
+    // §280F: full MACRS only applies to a HEAVY vehicle (>6,000 lb GVWR) exempt
+    // from the passenger-auto caps. Confirm with the CPA before computing.
+    const exempt = window.confirm(
+      "Is this vehicle EXEMPT from the IRS §280F passenger-auto depreciation limits (heavy vehicle, >6,000 lb GVWR)? OK = exempt (full MACRS); Cancel = not exempt (leave $0 for CPA-capped calc).",
+    );
     try {
       await adminFetch(`/admin/tax/equipment/${id}`, {
         method: "PUT",
-        body: JSON.stringify({ businessUsePct: pct }),
+        body: JSON.stringify({ businessUsePct: pct, luxuryAutoExempt: exempt }),
       });
       reload();
     } catch (e) {

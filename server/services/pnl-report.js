@@ -221,8 +221,12 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // also needs its business use CONFIRMED — otherwise the 100% column default is
   // an unverified guess, so depreciation fails closed until confirmed (never
   // overstates on a default).
+  // A VEHICLE is ready to depreciate only when its business use is CONFIRMED
+  // AND it's confirmed EXEMPT from the §280F passenger-auto limits (heavy
+  // vehicle) — otherwise the capped-auto schedule is a CPA calc, so fail closed.
   const isListed = String(asset?.asset_category || '') === 'vehicle';
-  const confirmed = !isListed || asset?.business_use_confirmed === true;
+  const confirmed = !isListed
+    || (asset?.business_use_confirmed === true && asset?.luxury_auto_exempt === true);
   const s179Gate = confirmed && bizUse > 0.5;                 // §179: >50% (all) + confirmed (vehicles)
   const macrsGdsGate = confirmed && (!isListed || bizUse > 0.5); // GDS: listed ≤50% → ADS; vehicles need confirm
 
@@ -382,7 +386,8 @@ function isDepreciationUncomputed(asset, startDate, endDate) {
   const inSvcYear = inService.getUTCFullYear();
   if (disposed && disposed.getUTCFullYear() === inSvcYear) return false; // same-year: not depreciable, computes 0 correctly
   const isListed = String(asset?.asset_category || '') === 'vehicle';
-  const confirmed = !isListed || asset?.business_use_confirmed === true;
+  const confirmed = !isListed
+    || (asset?.business_use_confirmed === true && asset?.luxury_auto_exempt === true);
   const bizUse = businessUseFraction(asset?.business_use_pct);
 
   // Immediate §179/bonus is recognized ONLY in the in-service year — flag it
@@ -864,7 +869,8 @@ async function buildPnlReport(db, startDate, endDate) {
         // MACRS computation inputs: recovery class + listed-property business
         // use (vehicles) + confirmation flag + averaging convention. Schema
         // defaults: 100 / false / half_year.
-        'irs_class', 'business_use_pct', 'business_use_confirmed', 'depreciation_convention',
+        'irs_class', 'business_use_pct', 'business_use_confirmed',
+        'luxury_auto_exempt', 'depreciation_convention',
       )
       .catch(missingTableOnly([])),
     // The vehicle-method election (newest financials row, same accessor every
@@ -988,8 +994,9 @@ async function buildPnlReport(db, startDate, endDate) {
       note: `${uncomputedDepreciation.length} MACRS asset(s) could not be auto-`
         + 'computed for this period (mid-quarter convention, an unsupported '
         + 'recovery class, a vehicle at ≤50% business use, or a vehicle whose '
-        + 'business use is unconfirmed). Their regular depreciation reads $0 '
-        + 'here, so the depreciation total is NOT final and needs review.',
+        + 'business use / §280F passenger-auto exemption is unconfirmed). Their '
+        + 'regular depreciation reads $0 here, so the depreciation total is NOT '
+        + 'final and needs review.',
     };
   } else {
     report.deductions.depreciationComplete = true;
