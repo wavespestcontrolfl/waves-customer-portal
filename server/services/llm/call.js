@@ -379,7 +379,26 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
   return { ok: false, reason: 'all_providers_failed', failures };
 }
 
+// Direct-SDK Anthropic create with the same sampling-controls strip-retry
+// the dispatcher leg uses: newer models (Opus 4.8+, Fable) 400 on
+// `temperature`; vision scorers that pin 0.2 for repeatability retry once
+// without it instead of losing the Claude leg (audit P1 2026-07-22 — the
+// VISION tier default moved to Opus).
+async function anthropicCreateWithSamplingRetry(client, request) {
+  try {
+    return await client.messages.create(request);
+  } catch (err) {
+    if (request.temperature !== undefined && /temperature.*deprecated/i.test(err?.message || '')) {
+      logger.warn(`[llm] ${request.model} rejects temperature — retrying without sampling controls`);
+      const { temperature: _dropped, ...bare } = request;
+      return client.messages.create(bare);
+    }
+    throw err;
+  }
+}
+
 module.exports = {
+  anthropicCreateWithSamplingRetry,
   callOpenAI,
   callGemini,
   callAnthropic,

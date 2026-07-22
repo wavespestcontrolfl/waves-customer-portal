@@ -14,6 +14,7 @@ const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
+const { treatmentNarrativePdfSignature } = require('./treatment-narrative');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
@@ -116,6 +117,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
+  // Narrative key component (audit P2 2026-07-22): a PDF cached against the
+  // deterministic fallback re-renders once the AI narrative lands.
+  const tnSignature = await treatmentNarrativePdfSignature(recordId, knex);
   let pdf;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
@@ -151,7 +155,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
   try {
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -181,7 +185,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex),
     })
     : null;
   const stored = service?.pdf_storage_key === expectedPdfStorageKey

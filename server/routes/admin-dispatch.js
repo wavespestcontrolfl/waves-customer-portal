@@ -8176,6 +8176,10 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
         validate: (result) => {
           const draft = String(result.text || '').trim();
           if (!draft) return 'empty';
+          // Product-name echoes fail validation so the dispatcher retries
+          // cross-provider before we give up (audit P2 2026-07-22) — same
+          // contract as the recap/narrative paths.
+          if (CompletionRecap.containsProductName(draft, draftProducts)) return 'trade_name';
           const violations = ActivityIndicators.findBannedCustomerCopy(draft);
           return violations.length ? `banned:${violations.join(',')}` : null;
         },
@@ -8183,6 +8187,10 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     );
     const draft = generated.ok ? String(generated.text || '').trim() : '';
     const violations = draft ? ActivityIndicators.findBannedCustomerCopy(draft) : [];
+    if (draft && CompletionRecap.containsProductName(draft, draftProducts)) {
+      logger.warn(`[dispatch] findings-recap draft echoed a product name for ${req.params.serviceId}`);
+      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
+    }
     if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
     if (violations.length) {
       logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);

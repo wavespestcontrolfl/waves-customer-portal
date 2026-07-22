@@ -252,6 +252,7 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
 
 module.exports = {
   buildPrompt,
+  containsProductName,
   composeCompletionSmsPreview,
   deterministicRecap,
   generateRecap,

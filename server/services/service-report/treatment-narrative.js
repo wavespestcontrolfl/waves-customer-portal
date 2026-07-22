@@ -217,7 +217,30 @@ async function buildTreatmentNarrative({
   }
 }
 
+/**
+ * PDF cache-key component (audit P2 2026-07-22): the narrative can ship its
+ * deterministic fallback inside the request budget and land the AI text in
+ * the cache moments later — a PDF stored against the fallback must re-render
+ * once the final text exists. status+generated_at of the LATEST row for this
+ * record changes exactly then.
+ */
+async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
+  try {
+    if (!serviceRecordId) return '';
+    const row = await knex('service_report_ai_summaries')
+      .where({ service_record_id: serviceRecordId, prompt_version: PROMPT_VERSION })
+      .orderBy('generated_at', 'desc')
+      .first('status', 'generated_at');
+    if (!row) return '';
+    const stamp = new Date(row.generated_at || 0).getTime();
+    return `-tn${row.status || 'x'}${Number.isFinite(stamp) ? stamp : 0}`;
+  } catch {
+    return '';
+  }
+}
+
 module.exports = {
+  treatmentNarrativePdfSignature,
   PROMPT_VERSION,
   buildTreatmentNarrative,
   buildTreatmentNarrativePrompt,

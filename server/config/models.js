@@ -36,10 +36,11 @@
  *               Sonnet reads more natural and less overbuilt; high-stakes
  *               messages (cancellations, complaints) escalate to FLAGSHIP at
  *               the call site.                                       → Sonnet 5
- *  VISION     — Image scoring where deterministic output matters more than
- *               raw capability. Sonnet 4.6 because the Opus line removed the
- *               temperature parameter; Sonnet still accepts it so we can pin
- *               Claude to 0.2 to match the Gemini scorer.            → Sonnet 4.6
+ *  VISION     — Image scoring. Opus 4.8 (owner 2026-07-21: photo scoring
+ *               drives customer-facing health scores — best model is the
+ *               live model). Opus rejects `temperature`, so every direct
+ *               vision caller goes through anthropicCreateWithSamplingRetry
+ *               (llm/call.js) which strips it and retries once. → Opus 4.8
  *
  * Cost-aware routing directive (2026-07-16): use the least-expensive model
  * that is reliably strong for the lane, reserve Opus for difficult/high-stakes
