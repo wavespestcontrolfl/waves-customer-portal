@@ -3607,15 +3607,16 @@ function ServiceCoverageMap({
 }
 
 function ServiceCoverageSummary({ summary = {} }) {
+  // Zero-count chips are noise ("Inspected 0 · Inaccessible 0 · Needs
+  // Attention 0") — show only what actually happened (owner 2026-07-21).
   const rows = [
     ['Completed', summary.completedCount || 0, 'green'],
     ['Inspected', summary.inspectedCount || 0, 'blue'],
     ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
     ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
-    // only when present — the usual four-chip layout is unchanged for
-    // reports with nothing skipped
-    ...(summary.skippedCount ? [['Skipped', summary.skippedCount, 'orange']] : []),
-  ];
+    ['Skipped', summary.skippedCount || 0, 'orange'],
+  ].filter(([, value]) => value > 0);
+  if (!rows.length) return null;
   return (
     <div className="service-coverage-summary" aria-label="Service coverage summary">
       {rows.map(([label, value, tone]) => (
@@ -3941,7 +3942,9 @@ function ServiceCoverageCard({
         )}
       </div>
 
-      {showSummary && <ServiceCoverageSummary summary={coverage.summary} />}
+      {/* Traced-map reports keep it simple: just where we sprayed — no stat
+          chips above the trace (owner 2026-07-21). */}
+      {showSummary && !showTraced && <ServiceCoverageSummary summary={coverage.summary} />}
 
       {showMap || showList ? (
         <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
