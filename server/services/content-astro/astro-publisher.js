@@ -2631,7 +2631,33 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   if (/usage limits|reached your Codex usage limits/i.test(latestBody)) {
     return { clean: false, reason: 'Codex review did not complete because usage limits were reached' };
   }
-  if (/Codex Review:\s*Didn'?t find any major issues/i.test(latestBody)) return { clean: true };
+  // Codex posts the clean verdict in two shapes: the issue-comment form
+  // ("Codex Review: Didn't find any major issues. Breezy!") and — since the
+  // 2026-07 format change — a submitted REVIEW OBJECT headed "### 💡 Codex
+  // Review" with the verdict sentence in its body (content PRs #394–#399
+  // received only review-object rounds, no issue comments at all). Both
+  // markers must appear in the SAME artifact body: testing the joined
+  // latestBody would let a findings review ("Codex Review …suggestions")
+  // plus an unrelated comment mentioning the verdict sentence combine into
+  // a false clean and authorize an auto-merge.
+  // …and only the NEWEST eligible artifact across both types renders the
+  // verdict: accepting either artifact independently would let a stale
+  // commit-pinned clean review (eligible regardless of the latest re-request
+  // timestamp) override a newer findings round delivered as an issue
+  // comment, and auto-merge past live findings.
+  const cleanVerdictIn = (body) => /Codex Review/i.test(String(body || ''))
+    && /Didn'?t find any major issues/i.test(String(body || ''));
+  const newestArtifact = [
+    { body: codexComments.at(-1)?.body, at: Date.parse(codexComments.at(-1)?.created_at || codexComments.at(-1)?.createdAt || 0) || 0 },
+    { body: codexReviews.at(-1)?.body, at: Date.parse(codexReviews.at(-1)?.submitted_at || codexReviews.at(-1)?.submittedAt || 0) || 0 },
+  ].filter((a) => a.body).sort((a, b) => b.at - a.at)[0];
+  // …and it must POSTDATE the latest same-head review request: a commit-
+  // pinned review stays eligible regardless of requestedAt, so after a
+  // same-head re-request an old clean review would otherwise authorize the
+  // merge before the requested round ever responds (same strictly-after
+  // posture as codexRoundCompleted).
+  if (newestArtifact && cleanVerdictIn(newestArtifact.body)
+    && (!requestedAt || newestArtifact.at > requestedAt)) return { clean: true };
   if (/approved/i.test(String(codexReviews.at(-1)?.state || ''))) return { clean: true };
   if (headSha && !requestedAt) return { clean: false, reason: 'Codex review has not been requested for the current PR head' };
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };

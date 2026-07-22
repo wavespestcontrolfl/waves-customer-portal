@@ -773,10 +773,17 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     // The park verdict applies to the commit we just pushed, not the pre-push head.
     expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
     // Next tick, the PR head IS that pushed commit — the park must hold.
+    // The pushed head has no Codex review and (by design of the sync-failure
+    // park) no re-review request, so the parked review-signal insurance posts
+    // the request while the park stands — without it this exact state
+    // wedged astro #395 at codex_review_pending for 30h (2026-07-22).
     const gh2 = makeGh({ gh: { getPr: async () => ({ state: 'open', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } }) } });
     const r2 = await runRemediationForPr(CTX, { db, gh: gh2, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r2.skipped).toBe(true);
-    expect(r2.reason).toBe('parked');
+    expect(r2.reason).toBe('parked (requested codex review for unreviewed head)');
+    expect(gh2._calls.comments).toHaveLength(1);
+    expect(gh2._calls.comments[0].body).toContain('newcommit999aaa');
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
   });
 });
 
@@ -2135,5 +2142,59 @@ describe('p2OnlyMergeEligible — usage-limit review bodies (Codex round-10 P1)'
     });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
     expect(r.eligible).toBe(true);
+  });
+});
+
+describe('parked review-signal insurance (astro #394/#395 wedge, 2026-07-22)', () => {
+  const parkedDb = () => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD, park_reason: 'fix changed frontmatter beyond the whitelist: meta_description changed but no finding in this round targets it' }] });
+
+  test('same-head park + unreviewed head + ref confirms → posts a review request, park stands', async () => {
+    const db = parkedDb();
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [], gh: { getBranchSha: async () => HEAD } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toBe('parked (requested codex review for unreviewed head)');
+    expect(gh._calls.comments).toHaveLength(1);
+    expect(gh._calls.comments[0].body).toMatch(/@codex review/);
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('request already posted for the head → plain parked hold, no duplicate request', async () => {
+    const db = parkedDb();
+    const gh = makeGh({ reviewComments: [], issueComments: [{ body: `@codex review\n\nRequesting Codex review for head \`${HEAD}\`` }], reviews: [], gh: { getBranchSha: async () => HEAD } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
+  test('submitted review object for the head (new Codex format) counts as responded → plain parked hold', async () => {
+    const db = parkedDb();
+    const gh = makeGh({
+      reviewComments: [],
+      issueComments: [],
+      reviews: [{ user: { login: 'chatgpt-codex-connector[bot]' }, state: 'COMMENTED', commit_id: HEAD, body: '### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `abc1234def`', submitted_at: '2026-07-22T17:17:28Z' }],
+      gh: { getBranchSha: async () => HEAD },
+    });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
+  test('branch ref disagrees with the observed head → no request (stale read), parked hold', async () => {
+    const db = parkedDb();
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [], gh: { getBranchSha: async () => 'parallel777push' } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
+  test('inline findings exist for the head → insurance no-ops, parked hold', async () => {
+    const db = parkedDb();
+    const gh = makeGh({ gh: { getBranchSha: async () => HEAD } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.comments).toHaveLength(0);
   });
 });

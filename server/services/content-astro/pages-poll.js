@@ -46,11 +46,20 @@ async function cfFetch(path) {
 
 async function latestDeploymentForBranch(branch) {
   const { project } = cfEnv();
-  // CF API paginates but default is newest-first; for a freshly pushed
-  // feature branch there are only ever 1–3 deployments. Grab page 1.
-  const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=preview&per_page=25`);
-  const list = Array.isArray(res?.result) ? res.result : [];
-  return list.find((d) => d?.deployment_trigger?.metadata?.branch === branch) || null;
+  // CF API paginates newest-first. A freshly pushed branch's deployment is
+  // usually on page 1, but a busy push window (every push to any branch
+  // builds this project too) rolls an older branch's deployment past the
+  // 25-item first page — astro PR #396 sat at preview_build_pending for a
+  // day because its green build had fallen off page 1 (audit 2026-07-15
+  // P3, observed live 2026-07-22). Scan up to 4 pages before giving up.
+  for (let page = 1; page <= 4; page += 1) {
+    const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=preview&per_page=25&page=${page}`);
+    const list = Array.isArray(res?.result) ? res.result : [];
+    const hit = list.find((d) => d?.deployment_trigger?.metadata?.branch === branch);
+    if (hit) return hit;
+    if (list.length < 25) break; // short page = no more results
+  }
+  return null;
 }
 
 // Newest successful production deployment, regardless of which commit it
