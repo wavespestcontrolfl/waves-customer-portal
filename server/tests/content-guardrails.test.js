@@ -1537,6 +1537,17 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
   });
 
+  test('future-tense claims, Tampa Bay geography, contracted disclaimers, wrapped blockquotes (astro r6 parity)', () => {
+    const future = guardrails.evaluate({ body: "In Tampa, we'll treat the infestation at the source." }, {});
+    expect(future.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const bay = guardrails.evaluate({ body: 'Around Tampa Bay, we treat heavier salt pressure on ornamentals.' }, {});
+    expect(bay.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const contracted = guardrails.evaluate({ body: "Naples isn't in our service area." }, {});
+    expect(contracted.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const quote = guardrails.evaluate({ body: '> From Sarasota to Naples,\n> we treat the same trouble spots.' }, {});
+    expect(quote.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
   test('passive off-footprint claims are caught (Codex round 3)', () => {
     for (const body of [
       'Tampa homes are covered by our technicians every quarter.',

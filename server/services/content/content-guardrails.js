@@ -595,7 +595,7 @@ function outOfAreaCities() {
 // factual reference, not a service claim.
 // Third-person brand claims ("Waves Pest Control is now serving …") assert
 // operation exactly like "we serve".
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we treat|we cover|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
+const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are )?(?:now |proudly )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\b/i;
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
@@ -604,7 +604,7 @@ const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are)? serv\w*|serving|proudly ser
 // negates a service line, not the footprint — so negation exempts a city
 // only when the city itself is the OBJECT of the negated verb (see
 // cityNegationRe). Tested on apostrophe-normalized text.
-const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|not (?:currently )?(?:in|within|part of) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint))\b/i;
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:service )?(?:area|footprint)|beyond our (?:service )?(?:area|footprint))\b/i;
 
 // "…does not include Tampa", "we no longer serve Naples" — the negated
 // verb's object (within a few words) is this specific city.
@@ -619,21 +619,33 @@ function cityNegationRe(citySource) {
 // (headings, list items, quotes, tables, JSX) are their own segments; and
 // consecutive PROSE lines re-join with a space — a soft-wrapped paragraph
 // renders as one sentence and must be scanned as one.
-const MARKDOWN_MARKER_LINE_RE = /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s?|\||<\/?[A-Za-z])/;
+// SELF-CLOSING marker lines (headings, JSX tags) are their own segments;
+// CONTINUABLE markers (list items, quotes, tables) start a segment that
+// absorbs following soft-wrapped lines — markdown renders a wrapped list
+// item as one item, and consecutive `>` lines as one quoted paragraph.
+const MARKDOWN_SELF_CLOSING_LINE_RE = /^\s*(?:#{1,6}\s|<\/?[A-Za-z])/;
+const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>\s?|\|)/;
 
 function markdownSegments(body) {
   const segments = [];
   for (const block of String(body || '').split(/\n{2,}/)) {
-    let prose = '';
+    let current = '';
     for (const line of block.split('\n')) {
-      if (MARKDOWN_MARKER_LINE_RE.test(line)) {
-        if (prose) { segments.push(prose); prose = ''; }
+      if (MARKDOWN_SELF_CLOSING_LINE_RE.test(line)) {
+        if (current) { segments.push(current); current = ''; }
         segments.push(line);
+      } else if (MARKDOWN_CONTINUABLE_MARKER_RE.test(line)) {
+        if (/^\s*>/.test(line) && /^\s*>/.test(current)) {
+          current = `${current} ${line.replace(/^\s*>\s?/, '').trim()}`;
+        } else {
+          if (current) segments.push(current);
+          current = line;
+        }
       } else {
-        prose = prose ? `${prose} ${line.trim()}` : line;
+        current = current ? `${current} ${line.trim()}` : line;
       }
     }
-    if (prose) segments.push(prose);
+    if (current) segments.push(current);
   }
   return segments;
 }
@@ -653,8 +665,10 @@ function offFootprintCityFinding(text) {
   const cities = outOfAreaCities();
   const cityRes = cities.map((city) => {
     // "St." may be written without the period; multi-word cities may wrap.
+    // The trailing lookahead keeps regional/water-body phrases out — "Tampa
+    // Bay" is geography, not the city of Tampa as a service target.
     const source = escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
-    return { city, re: new RegExp(`\\b${source}\\b`, 'i'), negationRe: cityNegationRe(source) };
+    return { city, re: new RegExp(`\\b${source}\\b(?!\\s+bay\\b)`, 'i'), negationRe: cityNegationRe(source) };
   });
   // Markdown segmentation first — blocks/marker lines split, soft-wrapped
   // prose re-joins so a hard-wrapped paragraph is scanned as the one
