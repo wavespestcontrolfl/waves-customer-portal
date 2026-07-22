@@ -319,15 +319,41 @@ describe('prorateDepreciation', () => {
     });
 
     test('§179 + MACRS depreciates only the REMAINING basis (no double-count)', () => {
-      // $35k asset, $10k §179 elected, then MACRS on the rest. In 2025 (in-
-      // service year): $10k immediate + 20% × ($35k−$10k)=$5,000 → $15,000.
+      // $35k, $10k §179, 100% business use. 2025: $10k immediate + 20%×($35k−
+      // $10k)=$5,000 → $15,000. 2026: 32%×$25k=$8,000.
       const hybrid = van({
         placed_in_service_date: '2025-01-01',
         section_179_elected: true, section_179_amount: '10000',
       });
       expect(prorateDepreciation([hybrid], '2025-01-01', '2025-12-31')).toBeCloseTo(15000, 2);
-      // 2026: MACRS year-2 on the $25k remaining basis = 32% × 25k = $8,000.
       expect(prorateDepreciation([hybrid], '2026-01-01', '2026-12-31')).toBeCloseTo(8000, 2);
+    });
+
+    test('hybrid §179/MACRS applies business use to the BASIS, not the schedule', () => {
+      const hybrid80 = van({
+        placed_in_service_date: '2025-01-01', business_use_pct: '80',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      // Business basis = $35k×80% = $28k; §179 $10k immediate; MACRS on $18k.
+      // 2025: $10k + 20%×$18k=$3,600 → $13,600 (NOT $14,000).
+      expect(prorateDepreciation([hybrid80], '2025-01-01', '2025-12-31')).toBeCloseTo(13600, 2);
+      // At 40% business use the whole asset fails closed — §179 does NOT survive.
+      const hybrid40 = van({
+        placed_in_service_date: '2025-01-01', business_use_pct: '40',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      expect(prorateDepreciation([hybrid40], '2025-01-01', '2025-12-31')).toBe(0);
+    });
+
+    test('disposed MACRS asset fails closed in the disposal year and after', () => {
+      const disposedVan = van({ disposal_date: '2027-12-31', disposed: true });
+      // 2026 (before disposal): full year-2 $11,200.
+      expect(prorateDepreciation([disposedVan], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+      // 2027 (disposal year): fail closed — half-year disposition + recapture
+      // is a CPA adjustment, not an arbitrary day fraction. A Dec-31 disposal
+      // must NOT quietly take the full annual %.
+      expect(prorateDepreciation([disposedVan], '2027-01-01', '2027-12-31')).toBe(0);
+      expect(prorateDepreciation([disposedVan], '2028-01-01', '2028-12-31')).toBe(0);
     });
 
     test('business use ≤50% FAILS CLOSED (ADS/CPA territory, not GDS)', () => {

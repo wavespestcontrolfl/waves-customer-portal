@@ -201,52 +201,55 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   const disposed = toUTCDay(asset?.disposal_date);
   let total = 0;
 
-  // Immediate expensing (Section 179 / 100% bonus): the WHOLE deduction is
-  // recognized in the placed-in-service year — never prorated by days. Such
-  // assets usually carry annual_depreciation NULL, so filtering on the
-  // annual field alone silently dropped the entire deduction from the P&L
-  // and the CPA package.
+  // Listed property (vehicles) used ≤50% for business is disqualified from BOTH
+  // §179 AND GDS declining-balance MACRS — Pub 946 requires ADS straight-line
+  // and may trigger recapture. FAIL CLOSED for the whole asset (surface it for
+  // CPA/ADS treatment) rather than report a wrong deduction. business_use_pct
+  // defaults 100 (unset → 1.0), so only an explicitly-lowered asset trips this.
+  const bizUse = businessUseFraction(asset?.business_use_pct);
+  if (bizUse <= 0.5) return 0;
+
+  // Immediate expensing (§179 / 100% bonus): the WHOLE deduction is recognized
+  // in the placed-in-service year — never day-prorated. (annual NULL, so
+  // filtering on the annual field alone silently dropped it from the P&L / CPA
+  // package.) The elected amount is the business figure the CPA entered.
   const method = String(asset?.depreciation_method || '');
-  if (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected) {
-    const immediate = parseFloat(asset?.section_179_amount ?? asset?.purchase_cost ?? 0) || 0;
-    if (immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
-      total += immediate;
-    }
+  const s179Immediate = (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
+    ? (parseFloat(asset?.section_179_amount ?? asset?.purchase_cost) || 0) : 0;
+  if (s179Immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
+    total += s179Immediate;
   }
 
-  // MACRS: year-varying declining balance (e.g. a 5-year vehicle is 20/32/
-  // 19.2/11.52/11.52/5.76% of basis). A flat annual_depreciation can't model
-  // it, which is why MACRS assets (annual NULL) showed $0 in the P&L.
+  // MACRS: year-varying declining balance on the BUSINESS basis remaining after
+  // §179. Order matters for a partial-use hybrid: business basis = cost ×
+  // business-use%, THEN minus §179 (already in the basis, so the schedule
+  // isn't scaled again). A flat annual_depreciation can't model the schedule,
+  // which is why MACRS assets showed $0.
   if (MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
-    const bizUse = businessUseFraction(asset?.business_use_pct);
-    // Listed property (vehicles) used ≤50% for business must use ADS
-    // straight-line, NOT this GDS declining-balance schedule, and may trigger
-    // recapture (Pub 946). FAIL CLOSED — surface it for CPA/ADS treatment
-    // rather than report a wrong GDS figure.
-    if (bizUse <= 0.5) return total;
-    // §179/bonus already expensed part of the cost immediately (added above);
-    // MACRS depreciates only the REMAINING basis, or the two double-count.
-    const s179Immediate = (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
-      ? (parseFloat(asset?.section_179_amount ?? asset?.purchase_cost) || 0) : 0;
-    const basis = Math.max(0, (parseFloat(asset?.purchase_cost || 0) || 0) - s179Immediate);
+    const cost = parseFloat(asset?.purchase_cost || 0) || 0;
+    const macrsBasis = Math.max(0, cost * bizUse - s179Immediate);
     const inSvcYear = inService ? inService.getUTCFullYear() : null;
-    if (basis > 0 && inSvcYear && inService) {
+    const disposalYear = disposed ? disposed.getUTCFullYear() : null;
+    if (macrsBasis > 0 && inSvcYear && inService) {
       for (let y = periodStart.getUTCFullYear(); y <= periodEnd.getUTCFullYear(); y++) {
-        // The year's MACRS amount (half-year convention baked into the %).
-        const yearAmount = macrsYearAmount(asset.irs_class, basis, inSvcYear, y) * bizUse;
+        // Disposal year and after: the MACRS half-year DISPOSITION convention
+        // (half the year's %, plus recapture) is a CPA adjustment — FAIL CLOSED
+        // here; prior years already booked their full amounts. The sole
+        // vehicle is not disposed, so this is defensive.
+        if (disposalYear != null && y >= disposalYear) continue;
+        const yearAmount = macrsYearAmount(asset.irs_class, macrsBasis, inSvcYear, y);
         if (yearAmount <= 0) continue;
+        // Attribute across the asset's coverage in year y (in-service date, or
+        // Jan 1 for later years, through year-end), prorated by the report
+        // window's overlap: a full-year window keeps the whole half-year-
+        // convention amount; a window ending before in-service gets nothing.
+        const yStart = new Date(Date.UTC(y, 0, 1));
         const yEnd = new Date(Date.UTC(y, 11, 31));
-        // The asset's COVERAGE in year y: in-service date (later years: Jan 1)
-        // through disposal/year-end. A window ending before in-service gets
-        // NOTHING; the full year's amount is attributed across coverage days,
-        // so a full-year window keeps the whole half-year-convention amount
-        // while partial windows prorate consistently.
-        const covStart = inService > new Date(Date.UTC(y, 0, 1)) ? inService : new Date(Date.UTC(y, 0, 1));
-        const covEnd = disposed && disposed < yEnd ? disposed : yEnd;
-        if (covStart > covEnd) continue;
-        const covDays = (covEnd - covStart) / 86400000 + 1;
+        const covStart = inService > yStart ? inService : yStart;
+        if (covStart > yEnd) continue;
+        const covDays = (yEnd - covStart) / 86400000 + 1;
         const ovStart = periodStart > covStart ? periodStart : covStart;
-        const ovEnd = periodEnd < covEnd ? periodEnd : covEnd;
+        const ovEnd = periodEnd < yEnd ? periodEnd : yEnd;
         if (ovStart > ovEnd) continue;
         const ovDays = (ovEnd - ovStart) / 86400000 + 1;
         total += yearAmount * (ovDays / covDays);
