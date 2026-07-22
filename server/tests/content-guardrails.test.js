@@ -1638,6 +1638,39 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(bayFact.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
 
+  test('mixed-case schemes, dot segments, although-clauses (Codex round 10)', () => {
+    const upper = guardrails.evaluate({ body: '[x](HTTPS://www.wavespestcontrol.com/pest-library/fleas/)' }, {});
+    expect(upper.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const dotted = guardrails.evaluate({ body: '[x](/images/../pest-library/fleas/)' }, {});
+    expect(dotted.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const although = guardrails.evaluate({ body: 'Naples is outside our service area, although Tampa homes are serviced by our team.' }, {});
+    expect(although.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('non-blog snake_case metas are snippet-style by page type (Codex round 10)', () => {
+    const { _internals } = require('../services/content/content-quality-gate');
+    const check = _internals.checkMetaDescriptionComplete || null;
+    if (check) {
+      expect(check({ meta_description: 'New Sarasota lawn program with quarterly visits and free re-treatments between visits for members' }, { page_type: 'city-service' }).ok).toBe(true);
+      expect(check({ meta_description: 'A cut-off blog meta that rambles toward one hundred fifteen characters and then stops before your' }, { page_type: 'supporting-blog' }).ok).toBe(false);
+    }
+  });
+
+  test('astro round-10 parity: verbs, counties, availability, link destinations, keyword context', () => {
+    const inspect = guardrails.evaluate({ body: 'In Naples, we inspect homes for termites before quoting.' }, {});
+    expect(inspect.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const county = guardrails.evaluate({ body: 'We service Collier County homes.' }, {});
+    expect(county.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const avail = guardrails.evaluate({ body: 'WaveGuard is available in Tampa.' }, {});
+    expect(avail.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const linkDest = guardrails.evaluate({ body: 'We treat Sarasota homes using [UF guidance](https://example.com/miami-termite-treatment).' }, {});
+    expect(linkDest.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const research = guardrails.evaluate({ body: 'University of Florida termite treatment research in Miami shaped statewide guidance.' }, {});
+    expect(research.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const proud = guardrails.evaluate({ body: "We're proud to serve Naples homeowners." }, {});
+    expect(proud.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
   test('attributive "call" is not claim context; CTA call is (Codex round 4)', () => {
     const attributive = guardrails.evaluate({ body: 'Researchers call Fort Myers one of the early tegu hotspots.' }, {});
     expect(attributive.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);

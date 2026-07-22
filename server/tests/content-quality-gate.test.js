@@ -859,13 +859,21 @@ describe('checkMetaDescriptionComplete', () => {
     expect(checkMetaDescriptionComplete({}).ok).toBe(true);
   });
 
-  test('a truncated meta hard-fails evaluate() on every page type', () => {
-    const result = evaluate(
-      { body: 'Body copy.', title: 'Chinch Bug Damage in Sarasota', meta_description: 'Spot the early signs of chinch bug damage before your' },
+  test('a truncated meta hard-fails evaluate() for blog drafts; non-blog page types are snippet-style', () => {
+    const truncated = 'Spot the early signs of chinch bug damage before your';
+    const blog = evaluate(
+      { body: 'Body copy.', title: 'Chinch Bug Damage in Sarasota', meta_description: truncated },
+      { page_type: 'supporting-blog', serp_signal: { dominant_intent: 'informational' }, gsc_signal: { impressions: 10 } },
+      {},
+    );
+    expect(blog.hard_failures.map((f) => f.name)).toContain('meta_description_complete');
+    // Codex round 10: non-blog surfaces legitimately use snippet-style
+    // metas — only authored truncation (ellipsis) hard-fails there.
+    const page = evaluate(
+      { body: 'Body copy.', title: 'Chinch Bug Damage in Sarasota', meta_description: truncated },
       { page_type: 'none', serp_signal: { dominant_intent: 'informational' }, gsc_signal: { impressions: 10 } },
       {},
     );
-    expect(result.ok).toBe(false);
-    expect(result.hard_failures.map((f) => f.name)).toContain('meta_description_complete');
+    expect(page.hard_failures.map((f) => f.name)).not.toContain('meta_description_complete');
   });
 });

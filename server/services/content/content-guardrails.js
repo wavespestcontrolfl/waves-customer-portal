@@ -584,6 +584,11 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
   // Nearby SWFL towns/islands a regional writer plausibly names.
   'Sanibel', 'Captiva', 'Arcadia', 'Sebring', 'Immokalee', 'LaBelle',
+  // County-level phrasings of the same out-of-area markets. Footprint
+  // counties (Manatee/Sarasota/Charlotte + served south Hillsborough) are
+  // deliberately absent.
+  'Lee County', 'Collier County', 'Pinellas County', 'Hendry County',
+  'DeSoto County', 'Polk County', 'Miami-Dade County', 'Broward County',
 ]);
 
 function outOfAreaCities() {
@@ -609,7 +614,22 @@ function outOfAreaCities() {
 // SEO/service packaging of an out-of-footprint city is a claim even
 // without "we serve". Bare pest words without a service noun ("Miami
 // termite research") stay factual and pass.
-const SERVICE_CLAIM_CONTEXT_RE = /\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \w+ly)? (?:serv\w+|treat\w*|cover\w*)|serving|proudly serv\w*|service areas?|your (?:\w+\s+){0,2}(?:home|house|lawn|yard|property)|call (?:us\b|waves\b|now\b|today\b|ahead\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?|our (?:technicians?|techs?|team)(?:\s+\w+){0,2}\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|works? in|operates? in)|same.day|we offer|free (?:quote|estimate|inspection)|waves(?: pest control)?\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also )?(?:serves?|servic\w+|serving|treats?|covers?|works? in|operates? in)|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?)|(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\s+(?:control|care|removal|treatment|exterminat\w+|inspection|service)s?\b)\b/i;
+const SERVICE_KEYWORD_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?';
+const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
+  "\\b(we(?:'re| are|'ll| will| can| could| do| does)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
+  + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
+  + '|serving|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
+  + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
+  + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
+  + '|same.day|we offer|free (?:quote|estimate|inspection)'
+  + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
+  + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
+  + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
+  + '|\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
+  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es)\\b(?!\\s+up\\b)|serving|servic\\w+|treats?|covers?|works? in|operates? in)"
+  + '|(?:is|are) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
+  'i',
+);
 
 // Fabricated-tenure hard gate (owner brand rule — founded 2024): any
 // years/decades-of-experience phrasing is a false claim regardless of the
@@ -690,10 +710,14 @@ const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)
 // disclaimer half hides an affirmative half. "and" splits ONLY before a
 // new we/our subject: a bare ", and" boundary would sever the tail of an
 // Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|while)\s+|\s+(?:but|however|yet|though)\s+|,?\s+and\s+(?=(?:we|our)\b)/i;
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our)\b)/i;
 
 function offFootprintCityFinding(text) {
-  const s = String(text || '');
+  // Link DESTINATIONS are invisible to readers — a blocked city inside a
+  // URL is not a rendered claim. Blank them (keeping anchor text) first.
+  const s = String(text || '')
+    .replace(/\]\(\s*[^)]*\)/g, '](#)')
+    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '');
   if (!s) return null;
   const cities = outOfAreaCities();
   const cityRes = cities.map((city) => {
@@ -810,7 +834,7 @@ const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["
 // ("https://www.wavespestcontrol.com/pest-library/fleas/" must be policed
 // as "/pest-library/fleas/", not waved through by the external gate's host
 // allowlist). Other hosts stay the external gate's job.
-const HUB_URL_CANDIDATE_RE = /https?:\/\/[^\s)\]>"'`]+/g;
+const HUB_URL_CANDIDATE_RE = /https?:\/\/[^\s)\]>"'`]+/gi;
 
 // Hub PLUS the whole spoke fleet: an absolute URL on any Waves-owned host
 // is the dead-route class spelled long-form, and the external gate's host
@@ -851,9 +875,14 @@ function collectInternalDestinations(text) {
   }
   const normalized = [];
   for (const dest of dests) {
+    // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
+    // "/x/", so the /images/ exemption must see the resolved path or a
+    // dot-segment link reopens the dead-route class.
+    let resolved = dest;
+    try { resolved = new URL(dest, 'https://resolve.invalid').pathname || dest; } catch { /* keep raw */ }
     // Anchor-only and in-repo image references are not routes.
-    if (dest.startsWith('/images/')) continue;
-    const norm = normalizeInternalPath(dest);
+    if (resolved.startsWith('/images/')) continue;
+    const norm = normalizeInternalPath(resolved);
     if (norm) normalized.push({ dest, norm });
   }
   return normalized;

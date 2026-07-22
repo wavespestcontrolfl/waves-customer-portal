@@ -312,9 +312,16 @@ function checkMetaDescriptionComplete(draft, brief) {
   // (target_page_type rides on the wrapped metadata brief). Everything else
   // — service/location refresh casings and non-blog metadata rewrites — is
   // legitimate snippet style, gated on truncation only above.
-  const isBlogTarget = brief?.page_type === 'metadata'
+  // Classified by PAGE TYPE, not meta casing: city-service and
+  // customer-question drafts also carry snake_case meta_description but are
+  // snippet-legitimate surfaces. Only supporting-blog (directly, or as a
+  // metadata rewrite's resolved target) gets the full sentence contract;
+  // briefs without a page_type fall back to the casing heuristic (legacy
+  // scheduler drafts are blogs).
+  const pt = brief?.page_type;
+  const isBlogTarget = pt === 'metadata'
     ? brief?.target_page_type === 'supporting-blog'
-    : Boolean(blogMeta) && !refreshMeta;
+    : (pt ? pt === 'supporting-blog' : (Boolean(blogMeta) && !refreshMeta));
   if (!isBlogTarget) return { ok: true, reason: 'snippet_style_meta_allowed' };
   const core = m.replace(/["'”’)\]]+$/, '');
   if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
