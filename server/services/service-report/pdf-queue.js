@@ -118,16 +118,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   let pdf;
-  // Captured right after the data build: this is the narrative state the PDF
-  // is actually rendered FROM. Storing with a fresher store-time read could
-  // mint a final-signature key for a fallback-rendered PDF when the
-  // background generation lands mid-render (codex P2 r12) — a stale captured
-  // key just re-renders once on the next download instead.
-  let tnRenderedSignature = '';
+  // The signature of the narrative text actually rendered travels ON the
+  // payload (attached by report-data at the moment the text was chosen) —
+  // never re-read from the DB, so a background generation landing mid-render
+  // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
+  // lookup sentinel for reports that render no narrative.
+  let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
-    tnRenderedSignature = await treatmentNarrativePdfSignature(recordId, knex);
+    tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).

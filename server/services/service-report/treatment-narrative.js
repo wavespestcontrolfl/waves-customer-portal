@@ -119,10 +119,19 @@ function validateNarrative(text, productNames = []) {
   return null;
 }
 
+// '-tn...' PDF cache-key component for a specific row state.
+function rowSignature(row) {
+  const stamp = new Date(row?.generated_at || 0).getTime();
+  return `-tn${row?.status || 'x'}${Number.isFinite(stamp) ? stamp : 0}`;
+}
+
 /**
- * Returns the narrative string (AI when available+valid, else the
- * deterministic template). Never throws; never returns '' when the visit
- * had classified products.
+ * Returns { text, signature } — AI text when available+valid, else the
+ * deterministic template. `signature` is the '-tn...' PDF cache-key component
+ * for the EXACT row state the text came from (null when uncacheable); it
+ * travels WITH the text so a PDF store can never key a fallback render as
+ * final even when the background generation lands mid-render (codex P2 r15).
+ * Returns null when the visit has no classifiable treatment.
  */
 async function buildTreatmentNarrative({
   serviceRecordId,
@@ -135,7 +144,7 @@ async function buildTreatmentNarrative({
   const fallback = buildTreatmentSummary(treatment);
   if (!fallback) return null;
   const products = (treatment?.products || []);
-  if (!serviceRecordId) return fallback;
+  if (!serviceRecordId) return { text: fallback, signature: null };
 
   try {
     const facts = {
@@ -158,20 +167,22 @@ async function buildTreatmentNarrative({
       // in-flight generation, so serve what's there and never fan out a
       // duplicate model call (pre-push audit P1 2026-07-21).
       const parsed = typeof existing.summary_json === 'string' ? JSON.parse(existing.summary_json) : existing.summary_json;
-      if (parsed?.text) return parsed.text;
-      return fallback;
+      return { text: parsed?.text || fallback, signature: rowSignature(existing) };
     }
 
     // Atomically claim the cache key: exactly ONE reader generates.
+    const claimStamp = new Date();
     const claimed = await knex('service_report_ai_summaries').insert({
       ...keyWhere,
       model: null,
       status: 'pending',
       summary_json: JSON.stringify({ text: fallback, mode: 'pending' }),
       validation_json: JSON.stringify({ problem: null }),
-      generated_at: new Date(),
+      generated_at: claimStamp,
     }).onConflict(['service_record_id', 'input_hash', 'prompt_version']).ignore().returning('service_record_id').catch(() => []);
-    if (!Array.isArray(claimed) || !claimed.length) return fallback;
+    if (!Array.isArray(claimed) || !claimed.length) {
+      return { text: fallback, signature: rowSignature({ status: 'pending', generated_at: claimStamp }) };
+    }
 
     const generate = (async () => {
       const prompt = buildTreatmentNarrativePrompt({
@@ -189,14 +200,16 @@ async function buildTreatmentNarrative({
       const text = generated.ok ? String(generated.text || '').trim() : '';
       const problem = text ? validateNarrative(text, productNames) : 'generation_failed';
       const finalText = problem ? fallback : text;
+      const finalStamp = new Date();
+      const finalStatus = problem ? 'fallback' : 'ok';
       await knex('service_report_ai_summaries').where(keyWhere).update({
         model: problem ? null : 'text_policy:report',
-        status: problem ? 'fallback' : 'ok',
+        status: finalStatus,
         summary_json: JSON.stringify({ text: finalText, mode: problem ? 'deterministic_fallback' : 'ai' }),
         validation_json: JSON.stringify({ problem: problem || null }),
-        generated_at: new Date(),
+        generated_at: finalStamp,
       }).catch(() => {});
-      return finalText;
+      return { text: finalText, signature: rowSignature({ status: finalStatus, generated_at: finalStamp }) };
     })();
 
     // The report read never waits more than a few seconds (the dispatcher
@@ -206,14 +219,17 @@ async function buildTreatmentNarrative({
     // every later read (pre-push audit P1 2026-07-21).
     let timer;
     const timed = await Promise.race([
-      generate.catch(() => fallback),
+      generate.catch(() => null),
       new Promise((resolve) => { timer = setTimeout(resolve, REQUEST_BUDGET_MS, null); }),
     ]);
     clearTimeout(timer);
     generate.catch(() => {});
-    return timed || fallback;
+    // Timed out (or generation errored): the text we return is the pending
+    // claim's fallback — the signature says so even if the background
+    // generation lands a moment later (the signature travels with the text).
+    return timed || { text: fallback, signature: rowSignature({ status: 'pending', generated_at: claimStamp }) };
   } catch {
-    return fallback;
+    return { text: fallback, signature: null };
   }
 }
 

@@ -4063,12 +4063,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               customerId: svc.customer_id,
             });
           } catch { /* context is polish — never block completion */ }
+          // The completion payload's products carry productId but no name —
+          // hydrate catalog names or safeProducts drops every entry and the
+          // prompt never sees the applied solutions (codex P2 r15).
+          let recapProducts = Array.isArray(products) ? products : [];
+          try {
+            const missingNameIds = recapProducts
+              .filter((p) => p && !p.name && !p.product_name && p.productId)
+              .map((p) => p.productId);
+            if (missingNameIds.length) {
+              const nameRows = await db('products_catalog')
+                .whereIn('id', missingNameIds)
+                .select('id', 'name');
+              const nameById = new Map(nameRows.map((r) => [String(r.id), r.name]));
+              recapProducts = recapProducts.map((p) => (
+                p && !p.name && !p.product_name && p.productId
+                  ? { ...p, name: nameById.get(String(p.productId)) || null }
+                  : p
+              ));
+            }
+          } catch { /* prompt context is polish — never block completion */ }
           const recapInput = {
             notes: technicianNotes,
             visitOutcome,
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
-            products: Array.isArray(products) ? products : [],
+            products: recapProducts,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {

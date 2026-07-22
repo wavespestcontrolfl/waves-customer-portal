@@ -2557,6 +2557,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // without one (historical tokens predating the assessment flow) keep the
   // legacy fallback layout client-side. Never blocks the report.
   let reportV2 = null;
+  // '-tn...' signature of the narrative text actually rendered into this
+  // payload (codex P2 r15) — PDF stores key off this value, never a re-read.
+  let treatmentNarrativeRenderedSignature = null;
   if (serviceLine === 'lawn' && lawnAssessment) {
     try {
       // Phase 2: prefer the stored area water-intake snapshot (computed at
@@ -2614,7 +2617,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
         const { buildTreatmentNarrative } = require('./treatment-narrative');
-        reportV2.snapshot.treatmentSummary = await buildTreatmentNarrative({
+        const narrative = await buildTreatmentNarrative({
           serviceRecordId: service.id,
           serviceLine: 'lawn',
           treatment: reportV2.treatment,
@@ -2622,6 +2625,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           photoSummary: reportV2.photoSummary || '',
           knex,
         });
+        reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
+        treatmentNarrativeRenderedSignature = narrative?.signature || null;
       }
       // 7-day rainfall chart — sourced from the client's exact lat/lng (the same
       // Open-Meteo trailing-7-day series behind waterContext.rainfallInches7d), so
@@ -2739,7 +2744,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         // deterministic template stands in when generation misses.
         if (reportV2?.snapshot?.treatmentSummary) {
           const { buildTreatmentNarrative } = require('./treatment-narrative');
-          reportV2.snapshot.treatmentSummary = await buildTreatmentNarrative({
+          const narrative = await buildTreatmentNarrative({
             serviceRecordId: service.id,
             serviceLine: 'tree_shrub',
             treatment: reportV2.treatment,
@@ -2750,6 +2755,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             photoSummary: reportV2.photoSummary || '',
             knex,
           });
+          reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
+          // Signature of the EXACT text rendered — PDF stores key off this,
+          // never a DB re-read (codex P2 r15).
+          treatmentNarrativeRenderedSignature = narrative?.signature || null;
         }
         // Next scheduled tree & shrub visit — confident date from a real upcoming
         // row, else omitted (never invent a precise date the data can't back).
@@ -2987,6 +2996,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     metrics,
     mapSvg,
     mapSvgUrl: `/api/reports/${token}/map.svg`,
+    treatmentNarrativeRenderedSignature,
     treatmentMap: {
       schematic: {
         svg: mapSvg,

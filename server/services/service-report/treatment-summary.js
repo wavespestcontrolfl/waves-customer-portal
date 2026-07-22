@@ -58,7 +58,10 @@ function buildTreatmentSummary(treatment) {
     : `${targets.slice(0, -1).join(', ')} and ${targets[targets.length - 1]}`;
   let out = `Today we applied ${list}`;
   if (targets.length) out += `, targeting the ${targetList} activity we found`;
-  out += support.length
+  // Only TRUE surfactants/adjuvants earn the coating sentence — humectants
+  // and PGRs are support products but not surfactants (codex P2 r15).
+  const hasSurfactant = support.some((p) => /surfactant|adjuvant|wetting/i.test(`${p.name || ''} ${p.activeIngredient || ''}`));
+  out += hasSurfactant
     ? ', with a surfactant added so the treatment coats the foliage evenly.'
     : '.';
   if (main.some((p) => p.kind === 'systemic')) {

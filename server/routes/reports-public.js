@@ -1235,14 +1235,15 @@ router.get('/:token', async (req, res, next) => {
       }
 
       let pdf;
-      // Same contract as pdf-queue (codex P2 r12): the stored key reflects
-      // the narrative state the PDF was rendered FROM, captured post-build.
-      let tnRenderedSignature = '';
+      // Same contract as pdf-queue (codex P2 r15): the stored key uses the
+      // signature attached to the payload — the narrative state the PDF was
+      // rendered FROM — never a DB re-read.
+      let tnRenderedSignature = '-tn0';
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
-          tnRenderedSignature = await treatmentNarrativePdfSignature(service.id, db);
+          tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,

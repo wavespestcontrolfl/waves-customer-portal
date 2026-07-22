@@ -10422,6 +10422,19 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
+        // Pesticide compliance mirror for companions (codex P2 r15): same
+        // gate as the primary form — the server requires these whenever a
+        // pesticide product is on the (shared) products list.
+        if (pesticideProductPresent) {
+          for (const f of schema.fields || []) {
+            if (!f.pesticideOnly) continue;
+            const value = String(entry.values[f.key] ?? "").trim();
+            if (!value) missingCompanionRequired.push(f.label);
+            else if (f.key === "irac_frac_logged" && value !== "Yes") {
+              missingCompanionRequired.push(`${f.label} (must be confirmed Yes)`);
+            }
+          }
+        }
         const companionScoreMissing = !!schema.activity && entry.score == null;
         const companionNextStepMissing =
           !!schema.nextStepRequired && !entry.chips.length;
