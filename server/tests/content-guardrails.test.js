@@ -1914,3 +1914,22 @@ describe('footprint gate — astro round-13 parity (long lists, idiom, semicolon
     expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
 });
+
+describe('footprint gate — parity pre-push hardening (mid-fragment conjunctions, object binding)', () => {
+  test('semicolon fragments with mid-list conjunctions still rejoin and flag', () => {
+    for (const body of [
+      'We serve Sarasota; Naples and Tampa.',
+      'We serve Sarasota; Venice, Naples, and Tampa.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('offer/provide/deliver require a service-shaped object, not mere proximity', () => {
+    const editorial = guardrails.evaluate({ body: 'We deliver pest research to help Naples homeowners compare options.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const claim = guardrails.evaluate({ body: 'We deliver reliable pest control in Naples.' }, {});
+    expect(claim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+});

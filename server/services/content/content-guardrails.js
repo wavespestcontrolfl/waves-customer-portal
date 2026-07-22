@@ -631,9 +631,10 @@ const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed
 const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?)?`;
 // "serve up"/"serving up" is the editorial idiom ("serving up a
 // Naples-vs-Sarasota comparison") — guarded on every serve-form arm.
-// offer/provide/deliver assert operation like serve/treat, but ONLY with a
-// service-shaped object nearby — "we provide this checklist for Naples
-// homeowners" is editorial, "we provide service in Tampa" is a claim.
+// offer/provide/deliver assert operation like serve/treat, but ONLY when a
+// service-shaped noun is the verb's OBJECT (≤2 modifier words between) —
+// "we provide this checklist for Naples homeowners" and "we deliver pest
+// research" are editorial; "we provide service in Tampa" is a claim.
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv(?:e|es|ed|ing)\\b(?!\\s+up\\b)|servic\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
@@ -641,7 +642,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
   + '|same.day|we offer|free (?:quote|estimate|inspection)'
-  + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?=[^.!?]{0,40}\\b(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bug|wdo|control|care|treatment|service|plan|program|inspection|removal|exterminat))"
+  + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\s+(?:[a-z-]+\\s+){0,2}?(?:(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+)?(?:control|care|treatment|service|plan|program|inspection|removal|exterminat)\\w*\\b"
   + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
   + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
@@ -749,7 +750,7 @@ const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|w
 // separator; a fragment with any lowercase prose is a real clause and stays
 // split — "We serve Sarasota; Tampa mosquito season starts earlier" must
 // NOT glue Tampa onto the claim.
-const LIST_FRAGMENT_RE = /^\s*(?:(?:and|or|nor)\s+)?(?:[A-Z][A-Za-z'.&-]*[\s,–—-]*)+\.?\s*$/;
+const LIST_FRAGMENT_RE = /^\s*(?:(?:and|or|nor)\s+|[A-Z][A-Za-z'.&-]*[\s,–—-]*)+\.?\s*$/;
 
 function rejoinListSemicolons(sentence) {
   const out = [];
