@@ -130,11 +130,17 @@ exports.seed = async function (knex) {
   const pmId = uuidv4();
   await knex('payment_methods').insert({
     id: pmId, customer_id: customerId,
+    // Explicit processor: the column default is legacy 'square', which no code
+    // path treats as chargeable — autopay coverage reads 0% on seeded data.
+    processor: 'stripe', method_type: 'card',
     stripe_payment_method_id: 'pm_DEMO_001',
     card_brand: 'VISA', last_four: '4821',
     exp_month: '08', exp_year: '2028',
     is_default: true, autopay_enabled: true,
   });
+  // Point the customer's autopay method at the card so billing-health's
+  // "No card" attention count doesn't flag the demo account.
+  await knex('customers').where({ id: customerId }).update({ autopay_payment_method_id: pmId });
 
   // ---- Payments ----
   await knex('payments').insert([
@@ -245,6 +251,27 @@ exports.seed = async function (knex) {
       credit_amount: 25.00,
     },
   ]);
+
+  // Promoter ledger row to match the referrals above. Earned/available totals
+  // in the portal's Refer tab read referral_promoters (the engine's ledger),
+  // NOT referral statuses — without this row the tab showed "$0 earned" next
+  // to a referral already marked credited $25.
+  await knex('referral_promoters').del();
+  await knex('referral_promoters').insert({
+    customer_id: customerId,
+    first_name: 'Jennifer',
+    last_name: 'Martinez',
+    customer_phone: '+19415993489',
+    customer_email: 'jennifer.m@email.com',
+    referral_code: 'WAVES-J4KM',
+    status: 'active',
+    total_referrals_sent: 3,
+    total_referrals_converted: 2,
+    total_earned_cents: 2500,
+    available_balance_cents: 2500,
+    referral_balance_cents: 2500,
+    last_referral_at: '2026-03-20T12:00:00.000Z',
+  });
 
   // ---- Property Preferences ----
   await knex('property_preferences').insert({

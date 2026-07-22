@@ -9,10 +9,21 @@ const D = {
 
 async function currentPosition() {
   if (!navigator.geolocation) return {};
+  // Hard deadline beyond the geolocation option timeout: when the permission
+  // prompt is left undecided the browser fires NEITHER callback, which left
+  // `busy` stuck and every time-clock button disabled until a page refresh.
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(deadline);
+      resolve(value);
+    };
+    const deadline = window.setTimeout(() => done({}), 7000);
     navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => resolve({}),
+      (pos) => done({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => done({}),
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 120000 },
     );
   });

@@ -8,7 +8,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
-const { isPaused } = require('../services/autopay-eligibility');
+const { isPaused, autopayActivePredicate } = require('../services/autopay-eligibility');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -266,6 +266,19 @@ router.get('/billing-health', async (req, res, next) => {
       .where('autopay_paused_until', '>=', etDateString(now))
       .count('* as n').first();
 
+    // Chargeable autopay — the shared predicate the dashboard Cash KPI and
+    // Action Inbox use (default Stripe method present, not paused, not
+    // expired). Reporting only the raw autopay_enabled flag here made this
+    // card claim 100% coverage while the Cash KPI on the same page said 0%.
+    const { sql: chargeableSql, binding: chargeableBinding } = autopayActivePredicate(now);
+    const chargeable = await db('customers as c')
+      .where({ 'c.active': true })
+      .whereNull('c.deleted_at')
+      .where('c.monthly_rate', '>', 0)
+      .whereRaw(chargeableSql, [chargeableBinding])
+      .count('* as n').first()
+      .catch(() => ({ n: 0 }));
+
     // Customers with no autopay payment method
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
@@ -324,6 +337,7 @@ router.get('/billing-health', async (req, res, next) => {
       summary: {
         total_billable: totalBillable,
         autopay_active: Math.max(0, (parseInt(enabled.n) || 0) - (parseInt(paused.n) || 0)),
+        autopay_chargeable: parseInt(chargeable.n) || 0,
         autopay_paused: parseInt(paused.n) || 0,
         autopay_disabled: parseInt(disabled.n) || 0,
         no_payment_method: parseInt(noMethod.n) || 0,

@@ -127,6 +127,11 @@ router.get('/balance', async (req, res) => {
     const balance = await StripeBanking.getBalance();
     res.json(balance);
   } catch (err) {
+    // Missing STRIPE_SECRET_KEY is a recognized configuration state, not a
+    // fault — answer 503 without the error-level log/stack a real failure gets.
+    if (err.message === 'Stripe not configured') {
+      return res.status(503).json({ error: 'Stripe not configured', message: 'STRIPE_SECRET_KEY is not set — banking balance is unavailable.' });
+    }
     logger.error('[banking] Balance fetch failed:', err);
     res.status(500).json({ error: err.message });
   }

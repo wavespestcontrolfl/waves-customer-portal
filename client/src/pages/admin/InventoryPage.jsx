@@ -2276,7 +2276,6 @@ function ProductsTab({
       <div style={{ overflowX: "auto" }}>
         {" "}
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          {" "}
           <thead>
             <tr>
               {[
@@ -2297,7 +2296,7 @@ function ProductsTab({
                 </th>
               ))}
             </tr>
-          </thead>{" "}
+          </thead>
           <tbody>
             {products.map((p) => {
               const isEditing = editing === p.id;
@@ -2317,7 +2316,6 @@ function ProductsTab({
                         : "transparent",
                   }}
                 >
-                  {" "}
                   <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>
                     {isEditing ? (
                       <input
@@ -2331,7 +2329,7 @@ function ProductsTab({
                     ) : (
                       p.name
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={tdS}>
                     {isEditing ? (
                       <input
@@ -2350,7 +2348,7 @@ function ProductsTab({
                         {p.category}
                       </span>
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                     {isEditing ? (
                       <input
@@ -2367,7 +2365,7 @@ function ProductsTab({
                     ) : (
                       p.activeIngredient || "—"
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>
                     {isEditing ? (
                       <input
@@ -2384,7 +2382,7 @@ function ProductsTab({
                     ) : (
                       p.moaGroup || "—"
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, fontSize: 12 }}>
                     {isEditing ? (
                       <input
@@ -2401,7 +2399,7 @@ function ProductsTab({
                     ) : (
                       p.containerSize || "—"
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, fontSize: 12 }}>
                     {isEditing ? (
                       <div
@@ -2469,7 +2467,7 @@ function ProductsTab({
                         )}
                       </span>
                     )}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       ...tdS,
@@ -2478,7 +2476,7 @@ function ProductsTab({
                   }}
                 >
                     {formatMoney(p.bestPrice)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       ...tdS,
@@ -2489,10 +2487,10 @@ function ProductsTab({
                   >
                     {formatUnitPriceList(p.unitPrices) ||
                       formatUnitCost(p.costPerUnit, p.costUnit)}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, fontSize: 12 }}>
                     {p.bestVendor || "—"}
-                  </td>{" "}
+                  </td>
                   <td style={tdS}>
                     {p.needsPricing ? (
                       <span style={sBadge(`${D.amber}22`, D.amber)}>
@@ -2503,7 +2501,7 @@ function ProductsTab({
                         Priced
                       </span>
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ ...tdS, width: 90 }}>
                     {" "}
                     <div
@@ -2623,7 +2621,7 @@ function ProductsTab({
                         </>
                       )}
                     </div>{" "}
-                  </td>{" "}
+                  </td>
                 </tr>,
                 isExpanded && (
                   <tr key={`${p.id}-exp`}>
@@ -2647,7 +2645,7 @@ function ProductsTab({
                 ),
               ];
             })}
-          </tbody>{" "}
+          </tbody>
         </table>{" "}
       </div>
       {products.length === 0 && (
@@ -3368,7 +3366,6 @@ function ExpandedProduct({
             <div style={{ maxHeight: 220, overflow: "auto" }}>
               {" "}
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                {" "}
                 <thead>
                   <tr>
                     {["Date", "Type", "Amount", "Stock", "Job/Reason"].map(
@@ -3379,16 +3376,15 @@ function ExpandedProduct({
                       ),
                     )}
                   </tr>
-                </thead>{" "}
+                </thead>
                 <tbody>
                   {movements.map((m) => (
                     <tr key={m.id}>
-                      {" "}
                       <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
                         {m.createdAt
                           ? new Date(m.createdAt).toLocaleDateString()
                           : "—"}
-                      </td>{" "}
+                      </td>
                       <td style={tdS}>
                         <span
                           style={sBadge(
@@ -3406,7 +3402,7 @@ function ExpandedProduct({
                         >
                           {m.movementType}
                         </span>
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -3414,7 +3410,7 @@ function ExpandedProduct({
                         }}
                       >
                         {m.quantity ?? "—"} {m.unit || ""}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -3423,16 +3419,16 @@ function ExpandedProduct({
                         }}
                       >
                         {m.stockBefore ?? "—"} → {m.stockAfter ?? "—"}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
                         {m.customerName ||
                           m.metadata?.reason ||
                           m.metadata?.note ||
                           "—"}
-                      </td>{" "}
+                      </td>
                     </tr>
                   ))}
-                </tbody>{" "}
+                </tbody>
               </table>{" "}
             </div>
           )}
@@ -4718,7 +4714,6 @@ function ProtocolsTab({
               </div>{" "}
             </div>{" "}
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              {" "}
               <thead>
                 <tr>
                   {[
@@ -4737,7 +4732,7 @@ function ProtocolsTab({
                     </th>
                   ))}
                 </tr>
-              </thead>{" "}
+              </thead>
               <tbody>
                 {svc.products.map((p) => {
                   const highlightProductCost =
@@ -4745,10 +4740,9 @@ function ProtocolsTab({
                     (p.costWarning || !p.costPerApp);
                   return editingRow === p.id ? (
                     <tr key={p.id} style={{ background: `${D.teal}10` }}>
-                      {" "}
                       <td style={{ ...tdS, fontWeight: 500 }}>
                         {p.productName}
-                      </td>{" "}
+                      </td>
                       <td style={tdS}>
                         <div style={{ display: "flex", gap: 4 }}>
                           <input
@@ -4780,7 +4774,7 @@ function ProtocolsTab({
                             ))}
                           </select>
                         </div>
-                      </td>{" "}
+                      </td>
                       <td style={tdS}>
                         <input
                           value={editForm.usagePer1000sf}
@@ -4795,7 +4789,7 @@ function ProtocolsTab({
                           placeholder="—"
                           style={{ ...sInput, width: 70 }}
                         />
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4805,7 +4799,7 @@ function ProtocolsTab({
                         {p.bestPrice
                           ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                           : "—"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4814,10 +4808,10 @@ function ProtocolsTab({
                         }}
                       >
                         {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
                         {costSourceLabel(p)}
-                      </td>{" "}
+                      </td>
                       <td style={tdS}>
                         <input
                           type="checkbox"
@@ -4830,7 +4824,7 @@ function ProtocolsTab({
                           }
                           style={{ accentColor: D.teal }}
                         />
-                      </td>{" "}
+                      </td>
                       <td style={tdS}>
                         <input
                           value={editForm.notes}
@@ -4842,7 +4836,7 @@ function ProtocolsTab({
                           }
                           style={{ ...sInput, width: "100%" }}
                         />
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, width: 80 }}>
                         <div style={{ display: "flex", gap: 4 }}>
                           <button
@@ -4874,7 +4868,7 @@ function ProtocolsTab({
                             ×
                           </button>
                         </div>
-                      </td>{" "}
+                      </td>
                     </tr>
                   ) : (
                     <tr
@@ -4885,7 +4879,6 @@ function ProtocolsTab({
                           : "transparent",
                       }}
                     >
-                      {" "}
                       <td style={{ ...tdS, fontWeight: 500 }}>
                         {p.productName}{" "}
                         {p.isPrimary && (
@@ -4893,13 +4886,13 @@ function ProtocolsTab({
                             Primary
                           </span>
                         )}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 12 }}>
                         {p.usageAmount} {p.usageUnit}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 12 }}>
                         {p.usagePer1000sf || "—"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4909,7 +4902,7 @@ function ProtocolsTab({
                         {p.bestPrice
                           ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                           : "—"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4918,7 +4911,7 @@ function ProtocolsTab({
                         }}
                       >
                         {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4928,10 +4921,10 @@ function ProtocolsTab({
                         title={p.costWarning || ""}
                       >
                         {costSourceLabel(p)}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, fontSize: 11 }}>
                         {p.isPrimary ? "" : ""}
-                      </td>{" "}
+                      </td>
                       <td
                         style={{
                           ...tdS,
@@ -4944,7 +4937,7 @@ function ProtocolsTab({
                         }}
                       >
                         {p.notes || "—"}
-                      </td>{" "}
+                      </td>
                       <td style={{ ...tdS, width: 80 }}>
                         <div style={{ display: "flex", gap: 4 }}>
                           {" "}
@@ -4977,11 +4970,11 @@ function ProtocolsTab({
                             ×
                           </button>{" "}
                         </div>
-                      </td>{" "}
+                      </td>
                     </tr>
                   );
                 })}
-              </tbody>{" "}
+              </tbody>
             </table>
             {showAdd === svc.serviceType && (
               <div
@@ -5234,7 +5227,6 @@ function MarginsTab({ showToast }) {
               </div>{" "}
             </div>{" "}
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              {" "}
               <thead>
                 <tr>
                   {[
@@ -5250,11 +5242,10 @@ function MarginsTab({ showToast }) {
                     </th>
                   ))}
                 </tr>
-              </thead>{" "}
+              </thead>
               <tbody>
                 {svc.products.map((p) => (
                   <tr key={p.id}>
-                    {" "}
                     <td style={{ ...tdS, fontWeight: 500 }}>
                       {p.productName}{" "}
                       {p.isPrimary && (
@@ -5262,13 +5253,13 @@ function MarginsTab({ showToast }) {
                           Primary
                         </span>
                       )}
-                    </td>{" "}
+                    </td>
                     <td style={{ ...tdS, fontSize: 12 }}>
                       {p.usageAmount} {p.usageUnit}
-                    </td>{" "}
+                    </td>
                     <td style={{ ...tdS, fontSize: 12 }}>
                       {p.usagePer1000sf || "—"}
-                    </td>{" "}
+                    </td>
                     <td
                       style={{
                         ...tdS,
@@ -5278,7 +5269,7 @@ function MarginsTab({ showToast }) {
                       {p.bestPrice
                         ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                         : "—"}
-                    </td>{" "}
+                    </td>
                     <td
                       style={{
                         ...tdS,
@@ -5287,7 +5278,7 @@ function MarginsTab({ showToast }) {
                       }}
                     >
                       {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                    </td>{" "}
+                    </td>
                     <td
                       style={{
                         ...tdS,
@@ -5297,10 +5288,10 @@ function MarginsTab({ showToast }) {
                       title={p.costWarning || ""}
                     >
                       {costSourceLabel(p)}
-                    </td>{" "}
+                    </td>
                   </tr>
                 ))}
-              </tbody>{" "}
+              </tbody>
             </table>{" "}
           </div>
         ))
@@ -5442,7 +5433,6 @@ function ScrapeTab({ showToast }) {
         </div>
       ) : (
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          {" "}
           <thead>
             <tr>
               {[
@@ -5460,14 +5450,13 @@ function ScrapeTab({ showToast }) {
                 </th>
               ))}
             </tr>
-          </thead>{" "}
+          </thead>
           <tbody>
             {jobs.map((j) => (
               <tr key={j.id}>
-                {" "}
                 <td style={{ ...tdS, fontWeight: 500 }}>
                   {j.vendor_name}
-                </td>{" "}
+                </td>
                 <td style={tdS}>
                   <span
                     style={sBadge(
@@ -5485,13 +5474,13 @@ function ScrapeTab({ showToast }) {
                   >
                     {j.status}
                   </span>
-                </td>{" "}
+                </td>
                 <td style={tdS}>{j.products_found}</td>
                 <td style={tdS}>{j.prices_updated}</td>
-                <td style={tdS}>{j.prices_new}</td>{" "}
+                <td style={tdS}>{j.prices_new}</td>
                 <td style={{ ...tdS, color: j.errors > 0 ? D.red : D.muted }}>
                   {j.errors}
-                </td>{" "}
+                </td>
                 <td
                   style={{
                     ...tdS,
@@ -5502,13 +5491,13 @@ function ScrapeTab({ showToast }) {
                   {j.duration_ms
                     ? `${(j.duration_ms / 1000).toFixed(1)}s`
                     : "—"}
-                </td>{" "}
+                </td>
                 <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
                   {new Date(j.created_at).toLocaleString()}
-                </td>{" "}
+                </td>
               </tr>
             ))}
-          </tbody>{" "}
+          </tbody>
         </table>
       )}
     </div>
