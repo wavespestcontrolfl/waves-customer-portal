@@ -1945,3 +1945,12 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const claim = guardrails.evaluate({ body: 'We offer pest control services in Naples.' }, {});
     expect(claim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
+
+  test('trailing qualifiers on list fragments rejoin; editorial modifiers stay excluded', () => {
+    const qualified = guardrails.evaluate({ body: 'We serve Sarasota; Venice and Naples year-round.' }, {});
+    expect(qualified.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const factual = guardrails.evaluate({ body: 'We serve Sarasota; Tampa mosquito season starts earlier than ours.' }, {});
+    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const editorial = guardrails.evaluate({ body: 'We provide pest control educational resources for Naples homeowners.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
