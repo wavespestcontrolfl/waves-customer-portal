@@ -16,6 +16,9 @@
 const {
   assemblePnl,
   prorateDepreciation,
+  macrsYearAmount,
+  annotateMidQuarter,
+  isDepreciationUncomputed,
   getPeriodRange,
   missingTableOnly,
   rateAsOf,
@@ -264,6 +267,259 @@ describe('prorateDepreciation', () => {
       year.start, year.end,
     );
     expect(total).toBe(0);
+  });
+
+  // MACRS 5-year vehicle (the Ford Transit case): $35k, in service 2025-01-01.
+  // annual_depreciation is NULL — before this it showed $0; now the year-
+  // varying half-year schedule computes it (20/32/19.2/11.52/11.52/5.76%).
+  describe('MACRS year-varying depreciation', () => {
+    const van = (over = {}) => ({
+      depreciation_method: 'MACRS', irs_class: '5-year',
+      purchase_cost: '35000', annual_depreciation: null,
+      placed_in_service_date: '2025-01-01', asset_category: 'vehicle',
+      business_use_confirmed: true, // owner-confirmed 100% business use
+      luxury_auto_exempt: true,     // heavy cargo van, §280F-exempt
+      ...over,
+    });
+
+    test('macrsYearAmount follows the 5-year half-year table', () => {
+      expect(macrsYearAmount('5-year', 35000, 2025, 2025)).toBeCloseTo(7000, 4);   // 20%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2026)).toBeCloseTo(11200, 4);  // 32%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2027)).toBeCloseTo(6720, 4);   // 19.2%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2030)).toBeCloseTo(2016, 4);   // 5.76%
+      expect(macrsYearAmount('5-year', 35000, 2025, 2031)).toBe(0);                // past recovery
+      expect(macrsYearAmount('5-year', 35000, 2025, 2024)).toBe(0);                // before in-service
+    });
+
+    test('2026 P&L shows the year-2 amount ($11,200), not $0', () => {
+      expect(prorateDepreciation([van()], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+    });
+
+    test('in-service year takes the FULL year-1 % regardless of in-service date (half-year)', () => {
+      // Placed in service mid-year: still the full 20% ($7,000), never day-prorated.
+      expect(prorateDepreciation(
+        [van({ placed_in_service_date: '2025-07-01' })],
+        '2025-01-01', '2025-12-31',
+      )).toBeCloseTo(7000, 2);
+    });
+
+    test('business_use_pct scales the deduction (listed property)', () => {
+      // 80% business use → 80% of the $11,200 year-2 amount.
+      expect(prorateDepreciation([van({ business_use_pct: '80' })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(8960, 2);
+      // Unset defaults to 100%.
+      expect(prorateDepreciation([van({ business_use_pct: null })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(11200, 2);
+    });
+
+    test('a partial REPORT window prorates the year amount by window days', () => {
+      // Q1 2026 = 90 days of 365 → 11200 × 90/365.
+      expect(prorateDepreciation([van()], '2026-01-01', '2026-03-31'))
+        .toBeCloseTo(11200 * 90 / 365, 2);
+    });
+
+    test('unknown recovery class contributes nothing (fail closed)', () => {
+      expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
+    });
+
+    test('an UNCONFIRMED vehicle fails closed and is flagged (never deducts the 100% default)', () => {
+      const unconfirmed = van({ business_use_confirmed: false });
+      expect(prorateDepreciation([unconfirmed], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(isDepreciationUncomputed(unconfirmed, '2026-01-01', '2026-12-31')).toBe(true);
+      // Confirming it computes normally.
+      expect(prorateDepreciation([van({ business_use_confirmed: true })], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+    });
+
+    test('a NON-§280F-exempt (passenger) vehicle fails closed until CPA confirms exemption', () => {
+      // A confirmed-business-use car that is NOT exempt from the passenger-auto
+      // caps must not take full MACRS — fail closed + flagged.
+      const passengerAuto = van({ luxury_auto_exempt: false });
+      expect(prorateDepreciation([passengerAuto], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(isDepreciationUncomputed(passengerAuto, '2026-01-01', '2026-12-31')).toBe(true);
+    });
+
+    test('isDepreciationUncomputed flags ALL fail-closed reasons, only in-window', () => {
+      const win = ['2026-01-01', '2026-12-31'];
+      // Computable half-year van → NOT uncomputed.
+      expect(isDepreciationUncomputed(van(), ...win)).toBe(false);
+      // Unknown class → uncomputed.
+      expect(isDepreciationUncomputed(van({ irs_class: '20-year' }), ...win)).toBe(true);
+      // ≤50% vehicle → uncomputed.
+      expect(isDepreciationUncomputed(van({ business_use_pct: '40' }), ...win)).toBe(true);
+      // Mid-quarter (marked) → uncomputed.
+      expect(isDepreciationUncomputed(van({ depreciation_convention: 'mid_quarter' }), ...win)).toBe(true);
+      // Out of window: placed in service AFTER the window → not flagged.
+      expect(isDepreciationUncomputed(van({ irs_class: '20-year', placed_in_service_date: '2027-01-01' }), ...win)).toBe(false);
+      // Past its recovery period (5-year van in service 2018, but mid-quarter) → computes 0 legitimately.
+      expect(isDepreciationUncomputed(van({ depreciation_convention: 'mid_quarter', placed_in_service_date: '2018-01-01' }), ...win)).toBe(false);
+    });
+
+    test('completeness covers §179/bonus fail-closed too, not just MACRS', () => {
+      const win = ['2026-01-01', '2026-12-31'];
+      // An unconfirmed vehicle on §179 (in-service this year) fails closed AND
+      // is flagged uncomputed.
+      const s179Van = {
+        depreciation_method: 'section_179', section_179_elected: true,
+        section_179_amount: '20000', asset_category: 'vehicle',
+        business_use_confirmed: false, placed_in_service_date: '2026-03-01',
+      };
+      expect(prorateDepreciation([s179Van], ...win)).toBe(0);
+      expect(isDepreciationUncomputed(s179Van, ...win)).toBe(true);
+      // Confirmed (business use + §280F exemption) → computes and is NOT flagged.
+      const confirmed = { ...s179Van, business_use_confirmed: true, luxury_auto_exempt: true, business_use_pct: '100' };
+      expect(prorateDepreciation([confirmed], ...win)).toBeCloseTo(20000, 2);
+      expect(isDepreciationUncomputed(confirmed, ...win)).toBe(false);
+    });
+
+    test('an ineligible MACRS asset NEVER falls through to a stale annual_depreciation', () => {
+      // A MACRS row carrying a leftover annual_depreciation must fail closed,
+      // not claim that straight-line amount — MACRS is handled entirely.
+      expect(prorateDepreciation(
+        [van({ irs_class: '20-year', annual_depreciation: '9999' })], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+      expect(prorateDepreciation(
+        [van({ business_use_pct: '40', annual_depreciation: '9999' })], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
+    test('§179 + MACRS depreciates only the REMAINING basis (no double-count)', () => {
+      // $35k, $10k §179, 100% business use. 2025: $10k immediate + 20%×($35k−
+      // $10k)=$5,000 → $15,000. 2026: 32%×$25k=$8,000.
+      const hybrid = van({
+        placed_in_service_date: '2025-01-01',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      expect(prorateDepreciation([hybrid], '2025-01-01', '2025-12-31')).toBeCloseTo(15000, 2);
+      expect(prorateDepreciation([hybrid], '2026-01-01', '2026-12-31')).toBeCloseTo(8000, 2);
+    });
+
+    test('§179/bonus immediate expensing is capped at the business basis', () => {
+      // Full-cost §179 fallback on an 80%-business-use $35k vehicle: the §179
+      // deduction is capped at $35k×80% = $28,000, not $35,000.
+      const s179Vehicle = {
+        depreciation_method: 'section_179', section_179_elected: true,
+        section_179_amount: null, purchase_cost: '35000',
+        placed_in_service_date: '2026-01-01', business_use_pct: '80',
+      };
+      expect(prorateDepreciation([s179Vehicle], '2026-01-01', '2026-12-31')).toBeCloseTo(28000, 2);
+      // ≤50% use disqualifies §179 entirely.
+      expect(prorateDepreciation(
+        [{ ...s179Vehicle, business_use_pct: '45' }], '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
+    test('hybrid §179/MACRS applies business use to the BASIS, not the schedule', () => {
+      const hybrid80 = van({
+        placed_in_service_date: '2025-01-01', business_use_pct: '80',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      // Business basis = $35k×80% = $28k; §179 $10k immediate; MACRS on $18k.
+      // 2025: $10k + 20%×$18k=$3,600 → $13,600 (NOT $14,000).
+      expect(prorateDepreciation([hybrid80], '2025-01-01', '2025-12-31')).toBeCloseTo(13600, 2);
+      // At 40% business use the whole asset fails closed — §179 does NOT survive.
+      const hybrid40 = van({
+        placed_in_service_date: '2025-01-01', business_use_pct: '40',
+        section_179_elected: true, section_179_amount: '10000',
+      });
+      expect(prorateDepreciation([hybrid40], '2025-01-01', '2025-12-31')).toBe(0);
+    });
+
+    test('disposed MACRS asset takes HALF the disposal-year amount (half-year disposition)', () => {
+      const disposedVan = van({ disposal_date: '2027-12-31', disposed: true });
+      // 2026 (before disposal): full year-2 $11,200.
+      expect(prorateDepreciation([disposedVan], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+      // 2027 (disposal year): HALF the year-3 amount = 0.5 × 19.2% × $35k =
+      // $3,360 (half-year disposition convention, not a day fraction).
+      expect(prorateDepreciation([disposedVan], '2027-01-01', '2027-12-31')).toBeCloseTo(3360, 2);
+      // After the disposal year: nothing.
+      expect(prorateDepreciation([disposedVan], '2028-01-01', '2028-12-31')).toBe(0);
+    });
+
+    test('disposal-year amount does NOT leak into post-disposal windows', () => {
+      // Disposed mid-year: the $3,360 half-year amount is earned Jan 1–Jun 30.
+      const midDisposal = van({ disposal_date: '2027-06-30', disposed: true });
+      // Full 2027 window still totals the whole $3,360 (window covers all coverage).
+      expect(prorateDepreciation([midDisposal], '2027-01-01', '2027-12-31')).toBeCloseTo(3360, 2);
+      // Q1 (Jan–Mar) = 90 of the 181 coverage days.
+      expect(prorateDepreciation([midDisposal], '2027-01-01', '2027-03-31'))
+        .toBeCloseTo(3360 * 90 / 181, 2);
+      // Q3 (Jul–Sep), entirely AFTER the June 30 disposal → $0, no leak.
+      expect(prorateDepreciation([midDisposal], '2027-07-01', '2027-09-30')).toBe(0);
+    });
+
+    test('same-year in-service + disposal is NOT MACRS-depreciable ($0)', () => {
+      const sameYear = van({ placed_in_service_date: '2026-03-01', disposal_date: '2026-11-01', disposed: true });
+      expect(prorateDepreciation([sameYear], '2026-01-01', '2026-12-31')).toBe(0);
+      // And it's excluded from the mid-quarter basis test, so it can't skew it:
+      // a genuine Q1 asset alongside a same-year-disposed Q4 asset stays half-year.
+      const q1 = van({ placed_in_service_date: '2026-02-01', purchase_cost: '35000' });
+      const sameYearQ4 = van({ placed_in_service_date: '2026-11-01', purchase_cost: '90000', disposal_date: '2026-12-15', disposed: true });
+      // Without the exclusion the $90k Q4 asset would be >40% of basis → spurious
+      // mid-quarter → both $0. Excluded, q1 keeps its year-1 half-year amount:
+      // 20% × $35k = $7,000.
+      expect(prorateDepreciation(annotateMidQuarter([q1, sameYearQ4]), '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(7000, 2);
+    });
+
+    test('the ≤50% guard gates ONLY GDS/§179 — a CPA-entered straight-line amount flows through', () => {
+      const adsVehicle = {
+        depreciation_method: 'straight_line', annual_depreciation: '2100',
+        placed_in_service_date: '2025-01-01', business_use_pct: '30',
+      };
+      expect(prorateDepreciation([adsVehicle], '2026-01-01', '2026-12-31')).toBeCloseTo(2100, 2);
+    });
+
+    test('mid-quarter year (>40% of basis in Q4) fails MACRS closed for CPA', () => {
+      const q1 = van({ placed_in_service_date: '2026-02-01', purchase_cost: '10000' });
+      const q4 = van({ placed_in_service_date: '2026-11-01', purchase_cost: '40000' });
+      // 40k of 50k (80%) in Q4 → mid-quarter year → both fail closed.
+      expect(prorateDepreciation(annotateMidQuarter([q1, q4]), '2026-01-01', '2026-12-31')).toBe(0);
+      // A half-year year (all Q1) computes normally.
+      expect(prorateDepreciation(annotateMidQuarter([van()]), '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+      // annotateMidQuarter marks the affected MACRS assets so the disclosure fires.
+      const marked = annotateMidQuarter([q1, q4]);
+      expect(marked.every((a) => a.depreciation_convention === 'mid_quarter')).toBe(true);
+    });
+
+    test('bonus (100%) on a non-listed asset at ≤50% use still expenses its business share', () => {
+      // Non-vehicle 100%-bonus at 40% business use: immediate = cost × 40% =
+      // $2,000 (bonus's >50% rule is listed-property only, unlike §179).
+      const bonusEquip = {
+        depreciation_method: 'bonus_100', asset_category: 'equipment',
+        purchase_cost: '5000', business_use_pct: '40',
+        placed_in_service_date: '2026-03-01',
+      };
+      expect(prorateDepreciation([bonusEquip], '2026-01-01', '2026-12-31')).toBeCloseTo(2000, 2);
+      // A §179 non-vehicle at 40% still fails closed (§179 needs >50% broadly).
+      expect(prorateDepreciation(
+        [{ ...bonusEquip, depreciation_method: 'section_179', section_179_elected: true }],
+        '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
+    test('the ≤50% ADS gate is LISTED-property only — a non-vehicle MACRS asset still depreciates', () => {
+      // Non-vehicle (asset_category !== 'vehicle') at 40% use uses GDS on its
+      // 40% basis: 32% × ($35k×0.40) = $4,480, not $0.
+      const equip = van({ asset_category: 'equipment', business_use_pct: '40' });
+      expect(prorateDepreciation([equip], '2026-01-01', '2026-12-31')).toBeCloseTo(4480, 2);
+    });
+
+    test('business use ≤50% FAILS CLOSED for a VEHICLE (ADS/CPA territory, not GDS)', () => {
+      expect(prorateDepreciation([van({ business_use_pct: '50' })], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(prorateDepreciation([van({ business_use_pct: '40' })], '2026-01-01', '2026-12-31')).toBe(0);
+      // Just above the threshold still computes (GDS × use).
+      expect(prorateDepreciation([van({ business_use_pct: '51' })], '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(11200 * 0.51, 2);
+    });
+
+    test('a report window ending BEFORE in-service gets nothing', () => {
+      const julyAsset = van({ placed_in_service_date: '2026-07-01' });
+      // Jan–Mar 2026 P&L: asset not yet in service → $0.
+      expect(prorateDepreciation([julyAsset], '2026-01-01', '2026-03-31')).toBe(0);
+      // Full 2026: in-service year takes the FULL year-1 20% = $7,000 (half-year
+      // convention — not day-prorated from July).
+      expect(prorateDepreciation([julyAsset], '2026-01-01', '2026-12-31')).toBeCloseTo(7000, 2);
+    });
   });
 });
 

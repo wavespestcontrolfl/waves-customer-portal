@@ -475,7 +475,7 @@ function ServiceTaxabilityTab() {
 function EquipmentTab() {
   const [equipment, setEquipment] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({
+  const emptyForm = {
     name: "",
     assetCategory: "equipment",
     purchaseDate: "",
@@ -483,13 +483,48 @@ function EquipmentTab() {
     depreciationMethod: "section_179",
     usefulLifeYears: "7",
     makeModel: "",
-  });
+    businessUsePct: "100",
+    luxuryAutoExempt: false,
+  };
+  const [form, setForm] = useState(emptyForm);
 
-  useEffect(() => {
+  const reload = () =>
     adminFetch("/admin/tax/equipment")
       .then((d) => setEquipment(d.equipment || []))
       .catch(() => {});
+
+  useEffect(() => {
+    reload();
   }, []);
+
+  // Confirm a vehicle's business use inline (needed before its depreciation
+  // computes — a vehicle is unconfirmed until the % is explicitly set).
+  const confirmVehicleUse = async (id, currentPct) => {
+    const input = window.prompt(
+      "Business-use % for this vehicle (0–100)? This confirms it so depreciation computes.",
+      String(currentPct ?? 100),
+    );
+    if (input == null) return;
+    const pct = Number(input);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      alert("Enter a number between 0 and 100.");
+      return;
+    }
+    // §280F: full MACRS only applies to a HEAVY vehicle (>6,000 lb GVWR) exempt
+    // from the passenger-auto caps. Confirm with the CPA before computing.
+    const exempt = window.confirm(
+      "Is this vehicle EXEMPT from the IRS §280F passenger-auto depreciation limits (heavy vehicle, >6,000 lb GVWR)? OK = exempt (full MACRS); Cancel = not exempt (leave $0 for CPA-capped calc).",
+    );
+    try {
+      await adminFetch(`/admin/tax/equipment/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ businessUsePct: pct, luxuryAutoExempt: exempt }),
+      });
+      reload();
+    } catch (e) {
+      alert("Failed: " + e.message);
+    }
+  };
 
   const handleAdd = async () => {
     if (!form.name || !form.purchaseCost) return;
@@ -500,19 +535,21 @@ function EquipmentTab() {
           ...form,
           purchaseCost: parseFloat(form.purchaseCost),
           usefulLifeYears: parseInt(form.usefulLifeYears),
+          // The recovery LIFE is the operator's choice (drives the MACRS class);
+          // no longer a hidden 7-year default.
           section179Elected: form.depreciationMethod === "section_179",
+          // Send business use + §280F exemption only for vehicles — both are
+          // needed to CONFIRM a vehicle so its depreciation computes.
+          businessUsePct:
+            form.assetCategory === "vehicle"
+              ? Number(form.businessUsePct)
+              : undefined,
+          luxuryAutoExempt:
+            form.assetCategory === "vehicle" ? form.luxuryAutoExempt : undefined,
         }),
       });
       setShowAdd(false);
-      setForm({
-        name: "",
-        assetCategory: "equipment",
-        purchaseDate: "",
-        purchaseCost: "",
-        depreciationMethod: "section_179",
-        usefulLifeYears: "7",
-        makeModel: "",
-      });
+      setForm(emptyForm);
       const d = await adminFetch("/admin/tax/equipment");
       setEquipment(d.equipment || []);
     } catch (e) {
@@ -626,7 +663,14 @@ function EquipmentTab() {
             <select
               value={form.assetCategory}
               onChange={(e) =>
-                setForm((f) => ({ ...f, assetCategory: e.target.value }))
+                setForm((f) => ({
+                  ...f,
+                  assetCategory: e.target.value,
+                  // Vehicles are 5-year MACRS property — default the life so a
+                  // vehicle isn't silently created on the 7-year table.
+                  usefulLifeYears:
+                    e.target.value === "vehicle" ? "5" : f.usefulLifeYears,
+                }))
               }
               style={{ ...inputStyle, minWidth: 100 }}
             >
@@ -682,6 +726,63 @@ function EquipmentTab() {
               <option value="bonus_100">100% Bonus</option>{" "}
             </select>
           </div>{" "}
+          {(form.depreciationMethod === "MACRS" ||
+            form.assetCategory === "vehicle") && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
+                Recovery life
+              </div>{" "}
+              <select
+                value={form.usefulLifeYears}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, usefulLifeYears: e.target.value }))
+                }
+                style={{ ...inputStyle, minWidth: 90 }}
+              >
+                {" "}
+                <option value="3">3-year</option>
+                <option value="5">5-year</option>
+                <option value="7">7-year</option>{" "}
+              </select>
+            </div>
+          )}{" "}
+          {form.assetCategory === "vehicle" && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
+                Business use %
+              </div>{" "}
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={form.businessUsePct}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, businessUsePct: e.target.value }))
+                }
+                style={{ ...inputStyle, width: 90 }}
+              />
+            </div>
+          )}{" "}
+          {form.assetCategory === "vehicle" && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                color: D.muted,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={form.luxuryAutoExempt}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, luxuryAutoExempt: e.target.checked }))
+                }
+              />
+              §280F-exempt (heavy, &gt;6,000 lb)
+            </label>
+          )}{" "}
           <button
             onClick={handleAdd}
             style={{
@@ -752,6 +853,32 @@ function EquipmentTab() {
               <Badge color={e.section179Elected ? D.green : D.amber} small>
                 {e.depreciationMethod}
               </Badge>{" "}
+              {e.assetCategory === "vehicle" &&
+                !(e.businessUseConfirmed && e.luxuryAutoExempt) && (
+                  <button
+                    onClick={() => confirmVehicleUse(e.id, e.businessUsePct)}
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${D.amber}`,
+                      borderRadius: 6,
+                      padding: "2px 8px",
+                      color: D.amber,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                    title="Depreciation won't compute until business use and §280F exemption are confirmed"
+                  >
+                    Confirm for depreciation
+                  </button>
+                )}{" "}
+              {e.assetCategory === "vehicle" &&
+                e.businessUseConfirmed &&
+                e.luxuryAutoExempt && (
+                  <span style={{ fontSize: 11, color: D.muted }}>
+                    {e.businessUsePct}% business · §280F-exempt
+                  </span>
+                )}{" "}
             </div>{" "}
             <div
               style={{
@@ -3155,11 +3282,30 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow
-            label="Depreciation"
+            label={
+              pnl.deductions?.depreciationComplete === false
+                ? "Depreciation (incomplete)"
+                : "Depreciation"
+            }
             value={pnl.deductions?.depreciation}
             indent
           />{" "}
           <PnlRow label="Total Deductions" value={pnl.deductions?.total} bold />{" "}
+          {pnl.depreciationDisclosure?.note && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "8px 10px",
+                border: `1px solid ${D.amber}`,
+                borderRadius: 6,
+                color: D.amber,
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {pnl.depreciationDisclosure.note}
+            </div>
+          )}{" "}
           {pnl.vehicleDeduction && (
             <div
               style={{

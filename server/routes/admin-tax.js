@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, outflowTransactionsQuery,
+  prorateAssetDepreciation, annotateMidQuarter, outflowTransactionsQuery,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -241,6 +241,12 @@ router.get('/equipment', async (req, res, next) => {
         currentBookValue: parseFloat(e.current_book_value || 0),
         section179Elected: e.section_179_elected,
         section179Amount: e.section_179_amount ? parseFloat(e.section_179_amount) : null,
+        // Listed-property business use + MACRS averaging convention — the CPA-
+        // adjustable inputs to the depreciation schedule.
+        businessUsePct: e.business_use_pct != null ? parseFloat(e.business_use_pct) : 100,
+        businessUseConfirmed: e.business_use_confirmed === true,
+        luxuryAutoExempt: e.luxury_auto_exempt === true,
+        depreciationConvention: e.depreciation_convention || 'half_year',
         serialNumber: e.serial_number, makeModel: e.make_model,
         location: e.location, active: e.active,
         disposed: e.disposed, disposalDate: e.disposal_date,
@@ -251,6 +257,17 @@ router.get('/equipment', async (req, res, next) => {
 });
 
 const VALID_DEPRECIATION_METHODS = ['MACRS', 'SL', 'section_179', 'bonus_100'];
+const VALID_DEPRECIATION_CONVENTIONS = ['half_year', 'mid_quarter'];
+// MACRS recovery classes the P&L can compute a schedule for. The equipment
+// form collects usefulLifeYears, so derive the IRS class from it when the
+// caller didn't send one — otherwise a UI-created MACRS asset lands with a
+// null class and silently depreciates at $0 (the exact bug this lane fixes).
+const SUPPORTED_MACRS_CLASSES = { 3: '3-year', 5: '5-year', 7: '7-year' };
+function irsClassFromLife(irsClass, usefulLifeYears) {
+  if (irsClass) return irsClass;
+  const n = parseInt(usefulLifeYears, 10);
+  return SUPPORTED_MACRS_CLASSES[n] || null;
+}
 // IRS Section 179 annual election limits. Update each tax year.
 const SECTION_179_LIMITS = { 2024: 1160000, 2025: 1220000, 2026: 1250000 };
 
@@ -258,11 +275,28 @@ router.post('/equipment', async (req, res, next) => {
   try {
     const { name, description, assetCategory, irsClass, purchaseDate, purchaseCost,
       salvageValue, depreciationMethod, usefulLifeYears, section179Elected,
-      serialNumber, makeModel, location, notes } = req.body;
+      businessUsePct, luxuryAutoExempt, serialNumber, makeModel, location, notes } = req.body;
 
     if (depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(depreciationMethod)) {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
     }
+    // business_use_pct 0–100 (strict). Providing it for a vehicle CONFIRMS the
+    // business use; a vehicle created without it stays unconfirmed and its
+    // depreciation is flagged incomplete rather than deducting the 100% default.
+    let bizUsePct;
+    if (businessUsePct !== undefined) {
+      bizUsePct = Number(businessUsePct);
+      if (!Number.isFinite(bizUsePct) || bizUsePct < 0 || bizUsePct > 100) {
+        return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
+      }
+    }
+    // §280F exemption is tax-sensitive — require a real boolean (a JSON string
+    // "false" must NOT enable exemption via truthiness).
+    if (luxuryAutoExempt !== undefined && typeof luxuryAutoExempt !== 'boolean') {
+      return res.status(400).json({ error: 'luxuryAutoExempt must be a boolean' });
+    }
+    const isVehicle = assetCategory === 'vehicle';
+    const businessUseConfirmed = isVehicle ? businessUsePct !== undefined : true;
     if (!name || !purchaseDate || purchaseCost == null) {
       return res.status(400).json({ error: 'name, purchaseDate, and purchaseCost are required' });
     }
@@ -286,12 +320,18 @@ router.post('/equipment', async (req, res, next) => {
     }
 
     await db('equipment_register').insert({
-      name, description, asset_category: assetCategory, irs_class: irsClass,
+      name, description, asset_category: assetCategory,
+      // Derive the MACRS class from the recovery life when not supplied, so a
+      // MACRS asset gets a computable schedule instead of $0.
+      irs_class: irsClassFromLife(irsClass, usefulLifeYears),
       purchase_date: purchaseDate, placed_in_service_date: purchaseDate,
       purchase_cost: purchaseCost, salvage_value: salvageValue || 0,
       depreciation_method: depreciationMethod || 'MACRS',
       useful_life_years: usefulLifeYears,
       section_179_elected: s179, section_179_amount: s179 ? purchaseCost : null,
+      business_use_pct: bizUsePct !== undefined ? bizUsePct : 100,
+      business_use_confirmed: businessUseConfirmed,
+      luxury_auto_exempt: isVehicle && luxuryAutoExempt === true,
       current_book_value: s179 ? 0 : purchaseCost,
       accumulated_depreciation: s179 ? purchaseCost : 0,
       serial_number: serialNumber, make_model: makeModel, location, notes,
@@ -306,6 +346,27 @@ router.put('/equipment/:id', async (req, res, next) => {
     if (fields.depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(fields.depreciationMethod)) {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
     }
+    // business_use_pct must be 0–100; convention must be an allow-listed value.
+    // STRICT coercion (Number, not parseFloat) so "50junk" is rejected rather
+    // than validated-then-persisted as a string that Postgres 500s on.
+    let businessUsePctNormalized;
+    if (fields.businessUsePct !== undefined) {
+      const p = Number(fields.businessUsePct);
+      if (!Number.isFinite(p) || p < 0 || p > 100) {
+        return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
+      }
+      businessUsePctNormalized = p;
+    }
+    if (fields.depreciationConvention !== undefined && !VALID_DEPRECIATION_CONVENTIONS.includes(fields.depreciationConvention)) {
+      return res.status(400).json({ error: `Invalid depreciation convention. Must be one of: ${VALID_DEPRECIATION_CONVENTIONS.join(', ')}` });
+    }
+    // Tax-sensitive booleans must be REAL booleans — a JSON string "false" must
+    // not enable exemption/confirmation via truthiness.
+    for (const b of ['luxuryAutoExempt', 'businessUseConfirmed']) {
+      if (fields[b] !== undefined && typeof fields[b] !== 'boolean') {
+        return res.status(400).json({ error: `${b} must be a boolean` });
+      }
+    }
     const update = { updated_at: new Date() };
     const map = {
       name: 'name', description: 'description', assetCategory: 'asset_category',
@@ -314,8 +375,34 @@ router.put('/equipment/:id', async (req, res, next) => {
       serialNumber: 'serial_number', makeModel: 'make_model', location: 'location',
       notes: 'notes', active: 'active', disposed: 'disposed', disposalDate: 'disposal_date',
       disposalProceeds: 'disposal_proceeds',
+      businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
+    if (fields.luxuryAutoExempt !== undefined) update.luxury_auto_exempt = fields.luxuryAutoExempt === true;
+    // Persist the NORMALIZED number, not the raw string. Explicitly setting a
+    // vehicle's business use CONFIRMS it unless the caller says otherwise.
+    if (businessUsePctNormalized !== undefined) {
+      update.business_use_pct = businessUsePctNormalized;
+      if (fields.businessUseConfirmed === undefined) update.business_use_confirmed = true;
+    }
+    if (fields.businessUseConfirmed !== undefined) update.business_use_confirmed = fields.businessUseConfirmed === true;
+    // Converting an asset TO a vehicle must not inherit a non-vehicle's
+    // confirmed=true — reset to unconfirmed unless this same update supplies a
+    // business-use % (or an explicit confirmed flag), so its depreciation fails
+    // closed until the vehicle's business use is stated.
+    if (fields.assetCategory === 'vehicle'
+        && businessUsePctNormalized === undefined
+        && fields.businessUseConfirmed === undefined) {
+      update.business_use_confirmed = false;
+      if (fields.luxuryAutoExempt === undefined) update.luxury_auto_exempt = false;
+    }
+    // Keep the MACRS class in sync with the recovery life: when the life
+    // changes without an explicit class, re-derive it — and CLEAR it (null)
+    // when the new life is unsupported, so MACRS fails closed rather than
+    // computing with the previous class's stale schedule.
+    if (fields.usefulLifeYears !== undefined && fields.irsClass === undefined) {
+      update.irs_class = irsClassFromLife(null, fields.usefulLifeYears);
+    }
     await db('equipment_register').where({ id: req.params.id }).update(update);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -1243,7 +1330,10 @@ router.get('/export/depreciation', async (req, res, next) => {
           this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
         })
         .orderBy('name');
-      equipment = equipment.map(e => ({
+      // Annotate mid-quarter years across the WHOLE list first, so this export
+      // reconciles with pnl.csv (which goes through buildPnlReport → same
+      // annotation) instead of reporting half-year where the P&L reports $0.
+      equipment = annotateMidQuarter(equipment).map(e => ({
         ...e,
         period_depreciation: prorateAssetDepreciation(e, sd, ed),
       }));
@@ -1439,10 +1529,10 @@ router.get('/export/tax-package', async (req, res, next) => {
           this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
         })
         .orderBy('name');
-      // Per-asset depreciation for THIS package's year, same proration the
-      // P&L uses — the schedule's period column sums to pnl.csv's
-      // depreciation line by construction.
-      equipment = equipment.map(e => ({
+      // Per-asset depreciation for THIS package's year, same proration AND
+      // mid-quarter annotation the P&L uses — the schedule's period column sums
+      // to pnl.csv's depreciation line by construction.
+      equipment = annotateMidQuarter(equipment).map(e => ({
         ...e,
         period_depreciation: prorateAssetDepreciation(e, sd, ed),
       }));
