@@ -2005,3 +2005,23 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const claim = guardrails.evaluate({ body: 'Pest control services in Naples are competitive.' }, {});
     expect(claim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
+
+  test('astro r14 parity: guide-after-our, progressive brand verbs, operating verbs, clause-bounded negation', () => {
+    const editorial = guardrails.evaluate({ body: 'Our pest control services guide explains Naples-area pests too.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    for (const body of [
+      'Our pest control services in Naples run quarterly.',
+      'Waves Pest Control is treating Cape Coral homes this spring.',
+      'We exterminate roaches in Tampa.',
+      'We remove rodents in Naples attics.',
+      'We do not serve Naples, we serve Tampa.',
+      'We do not serve Naples — we serve Tampa.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    const idiom = guardrails.evaluate({ body: 'We managed to identify the Naples population from records.' }, {});
+    expect(idiom.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const list = guardrails.evaluate({ body: "We don't serve Naples, Tampa, or Miami." }, {});
+    expect(list.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
