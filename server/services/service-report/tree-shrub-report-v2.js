@@ -45,7 +45,11 @@ function classifyProduct(app = {}) {
   // \bweeds?\b, not bare 'weed': 'seaweed' biostimulants must fall through
   // to the supplement branch, not render as herbicides (codex P2 r2).
   else if (/herbicide|pre[\s-]?emergent|post[\s-]?emergent|\bweeds?\b|glyphosate|prodiamine|dithiopyr|isoxaben|indaziflam|pendimethalin|oxadiazon|barricade|dimension|gallery|ronstar|specticle|marengo|snapshot|sedgehammer/.test(hay)) { kind = 'herbicide'; tag = 'weed prevention'; fallback = 'keeps bed weeds from establishing in the treated areas'; }
-  else if (/imidacloprid|dinotefuran|acephate|insect|bifenthrin|systemic|merit|safari/.test(hay)) { kind = /imidacloprid|dinotefuran|systemic|merit|safari/.test(hay) ? 'systemic' : 'insecticide'; tag = 'pest protection'; fallback = 'protects the plants from foliage-feeding pests'; }
+  // Actives list mirrors the closeout derivation classifier (codex P2
+  // 2026-07-22): blank-category products like Delta Dust (deltamethrin) and
+  // Elector PSP (spinosad) must classify here too, or the snapshot says
+  // "Insect treatment" while the report calls it a generic plant treatment.
+  else if (/imidacloprid|dinotefuran|clothianidin|thiamethoxam|acetamiprid|acephate|insect|bifen\w*|\w*thrin|pyrethroid|spinosad|spinetoram|indoxacarb|pyriproxyfen|chlorantraniliprole|acelepryn|fipronil|spirotetramat|kontos|talstar|zylam|systemic|merit|safari/.test(hay)) { kind = /imidacloprid|dinotefuran|clothianidin|thiamethoxam|spirotetramat|kontos|zylam|systemic|merit|safari/.test(hay) ? 'systemic' : 'insecticide'; tag = 'pest protection'; fallback = 'protects the plants from foliage-feeding pests'; }
   else if (/iron|micro|biostim|humic|kelp|seaweed|chelat/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports leaf color and stress tolerance'; }
   else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the plants to support color, density, and new growth'; }
   const whatItDoes = p.service_report_summary || p.public_summary || facts.serviceReportSummary || facts.publicSummary || fallback;

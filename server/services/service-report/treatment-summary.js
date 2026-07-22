@@ -19,7 +19,12 @@ const METHOD_PHRASES = {
 };
 
 function isSupportProduct(p = {}) {
-  return /surfactant|adjuvant|wetting|humectant/i.test(`${p.name || ''} ${p.activeIngredient || ''}`);
+  // Mirrors the closeout derivation's support set (surfactants, wetting
+  // agents, humectants, PGRs): these make NO treatment claim — a PGR-only
+  // visit must not publish "Today we applied paclobutrazol..." beside a
+  // derived-empty treatments_completed (codex P2 2026-07-22).
+  return /surfactant|adjuvant|wetting|humectant|growth\s*regulator|\bpgr\b|paclobutrazol|trinexapac|prohexadione|primo\s*maxx|anuew|shortstop|moisture\s*manager|hydretain/i
+    .test(`${p.name || ''} ${p.activeIngredient || ''} ${p.kind || ''}`);
 }
 
 function buildTreatmentSummary(treatment) {

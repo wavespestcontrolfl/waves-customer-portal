@@ -262,6 +262,11 @@ async function loadVisitSideData(recordIds) {
   const summaries = await db('service_report_ai_summaries')
     .whereIn('service_record_id', recordIds)
     .whereNotIn('status', ['hidden'])
+    // Treatment-narrative rows share this table (prompt_version
+    // treatment_narrative_v1, JSON {text}) but are hero copy, not the visit
+    // AI summary — without this filter a newer narrative row shadows the
+    // real summary out of resolution search (codex P2 2026-07-22).
+    .where((q) => q.whereNull('prompt_version').orWhere('prompt_version', 'not like', 'treatment_narrative%'))
     .orderBy('updated_at', 'desc')
     .select('service_record_id', 'summary_json')
     .catch(() => []);
