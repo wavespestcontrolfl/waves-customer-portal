@@ -854,6 +854,7 @@ async function buildPnlReport(db, startDate, endDate) {
           .orWhereNotNull('disposal_date');
       })
       .select(
+        'name',
         'annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date',
         'depreciation_method', 'section_179_elected', 'section_179_amount', 'purchase_cost',
         // Needed to split VEHICLE depreciation out under a standard-mileage
