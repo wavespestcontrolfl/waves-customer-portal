@@ -15,8 +15,9 @@ import {
   PestProtectionMap,
   PestPrimaryMove,
 } from './PestReportV2';
+import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 
-export default function PestReportV2Section({ data, print = false, token = null, mode = 'live' }) {
+export default function PestReportV2Section({ data, print = false, token = null, mode = 'live', tracedMap = null }) {
   if (!data) return null;
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards — the
@@ -30,10 +31,12 @@ export default function PestReportV2Section({ data, print = false, token = null,
         aiSummary={data.aiSummary}
         token={token}
         mode={mode}
+        tracedMap={tracedMap}
       />
-      {/* "Where we protected" — the branded coverage centerpiece, right after the
-          status so the report reads: how you're doing → where we treated → next. */}
-      {data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
+      {/* "Where we protected": the technician-traced spray map is COMBINED
+          into the status hero above (owner 2026-07-21) — the schematic
+          centerpiece renders only for visits without a trace. */}
+      {!tracedMap && data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
       {data.primaryMove ? <PestPrimaryMove primaryMove={data.primaryMove} /> : null}
       {/* Bug files, seasonal outlook, and the WaveGuard receipt were removed from
           the composed section (owner 2026-07-09) — the components remain exported

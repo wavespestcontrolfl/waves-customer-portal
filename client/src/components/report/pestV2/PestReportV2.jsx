@@ -14,6 +14,7 @@
 
 import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -111,7 +112,7 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null }) {
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload (the
@@ -160,6 +161,15 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
+      ) : null}
+      {/* Where we sprayed — the tech-traced application, combined into the
+          status card so status + narrative + map read as one story
+          (owner 2026-07-21). */}
+      {tracedMap ? (
+        <div style={{ marginTop: 14 }}>
+          <div data-gt="eyebrow" style={eyebrow}>Where we sprayed</div>
+          <TracedTreatmentZoneMap traced={tracedMap} />
+        </div>
       ) : null}
     </section>
   );

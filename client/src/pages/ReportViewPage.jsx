@@ -7,6 +7,7 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
@@ -3767,105 +3768,7 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 // server stored the composited snapshot (imagery attribution is baked into
 // the image). When present it replaces the generic schematic drawing as the
 // report's coverage map.
-function TracedTreatmentZoneMap({ traced }) {
-  // Spray replay (owner 2026-07-21): the tech-side mapper animates a
-  // spray-mist "applying" the barrier along the traced line — the customer
-  // report replays it over the saved snapshot. Mounts ONLY after the map
-  // scrolls into view on a motion-tolerant screen, so PDFs (no scroll, print
-  // media) and reduced-motion visitors keep the plain snapshot — which
-  // already carries the settled mist baked in.
-  const mapRef = useRef(null);
-  const [sprayLive, setSprayLive] = useState(false);
-  const points = Array.isArray(traced?.pathPoints) ? traced.pathPoints : [];
-  const canReplay = points.length >= 2;
-  useEffect(() => {
-    if (!canReplay || sprayLive) return undefined;
-    if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') return undefined;
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined;
-    const el = mapRef.current;
-    if (!el) return undefined;
-    const obs = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) { setSprayLive(true); obs.disconnect(); }
-    }, { threshold: 0.35 });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [canReplay, sprayLive]);
 
-  if (!traced?.snapshotUrl) return null;
-  const caption = [
-    traced.label || 'Treated perimeter traced on-site by your technician.',
-    traced.linearFt ? `${traced.linearFt} linear ft treated.` : null,
-  ].filter(Boolean).join(' ');
-  const pathD = canReplay
-    ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
-    : null;
-  // Mist puffs sampled along the trace — every ~4th point keeps it airy.
-  const puffs = canReplay ? points.filter((_, i) => i % 4 === 0).slice(0, 24) : [];
-  return (
-    <div className="service-coverage-map-panel">
-      <div className="service-coverage-map traced-zone-map" ref={mapRef} style={{ position: 'relative' }}>
-        {/* Eager on purpose: the PDF renderer prints without scrolling, so a
-            native-lazy image below the fold could render blank in PDFs. */}
-        <img
-          className="traced-zone-image"
-          src={traced.snapshotUrl}
-          alt="Satellite photo of the property with the treated perimeter highlighted"
-        />
-        {sprayLive && pathD && (
-          <svg
-            viewBox="0 0 1280 960"
-            preserveAspectRatio="xMidYMid slice"
-            aria-hidden="true"
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
-          >
-            <style>{`
-              @keyframes tracedSprayDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
-              /* Continuous loop (owner 2026-07-21): each puff blooms briefly
-                 once per cycle, timed to the sprayer head passing it. */
-              @keyframes tracedSprayPuff {
-                0% { opacity: 0; transform: scale(0.4); }
-                6% { opacity: 0.5; }
-                20% { opacity: 0; transform: scale(2.1); }
-                100% { opacity: 0; transform: scale(2.1); }
-              }
-              .traced-spray-line { animation: tracedSprayDraw 3.2s ease-in-out both; }
-              .traced-spray-puff { opacity: 0; transform-box: fill-box; transform-origin: center; animation: tracedSprayPuff 7s linear infinite; }
-            `}</style>
-            <path
-              className="traced-spray-line"
-              d={pathD}
-              fill="none"
-              stroke="#7CC7F0"
-              strokeOpacity="0.85"
-              strokeWidth="14"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              pathLength="1"
-              strokeDasharray="1"
-            />
-            {puffs.map((p, i) => (
-              <circle
-                key={i}
-                className="traced-spray-puff"
-                cx={Math.round(p.x)}
-                cy={Math.round(p.y)}
-                r="22"
-                fill="#AFE1FF"
-                fillOpacity="0.45"
-                style={{ animationDelay: `${(i / Math.max(1, puffs.length)) * 7}s` }}
-              />
-            ))}
-            {/* sprayer head loops the treated line continuously */}
-            <circle r="11" fill="#0A7EC2" stroke="#FFFFFF" strokeWidth="3">
-              <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
-            </circle>
-          </svg>
-        )}
-      </div>
-      <p className="traced-zone-caption">{caption}</p>
-    </div>
-  );
-}
 
 function ServiceCoverageCard({
   coverage,
@@ -8109,7 +8012,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             pest-pressure chart + products + photos stay below as supporting detail. */}
         {data.pestReportV2 && (
           <div id="visit-summary">
-            <PestReportV2Section data={data.pestReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+            <PestReportV2Section
+              data={data.pestReportV2}
+              print={mode === 'pdf' || mode === 'static'}
+              token={token}
+              mode={mode}
+              tracedMap={data.treatmentMap?.traced || null}
+            />
           </div>
         )}
 
@@ -8215,7 +8124,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.treatmentMap?.traced || null}
+              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
               applications={data.applications || []}
             />
           </div>
@@ -8332,7 +8241,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.treatmentMap?.traced || null}
+              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
               applications={data.applications || []}
             />
           </div>
