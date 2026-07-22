@@ -710,7 +710,7 @@ const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)
 // disclaimer half hides an affirmative half. "and" splits ONLY before a
 // new we/our subject: a bare ", and" boundary would sever the tail of an
 // Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)|,\s+(?=(?:we|our|waves|waveguard)\b)/i;
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)/i;
 
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a
@@ -739,9 +739,17 @@ function offFootprintCityFinding(text) {
     for (const clause of sentence.split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
       const normalized = clause.replace(/[‘’]/g, "'");
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
-      if (FOOTPRINT_DISCLAIMER_RE.test(normalized)) continue;
+      // Footprint disclaimers exempt PER CITY, not per clause: in "Naples is
+      // outside our service area, Waves serves Tampa" only Naples (the
+      // disclaimer's subject, sitting just before the phrase) is exempt —
+      // Tampa still flags.
+      const disclaimerMatch = normalized.match(FOOTPRINT_DISCLAIMER_RE);
       for (const { city, re, negationRe } of cityRes) {
-        if (!re.test(normalized)) continue;
+        const cityMatch = normalized.match(re);
+        if (!cityMatch) continue;
+        if (disclaimerMatch
+          && cityMatch.index < disclaimerMatch.index
+          && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
         // Negation scoped to THIS city ("does not include Tampa") exempts
         // only this city — a negation about some other service does not.
         if (negationRe.test(normalized)) continue;

@@ -1671,6 +1671,15 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(proud.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
 
+  test('disclaimers exempt per city, and intro commas never sever claims (astro r11 parity)', () => {
+    const splice = guardrails.evaluate({ body: 'Naples is outside our service area, Waves serves Tampa.' }, {});
+    expect(splice.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const intro = guardrails.evaluate({ body: 'In Naples, we treat lawns on the same quarterly cadence.' }, {});
+    expect(intro.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const plain = guardrails.evaluate({ body: 'Naples is outside our service area.' }, {});
+    expect(plain.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
   test('attributive "call" is not claim context; CTA call is (Codex round 4)', () => {
     const attributive = guardrails.evaluate({ body: 'Researchers call Fort Myers one of the early tegu hotspots.' }, {});
     expect(attributive.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
