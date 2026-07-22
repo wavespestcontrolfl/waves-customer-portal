@@ -1969,3 +1969,15 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const r = guardrails.evaluate({ body: 'We serve Naples — Fort Myers, Cape Coral, Bonita Springs, Estero, and Marco Island are outside our service area.' }, {});
     expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
+
+  test('symbolic conjunctions in fragments rejoin; prepositional editorial objects stay editorial', () => {
+    const amp = guardrails.evaluate({ body: 'We serve Sarasota; Naples & Tampa.' }, {});
+    expect(amp.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    for (const body of [
+      'We provide information about pest control to Naples homeowners.',
+      'We provide research on pest control affecting Naples communities.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
