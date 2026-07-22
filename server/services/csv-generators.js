@@ -60,15 +60,23 @@ function expensesToCSV(expenses) {
 }
 
 function mileageToCSV(trips) {
-  const headers = ['Date', 'Start Location', 'End Location', 'Business Miles', 'Purpose', 'IRS Rate', 'Deduction Amount'];
+  // 'Miles' is the trip's total distance; 'Business Miles' is populated ONLY
+  // for a confirmed business trip (is_business === true). Under the manual-
+  // review policy most synced trips are personal/unclassified, so labeling
+  // every distance as business would misrepresent unsubstantiated mileage to
+  // the CPA. Deduction/rate are already 0 for non-business rows.
+  const headers = ['Date', 'Start Location', 'End Location', 'Miles', 'Business Miles', 'Purpose', 'IRS Rate', 'Deduction Amount'];
   const lines = [row(headers)];
   for (const t of trips) {
+    const miles = t.distance_miles != null ? parseFloat(t.distance_miles) : null;
+    const isBusiness = t.is_business === true;
     lines.push(row([
       t.trip_date || t.date || '',
       t.start_address || t.start_location || '',
       t.end_address || t.end_location || '',
-      t.distance_miles != null ? parseFloat(t.distance_miles).toFixed(1) : '',
-      t.purpose || 'business',
+      miles != null ? miles.toFixed(1) : '',
+      isBusiness && miles != null ? miles.toFixed(1) : '',
+      t.purpose || 'unclassified',
       t.irs_rate != null ? parseFloat(t.irs_rate).toFixed(2) : '',
       t.deduction_amount != null ? parseFloat(t.deduction_amount).toFixed(2) : '',
     ]));
@@ -154,14 +162,46 @@ function pnlToCSV(pnlData) {
   lines.push(row(['', '']));
   lines.push(row(['DEDUCTIONS', '']));
   lines.push(row(['  Mileage Deduction', (pnlData.deductions?.mileage || 0).toFixed(2)]));
-  lines.push(row(['  Depreciation', (pnlData.deductions?.depreciation || 0).toFixed(2)]));
+  lines.push(row([
+    pnlData.deductions?.depreciationComplete === false ? '  Depreciation (INCOMPLETE)' : '  Depreciation',
+    (pnlData.deductions?.depreciation || 0).toFixed(2),
+  ]));
   lines.push(row(['Total Deductions', (pnlData.deductions?.total || 0).toFixed(2)]));
   lines.push(row(['', '']));
-  lines.push(row(['NET INCOME', (pnlData.netIncome || 0).toFixed(2)]));
+  lines.push(row(['NET INCOME (book)', (pnlData.netIncome || 0).toFixed(2)]));
   lines.push(row(['Net Margin', ((pnlData.netMargin || 0) * 100).toFixed(1) + '%']));
+  // Book-to-tax bridge: the figures above are actual spend; taxable income
+  // adds back non-deductible portions (e.g. the disallowed 50% of meals).
+  const adj = pnlData.taxAdjustments;
+  if (adj && (adj.nonDeductibleExpenses || 0) !== 0) {
+    lines.push(row(['', '']));
+    lines.push(row(['  Add back: non-deductible expenses', (adj.nonDeductibleExpenses || 0).toFixed(2)]));
+    lines.push(row(['TAXABLE NET INCOME', (adj.taxableNetIncome || 0).toFixed(2)]));
+  }
+  if (pnlData.depreciationDisclosure?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['DEPRECIATION NOTE', pnlData.depreciationDisclosure.note]));
+  }
   if (pnlData.coverage?.note) {
     lines.push(row(['', '']));
     lines.push(row(['COVERAGE NOTE', pnlData.coverage.note]));
+  }
+  // Vehicle deduction election — disclose any classified mileage excluded
+  // so the CPA sees the standard-mileage figure that was NOT applied (the P&L
+  // is on the actual-expenses basis), plus any method note.
+  const veh = pnlData.vehicleDeduction;
+  if (veh && veh.standardMileageComputed > 0) {
+    lines.push(row(['', '']));
+    lines.push(row(['VEHICLE DEDUCTION NOTE',
+      'This P&L deducts ACTUAL vehicle costs (all recorded expenses; no '
+      + `standard mileage rate). Standard mileage for the period would be `
+      + `${veh.standardMileageComputed.toFixed(2)} — apply it with your CPA IN `
+      + 'PLACE OF the actual vehicle costs only if you elect the standard '
+      + 'method (Schedule C line 9 allows one, not both).']));
+  }
+  if (veh?.methodConflict?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['VEHICLE METHOD NOTE', veh.methodConflict.note]));
   }
   return lines.join('\n');
 }

@@ -1,0 +1,193 @@
+/**
+ * Backfill persisted mileage deductions to the DATE-EFFECTIVE IRS rate.
+ *
+ * mileage_log.deduction_amount / irs_rate were written by earlier code that
+ * used a year-keyed rate (2026 → 0.70), and an interim table briefly dropped
+ * the real 0.76 July-2026 rate. The P&L sums the PERSISTED deduction_amount
+ * while the IRS report/CSV RECOMPUTE from the rate table, so stale rows made
+ * the two surfaces disagree for the same trips. This one-time backfill makes
+ * the persisted values authoritative and consistent with getIrsRate():
+ *
+ *   - RETIRE legacy auto-classifications first: rows the old webhook/cron
+ *     marked is_business=true from a PROXIMITY job match (or geo-fence) were
+ *     never operator-substantiated. Under the manual-review policy only an
+ *     operator classification (classification_method 'manual'/'manual_review')
+ *     substantiates a business trip, so every other is_business=true row is
+ *     reset to unclassified/$0 (job context kept as a suggestion). Otherwise
+ *     the automatic deductions this PR retires would survive in the backfill.
+ *   - is_business = true  → (now only operator-classified) irs_rate = the rate
+ *                           effective on trip_date; deduction_amount =
+ *                           round(distance_miles * rate, 2)
+ *   - everything else     → irs_rate = 0, deduction_amount = 0 (clears any
+ *                           stale deduction; unclassified/personal trips
+ *                           deduct nothing under the manual-review policy)
+ *
+ * The rate breakpoints are inlined (a migration must reproduce forever,
+ * independent of later service edits) and MUST match IRS_MILEAGE_RATE_TABLE
+ * in bouncie-mileage.js: 0.67 (2024, and the table floor), 0.70 (2025),
+ * 0.725 (2026-01-01, Notice 2026-10), 0.76 (2026-07-01, Announcement 2026-11).
+ * Daily/monthly summary irs_deduction are then recomputed from the corrected
+ * rows so the mileage dashboards agree too.
+ */
+
+// Kept in one place so the row update and the summary rollup use the same SQL.
+// Mirrors getIrsRate in bouncie-mileage.js, INCLUDING its fail-closed horizon:
+// a date past the last covered year has no verified rate, so it resolves to 0
+// (checked first, since the >= arms below would otherwise catch 2027 at 0.76).
+const RATE_CASE = `CASE
+  WHEN trip_date > DATE '2026-12-31' THEN 0
+  WHEN trip_date >= DATE '2026-07-01' THEN 0.76
+  WHEN trip_date >= DATE '2026-01-01' THEN 0.725
+  WHEN trip_date >= DATE '2025-01-01' THEN 0.70
+  ELSE 0.67
+END`;
+
+// The rate table only knows 2024 onward. Pre-2024 trips had their own IRS
+// rates (2023 65.5¢, 2022 58.5/62.5¢, …) that this migration does NOT carry,
+// so it must NEVER overwrite them — every UPDATE below is floored at 2024-01-01
+// and pre-2024 rows keep their persisted values untouched. (The Bouncie
+// integration only produced 2026+ trips, so this is defensive, not corrective.)
+const TABLE_FLOOR = "DATE '2024-01-01'";
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('mileage_log'))) return;
+
+  await knex.transaction(async (trx) => {
+    // 0. RETIRE legacy auto-classifications: an is_business=true row that was
+    //    auto-set from a proximity match is not substantiated. Reset those to
+    //    unclassified/$0, keeping job context as a suggestion so they resurface
+    //    in the Tax Center review. Idempotent — once is_business=false the row
+    //    no longer matches.
+    //
+    //    PRESERVE operator-entered mileage: the manual-entry route inserts
+    //    source='manual' but leaves classification_method at its schema default
+    //    ('auto'), so a method-only predicate would wrongly wipe hand-entered
+    //    business trips. source='manual' rows (and method manual/manual_review)
+    //    are operator-substantiated and kept.
+    await trx.raw(`
+      UPDATE mileage_log
+      SET is_business = false,
+          purpose = 'unclassified',
+          deduction_amount = 0,
+          irs_rate = 0,
+          classification_method = CASE
+            WHEN customer_id IS NOT NULL THEN 'job_match_suggested'
+            ELSE 'needs_review' END,
+          updated_at = now()
+      WHERE is_business = true
+        AND trip_date >= ${TABLE_FLOOR}
+        AND source IS DISTINCT FROM 'manual'
+        AND classification_method IS DISTINCT FROM 'manual'
+        AND classification_method IS DISTINCT FROM 'manual_review'
+    `);
+
+    // 0b. NORMALIZE is_business from purpose. The old manual-entry route stored
+    //     purpose ('personal'/'commute') but left is_business at its schema
+    //     default of TRUE — so a preserved manual PERSONAL trip would still be
+    //     is_business=true and get a deduction in step 1. purpose is the
+    //     operator's classification; is_business must equal (purpose='business').
+    //     Idempotent (only touches rows that disagree).
+    await trx.raw(`
+      UPDATE mileage_log
+      SET is_business = (purpose = 'business'),
+          updated_at = now()
+      WHERE trip_date >= ${TABLE_FLOOR}
+        AND is_business IS DISTINCT FROM (purpose = 'business')
+    `);
+
+    // 1. Business trips (now == purpose='business') → date-effective rate.
+    await trx.raw(`
+      UPDATE mileage_log
+      SET irs_rate = (${RATE_CASE}),
+          deduction_amount = ROUND(COALESCE(distance_miles, 0) * (${RATE_CASE})::numeric, 2),
+          updated_at = now()
+      WHERE is_business = true
+        AND trip_date >= ${TABLE_FLOOR}
+    `);
+
+    // 2. Non-business (incl. unclassified/personal) → no deduction. Clears any
+    //    stale nonzero deduction the old job-match auto-classifier persisted.
+    await trx.raw(`
+      UPDATE mileage_log
+      SET irs_rate = 0,
+          deduction_amount = 0,
+          updated_at = now()
+      WHERE (is_business IS DISTINCT FROM true)
+        AND trip_date >= ${TABLE_FLOOR}
+        AND (COALESCE(deduction_amount, 0) <> 0 OR COALESCE(irs_rate, 0) <> 0)
+    `);
+
+    // 3. Recompute daily-summary money AND classification fields from the
+    //    corrected rows — the step-0 reset moved miles from business to
+    //    unclassified, so business_miles/personal_miles/business_pct are stale
+    //    too, not just the deduction. total_miles is rate/classification-
+    //    independent and left as-is.
+    if (await knex.schema.hasTable('mileage_daily_summary')) {
+      await trx.raw(`
+        UPDATE mileage_daily_summary s
+        SET irs_deduction = COALESCE(t.deduction, 0),
+            business_miles = COALESCE(t.business_miles, 0),
+            personal_miles = COALESCE(t.personal_miles, 0),
+            business_pct = CASE WHEN COALESCE(t.total_miles, 0) > 0
+              THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
+              ELSE 0 END,
+            irs_rate = (CASE
+              WHEN s.summary_date > DATE '2026-12-31' THEN 0
+              WHEN s.summary_date >= DATE '2026-07-01' THEN 0.76
+              WHEN s.summary_date >= DATE '2026-01-01' THEN 0.725
+              WHEN s.summary_date >= DATE '2025-01-01' THEN 0.70
+              ELSE 0.67 END),
+            updated_at = now()
+        FROM (
+          SELECT equipment_id, trip_date,
+                 SUM(deduction_amount) AS deduction,
+                 SUM(distance_miles) AS total_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
+                 SUM(distance_miles) FILTER (WHERE purpose = 'personal') AS personal_miles
+          FROM mileage_log
+          WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
+          GROUP BY equipment_id, trip_date
+        ) t
+        WHERE s.equipment_id = t.equipment_id AND s.summary_date = t.trip_date
+          AND s.summary_date >= ${TABLE_FLOOR}
+      `);
+    }
+
+    // 4. Same recompute for the monthly summary.
+    if (await knex.schema.hasTable('mileage_monthly_summary')) {
+      await trx.raw(`
+        UPDATE mileage_monthly_summary s
+        SET irs_deduction = COALESCE(t.deduction, 0),
+            business_miles = COALESCE(t.business_miles, 0),
+            personal_miles = COALESCE(t.personal_miles, 0),
+            business_pct = CASE WHEN COALESCE(t.total_miles, 0) > 0
+              THEN ROUND((COALESCE(t.business_miles, 0) / t.total_miles * 100)::numeric, 2)
+              ELSE 0 END,
+            irs_rate = (CASE
+              WHEN s.summary_month > DATE '2026-12-31' THEN 0
+              WHEN s.summary_month >= DATE '2026-07-01' THEN 0.76
+              WHEN s.summary_month >= DATE '2026-01-01' THEN 0.725
+              WHEN s.summary_month >= DATE '2025-01-01' THEN 0.70
+              ELSE 0.67 END),
+            updated_at = now()
+        FROM (
+          SELECT equipment_id, date_trunc('month', trip_date)::date AS month,
+                 SUM(deduction_amount) AS deduction,
+                 SUM(distance_miles) AS total_miles,
+                 SUM(distance_miles) FILTER (WHERE is_business = true) AS business_miles,
+                 SUM(distance_miles) FILTER (WHERE purpose = 'personal') AS personal_miles
+          FROM mileage_log
+          WHERE equipment_id IS NOT NULL AND trip_date >= ${TABLE_FLOOR}
+          GROUP BY equipment_id, date_trunc('month', trip_date)::date
+        ) t
+        WHERE s.equipment_id = t.equipment_id AND s.summary_month = t.month
+          AND s.summary_month >= ${TABLE_FLOOR}
+      `);
+    }
+  });
+};
+
+// Irreversible data correction — the prior values were WRONG (stale rates), so
+// there is nothing correct to restore. No-op down keeps `migrate:rollback`
+// from throwing while refusing to reintroduce the bad figures.
+exports.down = async function down() {};

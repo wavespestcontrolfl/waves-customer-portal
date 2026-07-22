@@ -35,11 +35,13 @@ const TAN = '#F2EEE0';
 // ── Status system — one vocabulary for the overall score + 5 diagnosis bars +
 // insight cards + plant groups. Customer-safe words only. ───────────────────────
 export const STATUS = {
-  strong: { label: 'Strong', color: COLORS.green },
-  healthy: { label: 'Healthy', color: COLORS.green },
-  good: { label: 'Good', color: COLORS.green },
-  stable: { label: 'Stable', color: COLORS.green },
-  watch: { label: 'Watch', color: COLORS.orange },
+  strong: { label: 'Strong', color: COLORS.glassNavy },
+  healthy: { label: 'Healthy', color: COLORS.glassNavy },
+  good: { label: 'Good', color: COLORS.glassNavy },
+  stable: { label: 'Stable', color: COLORS.glassNavy },
+  // Navy accents (#2930 owner ruling: one accent family) + one-word labels
+  // (owner 2026-07-21 round 2) — both rulings merged here.
+  watch: { label: 'Watch', color: COLORS.glassNavy },
   needs_attention: { label: 'Attention', color: COLORS.red },
   urgent: { label: 'Urgent', color: COLORS.red },
   tracking: { label: 'Tracking', color: COLORS.grayMid },
@@ -200,7 +202,7 @@ function CardTitle({ children, sub }) {
 function InsightLine({ label, value, strong }) {
   return (
     <div style={{ fontSize: 13.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
-      <span style={{ fontWeight: 700, color: strong ? COLORS.green : MUTED }}>{label}: </span>
+      <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
   );
@@ -284,10 +286,10 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
       ) : null}
 
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
-        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={'#0A7EC2'} /> : null}
+        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={COLORS.glassNavy} /> : null}
         {customerAction
-          ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
-          : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we completed today’s treatment and did not identify an urgent plant health issue." dot={COLORS.green} /> : null)}
+          ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.glassNavy} />
+          : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we completed today’s treatment and did not identify an urgent plant health issue." dot={COLORS.glassNavy} /> : null)}
         {nextVisitText ? <KeyLine label="Next visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
     </Card>
@@ -474,9 +476,11 @@ export function LandscapeWaterContextCard({ water = null }) {
 }
 
 // ── 5b. What Waves did today (products applied) ─────────────────────────────────
+// Product dots are list bullets, not statuses — one navy family (owner
+// 2026-07-21); red stays reserved for needs-attention chrome only.
 const KIND_DOT = {
-  fungicide: '#0A7EC2', insecticide: COLORS.red, miticide: COLORS.orange,
-  systemic: COLORS.red, fertilizer: COLORS.green, supplement: COLORS.green, other: COLORS.grayMid,
+  fungicide: COLORS.glassNavy, insecticide: COLORS.glassNavy, miticide: COLORS.glassNavy,
+  systemic: COLORS.glassNavy, fertilizer: COLORS.glassNavy, supplement: COLORS.glassNavy, other: COLORS.grayMid,
 };
 export function TreeShrubTreatmentCard({ treatment = {} }) {
   const products = Array.isArray(treatment.products) ? treatment.products : [];
@@ -545,7 +549,7 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
 }
 
 // ── 7. Trends across visits ─────────────────────────────────────────────────────
-function TrendChart({ title, sub, points = [], accent = '#0A7EC2', compact = false }) {
+function TrendChart({ title, sub, points = [], accent = COLORS.glassNavy, compact = false }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const pts = (points || []).map((p) => ({ label: p.label, value: toScore(p.value) })).filter((p) => Number.isFinite(p.value));

@@ -106,18 +106,44 @@ async function processVendorInvoice(email, classification) {
 
   if (amount > 0) {
     try {
+      const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
+      // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
+      // AI categorization here would run on UNTRUSTED emailed invoice text
+      // (prompt-injectable, and its pick flows straight into the P&L / tax
+      // export), so its result is stored as a SUGGESTION only — the expense
+      // lands UNCATEGORIZED for the operator to confirm via the Expenses tab's
+      // (operator-triggered) auto-categorize. Full deductible amount until then.
       const categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
+
+      let aiSuggestionNote = '';
+      if (!categoryRow) {
+        try {
+          const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
+          if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
+        } catch (err) {
+          logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
+        }
+      }
+
+      // Server-owned partial-deduction policy — only for a DETERMINISTIC
+      // (vendor-domain) category match. Uncategorized stays fully deductible
+      // until the operator confirms a category.
+      let deductibleAmount = amount;
+      if (categoryRow?.name) {
+        const partial = categoryDeductibleAmount(categoryRow.name, amount);
+        if (partial !== null) deductibleAmount = partial;
+      }
 
       const [expense] = await db('expenses').insert({
         description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`,
         amount,
-        tax_deductible_amount: amount,
+        tax_deductible_amount: deductibleAmount,
         category_id: categoryRow?.id || null,
         vendor_name: vendorName,
         expense_date: invoiceDate,
         tax_year: taxYear,
         payment_method: 'invoice',
-        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.`,
+        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
       }).returning('*');
 
       await db('emails').where({ id: email.id }).update({

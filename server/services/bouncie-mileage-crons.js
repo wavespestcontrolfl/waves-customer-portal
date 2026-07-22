@@ -117,7 +117,13 @@ function initBouncieMileageCrons() {
         .whereNull('customer_id')
         .where('trip_date', '>=', startDate)
         .whereNotNull('end_lat')
-        .whereNotNull('end_lng');
+        .whereNotNull('end_lng')
+        // Never overwrite an operator's explicit classification. BOTH operator
+        // methods are excluded: 'manual_review' (Tax Center) and 'manual' (the
+        // admin-mileage reclassify route) — a hand-confirmed trip with no
+        // customer must not be re-stamped as a job_match_suggested.
+        .whereNotIn('classification_method', ['manual', 'manual_review'])
+        .whereNot('purpose', 'personal');
 
       let matched = 0;
 
@@ -136,17 +142,30 @@ function initBouncieMileageCrons() {
           );
 
           if (jobMatch) {
-            await db('mileage_log')
+            // Attach the job context so the operator can review with it, but
+            // do NOT auto-classify as business or write a deduction — a
+            // proximity match is a SUGGESTION, not substantiation. The trip
+            // stays unclassified at $0 until confirmed in the Tax Center
+            // mileage review (PR #2931). Auto-deducting on a geographic match
+            // turned false matches into tax deductions without review.
+            // Re-assert the same guards as the load query IN the UPDATE — an
+            // operator could classify this trip while matchTripToJob ran, and
+            // an id-only update would overwrite their manual review with an
+            // automated suggestion. A zero-row update means someone got there
+            // first; don't count it.
+            const changed = await db('mileage_log')
               .where('id', trip.id)
+              .whereNull('customer_id')
+              .whereNotIn('classification_method', ['manual', 'manual_review'])
+              .whereNot('purpose', 'personal')
               .update({
                 customer_id: jobMatch.customer_id,
                 job_id: jobMatch.job_id,
-                is_business: true,
-                classification_notes: `Re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron)`,
-                deduction_amount: parseFloat(trip.distance_miles) * mileageService.getIrsRate(new Date(tripDate).getFullYear()),
+                classification_method: 'job_match_suggested',
+                classification_notes: `Suggested business — re-matched: ${jobMatch.customer_name} (${jobMatch.distance_m}m, weekly cron). Confirm in Tax Center.`,
                 updated_at: db.fn.now(),
               });
-            matched++;
+            if (changed) matched++;
           }
         } catch (err) {
           logger.error(`[bouncie-crons] Re-match failed for trip ${trip.id}: ${err.message}`);

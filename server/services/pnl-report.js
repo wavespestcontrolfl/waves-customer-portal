@@ -12,11 +12,12 @@
  * Data sources (verified against the live schema):
  *   revenue      — all recorded cash inflows for the window (payments
  *                  ledger + paid-Stripe-invoice gap rows + estimate-deposit
- *                  cash) MINUS per-refund balance transactions from
+ *                  cash) MINUS refund/dispute balance transactions from
  *                  stripe_payout_transactions in the window they occurred.
- *                  See paidRevenueForWindow for the full basis and the
- *                  refund-ledger sync-coverage caveat. Disputes/chargebacks
- *                  are not yet ledgered and are out of scope here.
+ *                  The ledger fills via the GLOBAL balance-transaction sync
+ *                  (stripe-banking syncBalanceTransactions — Stripe refuses
+ *                  per-payout listing for manual payouts); coverage below
+ *                  discloses when the sync hasn't yet passed the window end.
  *   labor        — NO imputed labor: the sole technician is the OWNER, and
  *                  an owner/sole-proprietor's own labor is not a deductible
  *                  expense. Real payroll/contract-labor spend flows through
@@ -32,16 +33,35 @@
  *                  charges; never hand-enter Stripe fees in expenses or
  *                  they'd double-count).
  *   mileage      — mileage_log.deduction_amount in the window.
- *   depreciation — per-asset annual_depreciation prorated by days in service
- *                  within the window (same proration everywhere, including the
- *                  tax package, which previously summed full-year amounts).
+ *   depreciation — per asset: §179/bonus recognize in full in the in-service
+ *                  year; MACRS uses the year-varying half-year schedule
+ *                  (Pub 946) x business_use_pct; straight-line uses
+ *                  annual_depreciation. All prorated by window days (same
+ *                  proration everywhere, including the tax package).
  *
- * NOTE — standard-mileage vs actual vehicle expenses: both currently flow
- * through (mileage as a deduction, any "Vehicle Expenses" category as opex).
- * The IRS method election is an owner/CPA decision, parked with Adam; until
- * it's made, every prod trip carries a $0 deduction (unclassified), so no
- * double-count is live. When the mileage-classification lane ships, wire the
- * elected method here and exclude the other side.
+ * VEHICLE (Schedule C line 9) — the P&L computes the ACTUAL-EXPENSES basis
+ * ONLY: it deducts every recorded cost and NEVER the standard mileage rate.
+ * Standard mileage and actual expenses are mutually exclusive on line 9, and
+ * computing the standard-mileage basis would require removing ALL actual
+ * vehicle costs — but those are spread across shared categories (auto
+ * insurance under Insurance, van upkeep under Repairs & Maintenance, tags
+ * under Taxes & Licenses) that can't be isolated from non-vehicle costs
+ * without per-line attribution the data model doesn't have. Counting the rate
+ * beside them would double-deduct, so the P&L never does.
+ *
+ * The mileage figure is always EXCLUDED from the total and DISCLOSED
+ * (vehicleDeduction.standardMileageComputed) for the operator/CPA to apply
+ * manually IN PLACE OF the actual vehicle costs if they elect the standard
+ * method. company_financials.vehicle_deduction_method and the barred flag
+ * drive that DISCLOSURE only — never the computation:
+ *   'actual_expenses' / NULL — actual basis, no extra note.
+ *   'standard_mileage'       — actual basis + a note that the P&L reflects
+ *                              actual costs and the disclosed mileage must be
+ *                              applied manually instead.
+ *   MACRS/§179 vehicle held  — a stronger note: standard mileage is barred
+ *                              outright (Pub 463), so actual is the only option.
+ * Never overstates: the dangerous direction (rate + untracked actual costs) is
+ * structurally impossible because the rate is never added here.
  *
  * assemblePnl() is pure (no I/O) and unit-tested; buildPnlReport() runs the
  * queries and feeds it.
@@ -50,6 +70,10 @@
 const { etParts, etDateString } = require('../utils/datetime-et');
 
 const COGS_CATEGORIES = ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'];
+const VEHICLE_METHODS = ['standard_mileage', 'actual_expenses'];
+// Depreciation methods that disqualify a vehicle from the standard mileage
+// rate for the rest of its life (Pub 463).
+const MILEAGE_BARRING_METHODS = ['MACRS', 'section_179', 'bonus_100'];
 const DEFAULT_LOADED_LABOR_RATE = 35; // matches job-costing.js fallback
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -111,6 +135,39 @@ function daysInYear(y) {
   return ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 366 : 365;
 }
 
+// MACRS depreciation percentages (200% declining balance, HALF-YEAR
+// convention already baked in — that's why year 1 is 20% not 40% for 5-year).
+// Keyed by IRS recovery class. Percentages are of the ORIGINAL cost basis and
+// sum to 100%. Source: IRS Pub 946, Table A-1 (GDS half-year). Add a class
+// here only against that authoritative table.
+const MACRS_HALF_YEAR = {
+  '3-year': [0.3333, 0.4445, 0.1481, 0.0741],
+  '5-year': [0.20, 0.32, 0.192, 0.1152, 0.1152, 0.0576],
+  '7-year': [0.1429, 0.2449, 0.1749, 0.1249, 0.0893, 0.0892, 0.0893, 0.0446],
+};
+
+// The MACRS deduction for ONE calendar year: basis x the class percentage for
+// that recovery year (1-indexed). Returns 0 outside the schedule (before the
+// in-service year or after the asset is fully recovered). The half-year
+// convention means the in-service year gets the full year-1 percentage
+// regardless of the in-service DATE within that year — never day-prorate it.
+function macrsYearAmount(irsClass, basis, inServiceYear, calendarYear) {
+  const table = MACRS_HALF_YEAR[String(irsClass || '').trim()];
+  if (!table || !(basis > 0) || !inServiceYear) return 0;
+  const idx = calendarYear - inServiceYear; // 0-indexed recovery year
+  if (idx < 0 || idx >= table.length) return 0;
+  return basis * table[idx];
+}
+
+// Business-use fraction (listed property like vehicles): clamp to [0,1],
+// default 100% when unset. Non-vehicle MACRS assets are 100% business use.
+function businessUseFraction(v) {
+  if (v == null) return 1;
+  const pct = parseFloat(v);
+  if (!Number.isFinite(pct)) return 1;
+  return Math.min(1, Math.max(0, pct / 100));
+}
+
 // Date-ish (string or node-postgres DATE cell) → UTC-midnight Date, so day
 // arithmetic below is zone-independent.
 function toUTCDay(v) {
@@ -123,10 +180,18 @@ function toUTCDay(v) {
  * placed_in_service_date through disposal_date (when disposed), clamped to
  * the period, sliced per CALENDAR YEAR so each slice divides by that year's
  * actual day count — a full leap year yields exactly the annual amount
- * (a flat /365 paid 366/365ths of it). Pure. Section 179 / bonus assets
- * carry annual_depreciation NULL and contribute nothing. Disposal CAPS the
- * window rather than excluding the asset — filtering disposed assets out
- * silently deleted their depreciation from every historical P&L.
+ * (a flat /365 paid 366/365ths of it). Pure. Handles three methods:
+ * §179/bonus (whole cost in the in-service year), MACRS (year-varying
+ * half-year schedule x business_use_pct — see below), and straight-line
+ * (annual_depreciation). Disposal CAPS the window rather than excluding the
+ * asset — filtering disposed assets out silently deleted their depreciation
+ * from every historical P&L. MACRS specifics: depreciates only the basis
+ * REMAINING after any §179/bonus (or the two double-count); FAILS CLOSED
+ * (returns 0) for listed property at ≤50% business use, which requires ADS
+ * straight-line + possible recapture (Pub 946) — a CPA case, not GDS; and a
+ * report window ending before the in-service date contributes nothing.
+ * NOT modeled: the MACRS disposal-year half-convention (a CPA adjustment on
+ * sale; the sole vehicle is not disposed).
  */
 function prorateAssetDepreciation(asset, startDate, endDate) {
   const periodStart = toUTCDay(startDate);
@@ -136,17 +201,111 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   const disposed = toUTCDay(asset?.disposal_date);
   let total = 0;
 
-  // Immediate expensing (Section 179 / 100% bonus): the WHOLE deduction is
-  // recognized in the placed-in-service year — never prorated by days. Such
-  // assets usually carry annual_depreciation NULL, so filtering on the
-  // annual field alone silently dropped the entire deduction from the P&L
-  // and the CPA package.
+  // Listed property (vehicles) used ≤50% for business is disqualified from
+  // §179 AND GDS declining-balance MACRS (Pub 946 → ADS straight-line +
+  // possible recapture). The guard is applied ONLY to those two paths below,
+  // NOT globally: a CPA-entered annual_depreciation (their ADS/straight-line
+  // figure) must still flow through even at low business use. business_use_pct
+  // defaults 100 (unset → 1.0), so only an explicitly-lowered asset is gated.
+  //
+  // SCOPE — business_use_pct is a SINGLE current rate applied to every recovery
+  // year (the sole service vehicle is a stable 100% business use). A vehicle
+  // whose business use CHANGES mid-life needs per-year rates + ADS/recapture
+  // from the year it drops ≤50% — a CPA per-year treatment this single-value
+  // model doesn't track; editing the value re-states prior computed years,
+  // which is why the CPA-facing figures are advisory until reviewed.
+  const bizUse = businessUseFraction(asset?.business_use_pct);
+  // The ≤50% → ADS rule is a LISTED-PROPERTY (vehicle) restriction (§280F).
+  // A non-listed MACRS asset at low business use still depreciates its business
+  // share under GDS. §179 requires >50% business use for ALL property. A VEHICLE
+  // also needs its business use CONFIRMED — otherwise the 100% column default is
+  // an unverified guess, so depreciation fails closed until confirmed (never
+  // overstates on a default).
+  // A VEHICLE is ready to depreciate only when its business use is CONFIRMED
+  // AND it's confirmed EXEMPT from the §280F passenger-auto limits (heavy
+  // vehicle) — otherwise the capped-auto schedule is a CPA calc, so fail closed.
+  const isListed = String(asset?.asset_category || '') === 'vehicle';
+  const confirmed = !isListed
+    || (asset?.business_use_confirmed === true && asset?.luxury_auto_exempt === true);
+  const s179Gate = confirmed && bizUse > 0.5;                 // §179: >50% (all) + confirmed (vehicles)
+  const macrsGdsGate = confirmed && (!isListed || bizUse > 0.5); // GDS: listed ≤50% → ADS; vehicles need confirm
+
+  // Business basis: cost scaled by business use. §179/bonus and MACRS both work
+  // off this (can't deduct the personal-use portion).
+  const cost = parseFloat(asset?.purchase_cost || 0) || 0;
+  const businessBasis = cost * bizUse;
+
+  // Immediate expensing (§179 / 100% bonus): the WHOLE deduction is recognized
+  // in the placed-in-service year — never day-prorated. (annual NULL, so
+  // filtering on the annual field alone silently dropped it from the P&L / CPA
+  // package.) CAPPED at the business basis, so a partial-use vehicle (or the
+  // purchase-cost fallback when no explicit amount is entered) can't deduct
+  // more than its business share.
   const method = String(asset?.depreciation_method || '');
-  if (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected) {
-    const immediate = parseFloat(asset?.section_179_amount ?? asset?.purchase_cost ?? 0) || 0;
-    if (immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
-      total += immediate;
+  // §179's >50% requirement is broad (all property); the special/bonus
+  // allowance's >50% requirement is LISTED-property only, like GDS. So gate
+  // bonus by the listed rule and §179 by the broad rule.
+  const isImmediate = method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected;
+  const immediateGate = method === 'bonus_100' ? macrsGdsGate : s179Gate;
+  const s179Eligible = isImmediate && immediateGate;
+  const s179Elected = s179Eligible ? (parseFloat(asset?.section_179_amount ?? cost) || 0) : 0;
+  // Cap at the business basis ONLY when a cost basis is known — a CPA-entered
+  // amount without a recorded purchase_cost is trusted as its own basis.
+  const s179Immediate = businessBasis > 0 ? Math.min(s179Elected, businessBasis) : s179Elected;
+  if (s179Immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
+    total += s179Immediate;
+  }
+
+  // MACRS is handled ENTIRELY here — a MACRS asset never falls through to the
+  // straight-line annual_depreciation path (a stale value must not leak in).
+  // Year-varying declining balance on the BUSINESS basis remaining after §179:
+  // business basis = cost × business-use%, THEN minus §179. Any ineligible or
+  // unsupported case (≤50% use, unknown class, non-half-year convention) FAILS
+  // CLOSED at the current `total` (just the §179, which is 0 when ineligible).
+  if (method === 'MACRS') {
+    if (!macrsGdsGate) return total;                                     // listed ≤50% → ADS/CPA
+    if (!MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()]) return total; // unknown class
+    // The mid-quarter convention is mandatory when >40% of the YEAR's aggregate
+    // basis is placed in service in Q4 — a cross-asset determination made in
+    // buildPnlReport, which sets the convention on those assets. Only half-year
+    // is computed; anything else fails closed for CPA rather than mis-computing.
+    const convention = String(asset?.depreciation_convention || 'half_year');
+    if (convention !== 'half_year') return total;
+    const macrsBasis = Math.max(0, businessBasis - s179Immediate);
+    const inSvcYear = inService ? inService.getUTCFullYear() : null;
+    const disposalYear = disposed ? disposed.getUTCFullYear() : null;
+    // Property placed in service AND disposed in the SAME tax year is not
+    // depreciable under MACRS at all — no deduction on this path.
+    if (disposalYear != null && disposalYear === inSvcYear) return total;
+    if (macrsBasis > 0 && inSvcYear && inService) {
+      for (let y = periodStart.getUTCFullYear(); y <= periodEnd.getUTCFullYear(); y++) {
+        if (disposalYear != null && y > disposalYear) continue; // nothing after disposal
+        let yearAmount = macrsYearAmount(asset.irs_class, macrsBasis, inSvcYear, y);
+        // Disposal YEAR: the half-year disposition convention takes HALF the
+        // year's scheduled amount (not an arbitrary day fraction). Recapture on
+        // any gain is separate and remains a CPA adjustment on the sale.
+        if (disposalYear != null && y === disposalYear) yearAmount *= 0.5;
+        if (yearAmount <= 0) continue;
+        // Attribute across the asset's coverage in year y — in-service date (or
+        // Jan 1 for later years) through year-end, but CAPPED at the disposal
+        // date in the disposal year so a post-disposal quarter gets nothing —
+        // prorated by the report window's overlap. A full-year window keeps the
+        // whole convention amount; windows before in-service or after disposal
+        // get zero.
+        const yStart = new Date(Date.UTC(y, 0, 1));
+        const yEnd = new Date(Date.UTC(y, 11, 31));
+        const covStart = inService > yStart ? inService : yStart;
+        const covEnd = (disposalYear === y && disposed) ? disposed : yEnd;
+        if (covStart > covEnd) continue;
+        const covDays = (covEnd - covStart) / 86400000 + 1;
+        const ovStart = periodStart > covStart ? periodStart : covStart;
+        const ovEnd = periodEnd < covEnd ? periodEnd : covEnd;
+        if (ovStart > ovEnd) continue;
+        const ovDays = (ovEnd - ovStart) / 86400000 + 1;
+        total += yearAmount * (ovDays / covDays);
+      }
     }
+    return total; // MACRS handled — don't also read annual_depreciation
   }
 
   const annual = parseFloat(asset?.annual_depreciation || 0);
@@ -163,6 +322,94 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     if (days > 0) total += annual * (days / daysInYear(y));
   }
   return total;
+}
+
+// Detect MACRS mid-quarter years and mark the MACRS assets in them so
+// prorateAssetDepreciation FAILS CLOSED (only half-year is computed). The
+// mid-quarter convention is mandatory when >40% of a year's aggregate MACRS
+// depreciable basis is placed in service in Q4 (Oct–Dec). The aggregate basis
+// INCLUDES bonus (special-allowance) property — it participates in the test at
+// its basis after §179 but before bonus — even though bonus is expensed
+// immediately (so only MACRS-scheduled assets are marked). Returns a shallow-
+// cloned list; already-set non-half_year conventions are preserved. Pure.
+function annotateMidQuarter(assets) {
+  const byYear = new Map(); // year → { total, q4 }
+  for (const a of assets || []) {
+    const m = String(a?.depreciation_method || '');
+    if (m !== 'MACRS' && m !== 'bonus_100') continue; // §179 property is excluded
+    const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
+    if (!d) continue;
+    const y = d.getUTCFullYear();
+    // Same-year in-service+disposal property is not depreciable and is excluded
+    // from the mid-quarter basis test (Pub 946).
+    const disp = toUTCDay(a?.disposal_date);
+    if (disp && disp.getUTCFullYear() === y) continue;
+    // Business-use-adjusted basis after §179, BEFORE bonus — the same basis the
+    // mid-quarter test uses, so the 40%-in-Q4 fraction can't be skewed.
+    const s179 = a?.section_179_elected ? (parseFloat(a?.section_179_amount ?? a?.purchase_cost) || 0) : 0;
+    const basis = Math.max(0, (parseFloat(a?.purchase_cost || 0) || 0) * businessUseFraction(a?.business_use_pct) - s179);
+    if (basis <= 0) continue;
+    const rec = byYear.get(y) || { total: 0, q4: 0 };
+    rec.total += basis;
+    if (d.getUTCMonth() >= 9) rec.q4 += basis; // Oct(9)–Dec(11)
+    byYear.set(y, rec);
+  }
+  const midQuarterYears = new Set();
+  for (const [y, rec] of byYear) if (rec.total > 0 && rec.q4 > 0.4 * rec.total) midQuarterYears.add(y);
+  if (!midQuarterYears.size) return assets || [];
+  return (assets || []).map((a) => {
+    if (String(a?.depreciation_method || '') !== 'MACRS') return a;
+    const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
+    return d && midQuarterYears.has(d.getUTCFullYear())
+      ? { ...a, depreciation_convention: 'mid_quarter' } // fail closed → CPA
+      : a;
+  });
+}
+
+// True when an asset's regular depreciation FAILS CLOSED to $0 for THIS window
+// while it would otherwise contribute — covering EVERY method that can fail
+// closed: MACRS (mid-quarter, unknown class, listed ≤50% use, or an unconfirmed
+// vehicle) AND immediate §179/bonus (ineligible ≤50% or an unconfirmed
+// vehicle). Used to decide whether the depreciation total is FINAL. Pure.
+function isDepreciationUncomputed(asset, startDate, endDate) {
+  const method = String(asset?.depreciation_method || '');
+  const isMacrs = method === 'MACRS';
+  const isImmediate = method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected;
+  if (!isMacrs && !isImmediate) return false;
+  const periodStart = toUTCDay(startDate);
+  const periodEnd = toUTCDay(endDate);
+  const inService = toUTCDay(asset?.placed_in_service_date) || toUTCDay(asset?.purchase_date);
+  if (!periodStart || !periodEnd || !inService) return false;
+  if (inService > periodEnd) return false;                       // not yet in service
+  const disposed = toUTCDay(asset?.disposal_date);
+  if (disposed && disposed < periodStart) return false;          // disposed before window
+  const inSvcYear = inService.getUTCFullYear();
+  if (disposed && disposed.getUTCFullYear() === inSvcYear) return false; // same-year: not depreciable, computes 0 correctly
+  const isListed = String(asset?.asset_category || '') === 'vehicle';
+  const confirmed = !isListed
+    || (asset?.business_use_confirmed === true && asset?.luxury_auto_exempt === true);
+  const bizUse = businessUseFraction(asset?.business_use_pct);
+
+  // Immediate §179/bonus is recognized ONLY in the in-service year — flag it
+  // only when that year is in the window and its gate fails (mirrors the gates
+  // in prorateAssetDepreciation: §179 needs >50% for all property; bonus's
+  // >50% is listed-only; a vehicle also needs confirmation).
+  if (isImmediate && !isMacrs) {
+    if (inSvcYear < periodStart.getUTCFullYear() || inSvcYear > periodEnd.getUTCFullYear()) return false;
+    const gatePasses = method === 'bonus_100'
+      ? confirmed && (!isListed || bizUse > 0.5)
+      : confirmed && bizUse > 0.5;
+    return !gatePasses;
+  }
+
+  const cls = String(asset?.irs_class || '').trim();
+  const known = !!MACRS_HALF_YEAR[cls];
+  const failsClosed = String(asset?.depreciation_convention || 'half_year') !== 'half_year'
+    || !known || !confirmed || (isListed && bizUse <= 0.5);
+  if (!failsClosed) return false;
+  // Past the recovery period a known-class asset legitimately computes 0.
+  if (known && periodStart.getUTCFullYear() > inSvcYear + MACRS_HALF_YEAR[cls].length - 1) return false;
+  return true;
 }
 
 /** Sum of prorateAssetDepreciation over the asset list. Pure. */
@@ -182,22 +429,42 @@ function assemblePnl({
   otherRevenue = 0,
   laborCost = 0,
   materialsCost = 0,
+  cogsNonDeductible = 0,
   opexRows = [],
   processingFees = 0,
   mileageDeduction = 0,
   depreciationTotal = 0,
+  vehicleMethod = null,
+  vehicleMileageBarred = false,
 } = {}) {
   const revenue = round2(serviceRevenue);
   const other = round2(otherRevenue);
   const labor = round2(laborCost);
   const materials = round2(materialsCost);
 
+  // ── Schedule C line 9 (vehicle): the P&L computes the ACTUAL-EXPENSES basis
+  // ONLY — it deducts every recorded cost and NEVER the standard mileage rate.
+  // Standard mileage would require removing all actual vehicle costs, but those
+  // are spread across shared categories (auto insurance under Insurance, van
+  // upkeep under Repairs & Maintenance, tags under Taxes & Licenses) that can't
+  // be isolated from non-vehicle costs — so counting the rate beside them would
+  // double-deduct. The mileage figure is therefore always EXCLUDED here and
+  // DISCLOSED (vehicleDeduction.standardMileageComputed) for the operator/CPA
+  // to apply manually IN PLACE OF the actual vehicle costs if they elect the
+  // standard method. `method` and the barred flag drive that disclosure only.
+  const method = VEHICLE_METHODS.includes(vehicleMethod) ? vehicleMethod : null;
+  const rawMileage = round2(Number(mileageDeduction) || 0);
+  const countedMileage = 0; // never auto-applied — see note above
+
   const byCategory = new Map();
+  // book-to-tax adjustment (e.g. 50% meals) — seed with the COGS portion.
+  let nonDeductibleExpenses = round2(Number(cogsNonDeductible) || 0);
   for (const row of opexRows) {
     const name = row.category || 'Uncategorized';
     const prev = byCategory.get(name) || { name, irsLine: row.irs_line || null, amount: 0 };
     prev.amount = round2(prev.amount + (parseFloat(row.total) || 0));
     byCategory.set(name, prev);
+    nonDeductibleExpenses = round2(nonDeductibleExpenses + (parseFloat(row.non_deductible) || 0));
   }
   // Merchant processing fees from the synced Stripe ledger — revenue above is
   // gross charges (incl. card surcharges), so without this line netIncome
@@ -216,7 +483,13 @@ function assemblePnl({
   const totalRevenue = round2(revenue + other);
   const cogsTotal = round2(labor + materials);
   const grossProfit = round2(totalRevenue - cogsTotal);
-  const deductionsTotal = round2((Number(mileageDeduction) || 0) + (Number(depreciationTotal) || 0));
+  // Full depreciation always flows (actual-expenses basis). Under a standard-
+  // mileage election a vehicle's depreciation would be embedded in the rate
+  // instead, but since the P&L never applies that rate here, keeping the
+  // vehicle's actual depreciation is consistent — the mileage figure the
+  // operator would use instead is disclosed below.
+  const countedDepreciation = round2(Number(depreciationTotal) || 0);
+  const deductionsTotal = round2(countedMileage + countedDepreciation);
   const netIncome = round2(grossProfit - opexTotal - deductionsTotal);
 
   return {
@@ -226,12 +499,33 @@ function assemblePnl({
     grossMargin: totalRevenue > 0 ? grossProfit / totalRevenue : 0,
     operatingExpenses: { categories: opexCategories, total: opexTotal },
     deductions: {
-      mileage: round2(mileageDeduction),
-      depreciation: round2(depreciationTotal),
+      mileage: countedMileage,             // always 0 — see note
+      depreciation: countedDepreciation,
       total: deductionsTotal,
+    },
+    // The P&L is on the actual-expenses basis. Always disclose the standard
+    // mileage figure that was NOT applied, so it's visible, never silently
+    // missing. buildPnlReport attaches a methodConflict note when the operator
+    // elected standard mileage (and, more strongly, when a MACRS/§179 vehicle
+    // bars it outright).
+    vehicleDeduction: {
+      method,                       // null = unelected
+      elected: method !== null,
+      basis: 'actual_expenses',     // the only basis the P&L can compute cleanly
+      barred: method === 'standard_mileage' && vehicleMileageBarred,
+      countedMileage,               // 0
+      standardMileageComputed: rawMileage, // disclosed for manual/CPA use
     },
     netIncome,
     netMargin: totalRevenue > 0 ? netIncome / totalRevenue : 0,
+    // Book-to-tax bridge: the P&L above is BOOK (actual spend). Taxable income
+    // adds back the non-deductible portion of expenses (e.g. the disallowed
+    // 50% of business meals), so it's ≥ book net income. Exposed separately so
+    // the accounting figures stay true to actual spend.
+    taxAdjustments: {
+      nonDeductibleExpenses: round2(nonDeductibleExpenses),
+      taxableNetIncome: round2(netIncome + nonDeductibleExpenses),
+    },
   };
 }
 
@@ -313,16 +607,6 @@ function missingTableOnly(fallback) {
  * was never added.
  */
 const OUTFLOW_REPORTING_CATEGORIES = ['refund', 'refund_failure', 'dispute', 'dispute_reversal'];
-
-/**
- * Balance-transaction TYPES that legitimately carry no reporting_category —
- * a NULL category on these rows is normal, not "synced before the
- * reporting_category column". Excluded from the stale-row predicates in
- * both the coverage check and the payout-sync healing pass; without this,
- * one synced ACH reversal would flag its payout stale forever (permanent
- * coverage warning + endless re-syncs).
- */
-const CATEGORYLESS_TXN_TYPES = ['payment_reversal', 'payment_failure_refund'];
 
 /**
  * The outflow rows netted against revenue for [startDate, endDate] (ET
@@ -496,15 +780,27 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
-  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets] = await Promise.all([
+  const [serviceRevenue, matRow, opexRows, feeRow, mileageRow, assets,
+    financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
+    // The P&L is BOOK accounting — actual spend (expenses.amount) drives opex,
+    // net income, and margins. The deductible amount (lower for partial
+    // categories like meals 50%) is tracked SEPARATELY as a book-to-tax
+    // adjustment (deductions.nonDeductibleExpenses / taxableNetIncome below);
+    // folding it into opex would understate expenses and inflate net income.
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
       .whereIn('expense_categories.name', COGS_CATEGORIES)
-      .select(db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"))
+      .select(
+        db.raw("COALESCE(SUM(expenses.amount)::text, '0') as total"),
+        // COGS carries a non-deductible portion too (an operator can set a
+        // partial deductibleAmount on Supplies/Materials/Chemicals) — it must
+        // reach the book-to-tax add-back, same clamp as the opex query.
+        db.raw("COALESCE(SUM(expenses.amount - LEAST(expenses.amount, GREATEST(0, COALESCE(expenses.tax_deductible_amount, expenses.amount))))::text, '0') as non_deductible"),
+      )
       .first()
-      .catch(missingTableOnly({ total: '0' })),
+      .catch(missingTableOnly({ total: '0', non_deductible: '0' })),
     db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .whereBetween('expenses.expense_date', [startDate, endDate])
@@ -514,8 +810,17 @@ async function buildPnlReport(db, startDate, endDate) {
         this.whereNull('expense_categories.name')
           .orWhereNotIn('expense_categories.name', COGS_CATEGORIES);
       })
-      .select('expense_categories.name as category', 'expense_categories.irs_line')
-      .sum('expenses.amount as total')
+      .select(
+        'expense_categories.name as category',
+        'expense_categories.irs_line',
+        db.raw('SUM(expenses.amount) as total'),
+        // Non-deductible portion of this category (e.g. the disallowed 50% of
+        // meals). The deductible amount is CLAMPED to [0, amount] here too, so
+        // a bad historical row (deductible > amount, or negative) can't produce
+        // a negative add-back that understates taxable income — belt-and-braces
+        // with the write-time validation.
+        db.raw('SUM(expenses.amount - LEAST(expenses.amount, GREATEST(0, COALESCE(expenses.tax_deductible_amount, expenses.amount)))) as non_deductible'),
+      )
       .groupBy('expense_categories.name', 'expense_categories.irs_line')
       .catch(missingTableOnly([])),
     // Synced Stripe fees for the window (ET days). All balance-transaction
@@ -539,12 +844,14 @@ async function buildPnlReport(db, startDate, endDate) {
     // Rows merely deactivated (active=false, never disposed — archived /
     // non-business) stay excluded, matching every other tax surface.
     // Includes immediate-expensing assets (§179 / bonus — annual NULL):
-    // their whole deduction recognizes in the placed-in-service year.
+    // their whole deduction recognizes in the placed-in-service year. ALSO
+    // includes MACRS assets (annual NULL) — their year-varying schedule is
+    // computed in prorateAssetDepreciation; without this they showed $0.
     db('equipment_register')
       .where(function hasDeduction() {
         this.whereNotNull('annual_depreciation')
           .orWhere('section_179_elected', true)
-          .orWhereIn('depreciation_method', ['section_179', 'bonus_100']);
+          .orWhereIn('depreciation_method', ['section_179', 'bonus_100', 'MACRS']);
       })
       .where(function activeOrDisposed() {
         this.where('active', true)
@@ -552,11 +859,73 @@ async function buildPnlReport(db, startDate, endDate) {
           .orWhereNotNull('disposal_date');
       })
       .select(
+        'name',
         'annual_depreciation', 'placed_in_service_date', 'purchase_date', 'disposal_date',
         'depreciation_method', 'section_179_elected', 'section_179_amount', 'purchase_cost',
+        // Needed to split VEHICLE depreciation out under a standard-mileage
+        // election — the rate already embeds a depreciation component, so
+        // deducting a vehicle's MACRS/§179 beside it double-counts.
+        'asset_category',
+        // MACRS computation inputs: recovery class + listed-property business
+        // use (vehicles) + confirmation flag + averaging convention. Schema
+        // defaults: 100 / false / half_year.
+        'irs_class', 'business_use_pct', 'business_use_confirmed',
+        'luxury_auto_exempt', 'depreciation_convention',
       )
       .catch(missingTableOnly([])),
+    // The vehicle-method election (newest financials row, same accessor every
+    // other company_financials consumer uses) and any register vehicle whose
+    // depreciation method bars the standard mileage rate.
+    //
+    // SCOPE — the election is COMPANY-WIDE (one vehicle_deduction_method), and
+    // the business operates a single service vehicle. Mileage and vehicle
+    // depreciation are therefore aggregated, not split per vehicle: if ANY
+    // held vehicle is barred, the standard-mileage election fails closed for
+    // the whole company. With one vehicle that is exact; the conservative
+    // direction (never over-claiming) is deliberate if a second vehicle is
+    // ever added — per-vehicle elections would be the enhancement then, and
+    // mileage_log has no FK into equipment_register to attribute miles today.
+    // GLOBAL preference (newest row), not period-effective. The election is
+    // now INFORMATIONAL — it never changes the P&L computation (always the
+    // actual-expenses basis), only the disclosure note — so reading the newest
+    // row is correct and, unlike a ≤endDate filter, doesn't silently discard a
+    // selection saved (stamped today) while viewing a historical period.
+    db('company_financials')
+      .orderBy('effective_date', 'desc')
+      .select('vehicle_deduction_method')
+      .first()
+      .catch(missingTableOnly(null)),
+    db('equipment_register')
+      .where('asset_category', 'vehicle')
+      .where(function barred() {
+        this.whereIn('depreciation_method', MILEAGE_BARRING_METHODS)
+          .orWhere('section_179_elected', true);
+      })
+      // A vehicle bars the rate for a window it was HELD DURING, by its
+      // in-service/disposal INTERVAL — not current state. Current-state gating
+      // was wrong both ways: a since-disposed MACRS vehicle must still bar a
+      // historical P&L it was held in, and a vehicle placed in service after
+      // the window must not bar it. In service by window end AND not disposed
+      // before window start = interval overlaps [startDate, endDate]. (NULL
+      // in-service/disposal = open-ended, treated as still applicable.)
+      .where(function inServiceByWindowEnd() {
+        this.whereNull('placed_in_service_date')
+          .orWhere('placed_in_service_date', '<=', endDate);
+      })
+      .where(function notDisposedBeforeWindow() {
+        this.whereNull('disposal_date')
+          .orWhere('disposal_date', '>=', startDate);
+      })
+      .select('name', 'depreciation_method', 'section_179_elected')
+      .catch(missingTableOnly([])),
   ]);
+
+  const vehicleMethod = VEHICLE_METHODS.includes(financialsRow?.vehicle_deduction_method)
+    ? financialsRow.vehicle_deduction_method
+    : null;
+
+  // Flag MACRS mid-quarter years (fail closed → CPA) before depreciating.
+  const depreciableAssets = annotateMidQuarter(assets);
 
   const report = assemblePnl({
     serviceRevenue,
@@ -570,81 +939,97 @@ async function buildPnlReport(db, startDate, endDate) {
     // and the informational time-tracking CSV.
     laborCost: 0,
     materialsCost: parseFloat(matRow?.total || 0),
+    cogsNonDeductible: parseFloat(matRow?.non_deductible || 0),
     opexRows,
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
-    depreciationTotal: prorateDepreciation(assets, startDate, endDate),
+    depreciationTotal: prorateDepreciation(depreciableAssets, startDate, endDate),
+    vehicleMethod,
+    // A held vehicle on MACRS/§179 is barred from the standard mileage rate
+    // (Pub 463). The P&L never applies the rate regardless; this only sharpens
+    // the disclosure below.
+    vehicleMileageBarred: (barredVehicles || []).length > 0,
   });
 
+  // Disclosure when standard mileage is elected — the P&L is on the actual-
+  // expenses basis (the disclosed mileage figure is NOT in the total), because
+  // actual vehicle costs can't be isolated from shared categories to compute a
+  // clean standard-mileage basis. A held MACRS/§179 vehicle makes it stronger:
+  // standard mileage is barred outright (Pub 463).
+  if (vehicleMethod === 'standard_mileage') {
+    const barred = (barredVehicles || []).length > 0;
+    report.vehicleDeduction.methodConflict = {
+      reason: barred ? 'depreciation_bars_standard_mileage' : 'standard_mileage_not_auto_computed',
+      vehicles: (barredVehicles || []).map((v) => ({
+        name: v.name,
+        method: v.section_179_elected ? 'section_179' : v.depreciation_method,
+      })),
+      note: barred
+        ? 'Standard mileage is elected, but a held vehicle was depreciated under '
+          + 'MACRS/§179 — IRS Pub 463 bars the standard mileage rate for that '
+          + 'vehicle for the rest of its life. This P&L deducts ACTUAL vehicle '
+          + 'costs; keep the actual-expenses method with your CPA.'
+        : 'Standard mileage is elected, but this P&L deducts ACTUAL vehicle '
+          + 'costs — the system can\'t separate actual vehicle expenses (auto '
+          + 'insurance, van repairs, registration) from shared categories to '
+          + 'compute a clean standard-mileage figure. Your standard mileage '
+          + 'amount is disclosed separately; apply it with your CPA IN PLACE OF '
+          + 'the actual vehicle costs if you use that method.',
+    };
+  }
+
+  // Depreciation completeness — any MACRS asset whose regular depreciation
+  // FAILS CLOSED to $0 for THIS window (mid-quarter, unknown recovery class, or
+  // a ≤50%-use vehicle) is surfaced explicitly, so the depreciation total is
+  // never presented as final when it's understated. Scoped to the window so an
+  // out-of-period asset raises no false warning.
+  const uncomputedDepreciation = depreciableAssets.filter(
+    (a) => isDepreciationUncomputed(a, startDate, endDate),
+  );
+  if (uncomputedDepreciation.length) {
+    report.deductions.depreciationComplete = false;
+    report.depreciationDisclosure = {
+      reason: 'uncomputed_macrs',
+      assets: uncomputedDepreciation.map((a) => a.name).filter(Boolean),
+      note: `${uncomputedDepreciation.length} MACRS asset(s) could not be auto-`
+        + 'computed for this period (mid-quarter convention, an unsupported '
+        + 'recovery class, a vehicle at ≤50% business use, or a vehicle whose '
+        + 'business use / §280F passenger-auto exemption is unconfirmed). Their '
+        + 'regular depreciation reads $0 here, so the depreciation total is NOT '
+        + 'final and needs review.',
+    };
+  } else {
+    report.deductions.depreciationComplete = true;
+  }
+
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
-  // synced payout-transaction ledger, which lags until each payout is paid
-  // AND synced. FAIL CLOSED: the window is proven complete only when
-  // (a) no paid payout still needs its transaction (re)sync, (b) no payout
-  // anywhere is still unsettled (an unsettled payout — whatever its own
-  // creation date — can hold in-window transactions the ledger lacks), and
-  // (c) a SYNCED PAID payout exists that was created AFTER the window end,
-  // proving Stripe's chronological sweep has passed the cutoff. Anything
-  // weaker (e.g. the newest transaction date) can label incomplete figures
-  // final.
-  const [ledgerHead, backlogRow, unsettledRow, sweepRow] = await Promise.all([
-    db('stripe_payout_transactions')
-      .select(db.raw("TO_CHAR(MAX(created_at_stripe) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as through"))
-      .first()
-      .catch(missingTableOnly({ through: null })),
-    // Same predicate as syncPayouts' self-healing pass. NULL category only
-    // marks a row stale when its TYPE is supposed to carry one —
-    // CATEGORYLESS_TXN_TYPES rows are complete as-is.
-    db('stripe_payouts as sp')
-      .where('sp.status', 'paid')
-      .where(function needsResync() {
-        this.whereNull('sp.transaction_count')
-          .orWhere('sp.transaction_count', 0)
-          .orWhereExists(function preCategoryRows() {
-            this.select(db.raw('1'))
-              .from('stripe_payout_transactions as t')
-              .whereRaw('t.payout_id = sp.id')
-              .whereNull('t.reporting_category')
-              .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
-          });
-      })
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-    db('stripe_payouts')
-      .whereNotIn('status', ['paid', 'canceled', 'failed'])
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-    db('stripe_payouts')
-      .where('status', 'paid')
-      .where('transaction_count', '>', 0)
-      .whereRaw(
-        "DATE(created_at_stripe AT TIME ZONE 'America/New_York') > ?::date",
-        [endDate],
-      )
-      .count('* as n')
-      .first()
-      .catch(missingTableOnly({ n: 0 })),
-  ]);
-  const outflowLedgerThrough = ledgerHead?.through || null;
-  const backlogCount = parseInt(backlogRow?.n || 0, 10);
-  const unsettledCount = parseInt(unsettledRow?.n || 0, 10);
-  const sweptPastWindow = parseInt(sweepRow?.n || 0, 10) > 0;
+  // globally synced balance-transaction ledger (syncBalanceTransactions).
+  // The window is proven complete only when a successful global sync ran
+  // AFTER the window ended: that sync captured every balance transaction
+  // created on or before the cutoff, so nothing in-window can still be
+  // missing. Anything weaker labels incomplete figures final.
+  let lastBalanceSyncAt = null;
+  try {
+    const syncState = await db('stripe_sync_state')
+      .where('sync_type', 'balance_transactions')
+      .first();
+    if (syncState?.last_sync_at) lastBalanceSyncAt = new Date(syncState.last_sync_at);
+  } catch (e) {
+    if (e?.code !== '42P01') throw e; /* missing table in dev only */
+  }
+  // "After the window ended" at ET-day granularity: the sync's ET calendar
+  // day must be strictly later than the window's last day, which guarantees
+  // the sync ran after every in-window transaction already existed.
+  const syncedPastWindow = !!(lastBalanceSyncAt
+    && etDateString(lastBalanceSyncAt) > endDate);
   let coverageNote = null;
-  if (!outflowLedgerThrough) {
+  if (!lastBalanceSyncAt) {
     coverageNote = 'Refund/dispute/fee ledger has never been synced — outflows and processing fees are NOT reflected in these figures. Run Banking → Sync, then regenerate.';
-  } else if (backlogCount > 0) {
-    coverageNote = `${backlogCount} paid payout(s) still await transaction sync — outflow and fee figures are incomplete. Run Banking → Sync (repeat until it reports no backfill), then regenerate.`;
-  } else if (unsettledCount > 0) {
-    coverageNote = `${unsettledCount} payout(s) are still settling — their refunds/disputes/fees are not in the ledger yet. Figures firm up once they pay out and sync.`;
-  } else if (!sweptPastWindow) {
-    coverageNote = `Stripe's payout sweep has not yet passed ${endDate} — outflows and fees near the window end may not be in the ledger. Figures firm up once the next payout after the cutoff pays out and syncs.`;
+  } else if (!syncedPastWindow) {
+    coverageNote = `Refund/dispute/fee ledger last synced ${etDateString(lastBalanceSyncAt)} (ET) — a sync after ${endDate} is needed before outflow and fee figures for this window are final. Run Banking → Sync, then regenerate.`;
   }
   report.coverage = {
-    outflowLedgerThrough,
-    backlogCount,
-    unsettledCount,
-    sweptPastWindow,
+    lastBalanceSyncAt: lastBalanceSyncAt ? lastBalanceSyncAt.toISOString() : null,
     complete: !coverageNote,
     note: coverageNote,
   };
@@ -658,13 +1043,17 @@ module.exports = {
   getPeriodRange,
   prorateDepreciation,
   prorateAssetDepreciation,
+  macrsYearAmount,
+  annotateMidQuarter,
+  isDepreciationUncomputed,
   rateAsOf,
   costLaborByDay,
   dateCellStr,
   missingTableOnly,
   COGS_CATEGORIES,
+  VEHICLE_METHODS,
+  MILEAGE_BARRING_METHODS,
   DEFAULT_LOADED_LABOR_RATE,
   OUTFLOW_REPORTING_CATEGORIES,
-  CATEGORYLESS_TXN_TYPES,
   outflowTransactionsQuery,
 };

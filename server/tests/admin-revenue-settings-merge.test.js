@@ -70,4 +70,29 @@ describe('buildSettingsRow (revenue settings merge)', () => {
     expect(row.loaded_labor_rate).toBe(35);
     expect(row.effective_date).toBe('2026-07-04');
   });
+
+  test('vehicle deduction election: allow-listed values + null, stamps set_at', () => {
+    const now = new Date('2026-07-21T12:00:00Z');
+    const a = buildSettingsRow(LATEST, { vehicleDeductionMethod: 'standard_mileage' }, '2026-07-21', now);
+    expect(a.error).toBeUndefined();
+    expect(a.row.vehicle_deduction_method).toBe('standard_mileage');
+    expect(a.row.vehicle_deduction_method_set_at).toBe(now);
+
+    const b = buildSettingsRow(LATEST, { vehicleDeductionMethod: null }, '2026-07-21', now);
+    expect(b.row.vehicle_deduction_method).toBeNull(); // un-elect
+
+    // Garbage is rejected, not coerced or persisted.
+    expect(buildSettingsRow(LATEST, { vehicleDeductionMethod: 'mileage' }, '2026-07-21').error)
+      .toMatch(/vehicleDeductionMethod/);
+    expect(buildSettingsRow(LATEST, { vehicleDeductionMethod: 'STANDARD_MILEAGE' }, '2026-07-21').error)
+      .toMatch(/vehicleDeductionMethod/);
+  });
+
+  test('an unrelated save does NOT touch the election', () => {
+    const withElection = { ...LATEST, vehicle_deduction_method: 'actual_expenses' };
+    const { row } = buildSettingsRow(withElection, { loadedLaborRate: 40 }, '2026-07-21');
+    // Carried forward untouched — no accidental un-election on a labor save.
+    expect(row.vehicle_deduction_method).toBe('actual_expenses');
+    expect(row.vehicle_deduction_method_set_at).toBeUndefined();
+  });
 });

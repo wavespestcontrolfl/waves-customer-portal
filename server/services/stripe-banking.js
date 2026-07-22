@@ -216,7 +216,11 @@ async function syncPayouts(limit = 50) {
           .onConflict('stripe_payout_id')
           .merge();
 
-        if (p.status === 'paid') {
+        // Per-payout transaction listing ONLY works for automatic payouts —
+        // Stripe rejects it for manual ones ("can only be filtered on
+        // automatic transfers"), and every payout on this account is manual.
+        // Manual-payout transactions arrive via syncBalanceTransactions.
+        if (p.status === 'paid' && p.automatic === true) {
           try {
             await syncPayoutTransactions(p.id);
           } catch (err) {
@@ -255,26 +259,15 @@ async function syncPayouts(limit = 50) {
 
     if (synced > 0) logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
 
-    // Self-healing coverage pass — the watermark only moves FORWARD, so
-    // without this, historical paid payouts synced before the
-    // reporting_category column (or whose transaction sync failed) would
-    // keep an incomplete refund/dispute/fee ledger forever, silently
-    // overstating P&L revenue. Each run re-syncs a bounded batch of paid
-    // payouts that have no transaction rows or rows missing
-    // reporting_category (syncPayoutTransactions is a full delete+insert per
-    // payout, so a re-run fully refreshes them); repeated syncs converge.
-    let backfilled = 0;
+    // Refresh payouts stuck in a non-terminal LOCAL status: the forward-only
+    // watermark never revisits a payout first observed as pending/in-transit,
+    // so without this its local row would stay non-paid forever.
     try {
-      const BACKFILL_PER_RUN = 25;
-      // First, refresh payouts stuck in a non-terminal LOCAL status: the
-      // forward-only watermark never revisits a payout first observed as
-      // pending/in-transit, so without this its local row would stay
-      // non-paid forever and the paid-only selection below could never
-      // sync its transactions.
+      const REFRESH_PER_RUN = 25;
       const nonTerminal = await db('stripe_payouts')
         .whereNotIn('status', ['paid', 'canceled', 'failed'])
         .orderBy('created_at_stripe', 'desc')
-        .limit(BACKFILL_PER_RUN)
+        .limit(REFRESH_PER_RUN)
         .select('stripe_payout_id');
       for (const row of nonTerminal) {
         try {
@@ -287,45 +280,33 @@ async function syncPayouts(limit = 50) {
               failure_message: p.failure_message || null,
               synced_at: new Date().toISOString(),
             });
+          // An automatic payout that just transitioned to paid gets its
+          // per-payout transaction detail here — the watermark never
+          // revisits it, and the global sync leaves payout_id NULL, so this
+          // is the only path that fills transaction_count/fee_total for the
+          // common pending→paid flow.
+          if (p.status === 'paid' && p.automatic === true) {
+            try {
+              await syncPayoutTransactions(p.id);
+            } catch (err) {
+              logger.warn(`[stripe-banking] Post-refresh transaction sync failed for ${p.id}:`, err.message);
+            }
+          }
         } catch (err) {
           logger.warn(`[stripe-banking] Status refresh failed for ${row.stripe_payout_id}:`, err.message);
         }
       }
-      // NULL category only marks a row stale when its TYPE is supposed to
-      // carry one — CATEGORYLESS_TXN_TYPES rows (e.g. payment_reversal) are
-      // complete as-is; treating them as stale would re-sync their payout on
-      // every run forever.
-      const { CATEGORYLESS_TXN_TYPES } = require('./pnl-report');
-      const stale = await db('stripe_payouts as sp')
-        .where('sp.status', 'paid')
-        .where(function needsResync() {
-          this.whereNull('sp.transaction_count')
-            .orWhere('sp.transaction_count', 0)
-            .orWhereExists(function preCategoryRows() {
-              this.select(db.raw('1'))
-                .from('stripe_payout_transactions as t')
-                .whereRaw('t.payout_id = sp.id')
-                .whereNull('t.reporting_category')
-                .whereNotIn('t.type', CATEGORYLESS_TXN_TYPES);
-            });
-        })
-        .orderBy('sp.created_at_stripe', 'desc')
-        .limit(BACKFILL_PER_RUN)
-        .select('sp.stripe_payout_id');
-      for (const row of stale) {
-        try {
-          await syncPayoutTransactions(row.stripe_payout_id);
-          backfilled++;
-        } catch (err) {
-          logger.warn(`[stripe-banking] Backfill transaction sync failed for ${row.stripe_payout_id}:`, err.message);
-        }
-      }
-      if (backfilled > 0) logger.info(`[stripe-banking] Backfilled transaction detail for ${backfilled} historical payout(s)`);
     } catch (err) {
-      logger.warn('[stripe-banking] Historical payout backfill pass failed:', err.message);
+      logger.warn('[stripe-banking] Payout status refresh pass failed:', err.message);
     }
 
-    return { synced, backfilled, has_more: hasMore };
+    // The refund/dispute/fee ledger itself syncs GLOBALLY (see
+    // syncBalanceTransactions) — the old per-payout backfill pass could
+    // never work here because Stripe refuses per-payout transaction listing
+    // for manual payouts, which is all this account creates.
+    const balance = await syncBalanceTransactions();
+
+    return { synced, balance, has_more: hasMore };
   } catch (err) {
     logger.error('[stripe-banking] syncPayouts failed:', err.message);
     throw err;
@@ -338,8 +319,230 @@ async function syncPayouts(limit = 50) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Batch-resolve local payments/customers for a set of Stripe balance
+ * transactions (avoids N+1). Shared by the per-payout and global syncs.
+ * Returns { paymentsBySource, customersById }.
+ */
+async function resolveTxnLinkMaps(transactionRows) {
+  const chargeSources = transactionRows
+    .map(t => (typeof t.source === 'string' && t.source.startsWith('ch_')) ? t.source : null)
+    .filter(Boolean);
+  const paymentsBySource = new Map();
+  const customersById = new Map();
+  if (chargeSources.length) {
+    try {
+      const payments = await db('payments')
+        .whereIn('stripe_charge_id', chargeSources)
+        .orWhereIn('stripe_payment_intent_id', chargeSources);
+      for (const pay of payments) {
+        if (pay.stripe_charge_id) paymentsBySource.set(pay.stripe_charge_id, pay);
+        if (pay.stripe_payment_intent_id) paymentsBySource.set(pay.stripe_payment_intent_id, pay);
+      }
+      const customerIds = [...new Set(payments.map(p => p.customer_id).filter(Boolean))];
+      if (customerIds.length) {
+        const customers = await db('customers')
+          .whereIn('id', customerIds)
+          .select('id', 'first_name', 'last_name');
+        for (const c of customers) customersById.set(c.id, c);
+      }
+    } catch (err) {
+      logger.warn('[stripe-banking] Batch payment/customer lookup failed:', err.message);
+    }
+  }
+  return { paymentsBySource, customersById };
+}
+
+/** One insertable stripe_payout_transactions row from a Stripe balance txn. */
+function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = null) {
+  let customerId = null;
+  let customerName = null;
+  let invoiceId = null;
+  let paymentId = null;
+  const payment = (typeof txn.source === 'string') ? paymentsBySource.get(txn.source) : null;
+  if (payment) {
+    paymentId = payment.id;
+    customerId = payment.customer_id;
+    if (customerId) {
+      const customer = customersById.get(customerId);
+      if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
+    }
+    try {
+      const meta = typeof payment.metadata === 'string'
+        ? JSON.parse(payment.metadata)
+        : payment.metadata;
+      if (meta && meta.invoice_id) invoiceId = meta.invoice_id;
+    } catch { /* metadata parse failure — non-critical */ }
+  }
+  return {
+    payout_id: payoutId,
+    stripe_txn_id: txn.id,
+    type: txn.type,
+    // Canonical classification — required to tell dispute movements
+    // (reporting_category dispute/dispute_reversal, carried under the
+    // umbrella type 'adjustment') apart from unrelated adjustments.
+    reporting_category: txn.reporting_category || null,
+    amount: txn.amount / 100,
+    fee: txn.fee / 100,
+    net: txn.net / 100,
+    description: txn.description,
+    customer_name: customerName,
+    customer_id: customerId,
+    invoice_id: invoiceId,
+    payment_id: paymentId,
+    available_on: txn.available_on ? new Date(txn.available_on * 1000).toISOString() : null,
+    created_at_stripe: txn.created ? new Date(txn.created * 1000).toISOString() : null,
+  };
+}
+
+/**
+ * GLOBAL balance-transaction sync — the authoritative feed for the
+ * refund/dispute/fee ledger. Stripe refuses per-payout transaction listing
+ * for MANUAL payouts (all this account creates), so the ledger syncs from
+ * the account's balance-transaction stream instead: watermarked on the
+ * transaction `created` timestamp, upserted by stripe_txn_id (unique index
+ * from migration 20260721000002), payout_id left NULL (manual payouts carry
+ * no linkage). Rows therefore appear as soon as the money moves — not when
+ * a payout later settles.
+ */
+async function syncBalanceTransactions(limit = 100) {
+  const stripe = getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+
+  // Coverage honesty: the P&L treats last_sync_at as "the ledger is current
+  // through this moment", so it must be the time the sync STARTED — pages
+  // are read from that instant's view of the stream, and a run that
+  // straddles ET midnight would otherwise claim a day it never re-read.
+  const syncStartedAt = new Date();
+
+  let watermark = 0;
+  let resumeCursor = null;
+  let pendingHighWatermark = 0;
+  try {
+    const syncState = await db('stripe_sync_state')
+      .where('sync_type', 'balance_transactions')
+      .first();
+    if (syncState?.last_created_at) {
+      watermark = Math.floor(new Date(syncState.last_created_at).getTime() / 1000);
+    }
+    // A prior run that hit the page cap left a resume cursor
+    // ('txn_id@pendingHighWatermark'): continue paging DEEPER from it
+    // instead of refetching the same newest pages forever. The pending
+    // high-watermark is the newest timestamp the capped run saw — promoted
+    // to last_created_at once the tail completes, so a giant initial
+    // backfill converges instead of restarting from zero every time.
+    if (syncState?.cursor && String(syncState.cursor).startsWith('txn_')) {
+      const [cur, pending] = String(syncState.cursor).split('@');
+      resumeCursor = cur;
+      pendingHighWatermark = parseInt(pending, 10) || 0;
+    }
+  } catch { /* table may not exist yet */ }
+
+  const rows = [];
+  let startingAfter = resumeCursor;
+  let hasMore = true;
+  const MAX_PAGES = 200;
+  for (let pageIdx = 0; pageIdx < MAX_PAGES && hasMore; pageIdx++) {
+    const page = await stripe.balanceTransactions.list({
+      limit,
+      // gte, not gt: Stripe timestamps are second-granular, so a later
+      // transaction can share the watermark second — an exclusive filter
+      // would skip it forever. The 1-second overlap is deduped by the
+      // stripe_txn_id upsert.
+      ...(watermark > 0 ? { created: { gte: watermark } } : {}),
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    rows.push(...(page.data || []));
+    hasMore = !!page.has_more;
+    startingAfter = page.data?.length ? page.data[page.data.length - 1].id : null;
+    if (!startingAfter) break;
+  }
+
+  let upserted = 0;
+  let newestCreated = watermark;
+  if (rows.length) {
+    const linkMaps = await resolveTxnLinkMaps(rows);
+    // Merge every column EXCEPT payout_id: the global stream carries no
+    // payout linkage (null), and blindly merging null would erase linkage
+    // previously written by the per-payout sync for automatic payouts.
+    const MERGE_COLS = [
+      'type', 'reporting_category', 'amount', 'fee', 'net', 'description',
+      'customer_name', 'customer_id', 'invoice_id', 'payment_id',
+      'available_on', 'created_at_stripe',
+    ];
+    for (const txn of rows) {
+      if (txn.created && txn.created > newestCreated) newestCreated = txn.created;
+      await db('stripe_payout_transactions')
+        .insert(txnRowFromStripe(txn, linkMaps, null))
+        .onConflict('stripe_txn_id')
+        .merge(MERGE_COLS);
+      upserted++;
+    }
+  }
+
+  // Persist state. Pages arrive newest-first, so:
+  // - FRESH (cursor-free) EXHAUSTED run: the range is fully covered —
+  //   advance the watermark, stamp last_sync_at (the START time, see
+  //   above), clear any cursor. This is the ONLY transition that certifies
+  //   coverage.
+  // - CAP-HIT run: the OLDEST part of the range is still unfetched — save
+  //   the deep-page cursor so the next run resumes where this one stopped;
+  //   never advance the watermark or last_sync_at.
+  // - RESUMED run that exhausts: the old tail is done, but transactions
+  //   created SINCE the capped run sort before the cursor and were skipped
+  //   — clear the cursor WITHOUT certifying; the next (fresh) run re-scans
+  //   from the watermark and certifies. Upserted rows are always kept.
+  const resumedRun = !!resumeCursor;
+  const certifies = !hasMore && !resumedRun;
+  try {
+    const existing = await db('stripe_sync_state')
+      .where('sync_type', 'balance_transactions')
+      .first();
+    // Highest timestamp seen across this run AND any prior capped segments.
+    const highWater = Math.max(newestCreated, pendingHighWatermark);
+    const patch = hasMore
+      // Capped: save the deep-page cursor plus the pending high-watermark
+      // so the eventual tail completion can promote it.
+      ? { cursor: `${startingAfter}@${highWater}` }
+      : certifies
+        ? {
+          last_sync_at: syncStartedAt.toISOString(),
+          cursor: null,
+          ...(newestCreated > watermark
+            ? { last_created_at: new Date(newestCreated * 1000).toISOString() }
+            : {}),
+        }
+        // Resumed tail complete: clear the cursor and PROMOTE the pending
+        // high-watermark (the capped segments covered everything up to it),
+        // so the required fresh certifying pass starts from there instead
+        // of re-walking the whole history — without stamping last_sync_at.
+        : {
+          cursor: null,
+          ...(highWater > watermark
+            ? { last_created_at: new Date(highWater * 1000).toISOString() }
+            : {}),
+        };
+    if (existing) {
+      await db('stripe_sync_state').where('sync_type', 'balance_transactions').update(patch);
+    } else {
+      await db('stripe_sync_state').insert({ sync_type: 'balance_transactions', ...patch });
+    }
+  } catch (err) {
+    logger.warn('[stripe-banking] Could not update balance-transaction sync state:', err.message);
+  }
+  if (hasMore) {
+    logger.warn(`[stripe-banking] Balance-transaction sync hit the ${MAX_PAGES}-page cap — resume cursor saved; run Sync again to continue`);
+  } else if (resumedRun) {
+    logger.info('[stripe-banking] Resumed backfill segment complete — run Sync once more for a fresh certifying pass');
+  }
+
+  if (upserted > 0) logger.info(`[stripe-banking] Balance-transaction sync upserted ${upserted} row(s)`);
+  return { upserted, has_more: hasMore, certified: certifies };
+}
+
+/**
  * Fetch balance transactions for a specific payout and store them.
- * Attempts to match transactions to local payments/customers/invoices.
+ * AUTOMATIC payouts only — Stripe rejects the payout filter for manual
+ * payouts; those flow through syncBalanceTransactions instead.
  * @param {string} stripePayoutId — Stripe payout ID (po_xxx)
  */
 async function syncPayoutTransactions(stripePayoutId) {
@@ -374,92 +577,26 @@ async function syncPayoutTransactions(stripePayoutId) {
       logger.warn(`[stripe-banking] Payout ${stripePayoutId} transaction sync hit ${MAX_PAGES} page safety cap`);
     }
 
-    let totalFees = 0;
-    let txnCount = 0;
+    const linkMaps = await resolveTxnLinkMaps(transactionRows);
+    const txnInserts = transactionRows.map(txn => txnRowFromStripe(txn, linkMaps, payout.id));
+    const totalFees = txnInserts.reduce((s, r) => s + (Number(r.fee) || 0), 0);
+    const txnCount = txnInserts.length;
 
-    // Batch-resolve local payments/customers to avoid N+1.
-    const chargeSources = transactionRows
-      .map(t => (typeof t.source === 'string' && t.source.startsWith('ch_')) ? t.source : null)
-      .filter(Boolean);
-
-    let paymentsBySource = new Map();
-    let customersById = new Map();
-    if (chargeSources.length) {
-      try {
-        const payments = await db('payments')
-          .whereIn('stripe_charge_id', chargeSources)
-          .orWhereIn('stripe_payment_intent_id', chargeSources);
-        for (const pay of payments) {
-          if (pay.stripe_charge_id) paymentsBySource.set(pay.stripe_charge_id, pay);
-          if (pay.stripe_payment_intent_id) paymentsBySource.set(pay.stripe_payment_intent_id, pay);
-        }
-
-        const customerIds = [...new Set(payments.map(p => p.customer_id).filter(Boolean))];
-        if (customerIds.length) {
-          const customers = await db('customers')
-            .whereIn('id', customerIds)
-            .select('id', 'first_name', 'last_name');
-          for (const c of customers) customersById.set(c.id, c);
-        }
-      } catch (err) {
-        logger.warn('[stripe-banking] Batch payment/customer lookup failed:', err.message);
-      }
-    }
-
-    const txnInserts = [];
-    for (const txn of transactionRows) {
-      let customerId = null;
-      let customerName = null;
-      let invoiceId = null;
-      let paymentId = null;
-
-      const payment = (typeof txn.source === 'string') ? paymentsBySource.get(txn.source) : null;
-      if (payment) {
-        paymentId = payment.id;
-        customerId = payment.customer_id;
-
-        if (customerId) {
-          const customer = customersById.get(customerId);
-          if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
-        }
-
-        try {
-          const meta = typeof payment.metadata === 'string'
-            ? JSON.parse(payment.metadata)
-            : payment.metadata;
-          if (meta && meta.invoice_id) invoiceId = meta.invoice_id;
-        } catch { /* metadata parse failure — non-critical */ }
-      }
-
-      txnInserts.push({
-        payout_id: payout.id,
-        stripe_txn_id: txn.id,
-        type: txn.type,
-        // Canonical classification — required to tell dispute movements
-        // (reporting_category dispute/dispute_reversal, carried under the
-        // umbrella type 'adjustment') apart from unrelated adjustments.
-        reporting_category: txn.reporting_category || null,
-        amount: txn.amount / 100,
-        fee: txn.fee / 100,
-        net: txn.net / 100,
-        description: txn.description,
-        customer_name: customerName,
-        customer_id: customerId,
-        invoice_id: invoiceId,
-        payment_id: paymentId,
-        available_on: txn.available_on ? new Date(txn.available_on * 1000).toISOString() : null,
-        created_at_stripe: txn.created ? new Date(txn.created * 1000).toISOString() : null,
-      });
-
-      totalFees += txn.fee / 100;
-      txnCount++;
-    }
-
-    // Atomic swap: delete + insert + update payout inside a single DB transaction
+    // Atomic swap: delete + upsert + update payout inside one DB transaction.
+    // The insert is an UPSERT on stripe_txn_id (unique index): the global
+    // balance sync may already hold these rows with payout_id NULL — a plain
+    // insert would conflict, and the delete-by-payout_id above can't see
+    // unlinked rows. The full merge here (payout_id included) RESTORES the
+    // payout linkage for automatic payouts.
     await db.transaction(async (trx) => {
       await trx('stripe_payout_transactions').where('payout_id', payout.id).del();
       if (txnInserts.length) {
-        await trx('stripe_payout_transactions').insert(txnInserts);
+        for (const row of txnInserts) {
+          await trx('stripe_payout_transactions')
+            .insert(row)
+            .onConflict('stripe_txn_id')
+            .merge();
+        }
       }
       await trx('stripe_payouts')
         .where('id', payout.id)
@@ -1058,6 +1195,7 @@ module.exports = {
   getBalance,
   syncPayouts,
   syncPayoutTransactions,
+  syncBalanceTransactions,
   upsertPayoutFromEvent,
   getPayoutDetails,
   createPayout,

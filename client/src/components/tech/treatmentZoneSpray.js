@@ -416,6 +416,35 @@ export function buildSettledAccum({ width, height, points, closed, mistColor }) 
 // taints, re-fetch the tile via fetch() (CORS-checked) and compose on a
 // FRESH canvas — a tainted canvas stays tainted no matter what is drawn
 // onto it afterwards.
+// Map-only PNG export for the auto-trace upload — same taint fallback as
+// composeSnapshot: when the loaded Static Maps image is not canvas-readable,
+// re-fetch it as a blob and compose from the bitmap.
+export async function exportMapPng(mapImage, mapUrl) {
+  const compose = (img) => {
+    const c = document.createElement('canvas');
+    c.width = MAP_WIDTH;
+    c.height = MAP_HEIGHT;
+    c.getContext('2d').drawImage(img, 0, 0, MAP_WIDTH, MAP_HEIGHT);
+    return new Promise((resolve, reject) => {
+      try {
+        c.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error('Map export produced no image'))),
+          'image/png'
+        );
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+  try {
+    return await compose(mapImage);
+  } catch {
+    const res = await fetch(mapUrl);
+    const bitmap = await createImageBitmap(await res.blob());
+    return compose(bitmap);
+  }
+}
+
 export async function composeSnapshot(mapImage, accum, mapUrl) {
   const compose = (img) => {
     const c = document.createElement('canvas');

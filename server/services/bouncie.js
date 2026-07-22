@@ -19,13 +19,6 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const API_BASE = config.bouncie.apiBase || 'https://api.bouncie.dev/v1';
 const AUTH_BASE = config.bouncie.authBase || 'https://auth.bouncie.com';
 
-// IRS standard mileage rates by year
-const IRS_MILEAGE_RATES = {
-  2024: 0.67,
-  2025: 0.70,
-  2026: 0.70, // placeholder — update when IRS publishes
-};
-
 // In-memory token (shared with routes/bouncie.js pattern)
 function cleanToken(value) {
   const trimmed = String(value || '').trim();
@@ -124,12 +117,8 @@ async function bouncieRequest(path) {
   return res.json();
 }
 
-/**
- * Get the IRS mileage rate for a given year
- */
-function getIrsRate(year) {
-  return IRS_MILEAGE_RATES[year] || IRS_MILEAGE_RATES[2025];
-}
+// (The IRS rate resolver lives in bouncie-mileage.js — a stale duplicate
+// year-map here was dead code and was removed so rates can't drift.)
 
 class BouncieService {
   /**

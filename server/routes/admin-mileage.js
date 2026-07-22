@@ -11,6 +11,9 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const { etDateString } = require('../utils/datetime-et');
+// Canonical DATE-cell → 'YYYY-MM-DD' (local getters, no TZ shift) — the same
+// normalization the Tax Center mileage path uses before resolving IRS rates.
+const { dateCellStr } = require('../services/pnl-report');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -84,13 +87,26 @@ router.put('/trips/:id', async (req, res, next) => {
     const updates = { updated_at: db.fn.now() };
 
     if (is_business !== undefined) {
+      // Recalculate deduction at the trip's date-effective rate. NORMALIZE the
+      // DATE cell to its 'YYYY-MM-DD' calendar string first — node-postgres
+      // hands a `date` column back as a local-midnight Date, and passing that
+      // instant into getIrsRate would ET-shift it a day (so a 2026-07-01 trip
+      // resolves as Jun 30 → 72.5¢ instead of 76¢). dateCellStr uses local
+      // getters, the same normalization the Tax Center bulk path applies.
+      const irsRate = mileageService.getIrsRate(dateCellStr(trip.trip_date));
+      // REFUSE a business classification with no verified rate (date past the
+      // horizon → 0): persisting $0 would look reviewed and never self-heal
+      // when the rate is added (reports sum persisted values). Same guard as
+      // classifyTrips / the manual-entry route.
+      if (is_business && !(irsRate > 0)) {
+        return res.status(422).json({
+          error: 'No verified IRS mileage rate for this trip’s date yet — add the published rate before classifying it business.',
+        });
+      }
       updates.is_business = is_business;
       updates.purpose = is_business ? 'business' : 'personal';
       updates.classification_method = 'manual';
       updates.classification_notes = notes || (is_business ? 'Manually classified as business' : 'Manually classified as personal');
-
-      // Recalculate deduction
-      const irsRate = mileageService.getIrsRate(new Date(trip.trip_date).getFullYear());
       updates.deduction_amount = is_business
         ? parseFloat((parseFloat(trip.distance_miles) * irsRate).toFixed(2))
         : 0;
@@ -315,13 +331,21 @@ router.get('/analytics', async (req, res, next) => {
     const year = parseInt(req.query.year) || new Date().getFullYear();
     const yearStart = `${year}-01-01`;
     const yearEnd = `${year}-12-31`;
-    const irsRate = mileageService.getIrsRate(year);
     const estimatedHourlyVehicleCost = 5.78; // insurance + depreciation + maintenance per drive hour
 
     // All trips this year
     const trips = await db('mileage_log')
       .where('trip_date', '>=', yearStart)
       .where('trip_date', '<=', yearEnd);
+
+    // Deduction is per-trip at the trip's DATE-effective rate (the IRS changes
+    // mid-year — a single year rate misstated H2 2026 at 72.5¢ instead of 76¢),
+    // matching getIrsReport/exportIrsCsv. Only canonical business trips deduct.
+    const tripDeduction = (t) => {
+      if (t.is_business !== true) return 0;
+      const td = typeof t.trip_date === 'string' ? t.trip_date : t.trip_date.toISOString().split('T')[0];
+      return parseFloat((parseFloat(t.distance_miles || 0) * mileageService.getIrsRate(td)).toFixed(2));
+    };
 
     const totalMiles = trips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
     const totalDriveMin = trips.reduce((s, t) => s + (t.duration_minutes || 0), 0);
@@ -336,7 +360,7 @@ router.get('/analytics', async (req, res, next) => {
 
     // IRS deduction
     const businessMiles = trips.filter(t => t.is_business).reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const irsDeduction = parseFloat((businessMiles * irsRate).toFixed(2));
+    const irsDeduction = parseFloat(trips.reduce((s, t) => s + tripDeduction(t), 0).toFixed(2));
 
     // IRS vs actual comparison
     const irsAdvantage = parseFloat((irsDeduction - actualTotalCost).toFixed(2));
@@ -365,14 +389,17 @@ router.get('/analytics', async (req, res, next) => {
         fuel_cost: parseFloat(mFuelCost.toFixed(2)),
         vehicle_overhead: parseFloat(mOverhead.toFixed(2)),
         actual_cost: parseFloat(mActualCost.toFixed(2)),
-        irs_deduction: parseFloat((mBizMiles * irsRate).toFixed(2)),
+        irs_deduction: parseFloat(mTrips.reduce((s, t) => s + tripDeduction(t), 0).toFixed(2)),
         cost_per_mile: mMiles > 0 ? parseFloat((mActualCost / mMiles).toFixed(4)) : 0,
       });
     }
 
     res.json({
       year,
-      irs_rate: irsRate,
+      // Display-only: the rate in effect at year end (2026 → 0.76 after the
+      // July increase). Deductions above are computed per-trip at each trip's
+      // date-effective rate, not this single value.
+      irs_rate: mileageService.getIrsRate(yearEnd),
       estimated_hourly_vehicle_cost: estimatedHourlyVehicleCost,
       totals: {
         total_miles: parseFloat(totalMiles.toFixed(2)),

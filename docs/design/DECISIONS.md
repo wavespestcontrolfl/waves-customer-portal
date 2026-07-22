@@ -1752,3 +1752,15 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 **Risk noted.** The 07-10 entry attributed the scroll artifact to backdrop-filter re-compositing ("smear/shimmer"), not just the lifts. If any smear remains visible with the lifts gone, the owner judges it on the PR preview by thumb; the fallback is this PR's earlier round (translucent cards without backdrop-filter, commit 5371117242).
 
 **Verification.** Stubbed-render screenshots at 390px in the PR; brand check + client suite + build green. Owner eyeballs scroll feel on the Railway PR environment before merge.
+
+## 2026-07-21 — Glass UI: day-of-service tracker cards join the glass system (claude/waves-glass-ui-phmxs3)
+
+**Context.** Owner screenshot (mobile portal home): the service tracker's cards — the main state card, "Before your tech arrives" checklist, live updates, office Call/Text, and completion summary — rendered opaque white over the glass scene. The component predates the glass rollout and its cards were never tagged `data-glass`, so the theme's frosted material (applied via `html[data-glass-theme] [data-glass]` with `!important`) never reached them; their inline `background: B.white` won.
+
+**Change.** Tag the five tracker surfaces: `data-glass="card"` on the main state card, `data-glass="soft"` on the four sub-cards. Inline white backgrounds stay as the no-theme fallback. Plus one content bug visible in the same screenshot: the pet-plan checklist row hard-cut mid-word at 40 chars ("…during service. Plea"); it now truncates at a word boundary with an ellipsis and drops trailing punctuation before the ellipsis.
+
+**Verification.** Stubbed-render screenshots at 390 and 1440 against the vite dev client: all five cards render the frosted material and match the surrounding portal cards; the checklist row reads "Pet plan: Dogs will be inside during service…". `check:portal-brand` clean; PortalPage suites + glass-engine vitest 52/52 green.
+
+## 2026-07-21 — /book keeps the marketing chrome (owner exception, logged per the 07-17 glass rule)
+
+**Owner decision (2026-07-21).** The public booking page (`/book`, `PublicBookingPage.jsx`) stays in the standard wavespestcontrol.com warm marketing chrome and does not mount the glass scene. It renders embedded on the marketing site's /book page, so it matches that context rather than the portal app. This is the explicit exception entry the 2026-07-17 "glass is the rule" decision requires. The same-day audit verified every other customer-reachable React page mounts the glass scene (the only other non-glass renders are the print/PDF report modes and the WDO/termite paper certificates, both intentional).

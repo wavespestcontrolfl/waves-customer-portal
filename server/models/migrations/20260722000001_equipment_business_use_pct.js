@@ -1,0 +1,75 @@
+/**
+ * business_use_pct on equipment_register — the listed-property business-use
+ * fraction for depreciation (IRS Pub 946). It only bites for LISTED property
+ * (vehicles), where the deductible depreciation is business_use_pct x MACRS;
+ * non-vehicle assets stay 100%.
+ *
+ * Default 100.00: the sole service vehicle is used 100% for business (all
+ * logged trips are owner-confirmed work trips), and every existing asset is a
+ * business asset — so the default is correct out of the box and the P&L's new
+ * MACRS computation works immediately. A CPA can lower a specific vehicle's
+ * value later if any personal use exists.
+ */
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('equipment_register'))) return;
+  if (!(await knex.schema.hasColumn('equipment_register', 'business_use_pct'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      // 0–100; the P&L clamps defensively regardless.
+      t.decimal('business_use_pct', 5, 2).notNullable().defaultTo(100);
+    });
+  }
+  // MACRS averaging convention. Only 'half_year' is computed; buildPnlReport
+  // auto-detects mid-quarter years (>40% of the year's basis placed in Q4) and
+  // fails those assets closed for CPA computation, and a CPA can also set the
+  // value explicitly. Default 'half_year' is correct for every current asset
+  // (all placed in service in Q1).
+  if (!(await knex.schema.hasColumn('equipment_register', 'depreciation_convention'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.string('depreciation_convention', 20).notNullable().defaultTo('half_year');
+    });
+  }
+  // Whether a VEHICLE's business_use_pct has been explicitly confirmed. A new
+  // vehicle defaults false → its depreciation fails closed + flags "incomplete"
+  // rather than silently deducting at the 100% column default. Non-vehicles
+  // ignore this flag.
+  if (!(await knex.schema.hasColumn('equipment_register', 'business_use_confirmed'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.boolean('business_use_confirmed').notNullable().defaultTo(false);
+    });
+    // Grandfather the existing service vehicle: the owner confirmed it is 100%
+    // business use (all logged trips are work trips), so it computes immediately.
+    await knex('equipment_register').where('asset_category', 'vehicle').update({ business_use_confirmed: true });
+  }
+  // Whether a VEHICLE is EXEMPT from the IRS §280F passenger-automobile
+  // depreciation limits. Those caps cover cars and light trucks/vans at ≤6,000
+  // lb GVWR; a heavy vehicle is exempt and takes full MACRS. Default false → a
+  // non-exempt (passenger) vehicle fails closed until a CPA confirms it, so full
+  // MACRS can't silently overstate a capped auto's deduction.
+  if (!(await knex.schema.hasColumn('equipment_register', 'luxury_auto_exempt'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.boolean('luxury_auto_exempt').notNullable().defaultTo(false);
+    });
+    // Grandfather the existing service van: a Ford Transit 250 (GVWR ~8,600 lb,
+    // >6,000) is a heavy cargo van, exempt from the §280F caps.
+    await knex('equipment_register').where('asset_category', 'vehicle').update({ luxury_auto_exempt: true });
+  }
+  // Backfill irs_class for existing MACRS rows that never had one (the old
+  // equipment form collected useful_life_years but not the IRS class) — derive
+  // the supported 3/5/7-year class from the recovery life so those assets
+  // compute a schedule instead of hitting the unsupported-class guard at $0.
+  for (const n of [3, 5, 7]) {
+    await knex('equipment_register')
+      .where('depreciation_method', 'MACRS')
+      .whereNull('irs_class')
+      .where('useful_life_years', n)
+      .update({ irs_class: `${n}-year` });
+  }
+};
+
+exports.down = async function down(knex) {
+  for (const col of ['business_use_pct', 'depreciation_convention', 'business_use_confirmed', 'luxury_auto_exempt']) {
+    if (await knex.schema.hasColumn('equipment_register', col)) {
+      await knex.schema.alterTable('equipment_register', (t) => { t.dropColumn(col); });
+    }
+  }
+};
