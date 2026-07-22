@@ -835,12 +835,18 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
   }
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
   if (serviceLine === 'tree_shrub') {
-    if (/surfactant|adjuvant|wetting/.test(`${product} ${category}`)) return 'Spray coverage aid';
+    // Classify from name + category + ACTIVE ingredient — blank/Uncategorized
+    // catalog rows (Delta Dust/deltamethrin, Elector PSP/spinosad, Bifen XTS)
+    // classify by active elsewhere, and the card must agree with the hero
+    // treatment claim (codex P2 r14).
+    const active = String(app.product?.active_ingredient || '').toLowerCase();
+    const hay = `${product} ${category} ${active}`;
+    if (/surfactant|adjuvant|wetting/.test(hay)) return 'Spray coverage aid';
     if (method.includes('drench')) return 'Systemic root-zone treatment';
     if (method.includes('inject')) return 'Trunk injection';
-    if (category.includes('fung')) return 'Disease control application';
-    if (category.includes('insect') || category.includes('mitic')) return 'Insect & mite control';
-    if (category.includes('fert') || product.includes('fert')) return 'Plant nutrition application';
+    if (/fung|azoxy|propiconazole|thiophanate|chlorothalonil|phosphite|phosphonate|copper/.test(hay)) return 'Disease control application';
+    if (/insect|mitic|bifen\w*|\w*thrin\b|pyrethroid|spinosad|spinetoram|indoxacarb|imidacloprid|dinotefuran|clothianidin|thiamethoxam|abamectin|spirotetramat|pyriproxyfen|fipronil|acephate|\bigr\b/.test(hay)) return 'Insect & mite control';
+    if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient/.test(hay)) return 'Plant nutrition application';
     return 'Plant health treatment';
   }
   if (serviceLine === 'termite' || serviceLine === 'rodent') {

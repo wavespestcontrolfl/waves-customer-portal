@@ -3757,6 +3757,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           products: products || [],
           productRows: typedProductRows,
         });
+        // Support-only visits derive EMPTY treatments (no claim) — that is a
+        // no-treatment state, so an application detail like "Pre-emergent
+        // applied: Yes" contradicts it exactly like 'Inspection only' would
+        // (codex P2 r14): the snapshot must not publish an application no
+        // derived treatment or product backs.
+        if (!treeShrubComplianceValues.treatments_completed
+          && String(treeShrubComplianceValues.pre_emergent_applied) === 'Yes') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));
+          return res.status(400).json({
+            error: 'The recorded products contradict the visit detail fields',
+            code: 'typed_findings_invalid',
+            details: ['"Pre-emergent applied: Yes" requires a matching herbicide product — record the product or clear the bed module field'],
+            missing: [],
+          });
+        }
       }
       // The cross-field contradiction rules ran on the pre-derivation values —
       // re-run them so a derived 'Inspection only' can't sit beside an
@@ -4038,11 +4053,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // — on timeout (or error) we fall back to the deterministic recap.
         let effectiveCustomerRecap = customerRecap;
         if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit) {
+          // Season/weather/expectations context — the PRODUCTION recap path
+          // gets the same prompt inputs the preview path does (codex P2
+          // r14): tech-selected products + visit context. Best-effort only.
+          let completionVisitContext = '';
+          try {
+            completionVisitContext = await buildRecapVisitContext({
+              serviceType: svc.service_type,
+              customerId: svc.customer_id,
+            });
+          } catch { /* context is polish — never block completion */ }
           const recapInput = {
             notes: technicianNotes,
             visitOutcome,
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
+            products: Array.isArray(products) ? products : [],
+            visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
             try { return CompletionRecap.sanitizeRecap(CompletionRecap.deterministicRecap(recapInput)) || null; }
