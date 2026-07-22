@@ -2243,3 +2243,24 @@ describe('p2OnlyMergeEligible — remediation-declined parks open the bar (2026-
     expect(r.eligible).toBe(false);
   });
 });
+
+describe('P3 badges are recognized as nonblocking (Codex round-1 on the declined-parks bar)', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const p3Body = (t) => `**<sub><sub>![P3 Badge](https://img.shields.io/badge/P3-lightgrey?style=flat)</sub></sub>  ${t}**\n\nd`;
+
+  test('findingSeverity parses a P3 badge as P3, not unbadged-P1', () => {
+    expect(rem.findingSeverity(p3Body('nit'))).toBe('P3');
+    expect(rem.findingSeverity('no badge at all')).toBe('P1');
+  });
+
+  test('declined park + P2/P3-only round → eligible (the astro #395 shape)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'remediation produced no change (likely false-positive findings)' }] });
+    const gh = makeGh({
+      reviewComments: [finding({ body: p2Body('a') }), finding({ body: p3Body('b') }), finding({ body: p3Body('c') })],
+      reviews: [codexReview()],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(3);
+  });
+});

@@ -178,7 +178,10 @@ function p2MergeEnabled() {
   return String(process.env.AUTONOMOUS_CODEX_P2_MERGE || '').trim().toLowerCase() !== 'false';
 }
 
-const SEVERITY_BADGE_RE = /!\[P([012])\s+Badge\]/i;
+// P3 included: a P3 badge parsed as "unbadged" would fail closed into P1
+// and permanently block the P2-only bar on advisory-only rounds (observed:
+// astro #395 carried 1 P2 + 3 P3s and could never merge).
+const SEVERITY_BADGE_RE = /!\[P([0123])\s+Badge\]/i;
 
 function findingSeverity(body) {
   const m = String(body || '').match(SEVERITY_BADGE_RE);
