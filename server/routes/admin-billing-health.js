@@ -279,6 +279,25 @@ router.get('/billing-health', async (req, res, next) => {
       .count('* as n').first()
       .catch(() => ({ n: 0 }));
 
+    // Enrolled but unchargeable — autopay flag on, not paused, yet the
+    // chargeable predicate fails (no default Stripe method, expired card,
+    // retired processor). These customers silently won't bill, and none of
+    // the other attention buckets is guaranteed to catch them (Codex P2 on
+    // #2939). Overlaps no_payment_method when the method pointer is also
+    // NULL — both chips firing for one account is truthful, so no subtraction.
+    const unchargeable = await db('customers as c')
+      .where({ 'c.active': true })
+      .whereNull('c.deleted_at')
+      .where('c.monthly_rate', '>', 0)
+      .where('c.autopay_enabled', true)
+      .whereRaw(
+        'NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)',
+        [etDateString(now)]
+      )
+      .whereRaw(`NOT ${chargeableSql}`, [chargeableBinding])
+      .count('* as n').first()
+      .catch(() => ({ n: 0 }));
+
     // Customers with no autopay payment method
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
@@ -338,6 +357,7 @@ router.get('/billing-health', async (req, res, next) => {
         total_billable: totalBillable,
         autopay_active: Math.max(0, (parseInt(enabled.n) || 0) - (parseInt(paused.n) || 0)),
         autopay_chargeable: parseInt(chargeable.n) || 0,
+        autopay_unchargeable: parseInt(unchargeable.n) || 0,
         autopay_paused: parseInt(paused.n) || 0,
         autopay_disabled: parseInt(disabled.n) || 0,
         no_payment_method: parseInt(noMethod.n) || 0,

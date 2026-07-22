@@ -28,6 +28,10 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
   // both belong in the verdict, not hidden. Verdict is healthy only when all clear.
   const attention = [
     { label: "No card", value: h.no_payment_method || 0 },
+    // Enrolled but the chargeable predicate fails (bad/expired/non-Stripe
+    // method) — these dropped out of the coverage donut above, so without
+    // this chip the card could read Healthy while billing can't charge them.
+    { label: "Can't charge", value: h.autopay_unchargeable || 0 },
     { label: "Paused", value: paused },
     { label: "Failed", value: h.failed_last_30_days || 0 },
     { label: "In retry", value: h.in_retry_queue || 0 },
