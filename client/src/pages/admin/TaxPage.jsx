@@ -3155,11 +3155,30 @@ function PnlTab() {
             indent
           />{" "}
           <PnlRow
-            label="Depreciation"
+            label={
+              pnl.deductions?.depreciationComplete === false
+                ? "Depreciation (incomplete)"
+                : "Depreciation"
+            }
             value={pnl.deductions?.depreciation}
             indent
           />{" "}
           <PnlRow label="Total Deductions" value={pnl.deductions?.total} bold />{" "}
+          {pnl.depreciationDisclosure?.note && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "8px 10px",
+                border: `1px solid ${D.amber}`,
+                borderRadius: 6,
+                color: D.amber,
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {pnl.depreciationDisclosure.note}
+            </div>
+          )}{" "}
           {pnl.vehicleDeduction && (
             <div
               style={{

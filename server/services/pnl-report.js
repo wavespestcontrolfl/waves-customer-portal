@@ -921,6 +921,28 @@ async function buildPnlReport(db, startDate, endDate) {
     };
   }
 
+  // Depreciation completeness — a MACRS asset in a mid-quarter year (or any
+  // uncomputable convention) FAILS CLOSED to $0 above. Surface that explicitly
+  // so the depreciation total is NOT presented as final: it's understated until
+  // a CPA computes the mid-quarter schedule for these assets.
+  const uncomputedDepreciation = depreciableAssets.filter((a) =>
+    String(a?.depreciation_method || '') === 'MACRS'
+    && String(a?.depreciation_convention || 'half_year') !== 'half_year');
+  if (uncomputedDepreciation.length) {
+    report.deductions.depreciationComplete = false;
+    report.depreciationDisclosure = {
+      reason: 'mid_quarter_convention',
+      assets: uncomputedDepreciation.map((a) => a.name).filter(Boolean),
+      note: `${uncomputedDepreciation.length} MACRS asset(s) fall in a mid-quarter `
+        + 'year (>40% of that year\'s depreciable basis placed in service in Q4). '
+        + 'The mid-quarter schedule is not auto-computed — their regular '
+        + 'depreciation reads $0 here, so the depreciation total is NOT final and '
+        + 'needs CPA computation.',
+    };
+  } else {
+    report.deductions.depreciationComplete = true;
+  }
+
   // Coverage disclosure — refunds/disputes/fees come exclusively from the
   // globally synced balance-transaction ledger (syncBalanceTransactions).
   // The window is proven complete only when a successful global sync ran

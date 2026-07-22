@@ -162,7 +162,10 @@ function pnlToCSV(pnlData) {
   lines.push(row(['', '']));
   lines.push(row(['DEDUCTIONS', '']));
   lines.push(row(['  Mileage Deduction', (pnlData.deductions?.mileage || 0).toFixed(2)]));
-  lines.push(row(['  Depreciation', (pnlData.deductions?.depreciation || 0).toFixed(2)]));
+  lines.push(row([
+    pnlData.deductions?.depreciationComplete === false ? '  Depreciation (INCOMPLETE)' : '  Depreciation',
+    (pnlData.deductions?.depreciation || 0).toFixed(2),
+  ]));
   lines.push(row(['Total Deductions', (pnlData.deductions?.total || 0).toFixed(2)]));
   lines.push(row(['', '']));
   lines.push(row(['NET INCOME (book)', (pnlData.netIncome || 0).toFixed(2)]));
@@ -174,6 +177,10 @@ function pnlToCSV(pnlData) {
     lines.push(row(['', '']));
     lines.push(row(['  Add back: non-deductible expenses', (adj.nonDeductibleExpenses || 0).toFixed(2)]));
     lines.push(row(['TAXABLE NET INCOME', (adj.taxableNetIncome || 0).toFixed(2)]));
+  }
+  if (pnlData.depreciationDisclosure?.note) {
+    lines.push(row(['', '']));
+    lines.push(row(['DEPRECIATION NOTE', pnlData.depreciationDisclosure.note]));
   }
   if (pnlData.coverage?.note) {
     lines.push(row(['', '']));

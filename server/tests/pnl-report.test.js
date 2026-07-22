@@ -424,6 +424,9 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation(annotateMidQuarter([q1, q4]), '2026-01-01', '2026-12-31')).toBe(0);
       // A half-year year (all Q1) computes normally.
       expect(prorateDepreciation(annotateMidQuarter([van()]), '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
+      // annotateMidQuarter marks the affected MACRS assets so the disclosure fires.
+      const marked = annotateMidQuarter([q1, q4]);
+      expect(marked.every((a) => a.depreciation_convention === 'mid_quarter')).toBe(true);
     });
 
     test('bonus (100%) on a non-listed asset at ≤50% use still expenses its business share', () => {
