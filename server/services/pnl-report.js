@@ -217,10 +217,14 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   const bizUse = businessUseFraction(asset?.business_use_pct);
   // The ≤50% → ADS rule is a LISTED-PROPERTY (vehicle) restriction (§280F).
   // A non-listed MACRS asset at low business use still depreciates its business
-  // share under GDS. §179, though, requires >50% business use for ALL property.
+  // share under GDS. §179 requires >50% business use for ALL property. A VEHICLE
+  // also needs its business use CONFIRMED — otherwise the 100% column default is
+  // an unverified guess, so depreciation fails closed until confirmed (never
+  // overstates on a default).
   const isListed = String(asset?.asset_category || '') === 'vehicle';
-  const s179Gate = bizUse > 0.5;                 // §179 needs >50% (all property)
-  const macrsGdsGate = !isListed || bizUse > 0.5; // GDS ≤50% forces ADS for LISTED only
+  const confirmed = !isListed || asset?.business_use_confirmed === true;
+  const s179Gate = confirmed && bizUse > 0.5;                 // §179: >50% (all) + confirmed (vehicles)
+  const macrsGdsGate = confirmed && (!isListed || bizUse > 0.5); // GDS: listed ≤50% → ADS; vehicles need confirm
 
   // Business basis: cost scaled by business use. §179/bonus and MACRS both work
   // off this (can't deduct the personal-use portion).
@@ -380,7 +384,8 @@ function isDepreciationUncomputed(asset, startDate, endDate) {
   const isListed = String(asset?.asset_category || '') === 'vehicle';
   const bizUse = businessUseFraction(asset?.business_use_pct);
   const failsClosed = String(asset?.depreciation_convention || 'half_year') !== 'half_year'
-    || !known || (isListed && bizUse <= 0.5);
+    || !known || (isListed && bizUse <= 0.5)
+    || (isListed && asset?.business_use_confirmed !== true); // unconfirmed vehicle
   if (!failsClosed) return false;
   // Past the recovery period a known-class asset legitimately computes 0.
   if (known && periodStart.getUTCFullYear() > inSvcYear + MACRS_HALF_YEAR[cls].length - 1) return false;
@@ -841,8 +846,9 @@ async function buildPnlReport(db, startDate, endDate) {
         // deducting a vehicle's MACRS/§179 beside it double-counts.
         'asset_category',
         // MACRS computation inputs: recovery class + listed-property business
-        // use (vehicles) + averaging convention. Schema defaults: 100 / half_year.
-        'irs_class', 'business_use_pct', 'depreciation_convention',
+        // use (vehicles) + confirmation flag + averaging convention. Schema
+        // defaults: 100 / false / half_year.
+        'irs_class', 'business_use_pct', 'business_use_confirmed', 'depreciation_convention',
       )
       .catch(missingTableOnly([])),
     // The vehicle-method election (newest financials row, same accessor every
@@ -965,9 +971,9 @@ async function buildPnlReport(db, startDate, endDate) {
       assets: uncomputedDepreciation.map((a) => a.name).filter(Boolean),
       note: `${uncomputedDepreciation.length} MACRS asset(s) could not be auto-`
         + 'computed for this period (mid-quarter convention, an unsupported '
-        + 'recovery class, or a vehicle at ≤50% business use). Their regular '
-        + 'depreciation reads $0 here, so the depreciation total is NOT final '
-        + 'and needs CPA computation.',
+        + 'recovery class, a vehicle at ≤50% business use, or a vehicle whose '
+        + 'business use is unconfirmed). Their regular depreciation reads $0 '
+        + 'here, so the depreciation total is NOT final and needs review.',
     };
   } else {
     report.deductions.depreciationComplete = true;

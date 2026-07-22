@@ -244,6 +244,7 @@ router.get('/equipment', async (req, res, next) => {
         // Listed-property business use + MACRS averaging convention — the CPA-
         // adjustable inputs to the depreciation schedule.
         businessUsePct: e.business_use_pct != null ? parseFloat(e.business_use_pct) : 100,
+        businessUseConfirmed: e.business_use_confirmed === true,
         depreciationConvention: e.depreciation_convention || 'half_year',
         serialNumber: e.serial_number, makeModel: e.make_model,
         location: e.location, active: e.active,
@@ -273,11 +274,23 @@ router.post('/equipment', async (req, res, next) => {
   try {
     const { name, description, assetCategory, irsClass, purchaseDate, purchaseCost,
       salvageValue, depreciationMethod, usefulLifeYears, section179Elected,
-      serialNumber, makeModel, location, notes } = req.body;
+      businessUsePct, serialNumber, makeModel, location, notes } = req.body;
 
     if (depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(depreciationMethod)) {
       return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
     }
+    // business_use_pct 0–100 (strict). Providing it for a vehicle CONFIRMS the
+    // business use; a vehicle created without it stays unconfirmed and its
+    // depreciation is flagged incomplete rather than deducting the 100% default.
+    let bizUsePct;
+    if (businessUsePct !== undefined) {
+      bizUsePct = Number(businessUsePct);
+      if (!Number.isFinite(bizUsePct) || bizUsePct < 0 || bizUsePct > 100) {
+        return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
+      }
+    }
+    const isVehicle = assetCategory === 'vehicle';
+    const businessUseConfirmed = isVehicle ? businessUsePct !== undefined : true;
     if (!name || !purchaseDate || purchaseCost == null) {
       return res.status(400).json({ error: 'name, purchaseDate, and purchaseCost are required' });
     }
@@ -310,6 +323,8 @@ router.post('/equipment', async (req, res, next) => {
       depreciation_method: depreciationMethod || 'MACRS',
       useful_life_years: usefulLifeYears,
       section_179_elected: s179, section_179_amount: s179 ? purchaseCost : null,
+      business_use_pct: bizUsePct !== undefined ? bizUsePct : 100,
+      business_use_confirmed: businessUseConfirmed,
       current_book_value: s179 ? 0 : purchaseCost,
       accumulated_depreciation: s179 ? purchaseCost : 0,
       serial_number: serialNumber, make_model: makeModel, location, notes,
@@ -349,8 +364,13 @@ router.put('/equipment/:id', async (req, res, next) => {
       businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
-    // Persist the NORMALIZED number, not the raw string.
-    if (businessUsePctNormalized !== undefined) update.business_use_pct = businessUsePctNormalized;
+    // Persist the NORMALIZED number, not the raw string. Explicitly setting a
+    // vehicle's business use CONFIRMS it unless the caller says otherwise.
+    if (businessUsePctNormalized !== undefined) {
+      update.business_use_pct = businessUsePctNormalized;
+      if (fields.businessUseConfirmed === undefined) update.business_use_confirmed = true;
+    }
+    if (fields.businessUseConfirmed !== undefined) update.business_use_confirmed = !!fields.businessUseConfirmed;
     // Keep the MACRS class in sync with the recovery life: when the life
     // changes without an explicit class, re-derive it — and CLEAR it (null)
     // when the new life is unsupported, so MACRS fails closed rather than

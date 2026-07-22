@@ -28,6 +28,18 @@ exports.up = async function up(knex) {
       t.string('depreciation_convention', 20).notNullable().defaultTo('half_year');
     });
   }
+  // Whether a VEHICLE's business_use_pct has been explicitly confirmed. A new
+  // vehicle defaults false → its depreciation fails closed + flags "incomplete"
+  // rather than silently deducting at the 100% column default. Non-vehicles
+  // ignore this flag.
+  if (!(await knex.schema.hasColumn('equipment_register', 'business_use_confirmed'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.boolean('business_use_confirmed').notNullable().defaultTo(false);
+    });
+    // Grandfather the existing service vehicle: the owner confirmed it is 100%
+    // business use (all logged trips are work trips), so it computes immediately.
+    await knex('equipment_register').where('asset_category', 'vehicle').update({ business_use_confirmed: true });
+  }
   // Backfill irs_class for existing MACRS rows that never had one (the old
   // equipment form collected useful_life_years but not the IRS class) — derive
   // the supported 3/5/7-year class from the recovery life so those assets

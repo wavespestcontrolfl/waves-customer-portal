@@ -277,6 +277,7 @@ describe('prorateDepreciation', () => {
       depreciation_method: 'MACRS', irs_class: '5-year',
       purchase_cost: '35000', annual_depreciation: null,
       placed_in_service_date: '2025-01-01', asset_category: 'vehicle',
+      business_use_confirmed: true, // owner-confirmed 100% business use
       ...over,
     });
 
@@ -318,6 +319,14 @@ describe('prorateDepreciation', () => {
 
     test('unknown recovery class contributes nothing (fail closed)', () => {
       expect(prorateDepreciation([van({ irs_class: '20-year' })], '2026-01-01', '2026-12-31')).toBe(0);
+    });
+
+    test('an UNCONFIRMED vehicle fails closed and is flagged (never deducts the 100% default)', () => {
+      const unconfirmed = van({ business_use_confirmed: false });
+      expect(prorateDepreciation([unconfirmed], '2026-01-01', '2026-12-31')).toBe(0);
+      expect(isDepreciationUncomputed(unconfirmed, '2026-01-01', '2026-12-31')).toBe(true);
+      // Confirming it computes normally.
+      expect(prorateDepreciation([van({ business_use_confirmed: true })], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
     });
 
     test('isDepreciationUncomputed flags ALL fail-closed reasons, only in-window', () => {
