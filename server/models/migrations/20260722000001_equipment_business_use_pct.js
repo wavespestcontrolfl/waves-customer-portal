@@ -54,7 +54,7 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  for (const col of ['business_use_pct', 'depreciation_convention']) {
+  for (const col of ['business_use_pct', 'depreciation_convention', 'business_use_confirmed']) {
     if (await knex.schema.hasColumn('equipment_register', col)) {
       await knex.schema.alterTable('equipment_register', (t) => { t.dropColumn(col); });
     }

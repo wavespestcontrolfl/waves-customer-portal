@@ -475,7 +475,7 @@ function ServiceTaxabilityTab() {
 function EquipmentTab() {
   const [equipment, setEquipment] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({
+  const emptyForm = {
     name: "",
     assetCategory: "equipment",
     purchaseDate: "",
@@ -483,13 +483,42 @@ function EquipmentTab() {
     depreciationMethod: "section_179",
     usefulLifeYears: "7",
     makeModel: "",
-  });
+    businessUsePct: "100",
+  };
+  const [form, setForm] = useState(emptyForm);
 
-  useEffect(() => {
+  const reload = () =>
     adminFetch("/admin/tax/equipment")
       .then((d) => setEquipment(d.equipment || []))
       .catch(() => {});
+
+  useEffect(() => {
+    reload();
   }, []);
+
+  // Confirm a vehicle's business use inline (needed before its depreciation
+  // computes — a vehicle is unconfirmed until the % is explicitly set).
+  const confirmVehicleUse = async (id, currentPct) => {
+    const input = window.prompt(
+      "Business-use % for this vehicle (0–100)? This confirms it so depreciation computes.",
+      String(currentPct ?? 100),
+    );
+    if (input == null) return;
+    const pct = Number(input);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      alert("Enter a number between 0 and 100.");
+      return;
+    }
+    try {
+      await adminFetch(`/admin/tax/equipment/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ businessUsePct: pct }),
+      });
+      reload();
+    } catch (e) {
+      alert("Failed: " + e.message);
+    }
+  };
 
   const handleAdd = async () => {
     if (!form.name || !form.purchaseCost) return;
@@ -501,18 +530,15 @@ function EquipmentTab() {
           purchaseCost: parseFloat(form.purchaseCost),
           usefulLifeYears: parseInt(form.usefulLifeYears),
           section179Elected: form.depreciationMethod === "section_179",
+          // Send business use only for vehicles — it confirms them server-side.
+          businessUsePct:
+            form.assetCategory === "vehicle"
+              ? Number(form.businessUsePct)
+              : undefined,
         }),
       });
       setShowAdd(false);
-      setForm({
-        name: "",
-        assetCategory: "equipment",
-        purchaseDate: "",
-        purchaseCost: "",
-        depreciationMethod: "section_179",
-        usefulLifeYears: "7",
-        makeModel: "",
-      });
+      setForm(emptyForm);
       const d = await adminFetch("/admin/tax/equipment");
       setEquipment(d.equipment || []);
     } catch (e) {
@@ -682,6 +708,23 @@ function EquipmentTab() {
               <option value="bonus_100">100% Bonus</option>{" "}
             </select>
           </div>{" "}
+          {form.assetCategory === "vehicle" && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
+                Business use %
+              </div>{" "}
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={form.businessUsePct}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, businessUsePct: e.target.value }))
+                }
+                style={{ ...inputStyle, width: 90 }}
+              />
+            </div>
+          )}{" "}
           <button
             onClick={handleAdd}
             style={{
@@ -752,6 +795,29 @@ function EquipmentTab() {
               <Badge color={e.section179Elected ? D.green : D.amber} small>
                 {e.depreciationMethod}
               </Badge>{" "}
+              {e.assetCategory === "vehicle" && !e.businessUseConfirmed && (
+                <button
+                  onClick={() => confirmVehicleUse(e.id, e.businessUsePct)}
+                  style={{
+                    background: "transparent",
+                    border: `1px solid ${D.amber}`,
+                    borderRadius: 6,
+                    padding: "2px 8px",
+                    color: D.amber,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                  title="Depreciation won't compute until business use is confirmed"
+                >
+                  Confirm business use
+                </button>
+              )}{" "}
+              {e.assetCategory === "vehicle" && e.businessUseConfirmed && (
+                <span style={{ fontSize: 11, color: D.muted }}>
+                  {e.businessUsePct}% business
+                </span>
+              )}{" "}
             </div>{" "}
             <div
               style={{
