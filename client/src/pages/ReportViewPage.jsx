@@ -4885,12 +4885,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // A technician-traced satellite map overrides every hide: it is the real
   // photo of THIS property's treated perimeter, which beats any generic
   // diagram (that replacement is the Treatment Zone Mapper's whole point).
-  const hideCoverageCard = (data.serviceLine === 'lawn'
-    || /tree|shrub/.test(String(data.serviceLine || ''))
-    || Boolean(data.pestReportV2)
-    // Mosquito V2's habitat diagram replaces the lettered map the same way.
-    || Boolean(data.mosquitoReportV2))
-    && !data.treatmentMap?.traced?.snapshotUrl;
+  // Pest V2 reports NEVER render the Service Coverage card (owner
+  // 2026-07-21): the protection hero carries the traced spray map, the
+  // narrative names the areas, and Products Applied carries the products —
+  // the lettered A-E list + "Completed 5" chips read as duplication.
+  const hideCoverageCard = Boolean(data.pestReportV2)
+    || ((data.serviceLine === 'lawn'
+      || /tree|shrub/.test(String(data.serviceLine || ''))
+      // Mosquito V2's habitat diagram replaces the lettered map the same way.
+      || Boolean(data.mosquitoReportV2))
+      && !data.treatmentMap?.traced?.snapshotUrl);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
