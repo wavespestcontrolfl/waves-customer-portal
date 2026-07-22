@@ -9,6 +9,7 @@
  * visit commits; a failure just leaves verification_status at its prior value.
  */
 const MODELS = require('../config/models');
+const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const logger = require('./logger');
 const db = require('../models/db');
 const photos = require('./photos');
@@ -52,7 +53,7 @@ async function callClaudeGaugeOcr(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await anthropicCreateWithSamplingRetry(anthropic, {
       model: MODELS.VISION,
       max_tokens: 200,
       temperature: 0.1,

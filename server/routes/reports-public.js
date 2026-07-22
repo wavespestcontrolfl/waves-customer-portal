@@ -1274,8 +1274,13 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
+        // Same composition as the lookup above — a store without tnSignature
+        // mints a key the expected-key check can never match, re-rendering on
+        // every download (codex P2 r10). Re-read the narrative signature: the
+        // render itself may have claimed/updated the narrative row.
+        const storeTnSignature = await treatmentNarrativePdfSignature(service.id, db);
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + storeTnSignature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

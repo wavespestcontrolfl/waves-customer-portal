@@ -5565,10 +5565,12 @@ export function TypedFindingsSection({
                 .split(",")
                 .map((s) => s.trim())
                 .filter(Boolean);
-              const toggled =
-                next.find((c) => !nextStepChips.includes(c)) ||
-                nextStepChips.find((c) => !next.includes(c));
-              if (toggled) onToggleChip(toggled);
+              // The dropdown can change several chips at once (its Clear
+              // action empties the whole selection) — toggle EVERY diff, not
+              // just the first (codex P3 r10).
+              const added = next.filter((c) => !nextStepChips.includes(c));
+              const removed = nextStepChips.filter((c) => !next.includes(c));
+              [...added, ...removed].forEach((chip) => onToggleChip(chip));
             }}
             inputStyle={{ width: "100%", boxSizing: "border-box" }}
             optionDisabledReason={(option) => {

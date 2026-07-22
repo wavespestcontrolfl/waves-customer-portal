@@ -18,6 +18,7 @@
  */
 
 const logger = require('../logger');
+const { anthropicCreateWithSamplingRetry } = require('../llm/call');
 const MODELS = require('../../config/models');
 
 let Anthropic;
@@ -71,7 +72,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await anthropicCreateWithSamplingRetry(anthropic, {
       model: MODELS.VISION,
       max_tokens: 300,
       temperature: 0.2, // VISION tier keeps temperature; repeatable descriptions

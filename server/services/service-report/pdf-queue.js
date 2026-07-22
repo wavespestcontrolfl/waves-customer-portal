@@ -117,9 +117,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
-  // Narrative key component (audit P2 2026-07-22): a PDF cached against the
-  // deterministic fallback re-renders once the AI narrative lands.
-  const tnSignature = await treatmentNarrativePdfSignature(recordId, knex);
   let pdf;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
@@ -155,7 +152,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
   try {
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature,
+      // Recompute at store time: the render above may have CREATED the
+      // narrative row (claim-on-first-read), and a key minted from the
+      // pre-render signature would never match the next lookup (codex P2
+      // r10 on the direct route — same race here).
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + await treatmentNarrativePdfSignature(recordId, knex),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
