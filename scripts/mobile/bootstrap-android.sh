@@ -52,6 +52,43 @@ else
   echo "    Android push (FCM) will be inert until you add it (see step 5)."
 fi
 
+# Google Play target-API-level policy: releases must target Android 16 (API 36)
+# by Aug 31, 2026. The Capacitor 7 template generates the project at SDK 35, and
+# client/android persists across bootstraps, so pin the SDK levels here — this
+# script is the source of truth (same replacement-idempotent pattern as the App
+# Links block below). compileSdk 36 needs AGP >= 8.9.1 (the template's 8.7.x tops
+# out at 35); the template's Gradle 8.11.1 wrapper already satisfies AGP 8.9.
+# Remove these pins once the Capacitor template itself reaches SDK 36.
+ANDROID_TARGET_SDK=36
+ANDROID_AGP_VERSION=8.9.2
+perl -pi -e "s/^(\s*(?:compileSdkVersion|targetSdkVersion) = )\d+/\${1}$ANDROID_TARGET_SDK/" android/variables.gradle
+perl -pi -e "s/(com\.android\.tools\.build:gradle:)[0-9.]+/\${1}$ANDROID_AGP_VERSION/" android/build.gradle
+if grep -q "compileSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
+   && grep -q "targetSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
+   && grep -q "gradle:$ANDROID_AGP_VERSION" android/build.gradle; then
+  echo "==> Pinned compile/target SDK $ANDROID_TARGET_SDK + AGP $ANDROID_AGP_VERSION ✓"
+else
+  echo "==> ERROR: could not pin SDK $ANDROID_TARGET_SDK / AGP $ANDROID_AGP_VERSION —"
+  echo "    check android/variables.gradle and android/build.gradle by hand."
+  exit 1
+fi
+
+# Targeting API 36 flips android:enableOnBackInvokedCallback to default-TRUE,
+# which stops delivering onBackPressed/KEYCODE_BACK — Capacitor 7's bridge (and
+# the @capacitor/app backButton listener) depend on those, so the system back
+# gesture would exit the app instead of navigating the webview back. Pin the
+# legacy behavior explicitly until Capacitor ships predictive-back support.
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST" ] && ! grep -q 'enableOnBackInvokedCallback' "$MANIFEST"; then
+  perl -0pi -e 's{(<application\b)}{$1\n        android:enableOnBackInvokedCallback="false"}' "$MANIFEST"
+fi
+if grep -q 'android:enableOnBackInvokedCallback="false"' "$MANIFEST"; then
+  echo "==> Pinned enableOnBackInvokedCallback=false (Capacitor back handling) ✓"
+else
+  echo "==> ERROR: could not pin enableOnBackInvokedCallback=false in $MANIFEST."
+  exit 1
+fi
+
 # Android App Links: verified https://portal.wavespestcontrol.com URLs open the
 # installed app directly. Needs (a) this autoVerify intent-filter on MainActivity
 # and (b) the server serving /.well-known/assetlinks.json with the Play signing
