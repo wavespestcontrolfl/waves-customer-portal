@@ -3,7 +3,7 @@
 // Shared by the pest V2 hero and the legacy coverage card.
 import { useEffect, useRef, useState } from 'react';
 
-export default function TracedTreatmentZoneMap({ traced }) {
+export default function TracedTreatmentZoneMap({ traced, live = true }) {
   // Spray replay (owner 2026-07-21): the tech-side mapper animates a
   // spray-mist "applying" the barrier along the traced line — the customer
   // report replays it over the saved snapshot. Mounts ONLY after the map
@@ -15,7 +15,10 @@ export default function TracedTreatmentZoneMap({ traced }) {
   const points = Array.isArray(traced?.pathPoints) ? traced.pathPoints : [];
   const canReplay = points.length >= 2;
   useEffect(() => {
-    if (!canReplay || sprayLive) return undefined;
+    // pdf/static renders keep the plain snapshot — the PDF renderer has a
+    // window + IntersectionObserver, so mode gating is the only reliable
+    // guard against capturing an arbitrary animation frame (codex P2).
+    if (!live || !canReplay || sprayLive) return undefined;
     if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') return undefined;
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined;
     const el = mapRef.current;
@@ -25,7 +28,7 @@ export default function TracedTreatmentZoneMap({ traced }) {
     }, { threshold: 0.35 });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [canReplay, sprayLive]);
+  }, [live, canReplay, sprayLive]);
 
   if (!traced?.snapshotUrl) return null;
   // No linear-ft figure in the customer caption (owner 2026-07-21).

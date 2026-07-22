@@ -113,6 +113,7 @@ function TrendArrow({ trend }) {
 
 // ── Hero: protection status first ───────────────────────────────────────────────
 export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null }) {
+  const tracedLive = mode === 'live';
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload (the
@@ -168,7 +169,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       {tracedMap ? (
         <div style={{ marginTop: 14 }}>
           <div data-gt="eyebrow" style={eyebrow}>Where we sprayed</div>
-          <TracedTreatmentZoneMap traced={tracedMap} />
+          <TracedTreatmentZoneMap traced={tracedMap} live={tracedLive} />
         </div>
       ) : null}
     </section>
