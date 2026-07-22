@@ -426,7 +426,14 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation(annotateMidQuarter([van()]), '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
     });
 
-    test('business use ≤50% FAILS CLOSED (ADS/CPA territory, not GDS)', () => {
+    test('the ≤50% ADS gate is LISTED-property only — a non-vehicle MACRS asset still depreciates', () => {
+      // Non-vehicle (asset_category !== 'vehicle') at 40% use uses GDS on its
+      // 40% basis: 32% × ($35k×0.40) = $4,480, not $0.
+      const equip = van({ asset_category: 'equipment', business_use_pct: '40' });
+      expect(prorateDepreciation([equip], '2026-01-01', '2026-12-31')).toBeCloseTo(4480, 2);
+    });
+
+    test('business use ≤50% FAILS CLOSED for a VEHICLE (ADS/CPA territory, not GDS)', () => {
       expect(prorateDepreciation([van({ business_use_pct: '50' })], '2026-01-01', '2026-12-31')).toBe(0);
       expect(prorateDepreciation([van({ business_use_pct: '40' })], '2026-01-01', '2026-12-31')).toBe(0);
       // Just above the threshold still computes (GDS × use).

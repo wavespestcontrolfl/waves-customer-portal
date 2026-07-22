@@ -351,11 +351,12 @@ router.put('/equipment/:id', async (req, res, next) => {
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
     // Persist the NORMALIZED number, not the raw string.
     if (businessUsePctNormalized !== undefined) update.business_use_pct = businessUsePctNormalized;
-    // Keep the MACRS class derivable: if the recovery life changed without an
-    // explicit class, derive it so the schedule stays computable.
+    // Keep the MACRS class in sync with the recovery life: when the life
+    // changes without an explicit class, re-derive it — and CLEAR it (null)
+    // when the new life is unsupported, so MACRS fails closed rather than
+    // computing with the previous class's stale schedule.
     if (fields.usefulLifeYears !== undefined && fields.irsClass === undefined) {
-      const derived = irsClassFromLife(null, fields.usefulLifeYears);
-      if (derived) update.irs_class = derived;
+      update.irs_class = irsClassFromLife(null, fields.usefulLifeYears);
     }
     await db('equipment_register').where({ id: req.params.id }).update(update);
     res.json({ success: true });

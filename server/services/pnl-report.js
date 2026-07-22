@@ -215,10 +215,15 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // model doesn't track; editing the value re-states prior computed years,
   // which is why the CPA-facing figures are advisory until reviewed.
   const bizUse = businessUseFraction(asset?.business_use_pct);
-  const gdsEligible = bizUse > 0.5;
+  // The ≤50% → ADS rule is a LISTED-PROPERTY (vehicle) restriction (§280F).
+  // A non-listed MACRS asset at low business use still depreciates its business
+  // share under GDS. §179, though, requires >50% business use for ALL property.
+  const isListed = String(asset?.asset_category || '') === 'vehicle';
+  const s179Gate = bizUse > 0.5;                 // §179 needs >50% (all property)
+  const macrsGdsGate = !isListed || bizUse > 0.5; // GDS ≤50% forces ADS for LISTED only
 
   // Business basis: cost scaled by business use. §179/bonus and MACRS both work
-  // off this (listed property can't deduct the personal-use portion).
+  // off this (can't deduct the personal-use portion).
   const cost = parseFloat(asset?.purchase_cost || 0) || 0;
   const businessBasis = cost * bizUse;
 
@@ -229,7 +234,7 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // purchase-cost fallback when no explicit amount is entered) can't deduct
   // more than its business share.
   const method = String(asset?.depreciation_method || '');
-  const s179Eligible = gdsEligible && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected);
+  const s179Eligible = s179Gate && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected);
   const s179Elected = s179Eligible ? (parseFloat(asset?.section_179_amount ?? cost) || 0) : 0;
   // Cap at the business basis ONLY when a cost basis is known — a CPA-entered
   // amount without a recorded purchase_cost is trusted as its own basis.
@@ -245,7 +250,7 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // unsupported case (≤50% use, unknown class, non-half-year convention) FAILS
   // CLOSED at the current `total` (just the §179, which is 0 when ineligible).
   if (method === 'MACRS') {
-    if (!gdsEligible) return total;                                       // ≤50% → ADS/CPA
+    if (!macrsGdsGate) return total;                                     // listed ≤50% → ADS/CPA
     if (!MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()]) return total; // unknown class
     // The mid-quarter convention is mandatory when >40% of the YEAR's aggregate
     // basis is placed in service in Q4 — a cross-asset determination made in
@@ -306,24 +311,28 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   return total;
 }
 
-// Detect MACRS mid-quarter years and mark their assets so prorateAssetDepreciation
-// FAILS CLOSED for them (only half-year is computed). The mid-quarter convention
-// is mandatory when >40% of a year's aggregate MACRS depreciable basis is placed
-// in service in Q4 (Oct–Dec). Returns a shallow-cloned list; already-set
-// non-half_year conventions are preserved. Pure.
+// Detect MACRS mid-quarter years and mark the MACRS assets in them so
+// prorateAssetDepreciation FAILS CLOSED (only half-year is computed). The
+// mid-quarter convention is mandatory when >40% of a year's aggregate MACRS
+// depreciable basis is placed in service in Q4 (Oct–Dec). The aggregate basis
+// INCLUDES bonus (special-allowance) property — it participates in the test at
+// its basis after §179 but before bonus — even though bonus is expensed
+// immediately (so only MACRS-scheduled assets are marked). Returns a shallow-
+// cloned list; already-set non-half_year conventions are preserved. Pure.
 function annotateMidQuarter(assets) {
   const byYear = new Map(); // year → { total, q4 }
   for (const a of assets || []) {
-    if (String(a?.depreciation_method || '') !== 'MACRS') continue;
+    const m = String(a?.depreciation_method || '');
+    if (m !== 'MACRS' && m !== 'bonus_100') continue; // §179 property is excluded
     const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
     if (!d) continue;
     const y = d.getUTCFullYear();
-    // Same-year in-service+disposal property is not MACRS-depreciable and is
-    // excluded from the mid-quarter basis test (Pub 946).
+    // Same-year in-service+disposal property is not depreciable and is excluded
+    // from the mid-quarter basis test (Pub 946).
     const disp = toUTCDay(a?.disposal_date);
     if (disp && disp.getUTCFullYear() === y) continue;
-    // Business-use-adjusted depreciable basis: cost × business-use% − §179 —
-    // the same basis the schedule uses, so the 40%-in-Q4 test can't be skewed.
+    // Business-use-adjusted basis after §179, BEFORE bonus — the same basis the
+    // mid-quarter test uses, so the 40%-in-Q4 fraction can't be skewed.
     const s179 = a?.section_179_elected ? (parseFloat(a?.section_179_amount ?? a?.purchase_cost) || 0) : 0;
     const basis = Math.max(0, (parseFloat(a?.purchase_cost || 0) || 0) * businessUseFraction(a?.business_use_pct) - s179);
     if (basis <= 0) continue;
