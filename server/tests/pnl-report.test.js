@@ -426,6 +426,22 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation(annotateMidQuarter([van()]), '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
     });
 
+    test('bonus (100%) on a non-listed asset at ≤50% use still expenses its business share', () => {
+      // Non-vehicle 100%-bonus at 40% business use: immediate = cost × 40% =
+      // $2,000 (bonus's >50% rule is listed-property only, unlike §179).
+      const bonusEquip = {
+        depreciation_method: 'bonus_100', asset_category: 'equipment',
+        purchase_cost: '5000', business_use_pct: '40',
+        placed_in_service_date: '2026-03-01',
+      };
+      expect(prorateDepreciation([bonusEquip], '2026-01-01', '2026-12-31')).toBeCloseTo(2000, 2);
+      // A §179 non-vehicle at 40% still fails closed (§179 needs >50% broadly).
+      expect(prorateDepreciation(
+        [{ ...bonusEquip, depreciation_method: 'section_179', section_179_elected: true }],
+        '2026-01-01', '2026-12-31',
+      )).toBe(0);
+    });
+
     test('the ≤50% ADS gate is LISTED-property only — a non-vehicle MACRS asset still depreciates', () => {
       // Non-vehicle (asset_category !== 'vehicle') at 40% use uses GDS on its
       // 40% basis: 32% × ($35k×0.40) = $4,480, not $0.

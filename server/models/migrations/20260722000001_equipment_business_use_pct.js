@@ -28,6 +28,17 @@ exports.up = async function up(knex) {
       t.string('depreciation_convention', 20).notNullable().defaultTo('half_year');
     });
   }
+  // Backfill irs_class for existing MACRS rows that never had one (the old
+  // equipment form collected useful_life_years but not the IRS class) — derive
+  // the supported 3/5/7-year class from the recovery life so those assets
+  // compute a schedule instead of hitting the unsupported-class guard at $0.
+  for (const n of [3, 5, 7]) {
+    await knex('equipment_register')
+      .where('depreciation_method', 'MACRS')
+      .whereNull('irs_class')
+      .where('useful_life_years', n)
+      .update({ irs_class: `${n}-year` });
+  }
 };
 
 exports.down = async function down(knex) {

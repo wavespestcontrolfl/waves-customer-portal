@@ -234,7 +234,12 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // purchase-cost fallback when no explicit amount is entered) can't deduct
   // more than its business share.
   const method = String(asset?.depreciation_method || '');
-  const s179Eligible = s179Gate && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected);
+  // §179's >50% requirement is broad (all property); the special/bonus
+  // allowance's >50% requirement is LISTED-property only, like GDS. So gate
+  // bonus by the listed rule and §179 by the broad rule.
+  const isImmediate = method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected;
+  const immediateGate = method === 'bonus_100' ? macrsGdsGate : s179Gate;
+  const s179Eligible = isImmediate && immediateGate;
   const s179Elected = s179Eligible ? (parseFloat(asset?.section_179_amount ?? cost) || 0) : 0;
   // Cap at the business basis ONLY when a cost basis is known — a CPA-entered
   // amount without a recorded purchase_cost is trusted as its own basis.
