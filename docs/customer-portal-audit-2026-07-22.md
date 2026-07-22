@@ -97,7 +97,7 @@ The cold visitor's entry is the texted/emailed `/estimate/:token` link. Estimate
 Portal → Visits (Upcoming) → "On-location contacts" → name/phone → Save contact (PortalPage.jsx:3972-4016) → `updatePropertyNotificationPrefs`. **The chain ends there:**
 - No consent language shown to the account holder, no attestation the recipient agreed (4009).
 - **No double opt-in exists anywhere for SMS** — no confirmation text, no YES consumption; the only YES/START handling is re-subscribe after STOP (twilio-webhook.js:260-294). `notification_prefs.sms_enabled` defaults to `true` at row creation (migrations/20260401000001_initial_schema.js:169).
-- **No consent record is written** — no opted_in_at/source/language columns exist; the messaging audit log stores only caller-asserted `consentBasis` at send time plus a hash/preview of the outbound body, never the disclosure the person saw (services/messaging/audit.js:65-67). See findings S1-2/S1-4.
+- **No consent record is written on this path** — no opted_in_at/source/language columns exist; the messaging audit log stores only caller-asserted `consentBasis` at send time plus a hash/preview of the outbound body, never the disclosure the person saw (services/messaging/audit.js:65-67). (Call-originated consent is the one exception — durably captured inside call-extraction blobs; see S1-2's qualifier.) See findings S1-2/S1-4.
 Failure handling on save is good (optimistic revert + alert). The consent architecture is the gap, not the UX.
 
 ### E. Membership: view tier, upgrade, downgrade, cancel
@@ -219,7 +219,7 @@ Failure handling on save is good (optimistic revert + alert). The consent archit
 
 **Empty states** — new-customer portal renders sensible empties (balance "…", "All current", section gating); reports gate every section on content and render "Photo unavailable" tiles (ProjectReportViewPage.jsx:1259).
 
-**Timezone & DST** — ET-pinned via IANA-zone formatting on estimate dates (codified after a prior P1 — EstimateViewPage.jsx:743-753), expiry labels (620-624), booking windows (booking.js:1073-1077), reminder scheduling, and receipt/contract/statement dates (small-page sweep found no UTC-midnight day-shift: ReschedulePage.jsx:99, ReceiptPage.jsx:77-81, StatementPayPage.jsx:39). Two exceptions: TrackPage renders times with no ET label for out-of-state viewers (S3-9) and reuses an ET-projecting date formatter on a naive local string (S4-5).
+**Timezone & DST** — ET-pinned via IANA-zone formatting on estimate dates (codified after a prior P1 — EstimateViewPage.jsx:743-753), expiry labels (620-624), booking windows (booking.js:1073-1077), reminder scheduling, and receipt/contract/statement dates (small-page sweep found no UTC-midnight day-shift: ReschedulePage.jsx:99, ReceiptPage.jsx:77-81, StatementPayPage.jsx:39). Two exceptions, both cross-timezone manifestations the repo's review rules deem out of scope ("the portal is Eastern-only") but retained here because the audit brief asked for them: TrackPage renders times with no ET label for out-of-state viewers (S3-9) and reuses an ET-projecting date formatter on a naive local string (S4-5) — both carry an explicit repo-policy scope note.
 
 **Money integrity** — cents at every charge site; the one float path is the portal's *display* balance summing `parseFloat` dollars across rows (billing-v2.js:627, 679) — penny-drift display risk only (S4-7).
 
@@ -260,7 +260,7 @@ After the code-only pass, a live render pass was run at 390×844 (Chromium, iPho
 
 **SMS / A2P 10DLC / TCPA**
 - **Consent model is single opt-in, disclosure-based, with the disclosure living outside this repo** (marketing-site forms). In-repo customer surfaces show no opt-in language at all: the live portal contacts UI has none (PortalPage.jsx:4009), `/book` has none (grep-verified), and the only compliant strings are the STOP reply (twilio-webhook.js:256) and an **unwired** HELP template (opt-out-detector.js:46-49, exported but never imported by the webhook — twilio-webhook.js:9). Message frequency and "Msg & data rates may apply" appear nowhere a customer opts in. (S1-3)
-- **No durable consent record** — no timestamp/source/language capture for SMS consent anywhere; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor. (S1-2)
+- **No per-recipient consent ledger; web captures record nothing** — no timestamp/source/language capture for web/portal SMS consent; `messaging_audit_log` stores caller-asserted basis per send, not the opt-in event (audit.js:65-67). Call-originated consent IS durably evidenced (verbatim `sms_consent_quote` inside call-extraction blobs — call-recording-processor.js:4588-4590, schema :368-384) but isn't indexed per recipient. The codebase itself proves the team knows how to do this right: payment consent snapshots verbatim text + version + IP + UA (payment-method-consents.js:41-50). SMS never got that rigor as a ledger. (S1-2)
 - **STOP enforcement is real but architectural only at the wrapper layer** — `TwilioService.sendSMS` itself never checks suppression (twilio.js:320-535, provider call at 488); one live customer path bypasses the wrapper today (estimate-public.js:17013) and any future direct caller silently will too. (S2-4)
 - **No TCPA calling-window floor (8am-9pm local)** — quiet hours exist only when a customer personally set them, and only on the dispatcher path (notification-dispatcher.js:65-83); the canonical wrapper has no time-of-day validator (send-customer-message.js:153-164). Exposure in practice depends on cron timing, but no code prevents a night send. (S1-3)
 - **Third-party enrollment**: referral invites and on-location contacts text numbers whose owners never consented to anything; the referral send self-asserts `consentBasis: {status:'transactional_allowed', source:'referral_invite_form'}` (referrals-v2.js:243-255) — an assertion, not a capture; referral invites are promotional in nature. Mitigations that do exist: sends route through the suppression-checking wrapper, 24h per-number cooldown (218-229), honest `sms_failed` states in the UI. (S1-4)
@@ -286,12 +286,13 @@ Expected / Actual: Solicitation treats all customers alike / only 8-10 scorers a
 Blast radius: every review request sent; legal/policy exposure (Google review-gating policy, FTC Consumer Reviews rule) rather than UX breakage — works exactly as designed.
 Fix sketch: offer the public-review option to all scores (keep the AI writer as an 8+ perk if desired), or route everyone through a neutral "share feedback" step that always includes the Google link. Owner/counsel decision.
 
-**[S1-2] No durable SMS consent record (timestamp + source + language)**
+**[S1-2] No per-recipient SMS consent ledger; web/portal captures write no consent record at all**
 Where: `server/services/messaging/audit.js:65-67`; `server/models/migrations/20260401000001_initial_schema.js:169`; contrast `server/services/payment-method-consents.js:41-50`
-Repro: 1. Become a customer via any path. 2. `notification_prefs` row is created with `sms_enabled` defaulting true; no opted_in_at/consent_source/consent_text column exists in any migration. 3. Carrier/plaintiff asks "prove this person opted in, when, and to what language" — nothing to produce.
+Repro: 1. Become a customer via a web/portal path. 2. `notification_prefs` row is created with `sms_enabled` defaulting true; no opted_in_at/consent_source/consent_text column exists in any migration. 3. Carrier/plaintiff asks "prove this person opted in, when, and to what language" — for web-originated customers there is nothing to produce; for any recipient there is no queryable per-recipient ledger.
 Expected / Actual: a per-recipient consent capture like the payment-consent snapshot / only per-send, caller-asserted `consentBasis` on the audit log.
-Blast radius: entire SMS program (every recipient), A2P 10DLC audit and TCPA defense posture.
-Fix sketch: add an `sms_consents` table (phone, customer_id, captured_at, source, verbatim disclosure, version — mirror `payment_method_consents`), write it at every capture point, and pass it as the wrapper's consentBasis.
+**Qualifier (call-originated consent):** phone-call captures DO leave durable evidence — the V2 call-extraction pipeline persists `consent.sms_consent_given` plus a verbatim `sms_consent_quote` into `call_log.ai_extraction_enriched` (`server/services/call-recording-processor.js:4588-4590`; required fields in `server/schemas/call-extraction.persisted.schema.json:368-384`). That evidence lives inside a per-call JSON blob keyed to the call, not a per-recipient consent table, and nothing equivalent exists for web/portal/booking captures — so the gap is (a) web capture points writing nothing and (b) no centralized ledger unifying sources.
+Blast radius: the SMS program's A2P 10DLC audit and TCPA defense posture — strongest for web-originated recipients; call-originated recipients have recoverable-but-unindexed evidence.
+Fix sketch: add an `sms_consents` table (phone, customer_id, captured_at, source, verbatim disclosure, version — mirror `payment_method_consents`), write it at every capture point, backfill call-originated rows from the existing extraction blobs, and pass it as the wrapper's consentBasis.
 
 **[S1-3] No TCPA quiet-hours floor; HELP keyword unwired; no in-repo opt-in disclosure**
 Where: `server/services/notification-dispatcher.js:65-83` (only quiet-hours check, customer-set only); `server/services/messaging/send-customer-message.js:153-164` (validator chain has no time-of-day gate); `server/services/messaging/opt-out-detector.js:46-49,143-152` (HELP template defined, never imported — `twilio-webhook.js:9`); `client/src/pages/PortalPage.jsx:4009` + `client/src/pages/PublicBookingPage.jsx` (no Msg&data-rates / frequency / STOP-HELP copy at any in-repo capture point)
@@ -391,19 +392,20 @@ Expected / Actual: consistent in-app reschedule / some visits self-serve, others
 Blast radius: depends on how many visits lack tokens (UNVERIFIED); each is a manual Virginia touch.
 Fix sketch: mint reschedule tokens for all reschedulable visits server-side; keep SMS as the labeled fallback ("Text us to reschedule").
 
-**[S3-9] TrackPage shows appointment times with no ET label**
+**[S3-9] TrackPage shows appointment times with no ET label** *(repo-policy exception — retained per the audit brief)*
 Where: `client/src/pages/TrackPage.jsx:63-70` (`toLocaleTimeString(undefined,…)` on a naive local ISO); `server/routes/track-public.js:100-105` (window composed as zone-less `YYYY-MM-DDTHH:MM:SS`)
 Repro: 1. Snowbird in Denver opens the day-of tracking link. 2. "9:00–11:00 AM" renders with no zone; they read it as Mountain time. (Digits are ET wall-clock because naive-parse round-trips — but nothing says so.)
 Expected / Actual: "9:00–11:00 AM ET" / unlabeled time for an audience that is regularly out of state.
 Blast radius: missed-window confusion and "where's my tech" calls during snowbird months.
+Scope note: the repo's review rules deliberately treat cross-timezone concerns as out of scope ("The portal is Eastern-only" — AGENTS.md, review out-of-scope list). This audit's brief explicitly asked for timezone handling on appointment display, and the market is seasonally remote, so the observation is retained — **as a product decision for the owner**, not a rule violation. The fix is a two-character label, so it costs nothing if adopted.
 Fix sketch: append "ET" to the window strings on Track (and any other page rendering `window.start` for possibly-remote viewers).
 
-**[S3-10] Sub-16px body text is the system default on customer surfaces**
-Where: `client/src/theme-doc.js:41` (body 14 / caption 12); representative: `client/src/pages/ReportViewPage.jsx:6391,6409` (12px labels/footer disclaimers), `:6228` (10px map labels); `client/src/pages/PortalPage.jsx:716` (9px), `:2660` (10px); 14px body throughout the estimate/pay/portal pages
-Repro: open any customer page at 390×844; body copy renders 14px, secondary 12px, some labels 9-10px.
-Expected / Actual: ≥16px body for a retirement-age market (per this audit's brief) / a deliberate 14px design system — legible, AA-contrast, but small; the 12px report footer carries load-bearing terms.
-Blast radius: subtle, systemwide conversion/comprehension tax on the exact audience; not a defect against the current design spec (14 is its floor), so this is a spec-level decision.
-Fix sketch: raise DOC body to 16 and caption to 13-14 in theme-doc (one file re-flows the document pages); audit the 9-12px call sites for anything load-bearing (report footer terms first).
+**[S3-10] Load-bearing text below the repo's own 14px floor; the 14px-vs-16px body question is a product decision, not a defect**
+Where (actionable — below the documented floor): `client/src/pages/ReportViewPage.jsx:6391,6409` (12px labels + the report footer carrying WaveGuard re-service terms and disclaimers), `:6228` (10px map labels); `client/src/pages/PortalPage.jsx:716` (9px), `:2660` (10px); `client/src/theme-doc.js:41` (`caption: 12` used for "captions, legal, meta rows")
+Repro: open a service report or portal at 390×844; the terms-bearing footer and several labels render 9-12px.
+Expected / Actual: nothing load-bearing below the repo's own 14px minimum (AGENTS.md design-token rule: "14px text minimum on both" systems) / legal/terms copy and labels at 9-12px.
+Blast radius: comprehension of exactly the text a retiree most needs (guarantee terms, disclaimers) — and a violation of the repo's existing floor, so it's actionable without any spec change.
+Fix sketch: bring the 9-12px call sites (report footer first) up to ≥14px. Separately, whether the sanctioned 14px body should become 16px for this retirement-age market is a **product/spec decision** — the audit brief argues for it, the documented design contract says 14 is the floor; flagged for the owner, not as a repo defect.
 
 **[S3-11] Report/project error states say "Call Waves" with no visible number**
 Where: `client/src/pages/ReportViewPage.jsx:4720-4724`; `client/src/pages/ProjectReportViewPage.jsx:476-480` — `tel:` buttons labeled only "Call Waves"; contrast digits shown at `PestReportViewPage.jsx:106`, `LawnReportViewPage.jsx:108`
@@ -469,7 +471,7 @@ Fix sketch: render a "Try payment again" button to `/pay/:token`.
 
 **[S4-5] TrackPage reuses the ET-projecting date formatter on naive local strings**
 Where: `client/src/pages/TrackPage.jsx:78-84` (formatter comment says "completed_at is a real UTC instant"), used on `window.start` at `:593,623`
-Blast radius: theoretical wrong-day label for near-midnight windows viewed off-ET; effectively dormant (no midnight visits).
+Blast radius: theoretical wrong-day label for near-midnight windows viewed off-ET; effectively dormant (no midnight visits). Same repo-policy scope note as S3-9 — the manifestation is cross-timezone, which the repo rules out of review scope; listed as a correctness nit (the formatter's own contract says it's for real UTC instants, which `window.start` is not).
 Fix sketch: use the naive-local day formatter for window dates.
 
 **[S4-6] `/book` confirm lacks a synchronous double-tap latch**
@@ -522,9 +524,9 @@ Fix sketch: add `display:flex; flexDirection:'column'; alignItems:'stretch'; jus
 Where: `client/src/pages/PortalPage.jsx:6387-6389` — labels `'7-9' / '9-11' / '11-1' / '1-4'`
 Note: "11-1" and "1-4" force the reader to infer noon-crossing; trivial copy fix (`7-9 AM`, `9-11 AM`, `11 AM-1 PM`, `1-4 PM`).
 
-**[S4-15] Portal chrome overlap: card content scrolls legibly under the translucent sticky header, and page content peeks out beneath the floating bottom nav** *(owner screenshots)*
-Where: visible in the owner's My Property screenshots (pets-note text half-hidden under the top bar; a stray content line visible below the bottom nav). Header/nav are translucent-glass surfaces; the scroll container appears to lack matching top/bottom clearance. Exact style locations for the portal shell chrome were not pinned down in code during this pass — partially verified; the screenshots are the evidence.
-Fix sketch: add scroll-padding/margins matching the fixed chrome heights (plus `env(safe-area-inset-bottom)` under the nav), or make the chrome surfaces opaque enough that pass-under text doesn't read as a glitch.
+**[S4-15] Portal chrome overlap: card content scrolls legibly under the translucent sticky header, and page content shows in the gap beneath the floating bottom nav** *(owner screenshots, now code-pinned)*
+Where: top bar — `client/src/pages/PortalPage.jsx:13569-13575` (`position: 'sticky', top: 0, zIndex: 100` on a translucent glass surface, so scrolled card text reads through beneath it — the half-hidden pets-note in the owner's screenshot); bottom nav — `:12804-12813` (`position: 'fixed', bottom: 8, left: 10, right: 10` floating pill, safe-area padding *inside* the pill) — the deliberate 8px inset strip below/beside the pill shows scrolling page content by construction, which on-device reads as content "leaking" under the nav (the stray "1:00" line in the owner's screenshot).
+Fix sketch: increase the header surface's opacity (or add a solid scrim band) so pass-under text doesn't read as a glitch, and either close the nav's bottom inset on phones or extend an opaque backdrop from the pill to the screen edge; verify the content column's bottom padding clears the pill at full scroll.
 
 ---
 
@@ -564,4 +566,4 @@ Fix sketch: add scroll-padding/margins matching the fixed chrome heights (plus `
 
 ---
 
-*Method note: five parallel read-only sweeps (portal, reports, SMS/consent backend, tokenized pages, billing backend) fed this report; every S1/S2 citation and each load-bearing S3 citation was re-verified against the source before inclusion. One agent claim was corrected during verification: portal inputs specified at 14px do **not** trigger iOS zoom — the global `@media (pointer: coarse)` 16px override (index.css:42-48) covers them (later confirmed live in the render pass: rule present, matching, and computing 16px). Same-day revisions: (1) Codex review corrections — the `/estimate/:token` renderer fork and the public-quote API were added to scope statements (Phase 1/2A, S4-9) and a dangling S1-5 cross-reference was fixed; (2) a 390×844 render pass and four owner-reported device screenshots added Phase 6.5 and findings S3-17, S4-12..15.*
+*Method note: five parallel read-only sweeps (portal, reports, SMS/consent backend, tokenized pages, billing backend) fed this report; every S1/S2 citation and each load-bearing S3 citation was re-verified against the source before inclusion. One agent claim was corrected during verification: portal inputs specified at 14px do **not** trigger iOS zoom — the global `@media (pointer: coarse)` 16px override (index.css:42-48) covers them (later confirmed live in the render pass: rule present, matching, and computing 16px). Same-day revisions: (1) Codex review pass 1 — the `/estimate/:token` renderer fork and the public-quote API were added to scope statements (Phase 1/2A, S4-9) and a dangling S1-5 cross-reference was fixed; (2) a 390×844 render pass and four owner-reported device screenshots added Phase 6.5 and findings S3-17, S4-12..15; (3) Codex review pass 2 — S4-15 pinned to code, S3-10 narrowed to the sub-14px floor violations (14→16px reframed as a product decision), S3-9/S4-5 annotated with the repo's Eastern-only review policy, and S1-2 qualified for call-originated consent evidence.*
