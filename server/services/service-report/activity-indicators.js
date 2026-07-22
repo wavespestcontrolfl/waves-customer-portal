@@ -2129,7 +2129,8 @@ function buildTodaysResult({
     // The label suffix reads awkwardly in a headline ("Palm Injection
     // Summary completed today") — the approved golden-fixture style is
     // "Palm Injection Treatment completed today."
-    headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today.`,
+    // No trailing period — it's a headline, not a sentence (owner 2026-07-21).
+    headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today`,
     body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
     ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),

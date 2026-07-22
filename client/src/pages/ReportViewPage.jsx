@@ -696,6 +696,24 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     };
   }
 
+  // Re-service visits are follow-ups on reported activity — "routine
+  // service completed" undersells the entire point of the visit (owner
+  // dry-run review 2026-07-21). Name what the visit was.
+  if (/re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+    return {
+      heading: 'we came back and took care of it!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Reported activity areas were re-treated today.',
+      detail: [
+        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
+        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
+        'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+      ].filter(Boolean).join(' '),
+    };
+  }
+
   // V2 reports (lawn/T&S) carry an honest snapshot status — the generic
   // "No high-priority issues were noted." line must not sit two cards above
   // a needs-attention gauge saying the opposite (found in the David Thomas
@@ -2332,7 +2350,9 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
-      <h2>{result.headline}</h2>
+      {/* Strip a trailing period — headlines aren't sentences, and snapshots
+          persisted before the 2026-07-21 template fix still carry one. */}
+      <h2>{String(result.headline).replace(/\.$/, '')}</h2>
       {result.body && <p className="ai-summary-body">{result.body}</p>}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't. */}
@@ -8120,7 +8140,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        <TypedFindingsCard typedReport={data.typedReport} />
+        {/* Pest V2 reports: the dashboard already tells the findings story —
+            the tile card duplicated it ("What we found: German cockroaches")
+            right below (owner 2026-07-21). Typed compliance reports (termite,
+            WDO, rodent...) keep the card — those tiles ARE the record. */}
+        {!data.pestReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
 
         <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
 

@@ -427,7 +427,7 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
         ? 'One customer action would help strengthen the service plan.'
         : overallLabel === 'action_required'
           ? 'One recommendation needs attention to reduce recurring activity.'
-          : 'Waves will keep watching the documented activity areas.',
+          : 'We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.',
     items,
   };
 }
