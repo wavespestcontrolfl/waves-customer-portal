@@ -2333,6 +2333,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
             label: 'Treated perimeter traced on-site by your technician.',
+            // Traced path in snapshot pixel space (1280x960) so the report
+            // can REPLAY the spray application the tech saw (owner
+            // 2026-07-21) — px only, the customer surface never needs the
+            // lat/lng the row also stores.
+            pathPoints: parseJsonArray(tracedRow.path_points)
+              .map((p) => ({ x: numberOrNull(p?.px?.x), y: numberOrNull(p?.px?.y) }))
+              .filter((p) => p.x != null && p.y != null),
           };
         }
       }
