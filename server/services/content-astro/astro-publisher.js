@@ -2519,9 +2519,18 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   // latestBody would let a findings review ("Codex Review …suggestions")
   // plus an unrelated comment mentioning the verdict sentence combine into
   // a false clean and authorize an auto-merge.
+  // …and only the NEWEST eligible artifact across both types renders the
+  // verdict: accepting either artifact independently would let a stale
+  // commit-pinned clean review (eligible regardless of the latest re-request
+  // timestamp) override a newer findings round delivered as an issue
+  // comment, and auto-merge past live findings.
   const cleanVerdictIn = (body) => /Codex Review/i.test(String(body || ''))
     && /Didn'?t find any major issues/i.test(String(body || ''));
-  if ([codexComments.at(-1)?.body, codexReviews.at(-1)?.body].some(cleanVerdictIn)) return { clean: true };
+  const newestArtifact = [
+    { body: codexComments.at(-1)?.body, at: Date.parse(codexComments.at(-1)?.created_at || codexComments.at(-1)?.createdAt || 0) || 0 },
+    { body: codexReviews.at(-1)?.body, at: Date.parse(codexReviews.at(-1)?.submitted_at || codexReviews.at(-1)?.submittedAt || 0) || 0 },
+  ].filter((a) => a.body).sort((a, b) => b.at - a.at)[0];
+  if (newestArtifact && cleanVerdictIn(newestArtifact.body)) return { clean: true };
   if (/approved/i.test(String(codexReviews.at(-1)?.state || ''))) return { clean: true };
   if (headSha && !requestedAt) return { clean: false, reason: 'Codex review has not been requested for the current PR head' };
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
