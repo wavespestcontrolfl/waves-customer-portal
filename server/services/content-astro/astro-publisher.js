@@ -2530,7 +2530,13 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
     { body: codexComments.at(-1)?.body, at: Date.parse(codexComments.at(-1)?.created_at || codexComments.at(-1)?.createdAt || 0) || 0 },
     { body: codexReviews.at(-1)?.body, at: Date.parse(codexReviews.at(-1)?.submitted_at || codexReviews.at(-1)?.submittedAt || 0) || 0 },
   ].filter((a) => a.body).sort((a, b) => b.at - a.at)[0];
-  if (newestArtifact && cleanVerdictIn(newestArtifact.body)) return { clean: true };
+  // …and it must POSTDATE the latest same-head review request: a commit-
+  // pinned review stays eligible regardless of requestedAt, so after a
+  // same-head re-request an old clean review would otherwise authorize the
+  // merge before the requested round ever responds (same strictly-after
+  // posture as codexRoundCompleted).
+  if (newestArtifact && cleanVerdictIn(newestArtifact.body)
+    && (!requestedAt || newestArtifact.at > requestedAt)) return { clean: true };
   if (/approved/i.test(String(codexReviews.at(-1)?.state || ''))) return { clean: true };
   if (headSha && !requestedAt) return { clean: false, reason: 'Codex review has not been requested for the current PR head' };
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
