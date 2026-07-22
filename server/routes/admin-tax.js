@@ -256,6 +256,16 @@ router.get('/equipment', async (req, res, next) => {
 
 const VALID_DEPRECIATION_METHODS = ['MACRS', 'SL', 'section_179', 'bonus_100'];
 const VALID_DEPRECIATION_CONVENTIONS = ['half_year', 'mid_quarter'];
+// MACRS recovery classes the P&L can compute a schedule for. The equipment
+// form collects usefulLifeYears, so derive the IRS class from it when the
+// caller didn't send one — otherwise a UI-created MACRS asset lands with a
+// null class and silently depreciates at $0 (the exact bug this lane fixes).
+const SUPPORTED_MACRS_CLASSES = { 3: '3-year', 5: '5-year', 7: '7-year' };
+function irsClassFromLife(irsClass, usefulLifeYears) {
+  if (irsClass) return irsClass;
+  const n = parseInt(usefulLifeYears, 10);
+  return SUPPORTED_MACRS_CLASSES[n] || null;
+}
 // IRS Section 179 annual election limits. Update each tax year.
 const SECTION_179_LIMITS = { 2024: 1160000, 2025: 1220000, 2026: 1250000 };
 
@@ -291,7 +301,10 @@ router.post('/equipment', async (req, res, next) => {
     }
 
     await db('equipment_register').insert({
-      name, description, asset_category: assetCategory, irs_class: irsClass,
+      name, description, asset_category: assetCategory,
+      // Derive the MACRS class from the recovery life when not supplied, so a
+      // MACRS asset gets a computable schedule instead of $0.
+      irs_class: irsClassFromLife(irsClass, usefulLifeYears),
       purchase_date: purchaseDate, placed_in_service_date: purchaseDate,
       purchase_cost: purchaseCost, salvage_value: salvageValue || 0,
       depreciation_method: depreciationMethod || 'MACRS',
@@ -338,6 +351,12 @@ router.put('/equipment/:id', async (req, res, next) => {
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
     // Persist the NORMALIZED number, not the raw string.
     if (businessUsePctNormalized !== undefined) update.business_use_pct = businessUsePctNormalized;
+    // Keep the MACRS class derivable: if the recovery life changed without an
+    // explicit class, derive it so the schedule stays computable.
+    if (fields.usefulLifeYears !== undefined && fields.irsClass === undefined) {
+      const derived = irsClassFromLife(null, fields.usefulLifeYears);
+      if (derived) update.irs_class = derived;
+    }
     await db('equipment_register').where({ id: req.params.id }).update(update);
     res.json({ success: true });
   } catch (err) { next(err); }

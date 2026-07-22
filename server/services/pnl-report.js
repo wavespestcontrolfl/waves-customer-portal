@@ -207,6 +207,13 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // NOT globally: a CPA-entered annual_depreciation (their ADS/straight-line
   // figure) must still flow through even at low business use. business_use_pct
   // defaults 100 (unset → 1.0), so only an explicitly-lowered asset is gated.
+  //
+  // SCOPE — business_use_pct is a SINGLE current rate applied to every recovery
+  // year (the sole service vehicle is a stable 100% business use). A vehicle
+  // whose business use CHANGES mid-life needs per-year rates + ADS/recapture
+  // from the year it drops ≤50% — a CPA per-year treatment this single-value
+  // model doesn't track; editing the value re-states prior computed years,
+  // which is why the CPA-facing figures are advisory until reviewed.
   const bizUse = businessUseFraction(asset?.business_use_pct);
   const gdsEligible = bizUse > 0.5;
 
