@@ -664,6 +664,12 @@ describe('deriveTreeShrubTreatments (owner directive 2026-07-21)', () => {
     expect(derive([cat({ name: 'Bifen XTS', category: 'Uncategorized' })])).toBe('Insect treatment');
   });
 
+  test('real spray oils derive the Horticultural oil chip, not generic insect (audit P1)', () => {
+    expect(derive([cat({ name: 'SuffOil-X Spray Oil Emulsion', category: 'Insecticide', active_ingredient: 'Mineral oil 80%' })])).toBe('Horticultural oil');
+    expect(derive([cat({ name: 'TriTek Spray Oil Emulsion', category: 'Insecticide', active_ingredient: 'Mineral oil' })])).toBe('Horticultural oil');
+    expect(derive([cat({ name: 'Horticultural Oil Concentrate', category: 'insecticide' })])).toBe('Horticultural oil');
+  });
+
   test('chelated micronutrient rows derive Micronutrients, not empty', () => {
     expect(derive([cat({ name: 'LESCO Chelated Iron Plus', category: 'Uncategorized', active_ingredient: 'Iron + N (foliar)' })])).toBe('Micronutrients');
   });

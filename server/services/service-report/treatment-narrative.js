@@ -17,6 +17,10 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 
 const PROMPT_VERSION = 'treatment_narrative_v1';
 
+// Request-path budget: a report read ships the deterministic sentence after
+// this long and lets generation finish in the background.
+const REQUEST_BUDGET_MS = 4000;
+
 // Same over-claim vocabulary the other customer-copy validators enforce,
 // plus rate/registration leakage ("2 oz", "EPA Reg. No.").
 const FORBIDDEN = [
@@ -116,43 +120,69 @@ async function buildTreatmentNarrative({
       photoSummary: cleanLine(photoSummary),
     };
     const inputHash = crypto.createHash('sha256').update(stableStringify(facts)).digest('hex');
+    const keyWhere = { service_record_id: serviceRecordId, input_hash: inputHash, prompt_version: PROMPT_VERSION };
     const existing = await knex('service_report_ai_summaries')
-      .where({ service_record_id: serviceRecordId, input_hash: inputHash, prompt_version: PROMPT_VERSION })
+      .where(keyWhere)
       .first()
       .catch(() => null);
     if (existing?.summary_json) {
+      // 'pending' rows carry the deterministic text — another read owns the
+      // in-flight generation, so serve what's there and never fan out a
+      // duplicate model call (pre-push audit P1 2026-07-21).
       const parsed = typeof existing.summary_json === 'string' ? JSON.parse(existing.summary_json) : existing.summary_json;
       if (parsed?.text) return parsed.text;
       return fallback;
     }
 
-    const prompt = buildTreatmentNarrativePrompt({
-      serviceLine,
-      products,
-      findingsText: facts.findingsText,
-      photoSummary: facts.photoSummary,
-    });
-    const generated = await dispatchWithFallback(
-      MODELS.TEXT_POLICIES.report,
-      { text: prompt, jsonMode: false, maxTokens: 400 },
-      { validate: (result) => validateNarrative(result.text) },
-    );
-    const text = generated.ok ? String(generated.text || '').trim() : '';
-    const problem = text ? validateNarrative(text) : 'generation_failed';
-    const finalText = problem ? fallback : text;
-
-    await knex('service_report_ai_summaries').insert({
-      service_record_id: serviceRecordId,
-      input_hash: inputHash,
-      prompt_version: PROMPT_VERSION,
-      model: problem ? null : 'text_policy:report',
-      status: problem ? 'fallback' : 'ok',
-      summary_json: JSON.stringify({ text: finalText, mode: problem ? 'deterministic_fallback' : 'ai' }),
-      validation_json: JSON.stringify({ problem: problem || null }),
+    // Atomically claim the cache key: exactly ONE reader generates.
+    const claimed = await knex('service_report_ai_summaries').insert({
+      ...keyWhere,
+      model: null,
+      status: 'pending',
+      summary_json: JSON.stringify({ text: fallback, mode: 'pending' }),
+      validation_json: JSON.stringify({ problem: null }),
       generated_at: new Date(),
-    }).onConflict(['service_record_id', 'input_hash', 'prompt_version']).ignore().catch(() => {});
+    }).onConflict(['service_record_id', 'input_hash', 'prompt_version']).ignore().returning('service_record_id').catch(() => []);
+    if (!Array.isArray(claimed) || !claimed.length) return fallback;
 
-    return finalText;
+    const generate = (async () => {
+      const prompt = buildTreatmentNarrativePrompt({
+        serviceLine,
+        products,
+        findingsText: facts.findingsText,
+        photoSummary: facts.photoSummary,
+      });
+      const generated = await dispatchWithFallback(
+        MODELS.TEXT_POLICIES.report,
+        { text: prompt, jsonMode: false, maxTokens: 400 },
+        { validate: (result) => validateNarrative(result.text) },
+      );
+      const text = generated.ok ? String(generated.text || '').trim() : '';
+      const problem = text ? validateNarrative(text) : 'generation_failed';
+      const finalText = problem ? fallback : text;
+      await knex('service_report_ai_summaries').where(keyWhere).update({
+        model: problem ? null : 'text_policy:report',
+        status: problem ? 'fallback' : 'ok',
+        summary_json: JSON.stringify({ text: finalText, mode: problem ? 'deterministic_fallback' : 'ai' }),
+        validation_json: JSON.stringify({ problem: problem || null }),
+        generated_at: new Date(),
+      }).catch(() => {});
+      return finalText;
+    })();
+
+    // The report read never waits more than a few seconds (the dispatcher
+    // alone can spend minutes): AI within budget ships on this read;
+    // otherwise the deterministic sentence ships NOW and the generation
+    // finishes in the background — the cache row serves the AI text to
+    // every later read (pre-push audit P1 2026-07-21).
+    let timer;
+    const timed = await Promise.race([
+      generate.catch(() => fallback),
+      new Promise((resolve) => { timer = setTimeout(resolve, REQUEST_BUDGET_MS, null); }),
+    ]);
+    clearTimeout(timer);
+    generate.catch(() => {});
+    return timed || fallback;
   } catch {
     return fallback;
   }

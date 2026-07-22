@@ -474,7 +474,14 @@ function deriveTreeShrubTreatments({ products = [], productRows = [] } = {}) {
   for (const ref of refs) {
     const txt = productText(ref);
     if (isFertilizerFamilyProduct(ref)) chips.add(/\bpalm\b/i.test(txt) ? 'Palm fertilizer' : 'Fertilizer');
-    if (isInsectFamilyProduct(ref)) chips.add(/\bhort(?:icultural)?[\s-]*oil\b/i.test(txt) ? 'Horticultural oil' : 'Insect treatment');
+    // Oil detection covers the real catalog spray oils (SuffOil-X, TriTek,
+    // mineral/petroleum/paraffinic oil emulsions) — name-only matching sent
+    // them to the generic insect chip (pre-push audit P1 2026-07-21).
+    if (isInsectFamilyProduct(ref)) {
+      chips.add(/\bhort(?:icultural)?[\s-]*oil\b|\bsuffoil\b|\btritek\b|spray\s*oil|mineral\s*oil|petroleum\s*oil|paraffinic\s*oil|oil\s*emulsion/i.test(txt)
+        ? 'Horticultural oil'
+        : 'Insect treatment');
+    }
     if (isFungicideFamilyProduct(ref)) chips.add('Disease / fungicide treatment');
     if (isHerbicideFamilyProduct(ref)) chips.add(TS_PRE_EMERGENT_RE.test(txt) ? 'Pre-emergent bed treatment' : 'Weed spot treatment');
     // /chelat/: foliar chelated-iron/micronutrient rows (LESCO Chelated Iron

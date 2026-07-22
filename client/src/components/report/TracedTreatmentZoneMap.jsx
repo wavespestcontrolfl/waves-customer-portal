@@ -28,10 +28,8 @@ export default function TracedTreatmentZoneMap({ traced }) {
   }, [canReplay, sprayLive]);
 
   if (!traced?.snapshotUrl) return null;
-  const caption = [
-    traced.label || 'Treated perimeter traced on-site by your technician.',
-    traced.linearFt ? `${traced.linearFt} linear ft treated.` : null,
-  ].filter(Boolean).join(' ');
+  // No linear-ft figure in the customer caption (owner 2026-07-21).
+  const caption = traced.label || 'Treated perimeter traced on-site by your technician.';
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
     : null;
