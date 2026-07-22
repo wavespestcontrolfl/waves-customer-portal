@@ -1986,3 +1986,15 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const r = guardrails.evaluate({ body: 'We serve Naples, and Fort Myers, Cape Coral, Bonita Springs, Estero, and Marco Island are outside our service area.' }, {});
     expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
+
+  test('title-cased claim subjects never rejoin; mixed service+editorial objects still flag', () => {
+    for (const body of [
+      'Outside our service area: Naples; We Serve Tampa.',
+      'Naples is outside our service area; Waves Serves Tampa.',
+      'We provide pest control services and information in Naples.',
+      'Waves provides termite inspection and advice for Cape Coral homes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
