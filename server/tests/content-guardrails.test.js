@@ -2036,3 +2036,10 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const thirdParty = guardrails.evaluate({ body: 'Local companies provide services in Naples every day.' }, {});
     expect(thirdParty.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
+
+  test('negation gap stops at a conjunction+verb; repeated disclaimers all count', () => {
+    const crossed = guardrails.evaluate({ body: 'We do not provide service in Sarasota and now offer pest control in Naples.' }, {});
+    expect(crossed.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const repeated = guardrails.evaluate({ body: 'Naples is outside our service area, and Naples remains outside our service area.' }, {});
+    expect(repeated.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });

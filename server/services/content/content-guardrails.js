@@ -702,7 +702,7 @@ const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|
 // refuses dashes entirely (a dash splice is a new clause, not a list).
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b)[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\s(?:and|or)\\s+(?:now\\s+|currently\\s+|also\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
     'i',
   );
 }
@@ -843,7 +843,12 @@ function offFootprintCityFinding(text) {
       // outside our service area, Waves serves Tampa" only Naples (the
       // disclaimer's subject, sitting just before the phrase) is exempt —
       // Tampa still flags.
-      const disclaimerMatch = normalized.match(FOOTPRINT_DISCLAIMER_RE);
+      // ALL disclaimer occurrences, not just the first — "Naples is outside
+      // our service area, and Naples remains outside our service area."
+      // repeats the honest disclaimer, and each city occurrence must be
+      // evaluated against the disclaimer it belongs to.
+      const disclaimerRanges = [...normalized.matchAll(new RegExp(FOOTPRINT_DISCLAIMER_RE.source, 'gi'))]
+        .map((m) => [m.index, m.index + m[0].length]);
       for (const { city, re, negationRe } of cityRes) {
         // EVERY occurrence of the city is examined, not just the first —
         // "Naples is outside our service area — our techs service Naples
@@ -857,28 +862,25 @@ function offFootprintCityFinding(text) {
           const cityStart = cityMatch.index;
           const cityEnd = cityStart + cityMatch[0].length;
           if (negationRanges.some(([ns, ne]) => cityStart >= ns && cityEnd <= ne)) continue;
-          if (disclaimerMatch) {
-            const disclaimerStart = disclaimerMatch.index;
-            const disclaimerEnd = disclaimerStart + disclaimerMatch[0].length;
-            // City BEFORE the disclaimer: exempt within the close window, or
-            // across an arbitrarily long pure-list run ("Naples, Fort
-            // Myers, …, and Marco Island are outside our service area.").
-            // The long-list glue path additionally requires NO claim
-            // context BEFORE the city — in "We serve Naples, and Fort
-            // Myers, …, are outside our service area." Naples is the claim
-            // verb's object, not part of the disclaimer's subject list.
-            if (cityStart < disclaimerStart
-              && (disclaimerStart - cityEnd <= 60
-                || (PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, disclaimerStart))
-                  && !SERVICE_CLAIM_CONTEXT_RE.test(normalized.slice(0, cityStart))))) continue;
-            // Disclaimer-FIRST list form: "Outside our service area: Naples,
-            // Fort Myers, and Cape Coral." Cities after the disclaimer are
-            // exempt only while the ENTIRE clause tail after the disclaimer
-            // is pure list glue — a lowercase claim continuation anywhere in
-            // the tail re-arms the gate.
-            if (cityStart >= disclaimerEnd
-              && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd))) continue;
-          }
+          // City BEFORE a disclaimer: exempt within the close window, or
+          // across an arbitrarily long pure-list run ("Naples, Fort Myers,
+          // …, and Marco Island are outside our service area."). The
+          // long-list glue path additionally requires NO claim context
+          // BEFORE the city — in "We serve Naples, and Fort Myers, …, are
+          // outside our service area." Naples is the claim verb's object,
+          // not part of the disclaimer's subject list.
+          // City AFTER a disclaimer (disclaimer-FIRST list form): exempt
+          // only while the ENTIRE clause tail after that disclaimer is pure
+          // list glue — a lowercase claim continuation re-arms the gate.
+          const disclaimed = disclaimerRanges.some(([dStart, dEnd]) => {
+            if (cityStart < dStart) {
+              return dStart - cityEnd <= 60
+                || (PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, dStart))
+                  && !SERVICE_CLAIM_CONTEXT_RE.test(normalized.slice(0, cityStart)));
+            }
+            return cityStart >= dEnd && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(dEnd));
+          });
+          if (disclaimed) continue;
           return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
         }
       }
