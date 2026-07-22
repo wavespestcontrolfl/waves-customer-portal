@@ -5455,7 +5455,11 @@ export function TypedFindingsSection({
       )}
       <div style={fieldLabelStyle}>
         {field.label}
-        {typedFieldRequiredNow(field, values) && (
+        {/* pesticideOnly compliance fields only render when a pesticide
+            product is recorded — and then the server REQUIRES them
+            (validateTreeShrubTypedCompliance), so they carry the required
+            marker whenever visible (codex P2 r13). */}
+        {(typedFieldRequiredNow(field, values) || field.pesticideOnly) && (
           <span style={{ color: requiredColor }}> *</span>
         )}
       </div>
@@ -10324,6 +10328,20 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
+      // Pesticide compliance answers: the server blocks completion without
+      // pollinator_status and irac_frac_logged = Yes whenever a pesticide
+      // product is recorded — mirror that pre-submit so the tech is guided
+      // to the field instead of a generic server failure (codex P2 r13).
+      if (pesticideProductPresent) {
+        for (const f of typedFindingsSchema.fields || []) {
+          if (!f.pesticideOnly) continue;
+          const value = String(findingsValues[f.key] ?? "").trim();
+          if (!value) missingTypedRequired.push(f.label);
+          else if (f.key === "irac_frac_logged" && value !== "Yes") {
+            missingTypedRequired.push(`${f.label} (must be confirmed Yes)`);
+          }
+        }
+      }
       // Gauge types require a score on any completed-side outcome — the
       // server 422s (activity_score_required) when findings are submitted
       // without one and the derive field can't fill it.
