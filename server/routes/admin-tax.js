@@ -371,6 +371,15 @@ router.put('/equipment/:id', async (req, res, next) => {
       if (fields.businessUseConfirmed === undefined) update.business_use_confirmed = true;
     }
     if (fields.businessUseConfirmed !== undefined) update.business_use_confirmed = !!fields.businessUseConfirmed;
+    // Converting an asset TO a vehicle must not inherit a non-vehicle's
+    // confirmed=true — reset to unconfirmed unless this same update supplies a
+    // business-use % (or an explicit confirmed flag), so its depreciation fails
+    // closed until the vehicle's business use is stated.
+    if (fields.assetCategory === 'vehicle'
+        && businessUsePctNormalized === undefined
+        && fields.businessUseConfirmed === undefined) {
+      update.business_use_confirmed = false;
+    }
     // Keep the MACRS class in sync with the recovery life: when the life
     // changes without an explicit class, re-derive it — and CLEAR it (null)
     // when the new life is unsupported, so MACRS fails closed rather than

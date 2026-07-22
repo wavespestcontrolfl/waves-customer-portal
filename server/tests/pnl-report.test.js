@@ -345,6 +345,23 @@ describe('prorateDepreciation', () => {
       expect(isDepreciationUncomputed(van({ depreciation_convention: 'mid_quarter', placed_in_service_date: '2018-01-01' }), ...win)).toBe(false);
     });
 
+    test('completeness covers §179/bonus fail-closed too, not just MACRS', () => {
+      const win = ['2026-01-01', '2026-12-31'];
+      // An unconfirmed vehicle on §179 (in-service this year) fails closed AND
+      // is flagged uncomputed.
+      const s179Van = {
+        depreciation_method: 'section_179', section_179_elected: true,
+        section_179_amount: '20000', asset_category: 'vehicle',
+        business_use_confirmed: false, placed_in_service_date: '2026-03-01',
+      };
+      expect(prorateDepreciation([s179Van], ...win)).toBe(0);
+      expect(isDepreciationUncomputed(s179Van, ...win)).toBe(true);
+      // Confirmed → computes and is NOT flagged.
+      const confirmed = { ...s179Van, business_use_confirmed: true, business_use_pct: '100' };
+      expect(prorateDepreciation([confirmed], ...win)).toBeCloseTo(20000, 2);
+      expect(isDepreciationUncomputed(confirmed, ...win)).toBe(false);
+    });
+
     test('an ineligible MACRS asset NEVER falls through to a stale annual_depreciation', () => {
       // A MACRS row carrying a leftover annual_depreciation must fail closed,
       // not claim that straight-line amount — MACRS is handled entirely.

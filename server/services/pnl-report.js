@@ -362,14 +362,16 @@ function annotateMidQuarter(assets) {
   });
 }
 
-// True when a MACRS asset's regular depreciation FAILS CLOSED (mid-quarter
-// convention, unknown recovery class, or a listed vehicle ≤50% business use)
-// AND it would otherwise contribute in [startDate, endDate] — i.e. in service
-// by window end, not disposed before window start, and still within its
-// recovery period (known classes; unknown-class assets are flagged
-// conservatively). Used to decide whether the depreciation total is FINAL. Pure.
+// True when an asset's regular depreciation FAILS CLOSED to $0 for THIS window
+// while it would otherwise contribute — covering EVERY method that can fail
+// closed: MACRS (mid-quarter, unknown class, listed ≤50% use, or an unconfirmed
+// vehicle) AND immediate §179/bonus (ineligible ≤50% or an unconfirmed
+// vehicle). Used to decide whether the depreciation total is FINAL. Pure.
 function isDepreciationUncomputed(asset, startDate, endDate) {
-  if (String(asset?.depreciation_method || '') !== 'MACRS') return false;
+  const method = String(asset?.depreciation_method || '');
+  const isMacrs = method === 'MACRS';
+  const isImmediate = method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected;
+  if (!isMacrs && !isImmediate) return false;
   const periodStart = toUTCDay(startDate);
   const periodEnd = toUTCDay(endDate);
   const inService = toUTCDay(asset?.placed_in_service_date) || toUTCDay(asset?.purchase_date);
@@ -379,13 +381,26 @@ function isDepreciationUncomputed(asset, startDate, endDate) {
   if (disposed && disposed < periodStart) return false;          // disposed before window
   const inSvcYear = inService.getUTCFullYear();
   if (disposed && disposed.getUTCFullYear() === inSvcYear) return false; // same-year: not depreciable, computes 0 correctly
+  const isListed = String(asset?.asset_category || '') === 'vehicle';
+  const confirmed = !isListed || asset?.business_use_confirmed === true;
+  const bizUse = businessUseFraction(asset?.business_use_pct);
+
+  // Immediate §179/bonus is recognized ONLY in the in-service year — flag it
+  // only when that year is in the window and its gate fails (mirrors the gates
+  // in prorateAssetDepreciation: §179 needs >50% for all property; bonus's
+  // >50% is listed-only; a vehicle also needs confirmation).
+  if (isImmediate && !isMacrs) {
+    if (inSvcYear < periodStart.getUTCFullYear() || inSvcYear > periodEnd.getUTCFullYear()) return false;
+    const gatePasses = method === 'bonus_100'
+      ? confirmed && (!isListed || bizUse > 0.5)
+      : confirmed && bizUse > 0.5;
+    return !gatePasses;
+  }
+
   const cls = String(asset?.irs_class || '').trim();
   const known = !!MACRS_HALF_YEAR[cls];
-  const isListed = String(asset?.asset_category || '') === 'vehicle';
-  const bizUse = businessUseFraction(asset?.business_use_pct);
   const failsClosed = String(asset?.depreciation_convention || 'half_year') !== 'half_year'
-    || !known || (isListed && bizUse <= 0.5)
-    || (isListed && asset?.business_use_confirmed !== true); // unconfirmed vehicle
+    || !known || !confirmed || (isListed && bizUse <= 0.5);
   if (!failsClosed) return false;
   // Past the recovery period a known-class asset legitimately computes 0.
   if (known && periodStart.getUTCFullYear() > inSvcYear + MACRS_HALF_YEAR[cls].length - 1) return false;
