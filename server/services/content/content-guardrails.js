@@ -773,7 +773,7 @@ const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including
 // first city sits far past any fixed window, so the pre-disclaimer
 // exemption also accepts an arbitrarily long run of pure list glue plus the
 // linking verb between the city and the disclaimer phrase.
-const PRE_DISCLAIMER_GLUE_RE = /^[\s,;:–—-]*(?:(?:and|or|nor|all|both|are|is|sit|sits|fall|falls|lie|lies|remain|remains|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
+const PRE_DISCLAIMER_GLUE_RE = /^[\s,;:]*(?:(?:and|or|nor|all|both|are|is|sit|sits|fall|falls|lie|lies|remain|remains|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:]*)*$/;
 
 // A markdown list item ("- Naples", "2) Venice") — used to re-attach a
 // colon-terminated claim intro ("We serve these cities:") to each item.

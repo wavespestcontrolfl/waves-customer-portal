@@ -1964,3 +1964,8 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('a dash-bridged affirmative claim before a disclaimer list still flags', () => {
+    const r = guardrails.evaluate({ body: 'We serve Naples — Fort Myers, Cape Coral, Bonita Springs, Estero, and Marco Island are outside our service area.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
