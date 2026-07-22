@@ -2333,6 +2333,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
             label: 'Treated perimeter traced on-site by your technician.',
+            // Traced path in snapshot pixel space (1280x960) so the report
+            // can REPLAY the spray application the tech saw (owner
+            // 2026-07-21) — px only, the customer surface never needs the
+            // lat/lng the row also stores.
+            pathPoints: parseJsonArray(tracedRow.path_points)
+              .map((p) => ({ x: numberOrNull(p?.px?.x), y: numberOrNull(p?.px?.y) }))
+              .filter((p) => p.x != null && p.y != null),
           };
         }
       }
@@ -2550,6 +2557,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // without one (historical tokens predating the assessment flow) keep the
   // legacy fallback layout client-side. Never blocks the report.
   let reportV2 = null;
+  // '-tn...' signature of the narrative text actually rendered into this
+  // payload (codex P2 r15) — PDF stores key off this value, never a re-read.
+  let treatmentNarrativeRenderedSignature = null;
   if (serviceLine === 'lawn' && lawnAssessment) {
     try {
       // Phase 2: prefer the stored area water-intake snapshot (computed at
@@ -2603,6 +2613,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         waterGapHistory,
         mowingTrendFallback,
       });
+      // AI "What we applied today" narrative — same contract as the T&S path
+      // (owner 2026-07-21: across all reports).
+      if (reportV2?.snapshot?.treatmentSummary) {
+        const { buildTreatmentNarrative } = require('./treatment-narrative');
+        const narrative = await buildTreatmentNarrative({
+          serviceRecordId: service.id,
+          serviceLine: 'lawn',
+          treatment: reportV2.treatment,
+          findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
+          photoSummary: reportV2.photoSummary || '',
+          knex,
+        });
+        reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
+        treatmentNarrativeRenderedSignature = narrative?.signature || null;
+      }
       // 7-day rainfall chart — sourced from the client's exact lat/lng (the same
       // Open-Meteo trailing-7-day series behind waterContext.rainfallInches7d), so
       // the chart is property-specific and always reconciles with the "rain this
@@ -2714,6 +2739,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           customerConcern: structuredCustomerConcern(structured),
           waterSnapshot: null, // Phase 3: landscape water calibration
         });
+        // AI "What we applied today" narrative (owner 2026-07-21): why each
+        // product, what it does, the benefit — cached per input hash; the
+        // deterministic template stands in when generation misses.
+        if (reportV2?.snapshot?.treatmentSummary) {
+          const { buildTreatmentNarrative } = require('./treatment-narrative');
+          const narrative = await buildTreatmentNarrative({
+            serviceRecordId: service.id,
+            serviceLine: 'tree_shrub',
+            treatment: reportV2.treatment,
+            // The SCRUBBED summary, not raw observations — a vision overclaim
+            // ("scale infestation") must not reach the narrative prompt
+            // (codex P2 2026-07-22); the validator also rejects the terms.
+            findingsText: reportV2.photoSummary || '',
+            photoSummary: reportV2.photoSummary || '',
+            knex,
+          });
+          reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
+          // Signature of the EXACT text rendered — PDF stores key off this,
+          // never a DB re-read (codex P2 r15).
+          treatmentNarrativeRenderedSignature = narrative?.signature || null;
+        }
         // Next scheduled tree & shrub visit — confident date from a real upcoming
         // row, else omitted (never invent a precise date the data can't back).
         if (reportV2) {
@@ -2950,6 +2996,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     metrics,
     mapSvg,
     mapSvgUrl: `/api/reports/${token}/map.svg`,
+    treatmentNarrativeRenderedSignature,
     treatmentMap: {
       schematic: {
         svg: mapSvg,

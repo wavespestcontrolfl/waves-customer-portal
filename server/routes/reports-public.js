@@ -141,6 +141,7 @@ const {
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
+const { treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -1217,8 +1218,10 @@ router.get('/:token', async (req, res, next) => {
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
+      // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
+      const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1232,10 +1235,15 @@ router.get('/:token', async (req, res, next) => {
       }
 
       let pdf;
+      // Same contract as pdf-queue (codex P2 r15): the stored key uses the
+      // signature attached to the payload — the narrative state the PDF was
+      // rendered FROM — never a DB re-read.
+      let tnRenderedSignature = '-tn0';
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
@@ -1272,7 +1280,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

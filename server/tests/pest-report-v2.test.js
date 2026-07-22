@@ -181,16 +181,16 @@ describe('buildPestReportV2 — technician AI report copy in the hero summary sl
     expect(out.aiSummary).toEqual({ headline: null, body: REPORT });
   });
 
-  it('rejects unsafe report copy and falls back to the personality copy', () => {
+  it('rejects unsafe report copy — no hero body rather than the filler (owner 2026-07-21)', () => {
     const out = buildPestReportV2({
       premiumExperience: premium(),
       technicianReport: 'The infestation is eliminated and your home is guaranteed pest-free.',
     });
-    expect(out.aiSummary.body).toBe('No interior activity documented today.');
+    expect(out.aiSummary).toBe(null);
   });
 
-  it('keeps the personality copy when no report is passed', () => {
+  it('renders no hero body when no report is passed (filler retired, owner 2026-07-21)', () => {
     const out = buildPestReportV2({ premiumExperience: premium() });
-    expect(out.aiSummary.body).toBe('No interior activity documented today.');
+    expect(out.aiSummary).toBe(null);
   });
 });

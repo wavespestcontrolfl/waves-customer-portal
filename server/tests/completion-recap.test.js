@@ -34,6 +34,42 @@ describe('completion recap', () => {
     expect(prompt).toContain('prices');
   });
 
+  test('tech-chosen solutions feed the prompt as context, never as customer copy (owner 2026-07-21)', () => {
+    const prompt = buildPrompt({
+      serviceType: 'Mosquito Reduction',
+      visitOutcome: 'completed',
+      products: [
+        { name: 'In2Care Mosquito Station', applicationMethod: 'station_check', targets: ['mosquitoes'] },
+        { product_name: 'Talstar P', product_category: 'insecticide' },
+      ],
+    });
+    expect(prompt).toContain('Solutions the technician applied');
+    expect(prompt).toContain('- In2Care Mosquito Station (station_check; targets: mosquitoes)');
+    expect(prompt).toContain('- Talstar P');
+    expect(prompt).toContain('NEVER name these products');
+    // No products → no solutions block at all.
+    expect(buildPrompt({ serviceType: 'Lawn Care' })).not.toContain('Solutions the technician applied');
+    // Junk shapes are dropped, list is capped at 10.
+    const capped = buildPrompt({
+      serviceType: 'Pest',
+      products: [...Array.from({ length: 14 }, (_, i) => ({ name: `P${i}` })), { bogus: true }, null],
+    });
+    expect(capped).toContain('- P9');
+    expect(capped).not.toContain('- P10');
+  });
+
+  test('visit context (season/weather/expectations) rides the prompt when provided', () => {
+    const prompt = buildPrompt({
+      serviceType: 'Quarterly Pest Control',
+      visitOutcome: 'completed',
+      visitContext: 'Season: Wet season in Southwest Florida.\nWhat to expect for this service line: activity may briefly increase.',
+    });
+    expect(prompt).toContain('Visit context (season, weather, expectations');
+    expect(prompt).toContain('Wet season in Southwest Florida');
+    expect(prompt).toContain('do not copy verbatim');
+    expect(buildPrompt({ serviceType: 'Pest' })).not.toContain('Visit context');
+  });
+
   test('sms preview suppresses review placeholder when invoice is present', () => {
     const preview = composeCompletionSmsPreview({
       recap: 'Today we completed your service.',

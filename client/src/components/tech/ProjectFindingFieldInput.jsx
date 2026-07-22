@@ -311,7 +311,10 @@ function CountStepperInput({ id, name, value, onChange, T }) {
   );
 }
 
-function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [], T }) {
+// optionDisabledReason(option) → string | null: a non-null reason renders the
+// unchecked option disabled with the reason as its tooltip (already-checked
+// options stay tappable so a stale selection can always be removed).
+function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [], T, optionDisabledReason = null }) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => parseMultiSelectValue(value), [value]);
   const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
@@ -355,12 +358,17 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [],
         <div style={{ ...themedPopoverStyle(T), maxHeight: 260, padding: 6 }}>
           {options.map((option) => {
             const checked = selectedSet.has(String(option || '').toLowerCase());
+            const disabledReason = !checked && optionDisabledReason
+              ? optionDisabledReason(option)
+              : null;
             return (
               <button
                 key={option}
                 type="button"
+                disabled={!!disabledReason}
+                title={disabledReason || undefined}
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => toggleOption(option)}
+                onClick={disabledReason ? undefined : () => toggleOption(option)}
                 style={{
                   width: '100%',
                   display: 'flex',
@@ -372,7 +380,8 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [],
                   background: checked ? T.washSelected : T.popoverBg,
                   color: T.ink,
                   padding: '10px 10px',
-                  cursor: 'pointer',
+                  cursor: disabledReason ? 'not-allowed' : 'pointer',
+                  opacity: disabledReason ? 0.45 : 1,
                   fontSize: 14,
                   fontWeight: checked ? 500 : 400,
                 }}
@@ -781,6 +790,7 @@ export default function ProjectFindingFieldInput({
   onProductSelect,
   palette,
   appearance = 'light',
+  optionDisabledReason = null,
 }) {
   const T = resolveFieldTheme(appearance, palette);
   if (field.type === 'applications') {
@@ -888,6 +898,7 @@ export default function ProjectFindingFieldInput({
         inputStyle={inputStyle}
         options={field.options || []}
         T={T}
+        optionDisabledReason={optionDisabledReason}
       />
     );
   }

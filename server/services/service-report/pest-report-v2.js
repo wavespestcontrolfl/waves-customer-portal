@@ -205,9 +205,13 @@ function buildPestReportV2({
   const technicianCopy = technicianReport && validateCustomerCopy(String(technicianReport).trim())
     ? String(technicianReport).trim()
     : null;
+  // Only the tech-reviewed AI report copy earns the hero summary slot — the
+  // deterministic personality filler ("Your routine service is complete.
+  // Treatment included spot treatment.") read as weak stuffing and is gone
+  // (owner 2026-07-21).
   const aiSummary = technicianCopy
     ? { headline: null, body: technicianCopy }
-    : buildAiSummary(premiumExperience.aiSummaryPersonality);
+    : null;
   const forecastCard = buildForecast(forecast);
 
   // Nothing meaningful to show → don't render an empty V2 shell.

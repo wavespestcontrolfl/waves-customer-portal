@@ -5255,6 +5255,16 @@ export function typedNextStepChipConflict(schemaType, chip, values) {
       }
     }
   }
+  // Mirrors the server rule (codex P2 r6): the chip's report sentence says
+  // "Your help with the recommendations above", so it needs a recorded
+  // recommendation now that the simplified T&S form no longer requires one.
+  if (
+    schemaType === "tree_shrub" &&
+    chip === "Customer action needed" &&
+    !String(values?.customer_recommendations ?? "").trim()
+  ) {
+    return `"Customer action needed" requires a recorded customer recommendation — add one or remove the chip`;
+  }
   return null;
 }
 
@@ -5330,7 +5340,13 @@ function pruneRestoredFindingsValues(restored, fields) {
     const field = fieldByKey.get(key);
     if (!field) {
       delete values[key];
-    } else if (field.type === "chips" && Array.isArray(field.options)) {
+    } else if (field.autoFilled) {
+      // Derived server-side (e.g. primary T&S treatments) — a restored
+      // pre-cutover draft value has no visible input and could trip
+      // validation the tech can't fix (codex P2). Companion slices clear
+      // the flag for fields they collect, so those restores survive.
+      delete values[key];
+    } else if ((field.type === "chips" || field.type === "multi_select") && Array.isArray(field.options)) {
       const kept = String(raw || "")
         .split(",")
         .map((s) => s.trim())
@@ -5371,7 +5387,7 @@ const EMPTY_COMPANION_ENTRY = {
 // chips + optional AI-drafted recommendations. Shared by the mobile and
 // desktop renders of CompletionPanel — `variant` only switches the
 // palette/label chrome between the CP mobile tokens and the D palette.
-function TypedFindingsSection({
+export function TypedFindingsSection({
   variant,
   schema,
   values,
@@ -5388,6 +5404,7 @@ function TypedFindingsSection({
   includeComms,
   onIncludeCommsChange,
   onAiDraft,
+  pesticideProductPresent = true,
 }) {
   const mobile = variant === "mobile";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
@@ -5415,6 +5432,47 @@ function TypedFindingsSection({
     paddingBottom: 4,
     borderBottom: `1px solid ${hairline}`,
   };
+  // autoFilled fields are derived server-side at completion (treatments from
+  // products) and never rendered — companion schema slices clear the flag
+  // for fields the companion must collect (shared products list can't be
+  // attributed per service line), so this filter is schema-driven for both
+  // contexts. pesticideOnly compliance fields appear once a pesticide
+  // product is recorded (the server 422s them if missed, so hiding them
+  // can't skip enforcement). detail fields collapse behind one optional
+  // expander so routine visits stay a short form (owner directive
+  // 2026-07-21).
+  const visibleFields = (schema.fields || []).filter(
+    (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
+  );
+  const primaryFields = visibleFields.filter((f) => !f.detail);
+  const detailFields = visibleFields.filter((f) => f.detail);
+  const renderField = (field, index, list) => (
+    <div key={field.key} style={{ marginBottom: 12 }}>
+      {/* Sectioned schemas (rodent trapping): header above the first
+          field of each section so the checklist scans in groups. */}
+      {field.section && field.section !== list[index - 1]?.section && (
+        <div style={sectionHeaderStyle}>{field.section}</div>
+      )}
+      <div style={fieldLabelStyle}>
+        {field.label}
+        {/* pesticideOnly compliance fields only render when a pesticide
+            product is recorded — and then the server REQUIRES them
+            (validateTreeShrubTypedCompliance), so they carry the required
+            marker whenever visible (codex P2 r13). */}
+        {(typedFieldRequiredNow(field, values) || field.pesticideOnly) && (
+          <span style={{ color: requiredColor }}> *</span>
+        )}
+      </div>
+      <ProjectFindingFieldInput
+        field={field}
+        id={`typed-finding-${schema.type}-${field.key}`}
+        name={`structuredFindings.${field.key}`}
+        value={values[field.key] || ""}
+        onChange={(value) => onFieldChange(field.key, value)}
+        inputStyle={{ width: "100%", boxSizing: "border-box" }}
+      />
+    </div>
+  );
   return (
     <div style={{ marginBottom: 20 }}>
       {/* Companion sections (onRecommendationsChange null) label themselves
@@ -5422,29 +5480,22 @@ function TypedFindingsSection({
       <label style={labelCss}>
         {onRecommendationsChange ? "Service findings" : schema.label || "Service findings"}
       </label>
-      {(schema.fields || []).map((field, index) => (
-        <div key={field.key} style={{ marginBottom: 12 }}>
-          {/* Sectioned schemas (rodent trapping): header above the first
-              field of each section so the checklist scans in groups. */}
-          {field.section && field.section !== schema.fields[index - 1]?.section && (
-            <div style={sectionHeaderStyle}>{field.section}</div>
-          )}
-          <div style={fieldLabelStyle}>
-            {field.label}
-            {typedFieldRequiredNow(field, values) && (
-              <span style={{ color: requiredColor }}> *</span>
-            )}
-          </div>
-          <ProjectFindingFieldInput
-            field={field}
-            id={`typed-finding-${schema.type}-${field.key}`}
-            name={`structuredFindings.${field.key}`}
-            value={values[field.key] || ""}
-            onChange={(value) => onFieldChange(field.key, value)}
-            inputStyle={{ width: "100%", boxSizing: "border-box" }}
-          />
-        </div>
-      ))}
+      {primaryFields.map(renderField)}
+      {detailFields.length > 0 && (
+        <details style={{ marginBottom: 12 }}>
+          <summary
+            style={{
+              ...sectionHeaderStyle,
+              cursor: "pointer",
+              listStyle: "none",
+              borderBottom: "none",
+            }}
+          >
+            More detail (optional) ▸
+          </summary>
+          {detailFields.map(renderField)}
+        </details>
+      )}
       {schema.activity && (
         <div style={{ marginBottom: 12 }}>
           <div style={fieldLabelStyle}>
@@ -5497,6 +5548,48 @@ function TypedFindingsSection({
             <span style={{ color: requiredColor }}> *</span>
           )}
         </div>
+        {schema.type === "tree_shrub" ? (
+          /* Owner directive 2026-07-21 round 2: NO pills/chips on the T&S
+             closeout — every selection is a dropdown like the findings
+             fields (and lawn), so the whole form closes out in seconds.
+             Same toggle contract as the chip row: the diff between the
+             dropdown's value and current state is the one toggled chip. */
+          <ProjectFindingFieldInput
+            field={{
+              key: "next_steps",
+              label: "Next steps",
+              type: "multi_select",
+              options: schema.nextStepChips || [],
+            }}
+            id={`typed-next-steps-${schema.type}`}
+            name="nextStepChips"
+            value={nextStepChips.join(", ")}
+            onChange={(value) => {
+              const next = String(value || "")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              // The dropdown can change several chips at once (its Clear
+              // action empties the whole selection) — toggle EVERY diff, not
+              // just the first (codex P3 r10).
+              const added = next.filter((c) => !nextStepChips.includes(c));
+              const removed = nextStepChips.filter((c) => !next.includes(c));
+              [...added, ...removed].forEach((chip) => onToggleChip(chip));
+            }}
+            inputStyle={{ width: "100%", boxSizing: "border-box" }}
+            optionDisabledReason={(option) => {
+              if (nextStepChips.includes(option)) return null;
+              const conflict = typedNextStepChipConflict(
+                schema.type,
+                option,
+                values,
+              );
+              if (conflict) return conflict;
+              if (nextStepChips.length >= 4) return "Up to 4 next steps";
+              return null;
+            }}
+          />
+        ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {(schema.nextStepChips || []).map((chip) => {
             const selected = nextStepChips.includes(chip);
@@ -5537,6 +5630,7 @@ function TypedFindingsSection({
             );
           })}
         </div>
+        )}
       </div>
       {/* Recommendations textarea + AI draft stay PRIMARY-only: companion
           sections pass onRecommendationsChange={null} and are chips-first
@@ -6587,14 +6681,25 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
       product.name,
       product.category,
       product.productCategory,
+      product.activeIngredient,
       product.applicationMethod,
       product.rateUnit,
     );
+  // Mirrors the server's isInsectLikeProduct (incl. the bifen\w*/\w*thrin/
+  // named-active terms added for blank-category catalog rows like Delta Dust
+  // and Elector PSP — codex P1 r5). Keep the two regexes in sync.
   const hasInsectProduct = selectedProducts.some((product) =>
-    /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifenthrin|pyrethroid|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(productsText(product)),
+    /\b(insect|miticide|igr|whitefly|scale|aphid|thrip|caterpillar|mite|neonic|imidacloprid|dinotefuran|bifen\w*|\w*thrin|pyrethroid|spinosad|spinetoram|indoxacarb|abamectin|emamectin|pyriproxyfen|acephate|chlorantraniliprole|acelepryn|fipronil|merit|zylam|kontos|mainspring|distance|talus|suffoil|oil|conserve|floramite|talstar|sevin|azamax|ima[\s-]*jet)\b/.test(productsText(product)),
   );
   const hasFungicideProduct = selectedProducts.some((product) =>
     /\b(fungicide|fungus|disease|phytophthora|kphite|phosphite|phosphonate|copper|headway|artavia|propizol|frac)\b/.test(productsText(product)),
+  );
+  // Mirrors the server's herbicide family classifier: herbicides carry
+  // rotation history too (HRAC), so the server requires iracFracLogged for
+  // them — without this flag the form enables Submit and then 400s (codex
+  // P2 r4).
+  const hasHerbicideProduct = selectedProducts.some((product) =>
+    /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(productsText(product)),
   );
   const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
   const hasNpFertilizer = selectedProducts.some((product) => {
@@ -6614,7 +6719,8 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
   return {
     hasInsectProduct,
     hasFungicideProduct,
-    needsIracFracLog: hasInsectProduct || hasFungicideProduct,
+    hasHerbicideProduct,
+    needsIracFracLog: hasInsectProduct || hasFungicideProduct || hasHerbicideProduct,
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
@@ -7865,6 +7971,33 @@ export function CompletionPanel({
     return () => { live = false; };
   }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  // Gates the pesticideOnly compliance fields (pollinator / IRAC-FRAC) in the
+  // typed findings form — they appear once a pesticide-family product is on
+  // the visit. Display-only: the server compliance validation is authoritative.
+  // Brand-named catalog rows ("Dominion 2L") reach the client without a
+  // category, and the server classifies them from catalog text we don't have —
+  // so a row with NO category conservatively shows the fields rather than
+  // hiding ones the server will 422 on (codex P1). Hiding requires a category
+  // that is positively non-pesticide.
+  // Reuses the legacy closeout's family classifiers (insect/fungicide/
+  // herbicide incl. the pre-emergent brands — Snapshot, Barricade,
+  // Prodiamine…) so every product the server will demand irac_frac_logged
+  // for surfaces the fields here; a category-word-only test hid them for
+  // brand-named pre-emergents and left the tech no way to satisfy the
+  // server 400 (codex P1 r5).
+  const tsPesticideFlags = treeShrubProductFlagsClient(selectedProducts);
+  const pesticideProductPresent =
+    tsPesticideFlags.hasInsectProduct ||
+    tsPesticideFlags.hasFungicideProduct ||
+    tsPesticideFlags.hasHerbicideProduct ||
+    selectedProducts.some((p) => {
+      const category = String(p.category || p.product_category || "");
+      if (/pesticid|termitic|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
+      // "Uncategorized"/"other" style categories are non-blank but carry no
+      // signal (prod has Bifen XTS filed as Uncategorized) — they must stay
+      // on the conservative show-the-fields path, same as a missing category.
+      return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
+    });
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -9506,6 +9639,14 @@ export function CompletionPanel({
     setShowDraftPrompt(false);
   }
 
+  // Serialized product context for the recap auto-draft dependency: id +
+  // method + targets per product (rate edits excluded — they never reach
+  // the prompt).
+  const recapProductsKey = JSON.stringify(selectedProducts.map((p) => [
+    p.productId,
+    p.applicationMethod || null,
+    Array.isArray(p.targets) ? p.targets.join('|') : '',
+  ]));
   useEffect(() => {
     if (!canAutoDraftRecap) return;
     if (recapSource === "manual") {
@@ -9527,8 +9668,20 @@ export function CompletionPanel({
           body: JSON.stringify({
             notes,
             visitOutcome,
+            // serviceId → server resolves the customer geocode for the
+            // season/weather/expectations prompt context.
+            serviceId: service.id || null,
             serviceType: service.serviceType,
             areasTreated: areasServiced,
+            // Tech-chosen solutions feed the AI recap prompt on every line
+            // (owner directive 2026-07-21) — context only, the prompt rules
+            // keep product names out of the customer copy.
+            products: selectedProducts.map((p) => ({
+              productId: p.productId,
+              name: p.displayName || p.name,
+              applicationMethod: p.applicationMethod || null,
+              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+            })),
             willInvoice,
             willReview: reviewSendsWithCompletionSms,
           }),
@@ -9556,7 +9709,11 @@ export function CompletionPanel({
   }, [
     canAutoDraftRecap,
     notes,
-    selectedProducts.length,
+    // Full product CONTEXT, not just the count — a method or target edit
+    // after drafting must mark the recap for redraft, or the customer copy
+    // describes the previous product context (codex P2 2026-07-22). The
+    // debounce above absorbs per-keystroke churn.
+    recapProductsKey,
     visitOutcome,
     areasServiced,
     service.serviceType,
@@ -9590,8 +9747,15 @@ export function CompletionPanel({
         body: JSON.stringify({
           notes,
           visitOutcome,
+          serviceId: service.id || null,
           serviceType: service.serviceType,
           areasTreated: areasServiced,
+          products: selectedProducts.map((p) => ({
+            productId: p.productId,
+            name: p.displayName || p.name,
+            applicationMethod: p.applicationMethod || null,
+            targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+          })),
           willInvoice,
           willReview: reviewSendsWithCompletionSms,
           force: true,
@@ -9922,6 +10086,24 @@ export function CompletionPanel({
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
         displayName: product.display_name || product.displayName || null,
+        // The catalog category and active ingredient feed the pesticide/
+        // family flags — without them every selected product falls into the
+        // blank-category pesticide fallback and the simplified T&S form shows
+        // compliance fields on ordinary fertilizer visits (codex P3 r4),
+        // while blank-category insecticides (Delta Dust, Elector PSP) are
+        // only recognizable by their active (codex P1 r5). Protocol-added
+        // products are serialized without either, so fall back to the loaded
+        // catalog row.
+        category:
+          product.category ??
+          product.product_category ??
+          (products || []).find((p) => String(p.id) === String(product.id))?.category ??
+          null,
+        activeIngredient:
+          product.active_ingredient ??
+          product.activeIngredient ??
+          (products || []).find((p) => String(p.id) === String(product.id))?.active_ingredient ??
+          null,
         rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
@@ -10146,6 +10328,20 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
+      // Pesticide compliance answers: the server blocks completion without
+      // pollinator_status and irac_frac_logged = Yes whenever a pesticide
+      // product is recorded — mirror that pre-submit so the tech is guided
+      // to the field instead of a generic server failure (codex P2 r13).
+      if (pesticideProductPresent) {
+        for (const f of typedFindingsSchema.fields || []) {
+          if (!f.pesticideOnly) continue;
+          const value = String(findingsValues[f.key] ?? "").trim();
+          if (!value) missingTypedRequired.push(f.label);
+          else if (f.key === "irac_frac_logged" && value !== "Yes") {
+            missingTypedRequired.push(`${f.label} (must be confirmed Yes)`);
+          }
+        }
+      }
       // Gauge types require a score on any completed-side outcome — the
       // server 422s (activity_score_required) when findings are submitted
       // without one and the derive field can't fill it.
@@ -10226,6 +10422,19 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
+        // Pesticide compliance mirror for companions (codex P2 r15): same
+        // gate as the primary form — the server requires these whenever a
+        // pesticide product is on the (shared) products list.
+        if (pesticideProductPresent) {
+          for (const f of schema.fields || []) {
+            if (!f.pesticideOnly) continue;
+            const value = String(entry.values[f.key] ?? "").trim();
+            if (!value) missingCompanionRequired.push(f.label);
+            else if (f.key === "irac_frac_logged" && value !== "Yes") {
+              missingCompanionRequired.push(`${f.label} (must be confirmed Yes)`);
+            }
+          }
+        }
         const companionScoreMissing = !!schema.activity && entry.score == null;
         const companionNextStepMissing =
           !!schema.nextStepRequired && !entry.chips.length;
@@ -10933,6 +11142,14 @@ export function CompletionPanel({
               values: findingsValues,
             },
             nextStepChips: typedNextStepChips,
+            // Tech-chosen solutions feed the draft prompt; productId lets
+            // the server derive the T&S treatment chips from the catalog.
+            products: selectedProducts.map((p) => ({
+              productId: p.productId,
+              name: p.displayName || p.name,
+              applicationMethod: p.applicationMethod || null,
+              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
+            })),
             includeCustomerComms: typedAiIncludeComms,
           }),
         },
@@ -11154,6 +11371,7 @@ export function CompletionPanel({
                   aiSummary: treeShrubReview?.aiSummary || "",
                   suggestedCustomerAction: treeShrubReview?.suggestedCustomerAction || "",
                   findings: treeShrubReview?.findings || [],
+                  scores: treeShrubReview?.scores || null,
                   // Don't advertise one-tap completion while regulatory closeout fields
                   // (bed sqft, pollinator status, IRAC/FRAC, product actuals) are still
                   // required — the same gate handleSubmit enforces.
@@ -12316,6 +12534,7 @@ export function CompletionPanel({
             {isTypedFindings && (
               <TypedFindingsSection
                 variant="mobile"
+                pesticideProductPresent={pesticideProductPresent}
                 schema={typedFindingsSchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
@@ -12342,6 +12561,7 @@ export function CompletionPanel({
                 <TypedFindingsSection
                   key={schema.type}
                   variant="mobile"
+                  pesticideProductPresent={pesticideProductPresent}
                   schema={schema}
                   values={entry.values}
                   onFieldChange={(key, value) =>
@@ -14431,6 +14651,7 @@ export function CompletionPanel({
           {isTypedFindings && (
             <TypedFindingsSection
               variant="desktop"
+              pesticideProductPresent={pesticideProductPresent}
               schema={typedFindingsSchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
@@ -14457,6 +14678,7 @@ export function CompletionPanel({
               <TypedFindingsSection
                 key={schema.type}
                 variant="desktop"
+                pesticideProductPresent={pesticideProductPresent}
                 schema={schema}
                 values={entry.values}
                 onFieldChange={(key, value) =>

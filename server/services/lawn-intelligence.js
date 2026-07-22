@@ -21,6 +21,7 @@
  */
 
 const db = require('../models/db');
+const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { etDateString } = require('../utils/datetime-et');
@@ -68,7 +69,7 @@ async function assessPhotoQuality(base64Image, mimeType) {
   if (!Anthropic) return { passed: true, score: 50, issues: [] };
   try {
     const client = new Anthropic();
-    const response = await client.messages.create({
+    const response = await anthropicCreateWithSamplingRetry(client, {
       model: MODELS.VISION,
       max_tokens: 300,
       temperature: 0.2, // pin output for repeatable pass/fail decisions on the same photo
@@ -277,7 +278,7 @@ const LawnIntelligence = {
         if (!Anthropic) continue;
         try {
           const client = new Anthropic();
-          const response = await client.messages.create({
+          const response = await anthropicCreateWithSamplingRetry(client, {
             model: MODELS.FLAGSHIP,
             max_tokens: 500,
             messages: [{

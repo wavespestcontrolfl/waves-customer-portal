@@ -129,11 +129,41 @@ function deterministicRecap(input = {}) {
   ]);
 }
 
+// Tech-chosen solutions, normalized for the prompt (owner directive
+// 2026-07-21: the products the tech records must feed the AI recap on every
+// line — pest, lawn, mosquito, T&S). Context only: the output rules still
+// forbid naming products/chemicals to the customer. Accepts both the panel
+// shape ({name, applicationMethod, targets}) and the recap-modal shape
+// ({product_name, product_category}).
+function safeProducts(products) {
+  if (!Array.isArray(products)) return [];
+  return products
+    .map((p) => {
+      const name = cleanText(p?.name || p?.product_name).slice(0, 80);
+      if (!name) return null;
+      const method = cleanText(p?.applicationMethod || p?.application_method).slice(0, 40);
+      const targets = Array.isArray(p?.targets)
+        ? p.targets.map(cleanText).filter(Boolean).slice(0, 6)
+        : [];
+      return { name, method, targets };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function productPromptLines(products) {
+  return products.map((p) => {
+    const parts = [p.method, p.targets.length ? `targets: ${p.targets.join(', ')}` : ''].filter(Boolean);
+    return `- ${p.name}${parts.length ? ` (${parts.join('; ')})` : ''}`;
+  }).join('\n');
+}
+
 function buildPrompt(input = {}) {
   const serviceType = cleanText(input.serviceType) || 'service';
   const areas = safeAreas(input.areasTreated || input.areasServiced);
   const notes = cleanText(input.notes || input.technicianNotes);
   const outcome = normalizeOutcome(input.visitOutcome);
+  const products = safeProducts(input.products);
 
   return `Write one customer-facing SMS recap for a Waves Pest Control & Lawn Care service visit.
 
@@ -152,7 +182,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
+Technician notes: ${notes || 'not specified'}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }
@@ -170,6 +200,25 @@ async function aiRecap(input = {}) {
   return result.ok ? cleanText(result.text) : null;
 }
 
+// True when the generated copy mentions any recorded product by name —
+// matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
+// echoes ("we applied Talstar around...") are caught too.
+function containsProductName(text, products) {
+  const hay = String(text || '').toLowerCase();
+  if (!hay) return false;
+  return safeProducts(products).some((p) => String(p.name || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
+    .some((token) => hay.includes(token)));
+}
+const GENERIC_NAME_TOKENS = new Set([
+  'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
+  'concentrate', 'spray', 'nonionic', 'surfactant', 'miticide', 'insect',
+  'control', 'plus', 'pro', 'max', 'maxx', 'lawn', 'turf', 'palm', 'tree',
+  'shrub', 'weed', 'grass', 'pest', 'bait', 'dust', 'emulsion',
+]);
+
 async function generateRecap(input = {}) {
   const outcome = normalizeOutcome(input.visitOutcome);
   if (DETERMINISTIC_OUTCOMES.has(outcome)) {
@@ -178,7 +227,14 @@ async function generateRecap(input = {}) {
 
   try {
     const recap = await aiRecap(input);
-    if (recap) return { recap: sanitizeRecap(recap), source: 'ai' };
+    // The prompt forbids product names, but the contract is enforced here:
+    // a generated recap that echoes any recorded product name falls back to
+    // the deterministic copy (codex P3 2026-07-22).
+    if (recap && containsProductName(recap, input.products)) {
+      logger.warn('[completion-recap] AI recap echoed a product name — using fallback');
+    } else if (recap) {
+      return { recap: sanitizeRecap(recap), source: 'ai' };
+    }
   } catch (err) {
     logger.warn(`[completion-recap] AI recap failed, using fallback: ${err.message}`);
   }
@@ -196,6 +252,7 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
 
 module.exports = {
   buildPrompt,
+  containsProductName,
   composeCompletionSmsPreview,
   deterministicRecap,
   generateRecap,

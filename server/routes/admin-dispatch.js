@@ -13,6 +13,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
+const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
@@ -55,7 +56,7 @@ const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
-const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
@@ -1745,7 +1746,20 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
 // POST /api/admin/dispatch/recap-preview
 router.post('/recap-preview', async (req, res, next) => {
   try {
-    const result = await CompletionRecap.generateRecap(req.body || {});
+    const body = req.body || {};
+    // Season/weather/expectations context (owner directive 2026-07-21).
+    // serviceId → customer geocode for the weather line; without it the
+    // season + what-to-expect context still applies. Best-effort only.
+    let visitContext = '';
+    try {
+      let customerId = null;
+      if (body.serviceId) {
+        const svcRow = await db('scheduled_services').where({ id: body.serviceId }).first('customer_id');
+        customerId = svcRow?.customer_id || null;
+      }
+      visitContext = await buildRecapVisitContext({ serviceType: body.serviceType, customerId });
+    } catch { /* context is polish — never block the draft */ }
+    const result = await CompletionRecap.generateRecap({ ...body, visitContext });
     res.json({
       recap: result.recap,
       source: result.source,
@@ -1899,7 +1913,7 @@ router.get('/:date?', async (req, res, next) => {
         // completion must never block on a registry fetch.
         companionSchemas: completionProfile
           ? (completionProfile.companions || [])
-            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey }))
+            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
             .filter(Boolean)
           : null,
         linkedProject: linkedProject ? {
@@ -3072,6 +3086,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         };
       }
       if (typedFindingsType && structuredFindings != null && !isIncompleteVisit) {
+        // Primary T&S: treatments_completed is autoFilled/hidden and derived
+        // from products later in this request — a submitted value is a stale
+        // pre-cutover draft the tech has no input to change, and validating
+        // it here could 400 on contradictions the tech can't fix (codex P2
+        // r3). Strip it before validation; derivation re-fills it.
+        if (typedFindingsType === 'tree_shrub' && structuredFindings?.values
+          && typeof structuredFindings.values === 'object') {
+          delete structuredFindings.values.treatments_completed;
+        }
         const findingsValidation = ActivityIndicators.validateTypedFindings({
           type: structuredFindings?.type,
           values: structuredFindings?.values,
@@ -3716,6 +3739,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
       }
+      // The simplified closeout hides the treatments field on PRIMARY T&S
+      // completions — derive the chips from the recorded products (with
+      // catalog rows, loaded and fail-closed above) so the compliance rules,
+      // snapshot, and narrative keep their exact chip vocabulary. ALWAYS
+      // derive on the primary path: the field is autoFilled/hidden there, so
+      // any submitted value is a stale restored draft from before the
+      // cutover (codex P2 r1). COMBINED visits (tree_shrub as a COMPANION
+      // section) are excluded: the completion payload has ONE shared
+      // products list with no per-line attribution, so deriving would pull
+      // lawn-only products into the T&S snapshot (codex P2 r2) — the
+      // companion form renders the treatments dropdown instead and the
+      // tech's selection stands. Mutating the values object in place feeds
+      // the typed report snapshot built later from the same reference.
+      if (typedFindingsType === 'tree_shrub') {
+        treeShrubComplianceValues.treatments_completed = deriveTreeShrubTreatments({
+          products: products || [],
+          productRows: typedProductRows,
+        });
+        // Support-only visits derive EMPTY treatments (no claim) — that is a
+        // no-treatment state, so an application detail like "Pre-emergent
+        // applied: Yes" contradicts it exactly like 'Inspection only' would
+        // (codex P2 r14): the snapshot must not publish an application no
+        // derived treatment or product backs.
+        if (!treeShrubComplianceValues.treatments_completed
+          && String(treeShrubComplianceValues.pre_emergent_applied) === 'Yes') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));
+          return res.status(400).json({
+            error: 'The recorded products contradict the visit detail fields',
+            code: 'typed_findings_invalid',
+            details: ['"Pre-emergent applied: Yes" requires a matching herbicide product — record the product or clear the bed module field'],
+            missing: [],
+          });
+        }
+      }
+      // The cross-field contradiction rules ran on the pre-derivation values —
+      // re-run them so a derived 'Inspection only' can't sit beside an
+      // applied-treatment detail field (e.g. pre-emergent marked Yes with
+      // zero products recorded).
+      {
+        const derivedValidation = ActivityIndicators.validateTypedFindings({
+          type: 'tree_shrub',
+          values: treeShrubComplianceValues,
+          expectedType: 'tree_shrub',
+          enforceRequired: false,
+        });
+        if (!derivedValidation.ok) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));
+          return res.status(400).json({
+            error: 'The recorded products contradict the visit detail fields',
+            code: 'typed_findings_invalid',
+            details: derivedValidation.errors,
+            missing: [],
+          });
+        }
+      }
       const typedCompliance = validateTreeShrubTypedCompliance({
         service: svc,
         serviceDate: serviceDateOnly(svc.scheduled_date),
@@ -3975,11 +4053,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // — on timeout (or error) we fall back to the deterministic recap.
         let effectiveCustomerRecap = customerRecap;
         if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit) {
+          // Season/weather/expectations context — the PRODUCTION recap path
+          // gets the same prompt inputs the preview path does (codex P2
+          // r14): tech-selected products + visit context. Best-effort only.
+          let completionVisitContext = '';
+          try {
+            completionVisitContext = await buildRecapVisitContext({
+              serviceType: svc.service_type,
+              customerId: svc.customer_id,
+            });
+          } catch { /* context is polish — never block completion */ }
+          // The completion payload's products carry productId but no name —
+          // hydrate catalog names or safeProducts drops every entry and the
+          // prompt never sees the applied solutions (codex P2 r15).
+          let recapProducts = Array.isArray(products) ? products : [];
+          try {
+            const missingNameIds = recapProducts
+              .filter((p) => p && !p.name && !p.product_name && p.productId)
+              .map((p) => p.productId);
+            if (missingNameIds.length) {
+              const nameRows = await db('products_catalog')
+                .whereIn('id', missingNameIds)
+                .select('id', 'name');
+              const nameById = new Map(nameRows.map((r) => [String(r.id), r.name]));
+              recapProducts = recapProducts.map((p) => (
+                p && !p.name && !p.product_name && p.productId
+                  ? { ...p, name: nameById.get(String(p.productId)) || null }
+                  : p
+              ));
+            }
+          } catch { /* prompt context is polish — never block completion */ }
           const recapInput = {
             notes: technicianNotes,
             visitOutcome,
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
+            products: recapProducts,
+            visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
             try { return CompletionRecap.sanitizeRecap(CompletionRecap.deterministicRecap(recapInput)) || null; }
@@ -7711,11 +7821,12 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
 router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const { technicianNotes, areasTreated } = req.body || {};
+    const { technicianNotes, areasTreated, products } = req.body || {};
     const result = await PestRecap.draftRecapMessage({
       serviceId: req.params.serviceId,
       technicianNotes,
       areasTreated,
+      products: Array.isArray(products) ? products : [],
       includeCustomerComms: req.body?.includeCustomerComms === true,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
@@ -7763,7 +7874,27 @@ const { dispatchWithFallback } = require('../services/llm/call');
 // unbounded builder is retired.
 const { buildCompletionCommsContext } = require('../services/completion-comms-context');
 
-function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext }) {
+// Tech-chosen solutions for the typed-findings draft prompt — same contract
+// as completion-recap's safeProducts: context only, output rules keep
+// product names out of the customer copy (owner directive 2026-07-21).
+function findingsDraftProductLines(products) {
+  if (!Array.isArray(products)) return [];
+  return products
+    .map((p) => {
+      const name = String(p?.name || p?.product_name || '').trim().slice(0, 80);
+      if (!name) return null;
+      const method = String(p?.applicationMethod || p?.application_method || '').trim().slice(0, 40);
+      const targets = Array.isArray(p?.targets)
+        ? p.targets.map((t) => String(t || '').trim()).filter(Boolean).slice(0, 6)
+        : [];
+      const parts = [method, targets.length ? `targets: ${targets.join(', ')}` : ''].filter(Boolean);
+      return `- ${name}${parts.length ? ` (${parts.join('; ')})` : ''}`;
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [], visitContext = '' }) {
   const fieldLines = (schema.fields || [])
     .map((field) => {
       const value = values?.[field.key];
@@ -7771,6 +7902,7 @@ function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsCon
       return `${field.label}: ${String(value).trim()}`;
     })
     .filter(Boolean);
+  const productLines = findingsDraftProductLines(products);
   return `Write a short customer-facing "recommendations" paragraph (2-4 sentences) for a Waves Pest Control & Lawn Care service report.
 
 Rules:
@@ -7784,7 +7916,9 @@ Service type: ${serviceType || schema.label}
 Findings type: ${schema.label}
 Findings:
 ${fieldLines.length ? fieldLines.join('\n') : '[none recorded]'}
-Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}
+Solutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):
+${productLines.length ? productLines.join('\n') : '[none recorded]'}
+Next steps selected: ${Array.isArray(chips) && chips.length ? chips.join(', ') : '[none]'}${String(visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(visitContext).trim()}` : ''}
 Recent customer communications:
 ${commsContext || '[not provided]'}
 
@@ -8004,6 +8138,7 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     const { structuredFindings, nextStepChips, includeCustomerComms } = req.body || {};
+    const draftProducts = Array.isArray(req.body?.products) ? req.body.products : [];
     const findingsType = structuredFindings?.type;
     if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
       return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
@@ -8043,12 +8178,41 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     const commsContext = commsContextResult.text
       ? `${commsContextResult.promptHint}\n${commsContextResult.text}`
       : '';
+    // T&S derives its treatment chips from the recorded products at
+    // completion — the draft runs BEFORE completion, so derive here too or
+    // the AI writes recommendations blind to what was applied (owner
+    // directive 2026-07-21). Catalog rows are authoritative for the
+    // classification; client-sent names only feed the context lines.
+    const draftValues = { ...(structuredFindings?.values || {}) };
+    if (findingsType === 'tree_shrub' && draftProducts.length) {
+      try {
+        const ids = draftProducts.map((p) => p?.productId).filter(Boolean);
+        const rows = ids.length
+          ? await db('products_catalog').whereIn('id', ids)
+          : [];
+        const derived = deriveTreeShrubTreatments({
+          products: draftProducts.filter((p) => p?.productId),
+          productRows: rows,
+        });
+        if (derived) draftValues.treatments_completed = derived;
+      } catch { /* draft is polish — never block on derivation */ }
+    }
+    // Season/weather/expectations context (owner directive 2026-07-21).
+    let visitContext = '';
+    try {
+      visitContext = await buildRecapVisitContext({
+        serviceType: svc.service_type,
+        customerId: svc.customer_id,
+      });
+    } catch { /* context is polish — never block the draft */ }
     const basePrompt = buildFindingsRecapPrompt({
       schema,
-      values: structuredFindings?.values || {},
+      values: draftValues,
       chips,
       serviceType: svc.service_type,
       commsContext,
+      products: draftProducts,
+      visitContext,
     });
     // Sol first, Opus backup. The validator rejects empty or promissory copy,
     // causing the shared dispatcher to cross providers before returning.
@@ -8059,6 +8223,10 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
         validate: (result) => {
           const draft = String(result.text || '').trim();
           if (!draft) return 'empty';
+          // Product-name echoes fail validation so the dispatcher retries
+          // cross-provider before we give up (audit P2 2026-07-22) — same
+          // contract as the recap/narrative paths.
+          if (CompletionRecap.containsProductName(draft, draftProducts)) return 'trade_name';
           const violations = ActivityIndicators.findBannedCustomerCopy(draft);
           return violations.length ? `banned:${violations.join(',')}` : null;
         },
@@ -8066,6 +8234,10 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     );
     const draft = generated.ok ? String(generated.text || '').trim() : '';
     const violations = draft ? ActivityIndicators.findBannedCustomerCopy(draft) : [];
+    if (draft && CompletionRecap.containsProductName(draft, draftProducts)) {
+      logger.warn(`[dispatch] findings-recap draft echoed a product name for ${req.params.serviceId}`);
+      return res.status(502).json({ error: 'Draft failed the customer-copy quality check — please write the note manually.' });
+    }
     if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
     if (violations.length) {
       logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);

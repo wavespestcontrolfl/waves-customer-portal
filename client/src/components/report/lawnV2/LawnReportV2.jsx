@@ -38,11 +38,11 @@ export const STATUS = {
   stable: { label: 'Stable', color: COLORS.glassNavy },
   balanced: { label: 'Balanced', color: COLORS.glassNavy },
   ideal: { label: 'Ideal', color: COLORS.glassNavy },
-  // Watch/off-target accents render brand navy, not orange — report surfaces
-  // keep one accent family (owner ruling 2026-07-21, uniform across V2 layers).
+  // Navy accents (#2930 owner ruling: one accent family) + one-word labels
+  // (owner 2026-07-21 round 2) — both rulings merged here.
   watch: { label: 'Watch', color: COLORS.glassNavy },
-  needs_attention: { label: 'Needs attention', color: COLORS.red },
-  urgent: { label: 'Needs attention', color: COLORS.red },
+  needs_attention: { label: 'Attention', color: COLORS.red },
+  urgent: { label: 'Urgent', color: COLORS.red },
   too_short: { label: 'A bit short', color: COLORS.glassNavy },
   too_tall: { label: 'A bit tall', color: COLORS.glassNavy },
   low: { label: 'Below target', color: COLORS.glassNavy },
@@ -171,8 +171,12 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
   );
 }
 
+// Watch / Attention / Urgent pills pulse their dot (owner 2026-07-21) so the
+// states that need eyes read as live. Reduced-motion users get a steady dot.
+const PULSE_STATUSES = new Set(['watch', 'needs_attention', 'urgent']);
 export function StatusPill({ status, small = false }) {
   const meta = statusMeta(status);
+  const pulse = PULSE_STATUSES.has(String(status || ''));
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 7,
@@ -180,7 +184,16 @@ export function StatusPill({ status, small = false }) {
       background: CARD, border: `1px solid ${BORDER}`,
       fontFamily: FONTS.heading, fontWeight: 700, fontSize: small ? 12 : 14, color: TEXT,
     }}>
-      <span style={{ width: small ? 8 : 10, height: small ? 8 : 10, borderRadius: 999, background: meta.color, flex: 'none' }} />
+      {pulse ? (
+        <style>{'@keyframes wavesPillPulse{0%,100%{opacity:1}50%{opacity:.25}}@media (prefers-reduced-motion: reduce){.waves-pill-pulse{animation:none !important}}'}</style>
+      ) : null}
+      <span
+        className={pulse ? 'waves-pill-pulse' : undefined}
+        style={{
+          width: small ? 8 : 10, height: small ? 8 : 10, borderRadius: 999, background: meta.color, flex: 'none',
+          ...(pulse ? { animation: 'wavesPillPulse 1.6s ease-in-out infinite' } : {}),
+        }}
+      />
       {meta.label}
     </span>
   );
@@ -252,6 +265,15 @@ export function LawnSnapshotHero({ snapshot = {} }) {
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
           <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What’s driving it</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{rootCause}</div>
+        </div>
+      ) : null}
+
+      {/* What we applied today — the tech-chosen solutions in plain language
+          (owner 2026-07-21, same block as the T&S hero). */}
+      {snapshot.treatmentSummary ? (
+        <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
+          <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
         </div>
       ) : null}
 
@@ -350,7 +372,7 @@ export function LawnPhotoStrip({ photos = [], summary = null }) {
   };
   return (
     <Card>
-      <CardTitle sub={`${print ? 'What' : 'Swipe through what'} your technician documented on site today.`}>Lawn photos</CardTitle>
+      <CardTitle sub="Conditions your technician identified and photographed during today’s inspection — each one is tracked visit to visit as part of your lawn program.">Lawn Health Documentation</CardTitle>
       {pics.length && print ? (
         /* Static grid for PDF/print — no slider/arrows. */
         <div style={{ display: 'grid', gridTemplateColumns: pics.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
@@ -435,7 +457,7 @@ export function VisualDiagnosisCards({ categories = [] }) {
   if (!cats.length) return null;
   return (
     <Card>
-      <CardTitle sub="What our cameras and AI scored from today’s photos. Tap a row for the details.">Photo Diagnosis</CardTitle>
+      <CardTitle sub="Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.">Turf Health Analysis</CardTitle>
       {/* Visual-primary rows: the score ring + bar + status carry the read at a glance;
           the plain-language detail lives in the dropdown. */}
       <div ref={barsRef} style={{ display: 'grid', gap: 8 }}>
@@ -501,7 +523,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
   if (!top.length) return null;
   return (
     <Card>
-      <CardTitle sub="The few things that actually matter from today’s visit.">What we’re paying attention to</CardTitle>
+      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
       <div style={{ display: 'grid', gap: 12 }}>
         {top.map((it, i) => {
           const meta = statusMeta(it.status || 'tracking');

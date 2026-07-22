@@ -36,10 +36,11 @@
  *               Sonnet reads more natural and less overbuilt; high-stakes
  *               messages (cancellations, complaints) escalate to FLAGSHIP at
  *               the call site.                                       → Sonnet 5
- *  VISION     — Image scoring where deterministic output matters more than
- *               raw capability. Sonnet 4.6 because the Opus line removed the
- *               temperature parameter; Sonnet still accepts it so we can pin
- *               Claude to 0.2 to match the Gemini scorer.            → Sonnet 4.6
+ *  VISION     — Image scoring. Opus 4.8 (owner 2026-07-21: photo scoring
+ *               drives customer-facing health scores — best model is the
+ *               live model). Opus rejects `temperature`, so every direct
+ *               vision caller goes through anthropicCreateWithSamplingRetry
+ *               (llm/call.js) which strips it and retries once. → Opus 4.8
  *
  * Cost-aware routing directive (2026-07-16): use the least-expensive model
  * that is reliably strong for the lane, reserve Opus for difficult/high-stakes
@@ -63,7 +64,9 @@ const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
 const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-sonnet-5';
 const FAST      = process.env.MODEL_FAST      || 'claude-sonnet-5';
 const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-5';
-const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
+// Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
+// health scores and report claims — best model is the live model.
+const VISION    = process.env.MODEL_VISION    || 'claude-opus-4-8';
 
 // Automatic deep-review work stays on Opus. Fable is available only through
 // the explicit EXTREME tier so routine verifiers/fact checks cannot silently
@@ -182,7 +185,9 @@ const TEXT_POLICIES = Object.freeze({
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
   }),
   customerCopy: Object.freeze({
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE }),
+    // Owner 2026-07-21: customer-facing recap copy rides the flagship —
+    // "sonnet is not cutting it" on the report/recap surfaces.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   contentDraft: Object.freeze({

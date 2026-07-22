@@ -7,6 +7,7 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
@@ -447,15 +448,10 @@ function formatCustomerPhone(phone) {
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
 // The displayed arrival window is ALWAYS window_start + 2 hours — window_end
 // is the internal job block and never renders on customer surfaces.
-// "Every 6 Weeks Lawn Care Service" -> "Lawn Care": the next-service cell names
-// the service, not the billing cadence (owner 2026-07-09).
+// EXACT service name, cadence included (owner 2026-07-21 — reversal of the
+// 2026-07-09 strip applies to every report surface, next-service cell too).
 function nextServiceName(serviceType) {
-  const cleaned = String(serviceType || '')
-    .replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '')
-    .replace(/^every\s+\d+\s+(weeks?|months?|days?)\s+/i, '')
-    .replace(/\s+service$/i, '')
-    .trim();
-  return cleaned || null;
+  return String(serviceType || '').trim() || null;
 }
 
 function formatNextAppointmentLabel(nextAppointment) {
@@ -504,7 +500,18 @@ export function cleanVisitSummary(value) {
 }
 
 function visitSummaryCopy(data = {}) {
-  return cleanVisitSummary(data.summary) || 'Your routine service is complete.';
+  const cleaned = cleanVisitSummary(data.summary);
+  if (cleaned) return cleaned;
+  // V2 reports carry full diagnostics below — the summary line should frame
+  // the professional record, not shrug (owner 2026-07-21). Treatment wording
+  // only when products were actually applied: an inspection-only visit must
+  // not claim treatment above a snapshot saying otherwise (codex P2).
+  if (data.reportV2) {
+    return (data.applications || []).length
+      ? 'Today’s inspection and treatment are complete. The diagnostics, findings, and treatment record below document the condition of your property and the work performed on this visit.'
+      : 'Today’s inspection is complete. The diagnostics and findings below document the condition of your property and what we observed on this visit.';
+  }
+  return 'Your routine service is complete.';
 }
 
 export function customerInteractionCopy(value) {
@@ -595,6 +602,26 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
   }, null)?.target || null;
 }
 
+// "What Waves did today" cell: the actual work, not "service areas were
+// completed today" (owner 2026-07-21 — the customer knows it completed; the
+// cell must say what happened: treatments applied, areas covered, photos
+// documented). Shared by every report line.
+export function visitWorkSummary(data = {}, fallback = '') {
+  const appCount = (Array.isArray(data.applications) ? data.applications : [])
+    .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name).length;
+  const photoCount = [data.photos, data.completionPhotos, data.reportV2?.photos]
+    .map((list) => (Array.isArray(list) ? list.length : 0))
+    .reduce((max, n) => Math.max(max, n), 0);
+  const coverage = normalizeServiceCoverage(data);
+  const completed = (coverage?.items || []).filter((item) => isCompletedCoverageStatus(item.status));
+  const parts = [
+    appCount ? `${appCount} product${appCount === 1 ? '' : 's'} applied` : null,
+    completed.length ? `${completed.length} area${completed.length === 1 ? '' : 's'} serviced` : null,
+    photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : fallback;
+}
+
 export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -674,6 +701,45 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
       result: context.pressureTrend.customerSummary || 'Activity has decreased since the last visit.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Protective service maintained today.',
       detail: 'Today we maintained the protective treatment plan for this property.',
+    };
+  }
+
+  // Re-service visits are follow-ups on reported activity — "routine
+  // service completed" undersells the entire point of the visit (owner
+  // dry-run review 2026-07-21). Name what the visit was.
+  if (/re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+    return {
+      heading: 'we came back and took care of it!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Reported activity areas were re-treated today.',
+      detail: [
+        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
+        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
+        'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+      ].filter(Boolean).join(' '),
+    };
+  }
+
+  // V2 reports (lawn/T&S) carry an honest snapshot status — the generic
+  // "No high-priority issues were noted." line must not sit two cards above
+  // a needs-attention gauge saying the opposite (found in the David Thomas
+  // T&S dry-run). Use the snapshot's own peace-of-mind line instead.
+  const v2Snapshot = data.reportV2?.snapshot;
+  if (v2Snapshot && ['needs_attention', 'watch', 'urgent'].includes(String(v2Snapshot.status || ''))) {
+    return {
+      heading: 'your service is complete!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: v2Snapshot.peaceOfMind
+        || v2Snapshot.statusHeadline
+        || 'Service completed — we noted items to keep an eye on; details are below.',
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
+      detail: [
+        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
+        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
+      ].filter(Boolean).join(' '),
     };
   }
 
@@ -771,6 +837,21 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
     return 'Lawn treatment application';
   }
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
+  if (serviceLine === 'tree_shrub') {
+    // Classify from name + category + ACTIVE ingredient — blank/Uncategorized
+    // catalog rows (Delta Dust/deltamethrin, Elector PSP/spinosad, Bifen XTS)
+    // classify by active elsewhere, and the card must agree with the hero
+    // treatment claim (codex P2 r14).
+    const active = String(app.product?.active_ingredient || '').toLowerCase();
+    const hay = `${product} ${category} ${active}`;
+    if (/surfactant|adjuvant|wetting/.test(hay)) return 'Spray coverage aid';
+    if (method.includes('drench')) return 'Systemic root-zone treatment';
+    if (method.includes('inject')) return 'Trunk injection';
+    if (/fung|azoxy|propiconazole|thiophanate|chlorothalonil|phosphite|phosphonate|copper/.test(hay)) return 'Disease control application';
+    if (/insect|mitic|bifen\w*|\w*thrin\b|pyrethroid|spinosad|spinetoram|indoxacarb|imidacloprid|dinotefuran|clothianidin|thiamethoxam|abamectin|spirotetramat|pyriproxyfen|fipronil|acephate|\bigr\b/.test(hay)) return 'Insect & mite control';
+    if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient/.test(hay)) return 'Plant nutrition application';
+    return 'Plant health treatment';
+  }
   if (serviceLine === 'termite' || serviceLine === 'rodent') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
@@ -794,6 +875,19 @@ function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   if (purpose === 'Targeted ant bait') return 'Placed for light ant activity at the documented active zone.';
   if (purpose === 'Targeted treatment') return 'Applied only where activity or conditions called for treatment.';
   if (purpose === 'Mosquito pressure reduction') return 'Applied to reduce resting adult mosquito pressure around target areas.';
+  const targets = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean);
+  const targetText = targets.length ? targets.join(', ').toLowerCase() : '';
+  if (purpose === 'Systemic root-zone treatment') {
+    return `Applied at the root zone so the active ingredient moves up through the plant's vascular system${targetText ? ` to control the ${targetText} activity documented today` : ''}.`;
+  }
+  if (purpose === 'Insect & mite control') {
+    return `Applied to the affected foliage and stems${targetText ? ` to control the ${targetText} activity documented today` : ''}.`;
+  }
+  if (purpose === 'Trunk injection') return 'Delivered directly into the trunk so the treatment moves with the tree’s own vascular flow.';
+  if (purpose === 'Disease control application') return 'Applied to protect foliage where disease-like signals or seasonal conditions called for it.';
+  if (purpose === 'Plant nutrition application') return 'Applied to feed the documented plants — supporting color, density, root development, and new growth within the plant health program.';
+  if (purpose === 'Spray coverage aid') return 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.';
+  if (purpose === 'Plant health treatment') return 'Applied as part of the documented plant health program for this visit.';
   return 'Application recorded for this visit.';
 }
 
@@ -815,6 +909,22 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
 
   if (serviceLine === 'lawn') {
     details.push(`${productName} was documented as part of today’s lawn treatment plan. The treatment is interpreted against turf density, weed pressure, fungus signal, color health, thatch, irrigation context, and recent lawn history so the next visit can track response instead of treating each visit as isolated.`);
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  if (serviceLine === 'tree_shrub') {
+    const isSurfactant = /surfactant|adjuvant|wetting/i.test(`${productName} ${active}`);
+    const isSystemic = method.includes('drench') || method.includes('inject')
+      || /dinotefuran|imidacloprid|spirotetramat|systemic/i.test(active);
+    if (isSurfactant) {
+      details.push(`${productName} is a spray adjuvant, not a pesticide. It lowers the surface tension of the spray so the treatment spreads evenly and holds on waxy leaves, stems, and the protective coatings of pests like scale and mealybugs — improving the coverage and performance of the products it is mixed with.`);
+    } else if (isSystemic) {
+      details.push(`${productName} is a systemic treatment${active ? ` (active ingredient: ${active})` : ''}. It is absorbed into the plant and moved through its vascular system, so sap-feeding pests such as scale, mealybugs, and whiteflies take it in as they feed — including pests concealed under waxy coverings or tucked into branch crotches where contact sprays cannot reach. Systemic protection builds over days to weeks and keeps working between visits.`);
+    } else {
+      details.push(`${productName} was applied to the affected plants${active ? ` (active ingredient: ${active})` : ''} per its label directions, targeting the documented activity while minimizing impact on the surrounding landscape.`);
+    }
+    details.push('The application is tracked against this property’s plant inventory, photo history, and prior treatments so the next visit measures response rather than starting over.');
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1497,7 +1607,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
               <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
-              <figcaption>{photo.isBest ? 'Best view' : formatEnumLabel(photo.type || 'Turf photo')}</figcaption>
+              <figcaption>{formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}
         </div>
@@ -1716,13 +1826,9 @@ function useReadinessNow(context, mode) {
 
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
-  const completionTime = getReportCompletionTime(data);
-  const completionDisplayTime = formatTimelineTime(completionTime);
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const smartStatus = smartStatusSummary(data, mode, nowMs);
-  const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
-  const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   // ALL-CAPS records (older customer rows) title-case for display, same rule
   // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
   const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
@@ -1788,7 +1894,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <div className="service-status-grid">
           <div className="sr-cell">
             <div className="sr-cell-label">What Waves did today</div>
-            <div className="sr-cell-value">{smartStatus.completedLine}</div>
+            <div className="sr-cell-value">{visitWorkSummary(data, smartStatus.completedLine)}</div>
           </div>
           {/* Gate on: the photo card below carries the tech identity, so the
               plain-text cell would duplicate the name inside the same card. */}
@@ -1798,10 +1904,9 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               <div className="sr-cell-value">{technician}</div>
             </div>
           )}
-          <div className="sr-cell">
-            <div className="sr-cell-label">Completion status</div>
-            <div className="sr-cell-value">{completionStatus}</div>
-          </div>
+          {/* No "Completion status: Completed" cell — the status badge above
+              already says it, and the customer is reading a completed report
+              (owner 2026-07-21). */}
           {nextAppointmentLabel && (
             <div className="sr-cell">
               <div className="sr-cell-label">Next service</div>
@@ -2259,7 +2364,9 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
-      <h2>{result.headline}</h2>
+      {/* Strip a trailing period — headlines aren't sentences, and snapshots
+          persisted before the 2026-07-21 template fix still carry one. */}
+      <h2>{String(result.headline).replace(/\.$/, '')}</h2>
       {result.body && <p className="ai-summary-body">{result.body}</p>}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't. */}
@@ -2669,6 +2776,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                       <p>{active}</p>
                     </div>
                   )}
+                  {epa && (
+                    <div>
+                      <div className="sr-cell-label">EPA Reg. No.</div>
+                      <p>{epa}</p>
+                    </div>
+                  )}
                 </div>
                 <div className="product-why">
                   <div className="sr-cell-label">Why used today</div>
@@ -2678,6 +2791,16 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                       : why}
                   </p>
                 </div>
+                {/* Label-derived safety protocol, visible on the card face —
+                    not buried in Details (owner 2026-07-21). Sourced from the
+                    approved per-product label facts only. */}
+                {(precautionSummary || reentrySummary) && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">Safety &amp; re-entry</div>
+                    {precautionSummary && <p>{precautionSummary}</p>}
+                    {reentrySummary && <p>{reentrySummary}</p>}
+                  </div>
+                )}
                 {productSummary && (
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
@@ -2698,8 +2821,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     {applicationTechnicalExplanation(app, data.serviceLine).map((detail) => (
                       <p key={detail}>{detail}</p>
                     ))}
-                    {precautionSummary && <p>{precautionSummary}</p>}
-                    {reentrySummary && <p>{reentrySummary}</p>}
                     {watering && (
                       <div className="product-watering-guidance">
                         <div className="sr-cell-label">Watering after this application</div>
@@ -3500,15 +3621,16 @@ function ServiceCoverageMap({
 }
 
 function ServiceCoverageSummary({ summary = {} }) {
+  // Zero-count chips are noise ("Inspected 0 · Inaccessible 0 · Needs
+  // Attention 0") — show only what actually happened (owner 2026-07-21).
   const rows = [
     ['Completed', summary.completedCount || 0, 'green'],
     ['Inspected', summary.inspectedCount || 0, 'blue'],
     ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
     ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
-    // only when present — the usual four-chip layout is unchanged for
-    // reports with nothing skipped
-    ...(summary.skippedCount ? [['Skipped', summary.skippedCount, 'orange']] : []),
-  ];
+    ['Skipped', summary.skippedCount || 0, 'orange'],
+  ].filter(([, value]) => value > 0);
+  if (!rows.length) return null;
   return (
     <div className="service-coverage-summary" aria-label="Service coverage summary">
       {rows.map(([label, value, tone]) => (
@@ -3659,33 +3781,14 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 // server stored the composited snapshot (imagery attribution is baked into
 // the image). When present it replaces the generic schematic drawing as the
 // report's coverage map.
-function TracedTreatmentZoneMap({ traced }) {
-  if (!traced?.snapshotUrl) return null;
-  const caption = [
-    traced.label || 'Treated perimeter traced on-site by your technician.',
-    traced.linearFt ? `${traced.linearFt} linear ft treated.` : null,
-  ].filter(Boolean).join(' ');
-  return (
-    <div className="service-coverage-map-panel">
-      <div className="service-coverage-map traced-zone-map">
-        {/* Eager on purpose: the PDF renderer prints without scrolling, so a
-            native-lazy image below the fold could render blank in PDFs. */}
-        <img
-          className="traced-zone-image"
-          src={traced.snapshotUrl}
-          alt="Satellite photo of the property with the treated perimeter highlighted"
-        />
-      </div>
-      <p className="traced-zone-caption">{caption}</p>
-    </div>
-  );
-}
+
 
 function ServiceCoverageCard({
   coverage,
   evidenceLevel,
   mapBackgroundUrl,
   mapAttribution,
+  live = true,
   tracedMap = null,
   applications = [],
 }) {
@@ -3759,13 +3862,15 @@ function ServiceCoverageCard({
         )}
       </div>
 
-      {showSummary && <ServiceCoverageSummary summary={coverage.summary} />}
+      {/* Traced-map reports keep it simple: just where we sprayed — no stat
+          chips above the trace (owner 2026-07-21). */}
+      {showSummary && !showTraced && <ServiceCoverageSummary summary={coverage.summary} />}
 
       {showMap || showList ? (
         <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
           {showMap ? (
             showTraced ? (
-              <TracedTreatmentZoneMap traced={tracedMap} />
+              <TracedTreatmentZoneMap traced={tracedMap} live={live} />
             ) : (
               <ServiceCoverageMap
                 coverage={coverage}
@@ -4794,12 +4899,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // A technician-traced satellite map overrides every hide: it is the real
   // photo of THIS property's treated perimeter, which beats any generic
   // diagram (that replacement is the Treatment Zone Mapper's whole point).
-  const hideCoverageCard = (data.serviceLine === 'lawn'
-    || /tree|shrub/.test(String(data.serviceLine || ''))
-    || Boolean(data.pestReportV2)
-    // Mosquito V2's habitat diagram replaces the lettered map the same way.
-    || Boolean(data.mosquitoReportV2))
-    && !data.treatmentMap?.traced?.snapshotUrl;
+  // Pest V2 reports NEVER render the Service Coverage card (owner
+  // 2026-07-21): the protection hero carries the traced spray map, the
+  // narrative names the areas, and Products Applied carries the products —
+  // the lettered A-E list + "Completed 5" chips read as duplication.
+  const hideCoverageCard = Boolean(data.pestReportV2)
+    || ((data.serviceLine === 'lawn'
+      || /tree|shrub/.test(String(data.serviceLine || ''))
+      // Mosquito V2's habitat diagram replaces the lettered map the same way.
+      || Boolean(data.mosquitoReportV2))
+      && !data.treatmentMap?.traced?.snapshotUrl);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
@@ -7921,7 +8030,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             pest-pressure chart + products + photos stay below as supporting detail. */}
         {data.pestReportV2 && (
           <div id="visit-summary">
-            <PestReportV2Section data={data.pestReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+            <PestReportV2Section
+              data={data.pestReportV2}
+              print={mode === 'pdf' || mode === 'static'}
+              token={token}
+              mode={mode}
+              tracedMap={data.treatmentMap?.traced || null}
+            />
           </div>
         )}
 
@@ -8027,13 +8142,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.treatmentMap?.traced || null}
+              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              live={mode === 'live'}
               applications={data.applications || []}
             />
           </div>
         )}
 
-        <TypedFindingsCard typedReport={data.typedReport} />
+        {/* Pest V2 reports: the dashboard already tells the findings story —
+            the tile card duplicated it ("What we found: German cockroaches")
+            right below (owner 2026-07-21). Typed compliance reports (termite,
+            WDO, rodent...) keep the card — those tiles ARE the record. */}
+        {!data.pestReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
 
         <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
 
@@ -8140,7 +8260,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.treatmentMap?.traced || null}
+              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              live={mode === 'live'}
               applications={data.applications || []}
             />
           </div>

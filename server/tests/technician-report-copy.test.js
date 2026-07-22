@@ -215,7 +215,8 @@ describe('typed snapshot — technician report body in the generic tail composit
       serviceLabel: 'Pest Control Re-Service',
       technicianReportBody: AI_BODY,
     });
-    expect(snapshot.todaysResult.headline).toBe('Pest Control Re-Service completed today.');
+    // No trailing period — headlines aren't sentences (owner 2026-07-21).
+    expect(snapshot.todaysResult.headline).toBe('Pest Control Re-Service completed today');
     expect(snapshot.todaysResult.body).toBe(`${AI_BODY} ${chipSentence}`);
     expect(snapshot.todaysResult.bodySource).toBe('technician_report');
     expect(snapshot.summaryTemplateVersion).toBe(3);

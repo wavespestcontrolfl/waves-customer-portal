@@ -124,6 +124,9 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
       values,
       expectedType: type,
       enforceRequired: true,
+      // Companion context: extras the server can't derive there (e.g. T&S
+      // treatments on a shared products list) are required inputs.
+      companion: true,
     });
     if (!findingsValidation.ok) {
       return reject(

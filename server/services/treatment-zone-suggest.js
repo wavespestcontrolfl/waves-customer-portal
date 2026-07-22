@@ -13,6 +13,7 @@
  */
 const MODELS = require('../config/models');
 const logger = require('./logger');
+const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* optional in some test envs */ }
@@ -104,7 +105,7 @@ async function claudeSuggest(base64Png) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await anthropicCreateWithSamplingRetry(anthropic, {
       model: MODELS.VISION,
       max_tokens: 900,
       temperature: 0.1,

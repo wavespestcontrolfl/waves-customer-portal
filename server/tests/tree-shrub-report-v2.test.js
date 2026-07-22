@@ -11,7 +11,74 @@ const { buildTreeShrubInsightCards } = require('../services/service-report/tree-
 const { buildTreeShrubReportV2 } = require('../services/service-report/tree-shrub-report-v2');
 
 // Spec example scores: Foliage 84, Color 76, Pest 58 (Watch), Disease 88 (Strong),
-// Water 72 — overall "Healthy — monitoring light pest pressure".
+const { buildTreatmentSummary } = require('../services/service-report/treatment-summary');
+const { buildTreatmentNarrativePrompt, validateNarrative } = require('../services/service-report/treatment-narrative');
+
+describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
+  const PRODUCTS = [
+    { name: 'Safari 20 SG', kind: 'systemic', activeIngredient: 'Dinotefuran 20%', method: 'soil_drench', targets: ['Scale', 'Mealybugs'], whatItDoes: 'protects the plants from foliage-feeding pests' },
+    { name: 'LESCO 90/10 Nonionic Surfactant', kind: 'other', activeIngredient: 'Nonionic surfactant', method: 'foliar_spray', targets: [] },
+  ];
+
+  test('prompt demands why/what/benefit grounded in findings and products', () => {
+    const prompt = buildTreatmentNarrativePrompt({
+      serviceLine: 'tree_shrub',
+      products: PRODUCTS,
+      findingsText: 'Scale and mealybug activity on the arboricola and entry palms.',
+      photoSummary: 'White cottony buildup on stems.',
+    });
+    expect(prompt).toContain('WHY each product was chosen');
+    expect(prompt).toContain('WHAT each product does');
+    expect(prompt).toContain('BENEFIT');
+    // Actives-only identifiers — the model never sees the trade name
+    // (codex P2 2026-07-22).
+    expect(prompt).toContain('dinotefuran — systemic; method: soil drench; targets: Scale, Mealybugs');
+    expect(prompt).not.toContain('Safari');
+    expect(prompt).toContain('Scale and mealybug activity on the arboricola');
+    expect(prompt).toContain('Do not invent findings');
+    expect(prompt).toContain('NEVER include application rates');
+  });
+
+  test('validator rejects over-claims, rates, and "chemical"; accepts grounded copy', () => {
+    expect(validateNarrative('This treatment is completely safe and guaranteed.')).toBeTruthy();
+    expect(validateNarrative('We applied 2 oz of product to the beds.')).toBeTruthy();
+    expect(validateNarrative('These chemicals knock down the pests.')).toBeTruthy();
+    expect(validateNarrative('')).toBe('empty');
+    expect(validateNarrative(
+      'A dinotefuran soil drench is absorbed by the roots and carried through the plant, so the scale and mealybugs feeding on the stems take it in over the coming weeks. You should see the cottony buildup dry up as new growth comes in.',
+    )).toBe(null);
+    // Trade-name echoes and confirmed-diagnosis terms fail validation.
+    expect(validateNarrative('Safari was applied as a soil drench today.', ['Safari 20 SG'])).toBe('trade_name');
+    expect(validateNarrative('We treated the scale infestation on the palms.')).toBe('forbidden_copy');
+  });
+});
+
+describe('buildTreatmentSummary (owner 2026-07-21)', () => {
+  test('names products with methods and targets; surfactant becomes coverage copy', () => {
+    const out = buildTreatmentSummary({ products: [
+      { name: 'Safari 20 SG', kind: 'systemic', activeIngredient: 'Dinotefuran 20%', targets: ['Scale', 'Mealybugs'], method: 'soil_drench' },
+      { name: 'Kontos Insecticide/Miticide', kind: 'insecticide', activeIngredient: 'Spirotetramat', targets: ['Scale', 'Mites'], method: 'foliar_spray' },
+      { name: 'LESCO 90/10 Nonionic Surfactant', kind: 'other', targets: [], method: 'foliar_spray' },
+    ] });
+    // Actives, not brand names (owner 2026-07-21) — brands live on the cards.
+    expect(out).toContain('dinotefuran (soil drench)');
+    expect(out).not.toContain('Safari');
+    expect(out).toContain('scale, mealybugs and mites');
+    expect(out).toContain('spirotetramat (foliar spray)');
+    expect(out).toContain('surfactant added');
+    expect(out).toContain('systemic products are absorbed');
+    // Surfactant is coverage copy, never a listed treatment.
+    expect(out.indexOf('LESCO')).toBe(-1);
+  });
+
+  test('surfactant-only visits make no claim; no products → null', () => {
+    expect(buildTreatmentSummary({ products: [{ name: 'LESCO 90/10 Nonionic Surfactant', kind: 'other', targets: [] }] })).toBe(null);
+    expect(buildTreatmentSummary(null)).toBe(null);
+  });
+});
+
+// Water 72 — overall "Healthy — monitoring pest pressure" (no severity words
+// in ISSUE_TOPIC — the status prefix carries severity).
 function assessment(overrides = {}) {
   return {
     assessmentDate: '2026-06-23',
@@ -149,7 +216,7 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
   it('builds the snapshot headline from the most severe insight (spec example)', () => {
     const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment() });
     expect(v2).toBeTruthy();
-    expect(v2.snapshot.statusHeadline).toBe('Healthy — monitoring light pest pressure');
+    expect(v2.snapshot.statusHeadline).toBe('Healthy — monitoring pest pressure');
     expect(v2.snapshot.status).toBe('healthy');
     expect(v2.diagnosis).toHaveLength(5);
     expect(v2.snapshot.peaceOfMind).toMatch(/No urgent plant decline/);

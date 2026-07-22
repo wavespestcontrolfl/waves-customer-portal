@@ -137,7 +137,17 @@ export default function ServiceRecapModal({
     try {
       const data = await request(`${base}/draft`, {
         method: 'POST',
-        body: JSON.stringify({ technicianNotes: note, includeCustomerComms: includeComms }),
+        body: JSON.stringify({
+          technicianNotes: note,
+          // Tech-chosen solutions feed the AI recap prompt (owner directive
+          // 2026-07-21) — context only, the prompt keeps product names out
+          // of the customer copy.
+          products: [...selected]
+            .map((id) => productById.get(id))
+            .filter(Boolean)
+            .map((p) => ({ name: p.name, product_category: p.category })),
+          includeCustomerComms: includeComms,
+        }),
       });
       if (data?.recap) setMessage(data.recap);
     } catch (err) {
@@ -145,7 +155,7 @@ export default function ServiceRecapModal({
     } finally {
       setDrafting(false);
     }
-  }, [base, note, includeComms, request]);
+  }, [base, note, includeComms, request, selected, productById]);
 
   const handleSubmit = useCallback(async () => {
     if (submitInFlight.current) return;

@@ -125,7 +125,17 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null,
   const clientRatingQuestion = canCaptureClientRating
     ? resolveClientRatingQuestion(effectiveConfig, serviceRecord && serviceRecord.service_type)
     : null;
-  const submittedClientRating = hasClientRating ? Number(serviceRecord.client_pest_rating) : null;
+  // submittedClientRating drives the report's "Thanks — your input helps us
+  // calibrate" copy — it must reflect only a rating the CUSTOMER submitted.
+  // Tech-entered ratings (client_pest_rating_source = 'technician', set at
+  // closeout) still feed the score but must not thank the customer for
+  // input they never gave (owner 2026-07-21). Missing source column or
+  // value defaults to customer — the customer POST predates the source
+  // stamp.
+  const ratingSource = String((serviceRecord && serviceRecord.client_pest_rating_source) || 'customer').toLowerCase();
+  const submittedClientRating = hasClientRating && ratingSource === 'customer'
+    ? Number(serviceRecord.client_pest_rating)
+    : null;
 
   const history = shapeHistory(historyRows);
   const cadence = detectCadenceFromHistory(history);

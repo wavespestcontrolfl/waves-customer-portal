@@ -14,6 +14,7 @@
 
 import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -111,7 +112,8 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null }) {
+  const tracedLive = mode === 'live';
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload (the
@@ -160,6 +162,15 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
+      ) : null}
+      {/* Where we sprayed — the tech-traced application, combined into the
+          status card so status + narrative + map read as one story
+          (owner 2026-07-21). */}
+      {tracedMap ? (
+        <div style={{ marginTop: 14 }}>
+          <div data-gt="eyebrow" style={eyebrow}>Where we sprayed</div>
+          <TracedTreatmentZoneMap traced={tracedMap} live={tracedLive} />
+        </div>
       ) : null}
     </section>
   );
@@ -334,6 +345,16 @@ export function PestProtectionMap({ defense, print = false }) {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
         }
+        /* Treatment mist (owner 2026-07-21): soft puffs drift outward from the
+           treated band and dissolve — the spray, visualized. Perimeter-treated
+           visits only; print/reduced-motion render nothing (opacity stays 0). */
+        @keyframes pestMistDrift {
+          0% { opacity: 0; transform: translate(0, 0) scale(0.5); }
+          20% { opacity: 0.45; }
+          100% { opacity: 0; transform: translate(var(--mist-dx, 14px), var(--mist-dy, -8px)) scale(1.7); }
+        }
+        .pest-mist circle { opacity: 0; transform-box: fill-box; transform-origin: center; }
+        .pest-live .pest-mist circle { animation: pestMistDrift 4.6s ease-out infinite; animation-delay: inherit; }
         /* Awaiting scroll-into-view (live only): diagram internals hold hidden so
            the entrance plays from nothing when the customer reaches it. The card
            header stays visible — the glass card reveal (threshold .06) fires first,
@@ -353,7 +374,7 @@ export function PestProtectionMap({ defense, print = false }) {
           .pest-live .pest-ring, .pest-live .pest-seal-glow, .pest-live .pest-node .pest-node-dot,
           .pest-live .pest-node .pest-node-halo, .pest-live .pest-node-pulse, .pest-live .pest-node text,
           .pest-live .pest-seal-pulse, .pest-live .pest-shimmer, .pest-live .pest-ring-field--breathe,
-          .pest-live .pest-legend-row { animation: none !important; }
+          .pest-live .pest-legend-row, .pest-live .pest-mist circle { animation: none !important; }
           /* printing before the map scrolled into view must not print it blank */
           .pest-await .pest-seal-glow, .pest-await .pest-ring-field,
           .pest-await .pest-node, .pest-await .pest-legend-row { opacity: 1 !important; }
@@ -450,6 +471,30 @@ export function PestProtectionMap({ defense, print = false }) {
               stroke={`url(#pestRing-${gradId})`} strokeWidth="3"
               className="pest-seal-pulse" style={{ opacity: 0 }}
             />
+          ) : null}
+
+          {/* treatment mist (owner 2026-07-21): soft puffs rise off the treated
+              band and dissolve outward — live perimeter-treated visits only,
+              settles at opacity 0 so static/PDF frames never show it */}
+          {animate && perimeterActive ? (
+            <g className="pest-mist" aria-hidden="true">
+              {[
+                { cx: 254, cy: 144, r: 6, dx: 15, dy: 5, d: 0.4 },
+                { cx: 186, cy: 188, r: 5, dx: 4, dy: 15, d: 1.6 },
+                { cx: 83, cy: 165, r: 7, dx: -12, dy: 10, d: 2.5 },
+                { cx: 62, cy: 108, r: 5, dx: -16, dy: -3, d: 0.9 },
+                { cx: 110, cy: 59, r: 6, dx: -8, dy: -14, d: 3.3 },
+                { cx: 210, cy: 59, r: 5, dx: 8, dy: -14, d: 2.0 },
+                { cx: 257, cy: 102, r: 6, dx: 15, dy: -4, d: 4.0 },
+              ].map((p, i) => (
+                <circle
+                  key={i}
+                  cx={p.cx} cy={p.cy} r={p.r}
+                  fill="#7CC7F0" fillOpacity="0.5"
+                  style={{ '--mist-dx': `${p.dx}px`, '--mist-dy': `${p.dy}px`, animationDelay: `${p.d}s` }}
+                />
+              ))}
+            </g>
           ) : null}
 
           {/* slow specular shimmer sweeping across the rings (live only) */}

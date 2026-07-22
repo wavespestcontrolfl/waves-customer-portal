@@ -763,53 +763,57 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['palm', 'shrub', 'bed', 'disease', 'pest_activity', 'treatment_area', 'before', 'after', 'other'],
     findingsFields: [
-      { key: 'plant_groups', label: 'Plant groups serviced', type: 'chips', section: 'Service scope', options: [
+      { key: 'plant_groups', label: 'Plant groups serviced', type: 'multi_select', section: 'Service scope', options: [
         'Palms', 'Shrubs', 'Ornamentals', 'Hedges', 'Small trees',
         'Flowering plants', 'Groundcover beds', 'Other',
       ] },
       { key: 'landscape_condition', label: 'Overall landscape condition', type: 'select', section: 'Service scope', options: [
         'Excellent', 'Good', 'Fair', 'Poor', 'Declining', 'Recovering',
       ] },
-      { key: 'observed_conditions', label: 'Observed plant conditions', type: 'chips', section: 'Observed conditions', options: [
+      { key: 'observed_conditions', label: 'Observed plant conditions', type: 'multi_select', section: 'Observed conditions', detail: true, options: [
         'Healthy / new growth', 'Yellowing / chlorosis', 'Leaf spot', 'Scale',
         'Mealybug', 'Aphids', 'Whitefly', 'Mites', 'Caterpillar damage',
         'Sooty mold', 'Fungal pressure', 'Nutrient deficiency', 'Drought stress',
         'Overwatering stress', 'Pruning stress', 'Freeze / cold damage',
         'Salt / wind stress', 'No major issues observed',
       ] },
-      { key: 'treatments_completed', label: 'Treatment completed', type: 'chips', section: 'Treatments', options: [
+      // Derived from the products applied at completion (owner directive
+      // 2026-07-21 — "just add solutions used"): the tech never fills this
+      // by hand; deriveTreeShrubTreatments maps product categories to these
+      // exact chip strings, which the compliance gates and narrative key off.
+      { key: 'treatments_completed', label: 'Treatment completed', type: 'multi_select', section: 'Treatments', autoFilled: true, options: [
         'Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment',
         'Disease / fungicide treatment', 'Horticultural oil', 'Soil drench',
         'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
         'Soil amendment / acidifier', 'Inspection only',
       ] },
-      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm module' },
-      { key: 'palm_condition', label: 'Palm condition', type: 'select', section: 'Palm module', options: ['Good', 'Fair', 'Poor', 'Declining'] },
-      { key: 'palm_nutrient_stress', label: 'Palm nutrient stress', type: 'select', section: 'Palm module', options: ['Yes', 'No'] },
-      { key: 'spear_leaf_condition', label: 'Spear leaf condition', type: 'select', section: 'Palm module', options: ['Firm', 'Soft', 'Pulling', 'Not checked'] },
-      { key: 'canopy_density', label: 'Canopy density', type: 'select', section: 'Palm module', options: ['Full', 'Moderate', 'Thin', 'Declining'] },
-      { key: 'palm_trunk_concern', label: 'Trunk concern', type: 'select', section: 'Palm module', options: ['Yes', 'No'] },
-      { key: 'ganoderma_conk_observed', label: 'Visible Ganoderma conk', type: 'select', section: 'Palm module', options: ['Yes', 'No'] },
-      { key: 'injection_recommended', label: 'Injection recommended', type: 'select', section: 'Palm module', options: ['Yes', 'No'] },
-      { key: 'pest_pressure', label: 'Pest pressure', type: 'select', section: 'Shrub & ornamental module', options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Shrub & ornamental module', options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'deficiency_symptoms', label: 'Deficiency symptoms', type: 'select', section: 'Shrub & ornamental module', options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'new_growth_present', label: 'New growth present', type: 'select', section: 'Shrub & ornamental module', options: ['Yes', 'No'] },
-      { key: 'pruning_issue_observed', label: 'Pruning issue observed', type: 'select', section: 'Shrub & ornamental module', options: ['Yes', 'No'] },
-      { key: 'irrigation_issue_observed', label: 'Irrigation issue observed', type: 'select', section: 'Shrub & ornamental module', options: ['Yes', 'No'] },
-      { key: 'bed_weed_pressure', label: 'Bed weeds present', type: 'select', section: 'Bed & pre-emergent module', options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', options: ['Yes', 'No'] },
-      { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', options: ['Yes', 'No'] },
-      { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', placeholder: 'Front bed near driveway…' },
+      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm module', detail: true },
+      { key: 'palm_condition', label: 'Palm condition', type: 'select', section: 'Palm module', detail: true, options: ['Good', 'Fair', 'Poor', 'Declining'] },
+      { key: 'palm_nutrient_stress', label: 'Palm nutrient stress', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
+      { key: 'spear_leaf_condition', label: 'Spear leaf condition', type: 'select', section: 'Palm module', detail: true, options: ['Firm', 'Soft', 'Pulling', 'Not checked'] },
+      { key: 'canopy_density', label: 'Canopy density', type: 'select', section: 'Palm module', detail: true, options: ['Full', 'Moderate', 'Thin', 'Declining'] },
+      { key: 'palm_trunk_concern', label: 'Trunk concern', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
+      { key: 'ganoderma_conk_observed', label: 'Visible Ganoderma conk', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
+      { key: 'injection_recommended', label: 'Injection recommended', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
+      { key: 'pest_pressure', label: 'Pest pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'deficiency_symptoms', label: 'Deficiency symptoms', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'new_growth_present', label: 'New growth present', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
+      { key: 'pruning_issue_observed', label: 'Pruning issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
+      { key: 'irrigation_issue_observed', label: 'Irrigation issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
+      { key: 'bed_weed_pressure', label: 'Bed weeds present', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['Yes', 'No'] },
+      { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['Yes', 'No'] },
+      { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', detail: true, placeholder: 'Front bed near driveway…' },
       // Ported closeout compliance (internal-only; see tree-shrub-closeout
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance
       // rotation was checked for pesticide products.
-      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, options: [
+      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: [
         'No blooms or no bees', 'Blooming — no bees active', 'Blooming — bees active', 'No insecticide applied',
       ] },
-      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, options: ['Yes', 'No'] },
-      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
+      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: ['Yes', 'No'] },
+      { key: 'customer_recommendations', label: 'Customer recommendations', type: 'multi_select', section: 'Recommendations', options: [
         'Adjust irrigation', 'Avoid over-pruning', 'Remove dead plant material',
         'Trim away from structure', 'Keep mulch off trunks / stems', 'Monitor decline',
         'Replace severely declining plant', 'Approve injection', 'Improve drainage',

@@ -8,6 +8,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const MODELS = require('../config/models');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
@@ -41,6 +42,8 @@ Agronomic tells to weigh:
 - A blue-gray cast, folded or wilting blades, and lingering footprints (turf that doesn't spring back) indicate DROUGHT stress.
 - Uniform scalped strips, tire ruts, or shredded blade tips indicate MECHANICAL damage (scalping, mower, or foot/vehicle traffic).
 - Name specific weeds when identifiable (e.g., nutsedge, crabgrass, dollarweed) instead of just "weeds".
+
+BE SPECIFIC, NOT GENERIC. When a visual pattern points to a recognizable cause, NAME it using "consistent with" language: the likely disease (brown patch, gray leaf spot, dollar spot, take-all root rot), the likely insect (chinch bugs, sod webworms, armyworms, grubs), the likely specific deficiency (iron chlorosis — yellowing with green veins, common in alkaline SWFL soil; nitrogen — pale, even yellowing of older blades), or the specific weed. "Some stress" or "a nutrient issue" is too vague to act on — say WHICH one the pattern is consistent with, while keeping it a signal, not a confirmed diagnosis.
 
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
 
@@ -145,7 +148,7 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await anthropicCreateWithSamplingRetry(anthropic, {
       model: MODELS.VISION,
       max_tokens: 500,
       temperature: 0.2, // match Gemini's 0.2 — keeps Claude's scoring repeatable across re-runs
@@ -357,7 +360,11 @@ function averageScores(claudeResult, geminiResult) {
   // disagreement is already captured in divergenceFlags.
   composite.observationsClaude = claudeResult.observations || null;
   composite.observationsGemini = geminiResult.observations || null;
-  composite.observations = String(claudeResult.observations || geminiResult.observations || '').trim();
+  // Gemini's prose wins the observations slot (owner 2026-07-21 — same
+  // preference as tree-shrub: Gemini gave the named-diagnosis specificity on
+  // real field photos). Claude stands in when Gemini has no read; scores
+  // stay dual-model averaged.
+  composite.observations = String(geminiResult?.observations || claudeResult?.observations || '').trim();
 
   // Either model seeing a direct overwatering tell (mushrooms/standing water/
   // algae) flags it — this cross-checks the water-balance surplus on the report.
