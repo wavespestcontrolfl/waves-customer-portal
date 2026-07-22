@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { etParts, etDateString } = require('../utils/datetime-et');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, rateAsOf, dateCellStr,
-  prorateAssetDepreciation, outflowTransactionsQuery,
+  prorateAssetDepreciation, annotateMidQuarter, outflowTransactionsQuery,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 
@@ -1243,7 +1243,10 @@ router.get('/export/depreciation', async (req, res, next) => {
           this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
         })
         .orderBy('name');
-      equipment = equipment.map(e => ({
+      // Annotate mid-quarter years across the WHOLE list first, so this export
+      // reconciles with pnl.csv (which goes through buildPnlReport → same
+      // annotation) instead of reporting half-year where the P&L reports $0.
+      equipment = annotateMidQuarter(equipment).map(e => ({
         ...e,
         period_depreciation: prorateAssetDepreciation(e, sd, ed),
       }));
@@ -1439,10 +1442,10 @@ router.get('/export/tax-package', async (req, res, next) => {
           this.where('active', true).orWhere('disposed', true).orWhereNotNull('disposal_date');
         })
         .orderBy('name');
-      // Per-asset depreciation for THIS package's year, same proration the
-      // P&L uses — the schedule's period column sums to pnl.csv's
-      // depreciation line by construction.
-      equipment = equipment.map(e => ({
+      // Per-asset depreciation for THIS package's year, same proration AND
+      // mid-quarter annotation the P&L uses — the schedule's period column sums
+      // to pnl.csv's depreciation line by construction.
+      equipment = annotateMidQuarter(equipment).map(e => ({
         ...e,
         period_depreciation: prorateAssetDepreciation(e, sd, ed),
       }));

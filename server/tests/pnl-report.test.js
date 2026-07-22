@@ -17,6 +17,7 @@ const {
   assemblePnl,
   prorateDepreciation,
   macrsYearAmount,
+  annotateMidQuarter,
   getPeriodRange,
   missingTableOnly,
   rateAsOf,
@@ -368,6 +369,20 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation([midDisposal], '2027-07-01', '2027-09-30')).toBe(0);
     });
 
+    test('same-year in-service + disposal is NOT MACRS-depreciable ($0)', () => {
+      const sameYear = van({ placed_in_service_date: '2026-03-01', disposal_date: '2026-11-01', disposed: true });
+      expect(prorateDepreciation([sameYear], '2026-01-01', '2026-12-31')).toBe(0);
+      // And it's excluded from the mid-quarter basis test, so it can't skew it:
+      // a genuine Q1 asset alongside a same-year-disposed Q4 asset stays half-year.
+      const q1 = van({ placed_in_service_date: '2026-02-01', purchase_cost: '35000' });
+      const sameYearQ4 = van({ placed_in_service_date: '2026-11-01', purchase_cost: '90000', disposal_date: '2026-12-15', disposed: true });
+      // Without the exclusion the $90k Q4 asset would be >40% of basis → spurious
+      // mid-quarter → both $0. Excluded, q1 keeps its year-1 half-year amount:
+      // 20% × $35k = $7,000.
+      expect(prorateDepreciation(annotateMidQuarter([q1, sameYearQ4]), '2026-01-01', '2026-12-31'))
+        .toBeCloseTo(7000, 2);
+    });
+
     test('the ≤50% guard gates ONLY GDS/§179 — a CPA-entered straight-line amount flows through', () => {
       const adsVehicle = {
         depreciation_method: 'straight_line', annual_depreciation: '2100',
@@ -377,7 +392,6 @@ describe('prorateDepreciation', () => {
     });
 
     test('mid-quarter year (>40% of basis in Q4) fails MACRS closed for CPA', () => {
-      const { annotateMidQuarter } = require('../services/pnl-report');
       const q1 = van({ placed_in_service_date: '2026-02-01', purchase_cost: '10000' });
       const q4 = van({ placed_in_service_date: '2026-11-01', purchase_cost: '40000' });
       // 40k of 50k (80%) in Q4 → mid-quarter year → both fail closed.

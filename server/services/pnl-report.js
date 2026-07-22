@@ -238,6 +238,9 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     const macrsBasis = Math.max(0, cost * bizUse - s179Immediate);
     const inSvcYear = inService ? inService.getUTCFullYear() : null;
     const disposalYear = disposed ? disposed.getUTCFullYear() : null;
+    // Property placed in service AND disposed in the SAME tax year is not
+    // depreciable under MACRS at all — no deduction on this path.
+    if (disposalYear != null && disposalYear === inSvcYear) return total;
     if (macrsBasis > 0 && inSvcYear && inService) {
       for (let y = periodStart.getUTCFullYear(); y <= periodEnd.getUTCFullYear(); y++) {
         if (disposalYear != null && y > disposalYear) continue; // nothing after disposal
@@ -296,10 +299,16 @@ function annotateMidQuarter(assets) {
     if (String(a?.depreciation_method || '') !== 'MACRS') continue;
     const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
     if (!d) continue;
-    const s179 = a?.section_179_elected ? (parseFloat(a?.section_179_amount ?? a?.purchase_cost) || 0) : 0;
-    const basis = Math.max(0, (parseFloat(a?.purchase_cost || 0) || 0) - s179);
-    if (basis <= 0) continue;
     const y = d.getUTCFullYear();
+    // Same-year in-service+disposal property is not MACRS-depreciable and is
+    // excluded from the mid-quarter basis test (Pub 946).
+    const disp = toUTCDay(a?.disposal_date);
+    if (disp && disp.getUTCFullYear() === y) continue;
+    // Business-use-adjusted depreciable basis: cost × business-use% − §179 —
+    // the same basis the schedule uses, so the 40%-in-Q4 test can't be skewed.
+    const s179 = a?.section_179_elected ? (parseFloat(a?.section_179_amount ?? a?.purchase_cost) || 0) : 0;
+    const basis = Math.max(0, (parseFloat(a?.purchase_cost || 0) || 0) * businessUseFraction(a?.business_use_pct) - s179);
+    if (basis <= 0) continue;
     const rec = byYear.get(y) || { total: 0, q4: 0 };
     rec.total += basis;
     if (d.getUTCMonth() >= 9) rec.q4 += basis; // Oct(9)–Dec(11)
