@@ -484,6 +484,7 @@ function EquipmentTab() {
     usefulLifeYears: "7",
     makeModel: "",
     businessUsePct: "100",
+    luxuryAutoExempt: false,
   };
   const [form, setForm] = useState(emptyForm);
 
@@ -534,12 +535,17 @@ function EquipmentTab() {
           ...form,
           purchaseCost: parseFloat(form.purchaseCost),
           usefulLifeYears: parseInt(form.usefulLifeYears),
+          // The recovery LIFE is the operator's choice (drives the MACRS class);
+          // no longer a hidden 7-year default.
           section179Elected: form.depreciationMethod === "section_179",
-          // Send business use only for vehicles — it confirms them server-side.
+          // Send business use + §280F exemption only for vehicles — both are
+          // needed to CONFIRM a vehicle so its depreciation computes.
           businessUsePct:
             form.assetCategory === "vehicle"
               ? Number(form.businessUsePct)
               : undefined,
+          luxuryAutoExempt:
+            form.assetCategory === "vehicle" ? form.luxuryAutoExempt : undefined,
         }),
       });
       setShowAdd(false);
@@ -657,7 +663,14 @@ function EquipmentTab() {
             <select
               value={form.assetCategory}
               onChange={(e) =>
-                setForm((f) => ({ ...f, assetCategory: e.target.value }))
+                setForm((f) => ({
+                  ...f,
+                  assetCategory: e.target.value,
+                  // Vehicles are 5-year MACRS property — default the life so a
+                  // vehicle isn't silently created on the 7-year table.
+                  usefulLifeYears:
+                    e.target.value === "vehicle" ? "5" : f.usefulLifeYears,
+                }))
               }
               style={{ ...inputStyle, minWidth: 100 }}
             >
@@ -713,6 +726,26 @@ function EquipmentTab() {
               <option value="bonus_100">100% Bonus</option>{" "}
             </select>
           </div>{" "}
+          {(form.depreciationMethod === "MACRS" ||
+            form.assetCategory === "vehicle") && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
+                Recovery life
+              </div>{" "}
+              <select
+                value={form.usefulLifeYears}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, usefulLifeYears: e.target.value }))
+                }
+                style={{ ...inputStyle, minWidth: 90 }}
+              >
+                {" "}
+                <option value="3">3-year</option>
+                <option value="5">5-year</option>
+                <option value="7">7-year</option>{" "}
+              </select>
+            </div>
+          )}{" "}
           {form.assetCategory === "vehicle" && (
             <div>
               <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
@@ -729,6 +762,26 @@ function EquipmentTab() {
                 style={{ ...inputStyle, width: 90 }}
               />
             </div>
+          )}{" "}
+          {form.assetCategory === "vehicle" && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                color: D.muted,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={form.luxuryAutoExempt}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, luxuryAutoExempt: e.target.checked }))
+                }
+              />
+              §280F-exempt (heavy, &gt;6,000 lb)
+            </label>
           )}{" "}
           <button
             onClick={handleAdd}
@@ -800,29 +853,32 @@ function EquipmentTab() {
               <Badge color={e.section179Elected ? D.green : D.amber} small>
                 {e.depreciationMethod}
               </Badge>{" "}
-              {e.assetCategory === "vehicle" && !e.businessUseConfirmed && (
-                <button
-                  onClick={() => confirmVehicleUse(e.id, e.businessUsePct)}
-                  style={{
-                    background: "transparent",
-                    border: `1px solid ${D.amber}`,
-                    borderRadius: 6,
-                    padding: "2px 8px",
-                    color: D.amber,
-                    fontSize: 11,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                  title="Depreciation won't compute until business use is confirmed"
-                >
-                  Confirm business use
-                </button>
-              )}{" "}
-              {e.assetCategory === "vehicle" && e.businessUseConfirmed && (
-                <span style={{ fontSize: 11, color: D.muted }}>
-                  {e.businessUsePct}% business
-                </span>
-              )}{" "}
+              {e.assetCategory === "vehicle" &&
+                !(e.businessUseConfirmed && e.luxuryAutoExempt) && (
+                  <button
+                    onClick={() => confirmVehicleUse(e.id, e.businessUsePct)}
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${D.amber}`,
+                      borderRadius: 6,
+                      padding: "2px 8px",
+                      color: D.amber,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                    title="Depreciation won't compute until business use and §280F exemption are confirmed"
+                  >
+                    Confirm for depreciation
+                  </button>
+                )}{" "}
+              {e.assetCategory === "vehicle" &&
+                e.businessUseConfirmed &&
+                e.luxuryAutoExempt && (
+                  <span style={{ fontSize: 11, color: D.muted }}>
+                    {e.businessUsePct}% business · §280F-exempt
+                  </span>
+                )}{" "}
             </div>{" "}
             <div
               style={{
