@@ -290,6 +290,11 @@ router.post('/equipment', async (req, res, next) => {
         return res.status(400).json({ error: 'businessUsePct must be a number between 0 and 100' });
       }
     }
+    // §280F exemption is tax-sensitive — require a real boolean (a JSON string
+    // "false" must NOT enable exemption via truthiness).
+    if (luxuryAutoExempt !== undefined && typeof luxuryAutoExempt !== 'boolean') {
+      return res.status(400).json({ error: 'luxuryAutoExempt must be a boolean' });
+    }
     const isVehicle = assetCategory === 'vehicle';
     const businessUseConfirmed = isVehicle ? businessUsePct !== undefined : true;
     if (!name || !purchaseDate || purchaseCost == null) {
@@ -326,7 +331,7 @@ router.post('/equipment', async (req, res, next) => {
       section_179_elected: s179, section_179_amount: s179 ? purchaseCost : null,
       business_use_pct: bizUsePct !== undefined ? bizUsePct : 100,
       business_use_confirmed: businessUseConfirmed,
-      luxury_auto_exempt: isVehicle ? !!luxuryAutoExempt : false,
+      luxury_auto_exempt: isVehicle && luxuryAutoExempt === true,
       current_book_value: s179 ? 0 : purchaseCost,
       accumulated_depreciation: s179 ? purchaseCost : 0,
       serial_number: serialNumber, make_model: makeModel, location, notes,
@@ -355,6 +360,13 @@ router.put('/equipment/:id', async (req, res, next) => {
     if (fields.depreciationConvention !== undefined && !VALID_DEPRECIATION_CONVENTIONS.includes(fields.depreciationConvention)) {
       return res.status(400).json({ error: `Invalid depreciation convention. Must be one of: ${VALID_DEPRECIATION_CONVENTIONS.join(', ')}` });
     }
+    // Tax-sensitive booleans must be REAL booleans — a JSON string "false" must
+    // not enable exemption/confirmation via truthiness.
+    for (const b of ['luxuryAutoExempt', 'businessUseConfirmed']) {
+      if (fields[b] !== undefined && typeof fields[b] !== 'boolean') {
+        return res.status(400).json({ error: `${b} must be a boolean` });
+      }
+    }
     const update = { updated_at: new Date() };
     const map = {
       name: 'name', description: 'description', assetCategory: 'asset_category',
@@ -364,16 +376,16 @@ router.put('/equipment/:id', async (req, res, next) => {
       notes: 'notes', active: 'active', disposed: 'disposed', disposalDate: 'disposal_date',
       disposalProceeds: 'disposal_proceeds',
       businessUsePct: 'business_use_pct', depreciationConvention: 'depreciation_convention',
-      luxuryAutoExempt: 'luxury_auto_exempt',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
+    if (fields.luxuryAutoExempt !== undefined) update.luxury_auto_exempt = fields.luxuryAutoExempt === true;
     // Persist the NORMALIZED number, not the raw string. Explicitly setting a
     // vehicle's business use CONFIRMS it unless the caller says otherwise.
     if (businessUsePctNormalized !== undefined) {
       update.business_use_pct = businessUsePctNormalized;
       if (fields.businessUseConfirmed === undefined) update.business_use_confirmed = true;
     }
-    if (fields.businessUseConfirmed !== undefined) update.business_use_confirmed = !!fields.businessUseConfirmed;
+    if (fields.businessUseConfirmed !== undefined) update.business_use_confirmed = fields.businessUseConfirmed === true;
     // Converting an asset TO a vehicle must not inherit a non-vehicle's
     // confirmed=true — reset to unconfirmed unless this same update supplies a
     // business-use % (or an explicit confirmed flag), so its depreciation fails
