@@ -107,9 +107,11 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),
-      { visibilitySignature: 'sig-current' },
+      // '-tn0' = the narrative sentinel for payloads that rendered no
+      // narrative (mocked data carries none).
+      { visibilitySignature: 'sig-current-tn0' },
     );
-    expect(result.key).toBe('reports/service-1/report-sig-current.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
   });
 
   test('getOrRenderServiceReportPdf reuses the cache-check config when it has to render', async () => {
@@ -133,7 +135,7 @@ describe('service report PDF Pest Pressure cache config', () => {
     );
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
-    expect(result.key).toBe('reports/service-1/report-sig-current.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
   });
 
   test('renderAndStoreServiceReportPdf retries instead of storing when config changes during render', async () => {
@@ -154,8 +156,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),
-      { visibilitySignature: 'sig-second' },
+      { visibilitySignature: 'sig-second-tn0' },
     );
-    expect(result.key).toBe('reports/service-1/report-sig-second.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-second-tn0.pdf');
   });
 });
