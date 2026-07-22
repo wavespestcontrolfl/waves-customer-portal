@@ -70,6 +70,11 @@ export default function TechTreatmentZoneModal({
   const [runKey, setRunKey] = useState(0);
   const [status, setStatus] = useState({ phase: 'spraying', pct: 0, feet: 0 });
   const [saveState, setSaveState] = useState(null);
+  // Auto-trace (owner 2026-07-21): vision-suggested building perimeter
+  // (incl. attached lanai / pool cage) the tech adjusts by dragging corners.
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestNote, setSuggestNote] = useState('');
+  const dragRef = useRef(null); // { index, moved } while a corner drag is live
   const traceRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -146,22 +151,81 @@ export default function TechTreatmentZoneModal({
     ? pxToFeet(pathLengthPx(points, closed), mapState.center.lat, mapState.zoom)
     : 0;
 
+  const pointerToMapPx = (e) => {
+    const rect = traceRef.current.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * MAP_WIDTH,
+      y: ((e.clientY - rect.top) / rect.height) * MAP_HEIGHT,
+      threshold: CLOSE_TAP_CSS_PX * (MAP_WIDTH / rect.width),
+    };
+  };
+
   const handleTracePointer = (e) => {
     if (step !== 'trace' || mapState.status !== 'ready') return;
-    const rect = traceRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-    const y = ((e.clientY - rect.top) / rect.height) * MAP_HEIGHT;
+    const { x, y, threshold } = pointerToMapPx(e);
     if (x < 0 || y < 0 || x > MAP_WIDTH || y > MAP_HEIGHT) return;
-    if (!closed && points.length >= 3) {
-      const threshold = CLOSE_TAP_CSS_PX * (MAP_WIDTH / rect.width);
-      const first = points[0];
-      if (Math.hypot(first.x - x, first.y - y) < threshold) {
-        setClosed(true);
-        return;
-      }
+    // Corner drag: pointer down on an existing point picks it up — the tap
+    // vs drag call is resolved on pointer-up (a no-move release on the first
+    // point still closes the loop; auto-traced loops adjust the same way).
+    const nearIndex = points.findIndex((p) => Math.hypot(p.x - x, p.y - y) < threshold);
+    if (nearIndex >= 0) {
+      dragRef.current = { index: nearIndex, moved: false };
+      try { traceRef.current.setPointerCapture(e.pointerId); } catch { /* older WebKit */ }
+      return;
     }
     if (closed) return;
     setPoints((prev) => [...prev, { x, y }]);
+  };
+
+  const handleTraceMove = (e) => {
+    const drag = dragRef.current;
+    if (!drag || step !== 'trace' || mapState.status !== 'ready') return;
+    const { x, y } = pointerToMapPx(e);
+    if (x < 0 || y < 0 || x > MAP_WIDTH || y > MAP_HEIGHT) return;
+    drag.moved = true;
+    setPoints((prev) => prev.map((p, i) => (i === drag.index ? { x, y } : p)));
+  };
+
+  const handleTraceUp = () => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag || drag.moved) return;
+    // Stationary release = the original tap semantics: first point closes.
+    if (!closed && drag.index === 0 && points.length >= 3) setClosed(true);
+  };
+
+  const handleAutoTrace = async () => {
+    if (suggesting || mapState.status !== 'ready') return;
+    setSuggesting(true);
+    setSuggestNote('');
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = MAP_WIDTH;
+      canvas.height = MAP_HEIGHT;
+      canvas.getContext('2d').drawImage(mapState.image, 0, 0, MAP_WIDTH, MAP_HEIGHT);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('Could not read the map image.');
+      const form = new FormData();
+      form.append('map', blob, 'map.png');
+      const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone/suggest`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+        body: form,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.suggestion?.perimeter?.length) {
+        throw new Error(data.error || 'Could not detect the building outline — trace it manually.');
+      }
+      setPoints(data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT })));
+      setClosed(true);
+      setSuggestNote(data.suggestion.includesPoolEnclosure
+        ? 'Auto-traced — pool enclosure included. Drag any corner to adjust, then Play spray.'
+        : 'Auto-traced. Drag any corner to adjust, then Play spray.');
+    } catch (err) {
+      setSuggestNote(err.message || 'Auto-trace failed — trace manually.');
+    } finally {
+      setSuggesting(false);
+    }
   };
 
   const save = useCallback(async (accum) => {
@@ -254,6 +318,9 @@ export default function TechTreatmentZoneModal({
     <div
       ref={traceRef}
       onPointerDown={handleTracePointer}
+      onPointerMove={handleTraceMove}
+      onPointerUp={handleTraceUp}
+      onPointerCancel={handleTraceUp}
       style={{
         position: 'relative',
         width: '100%',
@@ -341,9 +408,14 @@ export default function TechTreatmentZoneModal({
         {mapState.status === 'ready' && step === 'trace' && (
           <>
             <p style={{ margin: '0 0 10px', fontSize: 13, color: DARK.muted }}>
-              Tap the photo to drop points along the treated line.
+              {points.length === 0
+                ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself.'
+                : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
+            {suggestNote ? (
+              <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: DARK.teal }}>{suggestNote}</p>
+            ) : null}
             {mapFrame(
               <svg
                 viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
@@ -383,9 +455,20 @@ export default function TechTreatmentZoneModal({
             </p>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
+                style={btnStyle('ghost', suggesting || points.length > 0)}
+                disabled={suggesting || points.length > 0}
+                onClick={handleAutoTrace}
+              >
+                {suggesting ? 'Detecting…' : 'Auto-trace'}
+              </button>
+              <button
                 style={btnStyle('ghost', points.length === 0)}
                 disabled={points.length === 0}
-                onClick={() => (closed ? setClosed(false) : setPoints((prev) => prev.slice(0, -1)))}
+                onClick={() => {
+                  if (closed) { setClosed(false); return; }
+                  setPoints((prev) => prev.slice(0, -1));
+                  if (points.length === 1) setSuggestNote('');
+                }}
               >
                 {closed ? 'Reopen loop' : 'Undo point'}
               </button>

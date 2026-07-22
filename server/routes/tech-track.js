@@ -704,6 +704,45 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
   }
 });
 
+// POST /api/tech/services/:id/treatment-zone/suggest — vision auto-trace
+// (owner 2026-07-21): the client uploads the visit's satellite PNG and gets
+// back a suggested building-perimeter loop (normalized 0-1 coords) that
+// INCLUDES any attached lanai / pool cage. Pure suggestion — the tech
+// adjusts and confirms; nothing persists until the normal save route runs.
+router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'map image is required' });
+    }
+    if (req.file.mimetype !== 'image/png') {
+      return res.status(400).json({ error: 'map must be a PNG' });
+    }
+    const { suggestTreatmentZone } = require('../services/treatment-zone-suggest');
+    const suggestion = await suggestTreatmentZone(req.file.buffer);
+    if (!suggestion) {
+      return res.status(422).json({ error: 'Could not detect the building outline — trace it manually.' });
+    }
+    logger.info(
+      `[tech-track] treatment zone suggested service=${svc.id} tech=${req.technicianId} `
+      + `points=${suggestion.perimeter.length} pool=${suggestion.includesPoolEnclosure}`
+    );
+    return res.json({ suggestion });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone suggest failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 // GET /api/tech/services/:id/geocode — server-side geocode of the visit's
 // stamped/customer address for the treatment-zone mapper. The Geocoding web
 // service rejects referer-restricted keys, so once the client key is locked
