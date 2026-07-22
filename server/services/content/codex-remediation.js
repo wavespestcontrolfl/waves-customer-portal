@@ -381,13 +381,26 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
 
   const domains = (Array.isArray(data.domains) && data.domains.length > 0) ? data.domains : SPOKE_SITE_KEYS;
   const service = (Array.isArray(opts.service) && opts.service.some(Boolean)) ? opts.service : [data.category, data.tag];
+  // Run-context allowances (autonomous lane threads them via guardContext):
+  // brief-mandated links, checked-existing routes, and refresh grandfathering
+  // must apply here exactly as in the run-context gate, or a valid fix parks
+  // on structure findings the run legitimately carries. Scheduler lane passes
+  // no context — static evaluation is its full contract.
+  const runContext = opts.guardContext || {};
   const guardrails = contentGuardrails.evaluate(
-    { body, frontmatter: data },
+    {
+      body,
+      frontmatter: data,
+      checked_existing_routes: Array.isArray(runContext.checkedExistingRoutes) ? runContext.checkedExistingRoutes : undefined,
+    },
     {
       domains,
       service,
       primaryKeyword: data.primary_keyword || null,
       operatorFaqException: opts.operatorFaqException === true,
+      allowedInternalLinks: Array.isArray(runContext.allowedInternalLinks) ? runContext.allowedInternalLinks : [],
+      isRefresh: runContext.isRefresh === true,
+      priorBody: typeof runContext.priorBody === 'string' ? runContext.priorBody : null,
     },
   );
   if (!guardrails.pass) {
@@ -995,7 +1008,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
-    operatorFaqException = false,
+    operatorFaqException = false, guardContext = null,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
@@ -1183,7 +1196,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
-  const gate = await validate(fixed, { service, factContext, operatorFaqException }, deps);
+  const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
@@ -1444,6 +1457,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // missing row or lookup failure stays false, which only parks (stricter),
   // never merges.
   let operatorFaqException = false;
+  // Full run-context for the preflight gate: the static frontmatter-derived
+  // evaluate would P0 brief-mandated links, checked-existing routes, and
+  // refresh-grandfathered content the run-context gate allows — the preflight
+  // must judge the fix with the SAME allowances or valid fixes park.
+  let guardContext = null;
   try {
     const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
     const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
@@ -1455,12 +1473,19 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
       if (brief) {
         const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
         operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
+        let dp = fullRun.draft_payload;
+        if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        guardContext = {
+          ...guardOptions,
+          checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
+        };
       }
     }
   } catch (e) {
     logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
   }
   return runRemediationForPr({
+    guardContext,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug

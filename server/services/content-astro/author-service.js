@@ -41,6 +41,11 @@ async function listAuthors({ force = false } = {}) {
           name: data.name,
           role: data.role || '',
           fdacs_license: data.fdacs_license || null,
+          // NO years_*/tenure fields: author metadata assembled here flows
+          // into post frontmatter (astro-publisher buildFrontmatter), and any
+          // years-of-experience claim is a fabrication (company founded
+          // 2024 — owner hard rule). Even if a legacy bio file still carries
+          // years_swfl, it is dropped at this boundary.
           photo: data.photo || null,
           bio_short: data.bio_short || '',
           credentials: Array.isArray(data.credentials) ? data.credentials : [],

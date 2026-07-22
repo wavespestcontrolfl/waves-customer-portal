@@ -25,7 +25,14 @@
  */
 
 const MODELS = require('../../../config/models');
-const { FAQ_BLOCKED_SERVICES, PRO_PRODUCT_TERMS, ACTIVE_INGREDIENT_TERMS } = require('../content-guardrails');
+const {
+  FAQ_BLOCKED_SERVICES,
+  PRO_PRODUCT_TERMS,
+  ACTIVE_INGREDIENT_TERMS,
+  SAFE_MDX_COMPONENTS,
+  ALLOWED_INTERNAL_LINKS,
+  outOfAreaCities,
+} = require('../content-guardrails');
 const { HYPE_TERMS, COMMERCIAL_TERMS } = require('../title-meta-spam-gate');
 
 // The FAQ-blocked list is interpolated into the system prompt straight from
@@ -52,6 +59,28 @@ const COMMERCIAL_TERMS_LIST = COMMERCIAL_TERMS.join(', ');
 // brief's facts_pack never contains, so Codex re-flagged them on every PR.
 const PRO_PRODUCT_TERMS_LIST = PRO_PRODUCT_TERMS.join(', ');
 const ACTIVE_INGREDIENT_TERMS_LIST = ACTIVE_INGREDIENT_TERMS.join(', ');
+
+// Same single-source rule for the MDX component vocabulary, the internal
+// link allowlist, and the out-of-footprint city blocklist: interpolated from
+// content-guardrails (which enforces all three as P0s at publish), so the
+// writer's instructions can never drift from the gates.
+const SAFE_MDX_COMPONENTS_LIST = SAFE_MDX_COMPONENTS.join(', ');
+const ALLOWED_INTERNAL_LINKS_LIST = ALLOWED_INTERNAL_LINKS.join(', ');
+const OUT_OF_AREA_CITIES_LIST = outOfAreaCities().join(', ');
+
+// The canonical service footprint (config/locations CITY_TO_LOCATION) —
+// the ONLY cities service claims may name. Falls back to the staffed-market
+// list if the config is unavailable (never an empty claim surface).
+const SERVICE_FOOTPRINT_CITIES_LIST = (() => {
+  try {
+    const { CITY_TO_LOCATION } = require('../../../config/locations');
+    return Object.keys(CITY_TO_LOCATION)
+      .map((c) => c.replace(/(^|\s)[a-z]/g, (ch) => ch.toUpperCase()))
+      .join(', ');
+  } catch {
+    return 'Bradenton, Lakewood Ranch, Sarasota, Venice, North Port, Palmetto, Parrish, Port Charlotte';
+  }
+})();
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -137,6 +166,25 @@ POST TYPE + DUPLICATE INTENT (binding):
   competing for the same query. If no differentiated angle exists, say so in
   notes_for_reviewer instead of forcing a duplicate.
 
+BRAND FACTS (binding — never guess, soften, or embellish these):
+- NO TENURE CLAIMS, EVER: Waves was founded in 2024. Never state or imply
+  years in business, "X years of experience", "over a decade", or any other
+  tenure figure — in the body OR the frontmatter. The publisher stamps the
+  author block; do not add years_* fields to it.
+- WAVEGUARD GUARANTEE (canonical wording): WaveGuard plans include UNLIMITED
+  callbacks between scheduled visits at no extra charge — if covered pests
+  come back between visits, Waves comes back free. NEVER describe callbacks
+  as "handled on the next scheduled visit" or otherwise deferred; that
+  understates the guarantee.
+- SERVICE FOOTPRINT (a deterministic publish gate parks violations): Waves
+  serves ONLY these SWFL cities: ${SERVICE_FOOTPRINT_CITIES_LIST}. NEVER
+  claim or imply service anywhere else — especially not
+  ${OUT_OF_AREA_CITIES_LIST}. A purely educational mention of another city
+  (e.g. "tegu lizards spread from Fort Myers") is fine; pairing an
+  out-of-footprint city with service language (we serve / serving / your
+  home|lawn|yard / call / schedule / book / our technicians / same-day) is a
+  hard block.
+
 METADATA + INTERNAL LINKS (binding — the publish gate enforces these
 mechanically; a violation means the draft is rejected and the run is
 wasted):
@@ -171,6 +219,14 @@ wasted):
   gate checks for — a draft that links city or topic pages but skips the
   hub URLs fails the gate even if everything else is perfect. Work through
   the list and verify each URL appears before calling emit_draft.
+- INTERNAL LINK TARGETS are a CLOSED set (binding — a deterministic gate
+  parks any draft that links elsewhere). You may link ONLY to: the URLs in
+  internal_links_to_add; these site pages: ${ALLOWED_INTERNAL_LINKS_LIST};
+  and real city-service pages of the form /{service-slug}-{city}-fl/
+  (e.g. /pest-control-bradenton-fl/, /pest-control-quote-sarasota-fl/).
+  NEVER invent any other internal URL — no /pest-library/<pest>/ subpages,
+  no guessed blog-post slugs, no made-up routes. A dead internal link parks
+  the whole draft.
 
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:
@@ -241,12 +297,21 @@ Violating these makes the live page render broken:
   [(941) 297-5749](tel:+19412975749) — never bare text.
 - Avoid stray curly braces { } in body copy — a token-substitution plugin
   processes {token} patterns and will mangle literal braces.
+- NEVER emit citation markup of any kind: no <cite> tags, no index="N"
+  citation tokens, no footnote apparatus (a deterministic gate parks any
+  draft containing them). Attribute sources in prose ("per UF/IFAS…"), with
+  a link only when the brief's required_sources mandate one.
 
 VISUAL COMPONENTS (MDX) — posts publish as .mdx, so embed these Astro
 infographic components where they genuinely fit the topic (never force them;
 aim for 1–3 per post). They render as branded cards. Write valid JSX, NOT in
 code fences. NOTE: the "avoid curly braces" rule above is about PROSE text —
 JSX component props like columns={[...]} are expected and render fine.
+COMPONENT VOCABULARY IS CLOSED (binding — a deterministic gate parks any
+draft using anything else): the ONLY legal component names are
+${SAFE_MDX_COMPONENTS_LIST}. Never invent a component. (AppPhone is
+registered for layout use — do not emit it yourself; phone numbers are
+tel: markdown links per the rule above.)
 - <SeasonalPressureChart /> — year-round SWFL pest-pressure chart. Ships with
   the correct Southwest Florida seasons baked in; prefer it BARE. Use anywhere
   you explain seasonality / why year-round service. Override only if needed:

@@ -493,6 +493,513 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   return null;
 }
 
+// ── MDX component gate ──────────────────────────────────────────────
+// SAFE_MDX_COMPONENTS mirrors the RECONCILED Astro component contract
+// (wavespestcontrol-astro PR #342): the set where
+//   1. packages/blog-schema/schema.ts COMPONENT_NAMES (the publish-gate
+//      catalog — an uncataloged name rejects the PR) and
+//   2. src/layouts/BlogPostLayout.astro mdxComponents (the renderer registry
+//      — a cataloged-but-unregistered name crashes the MDX build with
+//      "Expected component X to be defined")
+// agree on an implemented component. Before #342 the two had drifted: the
+// writer's favorite <SeasonalPressureChart>/<HomeZoneMap> were registered but
+// uncataloged, so every post embedding them parked at the Astro gate after a
+// full generation spend, while 14 phantom catalog names (WhyTrustUs, TLDR,
+// DataCallout, ProTip, …) had no renderer at all. Any PascalCase JSX tag
+// outside this set is a P0 — the draft routes to review exactly like the
+// other body-policy P0s. If the astro catalog changes again, update this
+// list to the new catalog∩renderer intersection.
+const SAFE_MDX_COMPONENTS = Object.freeze([
+  'AppPhone',
+  'BottomLineBox',
+  'ComparisonTable',
+  'HomeZoneMap',
+  'HonestRejection',
+  'PestEvidenceGrid',
+  'SeasonalPressureChart',
+]);
+
+const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
+// A PascalCase JSX opening tag — the shape MDX treats as a component
+// invocation. Member expressions (<ComparisonTable.Row>) are captured WHOLE
+// so an invented subcomponent of a safe root can never slip through — the
+// dotted name is not in the closed set. Underscores are legal JSX identifier
+// characters (<Pro_Tip> is a component, and an undefined one). Closing tags
+// (</X>) reuse the same name and need no extra scan.
+const JSX_COMPONENT_TAG_RE = /<([A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\b/g;
+
+function collectComponentCounts(text) {
+  const counts = new Map();
+  const re = new RegExp(JSX_COMPONENT_TAG_RE.source, JSX_COMPONENT_TAG_RE.flags);
+  let m;
+  while ((m = re.exec(String(text || ''))) !== null) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+  return counts;
+}
+
+// exemptComponentCounts: refresh grandfathering, by OCCURRENCE COUNT — a
+// refresh that preserves one legacy <Callout> must not thereby earn a free
+// pass to ADD more of them; only up to the prior body's count of each
+// uncataloged name is preserved-legacy, every occurrence past that is a
+// writer addition and gates like new content.
+function uncatalogedComponentFinding(body, exemptComponentCounts = null) {
+  for (const [name, count] of collectComponentCounts(body)) {
+    if (SAFE_MDX_COMPONENT_SET.has(name)) continue;
+    const grandfathered = exemptComponentCounts ? (exemptComponentCounts.get(name) || 0) : 0;
+    if (count <= grandfathered) continue;
+    return finding('P0', 'UNCATALOGED_COMPONENT', `Draft embeds <${name}>, which is not in the safe MDX component set (${SAFE_MDX_COMPONENTS.join(', ')})${grandfathered ? ` — the draft carries ${count} occurrence(s) but the live page only had ${grandfathered}, so the surplus is a writer addition` : ''} — uncataloged components are rejected by the Astro publish gate or crash the build. Remove it or express the content in markdown.`);
+  }
+  return null;
+}
+
+// ── citation-token residue gate ─────────────────────────────────────
+// A model-side citation apparatus (<cite index="12">…</cite>, bare
+// index="N" tokens, or markdown footnotes [^1] / [^1]: …) leaking into
+// publishable copy — one live draft shipped 12 of them. There is no
+// legitimate use for this markup in a draft: real sourcing is prose
+// attribution plus an allowlisted link.
+// Covers HTML cite tags, quoted AND unquoted index=N props, markdown
+// footnotes, and the raw model-tooling artifacts (citeturn…, 【N†source】,
+// :contentReference[oaicite:N]) — none has a legitimate published form.
+// The Unicode private-use range covers the OpenAI citation GLYPHS
+// themselves (citeturn0search0 wraps its token in U+E200-block
+// characters) — the glyphs are invisible in rendered copy but ship as
+// garbage bytes, and no legitimate draft contains PUA characters.
+const CITATION_RESIDUE_RE = /<\/?cite\b|\bindex\s*=\s*["']?\d+|\[\^[^\]]{1,30}\]|\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[|\boaicite\b|[\uE000-\uF8FF]/i;
+
+function citationResidueFinding(text) {
+  const m = String(text || '').match(CITATION_RESIDUE_RE);
+  if (!m) return null;
+  return finding('P0', 'CITATION_TOKEN_RESIDUE', `Draft contains raw citation markup ("${m[0]}") — model citation tokens must never ship. Attribute sources in prose instead.`);
+}
+
+// ── off-footprint service-claim gate ────────────────────────────────
+// Regional SWFL cities Waves does NOT serve. The canonical footprint is
+// config/locations CITY_TO_LOCATION; this candidate list is filtered against
+// it at scan time so a city added to the real footprint automatically drops
+// out of the blocklist. A blocked city is only a P0 inside a SERVICE-CLAIM
+// context (we serve / your home / call-schedule-book / our technicians /
+// same-day within ~90 chars) — bare educational mentions ("tegu lizards
+// spread from Fort Myers") must pass.
+// Regional SWFL leak candidates plus the major FL metros a "Southwest
+// Florida" writer plausibly names. Deliberate EXCLUSIONS: "St. Augustine"
+// (the grass — "your St. Augustine lawn" is core footprint copy) and
+// person-name cities like "Brandon" — both would false-positive constantly.
+const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
+  'Fort Myers', 'Cape Coral', 'Naples', 'Bonita Springs', 'Marco Island',
+  'Estero', 'Lehigh Acres', 'St. Petersburg', 'Tampa', 'Winter Haven',
+  'Plant City', 'Clearwater', 'Orlando', 'Miami', 'Jacksonville',
+  'Fort Lauderdale', 'Tallahassee', 'Gainesville', 'Lakeland', 'Kissimmee',
+  'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
+  // Nearby SWFL towns/islands a regional writer plausibly names.
+  'Sanibel', 'Captiva', 'Arcadia', 'Sebring', 'Immokalee', 'LaBelle',
+  // County-level phrasings of the same out-of-area markets. Footprint
+  // counties (Manatee/Sarasota/Charlotte + served south Hillsborough) are
+  // deliberately absent.
+  'Lee County', 'Collier County', 'Pinellas County', 'Hendry County',
+  'DeSoto County', 'Polk County', 'Miami-Dade County', 'Broward County',
+]);
+
+function outOfAreaCities() {
+  let footprint = null;
+  try {
+    ({ CITY_TO_LOCATION: footprint } = require('../../config/locations'));
+  } catch { footprint = null; }
+  if (!footprint) return [...OUT_OF_AREA_CITY_CANDIDATES]; // fail closed: full blocklist
+  return OUT_OF_AREA_CITY_CANDIDATES.filter((c) => !footprint[c.toLowerCase()]);
+}
+
+// "our techs/team/technicians" needs an OPERATION VERB within two words — a
+// bare team mention ("our team reviewed Miami termite research") is a
+// factual reference, not a service claim.
+// Third-person brand claims ("Waves Pest Control is now serving …") assert
+// operation exactly like "we serve".
+// "call" alone is NOT claim context — "Researchers call Fort Myers an
+// early tegu hotspot" is attribution, not a CTA. Only CTA usage counts
+// (call us / call Waves / call now|today / call for a quote / give us a
+// call).
+// The final arm catches SERVICE-KEYWORD framing with no explicit verb —
+// "Need mosquito control in Cape Coral?", "Naples pest control guide" —
+// SEO/service packaging of an out-of-footprint city is a claim even
+// without "we serve". Bare pest words without a service noun ("Miami
+// termite research") stay factual and pass.
+// Lead nouns chain through conjunctions — "tree and shrub care", "lawn &
+// pest control" are single service phrases, not two failed half-matches.
+const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)';
+const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?`;
+const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
+  "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*)"
+  + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
+  + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b|(?:now|currently|still|also) serving\\b|proudly serv\\w*|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
+  + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
+  + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
+  + '|same.day|we offer|free (?:quote|estimate|inspection)'
+  + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
+  + `|\\b${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
+  + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b`
+  + '|\\b(?:waves\\w*|waveguard|(?:our|this|the)\\s+(?:\\w+\\s+){0,2}?(?:service|plan|program|membership|treatment)s?)\\b[^.!?]{0,20}?\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
+  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving|servic\\w+|treat(?:s|ed)?|cover(?:s|ed)?|work(?:s|ed)? in|operat(?:es|ed)? in)"
+  + '|(?:is|are|has been|have been) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
+  'i',
+);
+
+// Fabricated-tenure hard gate (owner brand rule — founded 2024): any
+// years/decades-of-experience phrasing is a false claim regardless of the
+// number. Deterministic backstop to the prompt's BRAND FACTS ban.
+const TENURE_CLAIM_RE = /\b(?:over |more than |nearly |almost )?(?:\d{1,2}\+?\s+years?|(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|twenty-five|thirty)\s+years?|a decade|decades?)\s+(?:of\s+)?(?:\w+\s+){0,4}?(?:experience|expertise|know-?how|in business|in the industry|serving\b)/i;
+// Company-history fabrications: "serving Sarasota since 2012", "founded in
+// 2010", "family-owned since 1998". Scoped to COMPANY context so factual
+// regulatory/history copy ("since 2019, Florida has required…") passes.
+// Every year EXCEPT 2024 blocks: pre-2024 inflates tenure, post-2024
+// ("founded in 2025") is a false company history in the other direction.
+// 2024 — the truthful founding year — stays allowed so honest copy
+// ("family-owned since 2024") never parks.
+const TENURE_SINCE_RE = /\b(?:serving\b[^.!?]{0,40}?|in business\b[^.!?]{0,20}?|family[- ]owned\b[^.!?]{0,20}?|trusted\b[^.!?]{0,30}?|established\b[^.!?]{0,15}?|founded\b[^.!?]{0,15}?)since (?:19\d\d|20[01]\d|202[0-35-9])\b|\b(?:founded|established) in (?:19\d\d|20[01]\d|202[0-35-9])\b/i;
+
+function tenureClaimFinding(text) {
+  const s = String(text || '');
+  const m = s.match(TENURE_CLAIM_RE) || s.match(TENURE_SINCE_RE);
+  if (!m) return null;
+  return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/company-history claim ("${m[0].trim()}") — Waves was founded in 2024; any earlier tenure or founding figure is fabricated (owner hard rule).`);
+}
+
+// Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
+// the service area itself and safely exempt a whole clause ("Naples is
+// outside our service area"). Bare negated verbs ("don't include") are NOT
+// clause-level exemptions — "plans that don't include termite coverage"
+// negates a service line, not the footprint — so negation exempts a city
+// only when the city itself is the OBJECT of the negated verb (see
+// cityNegationRe). Tested on apostrophe-normalized text.
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:service )?(?:area|footprint)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a service area|one of our service areas)\b|beyond our (?:service )?(?:area|footprint)|our service area (?:excludes|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
+
+// "…does not include Tampa", "we no longer serve Naples" — the negated
+// verb's object (within a few words) is this specific city.
+// The gap after the negated verb tolerates list separators so every city in
+// "we don't serve Naples, Tampa, or Miami" is exempt, not just the first.
+// "excludes Naples" and "stops short of Naples" deny service in POSITIVE
+// verb form — same honest boundary copy as the do-not forms.
+function cityNegationRe(citySource) {
+  return new RegExp(
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit)|excludes?|stops? (?:short of|before|at))[^.!?;]{0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    'i',
+  );
+}
+
+// Markdown-aware segmentation: blank lines split blocks; marker lines
+// (headings, list items, quotes, tables, JSX) are their own segments; and
+// consecutive PROSE lines re-join with a space — a soft-wrapped paragraph
+// renders as one sentence and must be scanned as one.
+// SELF-CLOSING marker lines (headings, JSX tags) are their own segments;
+// CONTINUABLE markers (list items, quotes, tables) start a segment that
+// absorbs following soft-wrapped lines — markdown renders a wrapped list
+// item as one item, and consecutive `>` lines as one quoted paragraph.
+const MARKDOWN_SELF_CLOSING_LINE_RE = /^\s*(?:#{1,6}\s|<\/?[A-Za-z])/;
+const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>\s?|\|)/;
+
+function markdownSegments(body) {
+  const segments = [];
+  for (const block of String(body || '').split(/\n{2,}/)) {
+    let current = '';
+    for (const line of block.split('\n')) {
+      if (MARKDOWN_SELF_CLOSING_LINE_RE.test(line)) {
+        if (current) { segments.push(current); current = ''; }
+        segments.push(line);
+      } else if (MARKDOWN_CONTINUABLE_MARKER_RE.test(line)) {
+        if (/^\s*>/.test(line) && /^\s*>/.test(current)) {
+          current = `${current} ${line.replace(/^\s*>\s?/, '').trim()}`;
+        } else {
+          if (current) segments.push(current);
+          current = line;
+        }
+      } else {
+        current = current ? `${current} ${line.trim()}` : line;
+      }
+    }
+    if (current) segments.push(current);
+  }
+  return segments;
+}
+
+// Sentence split preserves dotted place abbreviations (St. Petersburg); a
+// rare genuine "St."-final sentence merges with the next, which only widens
+// the claim scope — fails closed. Clause split mirrors the astro-side gate.
+const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)\s+/;
+// Bare adversatives and "and we/our …" split too — the joints where a
+// disclaimer half hides an affirmative half. "and" splits ONLY before a
+// new we/our subject: a bare ", and" boundary would sever the tail of an
+// Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)/i;
+
+// "We serve Sarasota; Venice; and Naples." renders as ONE claim list — a
+// semicolon before a capitalized continuation (optionally "and"/"or") is a
+// list separator, not a clause boundary, so the claim verb must carry across
+// it. A semicolon before a new claim subject ("…; We also serve Tampa") or
+// lowercase prose still splits. Case-sensitive on purpose: the capital is
+// the list-item signal.
+const LIST_SEMICOLON_RE = /;\s*(?=(?:and\s+|or\s+)?(?!We\b|Our\b|Waves|WaveGuard|\{\{)[A-Z])/g;
+
+// Glue allowed between a footprint disclaimer and a city it exempts when the
+// disclaimer comes FIRST ("Outside our service area: Naples, Fort Myers, and
+// Cape Coral."): separators, list connectors, and capitalized place words
+// only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
+// glue and the trailing city flags. Case-sensitive on purpose.
+const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
+
+// A markdown list item ("- Naples", "2) Venice") — used to re-attach a
+// colon-terminated claim intro ("We serve these cities:") to each item.
+const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
+
+function offFootprintCityFinding(text) {
+  // Link DESTINATIONS are invisible to readers — a blocked city inside a
+  // URL is not a rendered claim. Blank them (keeping anchor text) first.
+  const s = String(text || '')
+    .replace(/\]\(\s*[^)]*\)/g, '](#)')
+    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '');
+  if (!s) return null;
+  const cities = outOfAreaCities();
+  const cityRes = cities.map((city) => {
+    // "St." may be written without the period; multi-word cities may wrap;
+    // St. Petersburg matches its local "St. Pete" abbreviation. No "Bay"
+    // exemption — "we service Tampa Bay" targets an out-of-footprint region
+    // and must flag; factual water-body mentions pass because they carry no
+    // claim context (the claim gate does that discrimination).
+    const source = city === 'St. Petersburg'
+      ? '(?:St\\.?|Saint)\\s+Pete(?:rsburg)?'
+      : escapeRegExp(city).replace(/\\\./g, '\\.?').replace(/^Fort/, '(?:Fort|Ft\\.?)').replace(/\s+/g, '\\s+');
+    return { city, re: new RegExp(`\\b${source}\\b`, 'i'), negationRe: cityNegationRe(source) };
+  });
+  // Markdown segmentation first — blocks/marker lines split, soft-wrapped
+  // prose re-joins so a hard-wrapped paragraph is scanned as the one
+  // sentence it renders as (the joined meta lines stay separate segments).
+  // "We serve these cities:" followed by "- Naples" bullets is ONE rendered
+  // claim — the intro carries the service verb, each item carries a city, and
+  // neither alone would flag. Re-attach a colon-terminated intro to every
+  // following list item; the intro persists across the whole list (blank
+  // lines included) and clears at the next non-list prose segment.
+  const scanUnits = [];
+  let listIntro = '';
+  for (const segment of markdownSegments(s)) {
+    if (LIST_ITEM_MARKER_RE.test(segment)) {
+      const item = segment.replace(LIST_ITEM_MARKER_RE, '');
+      scanUnits.push(listIntro ? `${listIntro} ${item}` : segment);
+    } else {
+      listIntro = /:\s*$/.test(segment.trim()) ? segment.trim() : '';
+      scanUnits.push(segment);
+    }
+  }
+  const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+  for (const sentence of sentences) {
+    // List semicolons are rejoined first so "We serve Sarasota; Venice; and
+    // Naples" scans as one claim clause (see LIST_SEMICOLON_RE).
+    for (const clause of sentence.replace(LIST_SEMICOLON_RE, ', ').split(FOOTPRINT_CLAUSE_SPLIT_RE)) {
+      const normalized = clause.replace(/[‘’]/g, "'");
+      if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
+      // Footprint disclaimers exempt PER CITY, not per clause: in "Naples is
+      // outside our service area, Waves serves Tampa" only Naples (the
+      // disclaimer's subject, sitting just before the phrase) is exempt —
+      // Tampa still flags.
+      const disclaimerMatch = normalized.match(FOOTPRINT_DISCLAIMER_RE);
+      for (const { city, re, negationRe } of cityRes) {
+        const cityMatch = normalized.match(re);
+        if (!cityMatch) continue;
+        if (disclaimerMatch) {
+          if (cityMatch.index < disclaimerMatch.index
+            && disclaimerMatch.index - (cityMatch.index + cityMatch[0].length) <= 60) continue;
+          // Disclaimer-FIRST list form: "Outside our service area: Naples,
+          // Fort Myers, and Cape Coral." Cities after the disclaimer are
+          // exempt only while the ENTIRE clause tail after the disclaimer is
+          // pure list glue — testing only the text up to the city would
+          // exempt "Outside our service area: Tampa homes are serviced by
+          // our team" (claim CONTINUES after the city). A lowercase claim
+          // verb anywhere in the tail re-arms the gate.
+          const disclaimerEnd = disclaimerMatch.index + disclaimerMatch[0].length;
+          if (cityMatch.index >= disclaimerEnd
+            && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(disclaimerEnd))) continue;
+        }
+        // Negation scoped to THIS city ("does not include Tampa") exempts
+        // only this city — a negation about some other service does not.
+        if (negationRe.test(normalized)) continue;
+        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
+      }
+    }
+  }
+  return null;
+}
+
+// ── internal-route gate ─────────────────────────────────────────────
+// Site-relative link destinations must resolve to routes that actually
+// exist — one live draft linked a dead /pest-library/fleas/. The allowlist
+// is deliberately CONSERVATIVE: the conversion pages, the hub service pages
+// (kept in sync with content-brief-builder's SERVICE_HUB_LINKS — a unit test
+// asserts the superset), and the city-service URL patterns the briefs/prompts
+// mandate. Everything else parks the draft for review. Brief-mandated links
+// (internal_links_to_add, curated operator hub_link) are threaded in per-draft
+// via the allowedInternalLinks option — they are binding writer instructions,
+// exactly like requiredSourceUrls on the external gate.
+const ALLOWED_INTERNAL_LINKS = Object.freeze([
+  '/',
+  '/book/',
+  '/contact/',
+  '/pest-control-quote/',
+  '/pest-control-calculator/',
+  // hub service pages (superset of content-brief-builder SERVICE_HUB_LINKS)
+  '/pest-control-services/',
+  '/waveguard-memberships/',
+  '/pest-library/',
+  '/lawn-care/',
+  '/lawn-care/fertilizer-blackout-manatee-county/',
+  '/mosquito-control/',
+  '/termite-inspection/',
+  '/rodent-control/',
+  '/tree-shrub-care/',
+  // hub pages the legacy writer prompts already reference
+  '/service-areas/',
+  '/pest-control-deals/',
+  '/pest-inspection/',
+  '/waves-guarantee/',
+  '/faqs/',
+]);
+
+// /{service}-{city}-fl/ city-service pages (incl. the city quote pages the
+// city-service prompt mandates for CTAs and the Bradenton-only specialty
+// slugs the legacy optimizer prompt lists). Alternation is LONGEST-FIRST so
+// the captured city slug never swallows a service suffix
+// ("pest-control-quote-sarasota" must capture "sarasota", not
+// "quote-sarasota"). The city capture is validated against the real
+// footprint below — "/pest-control-fort-myers-fl/" is a dead out-of-area
+// link, not a pass.
+// GROUND TRUTH (verified against wavespestcontrol-astro src/content/services
+// on 2026-07-22): every service family below has a page for ALL EIGHT
+// published cities — including pest-control-services-{city}-fl and every
+// specialty slug. Alternation is LONGEST-FIRST so the captured city slug
+// never swallows a service suffix. The capture is validated against
+// PAGE_CITY_SLUGS below.
+const CITY_SERVICE_LINK_RE = /^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-([a-z][a-z-]*)-fl\/$/;
+
+// City slugs a generated city-service link may target — the cities that
+// actually HAVE published city-service pages (astro-publisher SERVICE_AREAS),
+// NOT the broader CITY_TO_LOCATION dispatch footprint: service-area towns
+// like Oneco or Gibsonton route to an office but have no /pest-control-*-fl/
+// page, so a link there is dead even though the town is served.
+const PAGE_CITY_SLUGS = new Set([
+  'bradenton', 'lakewood-ranch', 'sarasota', 'venice',
+  'north-port', 'palmetto', 'parrish', 'port-charlotte',
+]);
+
+function normalizeInternalPath(dest) {
+  let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
+  if (!p.startsWith('/')) return null;
+  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/.test(p)) p += '/';
+  return p;
+}
+
+// Every site-relative destination in the body: markdown links/images,
+// href/src attributes, AND reference-style definitions ("[flea]: /path/") —
+// reference links render exactly like inline ones and shipped a dead
+// destination would be just as dead. (Absolute URLs are the external gate's
+// job.)
+// Arms: markdown destinations, QUOTED href/src, reference definitions, and
+// UNQUOTED href/src (legal in HTML — `<a href=/pest-library/fleas/>`).
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src)\s*=\s*(\/[^\s>"'`]+)/gim;
+
+// EVERY absolute URL in the text — markdown destinations, href/src,
+// reference definitions, CommonMark autolinks (<https://…>), and bare GFM
+// URLs. Hub-host matches are the dead-route class spelled long-form
+// ("https://www.wavespestcontrol.com/pest-library/fleas/" must be policed
+// as "/pest-library/fleas/", not waved through by the external gate's host
+// allowlist). Other hosts stay the external gate's job.
+const HUB_URL_CANDIDATE_RE = /https?:\/\/[^\s)\]>"'`]+/gi;
+
+// Hub PLUS the whole spoke fleet: an absolute URL on any Waves-owned host
+// is the dead-route class spelled long-form, and the external gate's host
+// allowlist would otherwise wave it through unchecked.
+function hubHostSet() {
+  const hosts = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+  try {
+    const h = new URL(process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').hostname.toLowerCase();
+    const bare = h.replace(/^www\./, '');
+    hosts.add(bare); hosts.add(`www.${bare}`);
+  } catch { /* defaults above */ }
+  for (const key of SPOKE_SITE_KEYS || []) {
+    const bare = String(key).toLowerCase().replace(/^www\./, '');
+    hosts.add(bare); hosts.add(`www.${bare}`);
+  }
+  return hosts;
+}
+
+// Every internal-route candidate in the text, normalized. Shared by the
+// gate and by the refresh grandfathering pass over the prior live body.
+function collectInternalDestinations(text) {
+  const s = String(text || '');
+  const dests = [];
+  let m;
+  const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
+  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3] || m[4]);
+  const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
+  const hubHosts = hubHostSet();
+  while ((m = abs.exec(s)) !== null) {
+    // Bare URLs in prose drag trailing punctuation into the match
+    // ("…/contact/, then…") — trim it so a valid allowlisted route never
+    // normalizes to "/contact/," and false-parks the draft.
+    const raw = m[0].replace(/[),.;:!?'"\]]+$/, '');
+    try {
+      const u = new URL(raw);
+      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+    } catch { /* malformed URL — the external gate owns it */ }
+  }
+  const normalized = [];
+  for (const dest of dests) {
+    // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
+    // "/x/", so the /images/ exemption must see the resolved path or a
+    // dot-segment link reopens the dead-route class.
+    let resolved = dest;
+    try { resolved = new URL(dest, 'https://resolve.invalid').pathname || dest; } catch { /* keep raw */ }
+    // Anchor-only and in-repo image references are not routes.
+    if (resolved.startsWith('/images/')) continue;
+    const norm = normalizeInternalPath(resolved);
+    if (norm) normalized.push({ dest, norm });
+  }
+  return normalized;
+}
+
+// exemptRouteCounts: refresh grandfathering, by OCCURRENCE COUNT — a refresh
+// that preserves one legacy /old/ link must not thereby earn a free pass to
+// ADD more links to that dead route; only up to the prior body's count of
+// each route is preserved-legacy (see uncatalogedComponentFinding).
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
+  const text = String(body || '');
+  if (!text) return null;
+  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
+  for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
+    // Briefs may mandate a link as an ABSOLUTE hub URL; body occurrences
+    // normalize to pathnames, so the allowance must too or it silently
+    // never matches.
+    let candidate = String(link || '');
+    try {
+      const u = new URL(candidate);
+      if (hubHostSet().has(u.hostname.toLowerCase())) candidate = u.pathname || '/';
+    } catch { /* not absolute — use as-is */ }
+    const norm = normalizeInternalPath(candidate);
+    if (!norm) continue;
+    // A brief-supplied CITY-SERVICE link still has to be a real page — a
+    // brief bug ("/pest-control-oneco-fl/" for a served town with no page)
+    // must not become an allowance for a dead link.
+    const allowanceCity = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+    if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
+    allowed.add(norm);
+  }
+  const seenCounts = new Map();
+  for (const { dest, norm } of collectInternalDestinations(text)) {
+    if (allowed.has(norm)) continue;
+    const seen = (seenCounts.get(norm) || 0) + 1;
+    seenCounts.set(norm, seen);
+    if (exemptRouteCounts && seen <= (exemptRouteCounts.get(norm) || 0)) continue;
+    const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+    if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
+    return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
+  }
+  return null;
+}
+
 // Normalize service/topic value(s) to candidate FAQ_BLOCKED_SERVICES ids. The
 // ids are lowercase/singular/hyphenated ('rodent', 'bed-bug'), but legacy blog
 // `tag` values are display-cased plurals ("Rodents", "Bed Bugs", "Cockroaches").
@@ -875,8 +1382,17 @@ function preventionPromiseFinding(text) {
  * operatorCitations: operator brief carries source_notes directives (writer
  *   locates the sources itself) — additionally allow the curated citation +
  *   competitor-source hosts. Both default off: mined drafts stay internal-only.
+ * allowedInternalLinks: brief-mandated internal link targets
+ *   (internal_links_to_add, curated operator hub_link) — allowed for this
+ *   draft on top of the static ALLOWED_INTERNAL_LINKS set.
+ * isRefresh: the draft rewrites the body of an EXISTING live page. The
+ *   structure-of-new-content checks (component allowlist, internal-route
+ *   allowlist) are skipped — legacy live bodies predate both policies and a
+ *   refresh must not park on links/components it merely preserved. The
+ *   citation-residue and off-footprint checks still apply in full (those are
+ *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -886,12 +1402,36 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // the (possibly multi-domain) live page. A hardcoded price or literal-brand
   // leak hiding only in metaTitle/metaDescription would otherwise slip past the
   // body-only P0 guards. Mirror astro-publisher's REFRESH_EDITABLE_META_FIELDS.
+  // Joined as BLOCKS (blank lines): the markdown-aware scanners re-join
+  // consecutive prose lines, so single-newline joins would merge the body's
+  // last sentence with the title into one pseudo-sentence.
+  // Hero-alt is scanned ONLY on lanes that write it: publishRefresh freezes
+  // frontmatter and applies just the title/meta fields, so a refresh draft's
+  // hero_image_alt (often a copied or hallucinated echo of the live page)
+  // never ships — parking a refresh on findings in it would gate text that
+  // will not be committed.
   const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+    .concat(isRefresh ? [] : ['hero_image_alt'])
     .map((f) => frontmatter[f])
+    .concat(isRefresh ? [] : [frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
-    .join('\n');
-  const publishableText = editableMeta ? `${body}\n${editableMeta}` : body;
+    .join('\n\n');
+  const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
+
+  // Refresh grandfathering surface: what the live prior body already
+  // carried, by occurrence COUNT — preserving a legacy link/component must
+  // not license adding more of it. Built once here; consumed by the two
+  // structure gates below.
+  const refreshPriorBody = isRefresh && typeof priorBody === 'string' && priorBody.trim() ? priorBody : null;
+  const refreshExemptComponents = refreshPriorBody ? collectComponentCounts(refreshPriorBody) : null;
+  let refreshExemptRoutes = null;
+  if (refreshPriorBody) {
+    refreshExemptRoutes = new Map();
+    for (const { norm } of collectInternalDestinations(refreshPriorBody)) {
+      refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
+    }
+  }
 
   const findings = [
     // Price must cover everything that ships: body AND meta.
@@ -917,6 +1457,33 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // just like in body — scan the full publishable text for both.
     productClaimFinding(publishableText),
     preventionPromiseFinding(publishableText),
+    // Citation residue + off-footprint service claims cover everything that
+    // ships (body AND meta) on every lane — neither has a legitimate form.
+    citationResidueFinding(publishableText),
+    offFootprintCityFinding(publishableText),
+    // Fabricated tenure is a brand hard rule (founded 2024) — deterministic
+    // backstop to the writer prompt's BRAND FACTS ban, body AND meta.
+    tenureClaimFinding(publishableText),
+    // Component + internal-route allowlists are body-structure policies.
+    // Refresh drafts GRANDFATHER what the live prior body already carried
+    // (legacy links/components the refresh merely preserves must not park
+    // it) but writer ADDITIONS are gated exactly like new content. Without
+    // a prior body the gates skip — the quality gate's improvement_over_
+    // prior check independently refuses to publish such a refresh. Routes
+    // surfaced by check_existing_content ride on the draft payload
+    // (checked_existing_routes) so the stored-draft revalidation grants the
+    // same allowance the original run did.
+    // A refresh with NO prior body cannot separate preserved-legacy from
+    // writer additions — fail CLOSED (park for review) rather than skipping
+    // the structure gates; a transient load failure here must not become a
+    // publish window for dead routes or uncataloged components.
+    (isRefresh && !refreshPriorBody)
+      ? finding('P1', 'REFRESH_PRIOR_BODY_UNAVAILABLE', 'Refresh draft arrived without the live prior body, so the component/internal-route gates cannot grandfather preserved-legacy content — routed to review (fail closed).')
+      : uncatalogedComponentFinding(body, refreshExemptComponents),
+    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
+      ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
+      ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
+    ], refreshExemptRoutes),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -939,5 +1506,14 @@ module.exports = {
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).
   PRO_PRODUCT_TERMS,
   ACTIVE_INGREDIENT_TERMS,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding },
+  // single source of truth for the MDX component vocabulary, the internal
+  // link allowlist, and the out-of-footprint city blocklist — consumed by
+  // writer-agent-config so the writer's instructions can never drift from
+  // what these gates enforce at publish.
+  SAFE_MDX_COMPONENTS,
+  ALLOWED_INTERNAL_LINKS,
+  PAGE_CITY_SLUGS,
+  OUT_OF_AREA_CITY_CANDIDATES,
+  outOfAreaCities,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

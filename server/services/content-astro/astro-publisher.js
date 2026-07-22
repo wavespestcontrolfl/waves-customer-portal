@@ -158,6 +158,11 @@ const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol
 const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
 const DEFAULT_SERVICE_AREAS = Object.freeze(['Sarasota', 'Bradenton', 'Venice', 'Lakewood Ranch', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
+// Author blocks are WHITELISTED to name/role/fdacs_license/bio_url. No
+// years_*/tenure field may ever be assembled into post frontmatter: the
+// company was founded in 2024 and any years-of-experience claim is a
+// fabrication (owner hard rule — the old years_swfl: 12 default shipped on
+// every generated post).
 const DEFAULT_BLOG_AUTHOR = Object.freeze({
   name: 'Adam Benetti',
   role: 'Founder & Lead Technician',
@@ -216,7 +221,13 @@ async function buildFrontmatter(post) {
   const author = post.author_slug ? await authorService.getAuthor(post.author_slug) : null;
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
-  const today = calendarDateOnly(post.publish_date) || etDateString();
+  // Frontmatter dates must never exceed the ACTUAL publish date: the Astro
+  // site renders the post as soon as the PR merges, so a scheduled
+  // publish_date (or a future reviewed/fact-checked stamp) would ship a
+  // future-dated live page. Clamp everything to today (ET) at PR-open time;
+  // a genuinely PAST publish_date (backdated original publish) is preserved.
+  const todayEt = etDateString();
+  const today = clampDateToToday(calendarDateOnly(post.publish_date), todayEt) || todayEt;
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
@@ -229,11 +240,12 @@ async function buildFrontmatter(post) {
   // corrupt stamp heals to today ET (matching publish_date's fallback) rather
   // than dropping to undefined, which would fail assertValidBlogFrontmatter
   // and strand the row before a PR ever opens. An absent stamp stays absent
-  // (unchanged behavior).
-  const technicallyReviewedDate = calendarDateOnly(post.technically_reviewed_at)
-    || (post.technically_reviewed_at ? etDateString() : null);
-  const factCheckedDate = calendarDateOnly(post.fact_checked_at)
-    || (post.fact_checked_at ? etDateString() : null);
+  // (unchanged behavior). Valid stamps are clamped so they never sit in the
+  // future on a live page.
+  const technicallyReviewedDate = clampDateToToday(calendarDateOnly(post.technically_reviewed_at), todayEt)
+    || (post.technically_reviewed_at ? todayEt : null);
+  const factCheckedDate = clampDateToToday(calendarDateOnly(post.fact_checked_at), todayEt)
+    || (post.fact_checked_at ? todayEt : null);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
@@ -256,6 +268,8 @@ async function buildFrontmatter(post) {
     // collections, not the blog collection.
     domains,
     author: author ? {
+      // Whitelisted author fields only — never years_*/tenure (fabricated
+      // claim; see DEFAULT_BLOG_AUTHOR).
       name: author.name,
       role: author.role,
       fdacs_license: author.fdacs_license || undefined,
@@ -360,11 +374,13 @@ function normalizeAuthorBlock(value, fallback) {
   const role = String(source.role || fallback.role || '').trim();
   const bioUrl = String(source.bio_url || fallback.bio_url || '').trim();
   if (!name || !role || !/^\/about\/authors\/[a-z0-9-]+$/.test(bioUrl)) return { ...fallback };
+  // Whitelist: name/role/bio_url/fdacs_license only. A writer-emitted
+  // years_swfl (or any other tenure field) is DROPPED, never passed through —
+  // the old years_swfl emission was a fabricated "12" (owner ruling
+  // 2026-07-09 — real figure is 3, and tenure is not displayed anywhere).
   const out = { name, role, bio_url: bioUrl };
   const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
   if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
-  // No tenure field: the old years_swfl emission was a fabricated "12" (owner
-  // ruling 2026-07-09 — real figure is 3, and tenure is not displayed anywhere).
   return out;
 }
 
@@ -423,8 +439,54 @@ function clampToWordBoundary(value, max) {
     .trim();
   return trimmed || cut.trim();
 }
+// Meta clamp is SENTENCE-aware: the bare word-boundary cut shipped visibly
+// truncated meta_descriptions (no terminal punctuation, dangling phrases) —
+// one of the recurring Codex findings on generated posts. Prefer cutting at
+// the last complete sentence that still satisfies the schema minimum (115);
+// only when no complete sentence fits fall back to the word-boundary cut,
+// dropping a dangling connective and closing the fragment with a period so
+// the shipped meta always reads as finished copy.
+const META_DESCRIPTION_MIN = 115;
+// The dangling-word set is content-quality-gate's DANGLING_META_ENDINGS —
+// the SAME set checkMetaDescriptionComplete rejects on, so a clamped meta
+// can never end on a word the gate calls dangling. Stripping loops because
+// removing one dangling word can expose another ("…of the" → "…of").
+const { DANGLING_META_ENDINGS } = require('../content/content-quality-gate');
+function stripDanglingTail(s) {
+  let out = String(s || '').trim();
+  for (;;) {
+    const words = out.split(/\s+/);
+    if (words.length <= 1) return out;
+    const last = (words[words.length - 1] || '').toLowerCase().replace(/[^a-z']/g, '');
+    if (!DANGLING_META_ENDINGS.has(last)) return out;
+    out = words.slice(0, -1).join(' ');
+  }
+}
+// Dotted abbreviations whose period is NOT a sentence end — "St. Augustine
+// grass" is a staple topic in this content, and cutting at "St." ships a
+// meta ending mid-name.
+const META_ABBREVIATION_TAIL_RE = /\b(?:St|Ft|Mt|Dr|Mr|Mrs|Ms|vs|etc|approx|U\.S|e\.g|i\.e)\.$/i;
 function clampMetaDescription(meta) {
-  return clampToWordBoundary(meta, META_DESCRIPTION_MAX);
+  const s = String(meta || '').trim();
+  if (s.length <= META_DESCRIPTION_MAX) return s;
+  const window = s.slice(0, META_DESCRIPTION_MAX);
+  for (let i = window.length - 1; i >= META_DESCRIPTION_MIN - 1; i--) {
+    // A sentence end is . ! ? followed by whitespace/close-quote/end in the
+    // ORIGINAL string (so "4.5 stars" never counts), and not the period of a
+    // dotted abbreviation ("St. Augustine" never counts either).
+    if ('.!?'.includes(window[i])
+      && (i + 1 >= s.length || /[\s"'”’)\]]/.test(s[i + 1]))
+      && !META_ABBREVIATION_TAIL_RE.test(window.slice(0, i + 1))) {
+      // Carry adjacent closing quotes/brackets so a sentence ending inside
+      // a quotation ships whole ('…the silent lawn killer."', not a
+      // dangling open quote). Still bounded by the window (<= max).
+      let end = i + 1;
+      while (end < window.length && /["'”’)\]]/.test(window[end])) end += 1;
+      return window.slice(0, end).trim();
+    }
+  }
+  const wordCut = clampToWordBoundary(s, META_DESCRIPTION_MAX - 1); // leave room for the closing period
+  return `${stripDanglingTail(wordCut)}.`;
 }
 function clampTitle(title) {
   return clampToWordBoundary(title, TITLE_MAX);
@@ -545,6 +607,14 @@ function calendarDateOnly(value) {
   return s > today ? today : s;
 }
 
+// Clamp a YYYY-MM-DD date so it never exceeds today (ET). ISO date strings
+// compare correctly as strings. Null-safe: null in → null out (the callers'
+// || fallbacks handle absence).
+function clampDateToToday(isoDate, todayEt = etDateString()) {
+  if (!isoDate) return null;
+  return isoDate > todayEt ? todayEt : isoDate;
+}
+
 function imageExtFromMime(mime) {
   if (mime === 'image/png') return 'png';
   if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
@@ -628,7 +698,11 @@ async function generateHeroBuffer(post) {
   const img = await fetchImageBuffer(gen.dataUrl);
   if (!img?.buffer) throw new Error('hero image generation produced no usable image');
   logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
-  return img;
+  // Carry the generator's alt (derived from the actual generation prompt's
+  // subject/setting) so callers can overwrite any pre-written
+  // hero_image_alt — alt authored BEFORE the image exists routinely
+  // mismatches what was generated.
+  return { ...img, alt: gen.alt || null };
 }
 
 // ── Main publish ───────────────────────────────────────────────────
@@ -781,7 +855,8 @@ async function publishAstro(postId) {
     // which lets the merge step persist the public path without tracking the
     // source extension.
     if (heroImage?.buffer) {
-      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp' };
+      // Preserve alt across the recompress — only the generated path sets it.
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null };
     }
     const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
 
@@ -793,7 +868,17 @@ async function publishAstro(postId) {
       : (post.featured_image_url || null);
 
     // 2. Markdown frontmatter/body validation
-    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt, featured_image_url: heroPublicRef });
+    // A freshly GENERATED hero carries its own alt (derived from the
+    // generation prompt) and overrides any pre-written hero_image_alt — the
+    // stored alt was authored before this image existed. Curated/committed
+    // heroes keep the stored alt.
+    const data = await buildFrontmatter({
+      ...post,
+      slug,
+      hero_image_ext: heroImageExt,
+      featured_image_url: heroPublicRef,
+      hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
+    });
     assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
 
@@ -1147,6 +1232,28 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
 // Stamp the publisher-owned hero reference into autonomous frontmatter,
 // overriding whatever the writer agent emitted (including caption/credit —
 // agent-invented attribution for a generated image would be wrong).
+// A generation/vision-derived alt is produced AFTER the draft's guardrails
+// scan, so run it through the same policy before it lands in frontmatter —
+// prices, product names, brand tokens, footprint claims, citation residue.
+// `domains` carries the draft's resolved target domains so the brand-token
+// leak guard applies with the same spoke context as the draft scan. Fail
+// closed to the fallback (the already-scanned draft alt): a policy hit or
+// an evaluation error must never publish an unvetted string.
+function vetGeneratedAlt(generatedAlt, fallbackAlt, domains = null) {
+  if (!generatedAlt) return fallbackAlt || null;
+  try {
+    const check = contentGuardrails.evaluate({ body: '', frontmatter: { hero_image_alt: String(generatedAlt) } }, { domains });
+    if (!check.pass) {
+      logger.warn(`[astro-publisher] generated hero alt failed guardrails (${check.findings.map((f) => f.code).join(', ')}) — keeping the draft alt`);
+      return fallbackAlt || null;
+    }
+  } catch (err) {
+    logger.warn(`[astro-publisher] generated-alt guardrail check errored (${err.message}) — keeping the draft alt`);
+    return fallbackAlt || null;
+  }
+  return String(generatedAlt);
+}
+
 function stampAutonomousHero(frontmatter, src, alt) {
   frontmatter.hero_image = { src, alt };
   frontmatter.og_image = src;
@@ -1216,6 +1323,9 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
       repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
       buffer,
+      // Generation-derived alt: describes the image that was ACTUALLY
+      // produced. The caller stamps it over the agent's pre-generation alt.
+      alt: img.alt || null,
     };
   } catch (err) {
     const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${err.message}`);
@@ -1227,12 +1337,16 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   // generator actually rendered — the writer authored its alt before any
   // image existed, and an image/alt mismatch is a recurring Codex P2 that
   // parks the PR (remediation is body-only and cannot touch frontmatter).
-  // Outside the fail-closed block above: fail-open, null keeps the writer alt.
-  generated.alt = await describeHeroForAlt({
+  // Outside the fail-closed block above: fail-open. When vision is
+  // unavailable (no key / SDK / unusable output) fall back to the
+  // generation-prompt-derived alt already on `generated` — still closer to
+  // the real image than the writer's pre-image alt, which is the last
+  // resort in the caller.
+  generated.alt = (await describeHeroForAlt({
     buffer: generated.buffer,
     title: frontmatter.title,
     keyword: frontmatter.primary_keyword,
-  });
+  })) || generated.alt || null;
   return generated;
 }
 
@@ -1358,7 +1472,14 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // never a silent hero-less publish. Resolution happens BEFORE the branch is
   // cut so a hero failure can't orphan a branch/PR.
   const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
-  stampAutonomousHero(frontmatter, hero.src, hero.alt || heroAlt);
+  // A freshly generated hero carries a generation-derived alt that describes
+  // the actual image — it wins over the agent's alt, which was written
+  // before the image existed (the recurring alt↔hero mismatch). Reused
+  // committed heroes keep the draft alt. The generated alt was produced
+  // AFTER the runner's guardrails scanned the draft, so vet it against the
+  // same policy here — a violating alt falls back to the already-scanned
+  // draft alt instead of bypassing the gates.
+  stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt, Array.isArray(frontmatter.domains) ? frontmatter.domains : null));
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
@@ -2580,6 +2701,7 @@ module.exports = {
   publishRefresh,
   getLiveFrontmatter,
   loadExistingPageBody,
+  resolveExistingAstroFileForTarget,
   canPublishDraftBrief,
   canPublishMetadataRewrite,
   canPublishRefresh,
@@ -2618,6 +2740,9 @@ module.exports = {
     assertCanonicalMatchesSlug,
     clampMetaDescription,
     clampTitle,
+    clampDateToToday,
+    normalizeAutonomousBlogFrontmatter,
+    normalizeAuthorBlock,
     buildDraftPrBody,
     buildMetadataPrBody,
     buildSeoReviewSection,

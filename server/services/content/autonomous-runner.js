@@ -463,6 +463,13 @@ class AutonomousRunner {
     }
 
     const draft = dispatchResult.draft;
+    // Routes check_existing_content showed this session are legitimate link
+    // targets (the prompt mandates linking the existing post on a
+    // differentiated angle). They ride ON the draft payload so the
+    // stored-draft guardrail revalidation grants the same allowance.
+    if (draft && Array.isArray(dispatchResult.checked_existing_routes) && dispatchResult.checked_existing_routes.length) {
+      draft.checked_existing_routes = dispatchResult.checked_existing_routes;
+    }
     run.agent_id = dispatchResult.agent_id || null;
     run.agent_session_id = dispatchResult.session_id || null;
     run.draft_payload = draft || null;
@@ -607,13 +614,14 @@ class AutonomousRunner {
       try {
         guardOptions = await this._deriveGuardrailOptions(opp, brief);
       } catch (err) {
-        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED') throw err;
+        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED' && err.code !== 'REFRESH_PRIOR_BODY_LOAD_FAILED') throw err;
+        const skipReason = err.code === 'REFRESH_DOMAINS_LOAD_FAILED' ? 'refresh_domains_load_failed' : 'refresh_prior_body_load_failed';
         const finalized = await finalize(run, t0, {
           outcome: 'skipped_gate_fail',
-          skip_reason: 'refresh_domains_load_failed',
-          reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+          skip_reason: skipReason,
+          reviewer_notes: `${err.message} — routed to review (fail-closed, infra load failure not a writer mistake).`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken });
         return finalized;
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
@@ -752,6 +760,7 @@ class AutonomousRunner {
       // refresh fails that check (no_previous_version_to_compare) and can never
       // publish. On load failure we leave previousVersion unset → the hard
       // check fails closed and the refresh routes to review (safe).
+      let gateBrief = brief;
       if (brief.action_type === 'refresh_existing_page') {
         const publisher = getAstroPublisher();
         if (publisher?.loadExistingPageBody) {
@@ -763,9 +772,22 @@ class AutonomousRunner {
             });
           if (prior) ctx.previousVersion = prior;
         }
+        // Same resolved-target derivation as the metadata lane: page_type
+        // 'refresh' says nothing about the target, and a refresh that
+        // rewrites a blog post's meta_description must keep the full blog
+        // meta-completeness contract. Resolution failure fails CLOSED to
+        // the stricter blog contract — such a target cannot publish anyway.
+        let targetPageType = 'supporting-blog';
+        try {
+          const resolved = publisher?.resolveExistingAstroFileForTarget
+            ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
+            : null;
+          if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+        } catch (_) { /* keep the stricter blog contract */ }
+        gateBrief = { ...brief, target_page_type: targetPageType };
       }
       try {
-        qualityResult = qualityGate.evaluate(draft, brief, ctx);
+        qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
       } catch (err) {
         qualityResult = { ok: false, error: err.message };
       }
@@ -1769,7 +1791,20 @@ class AutonomousRunner {
         meta_description: draft.meta_description,
       },
     };
-    const metadataBrief = { ...brief, page_type: 'metadata' };
+    // target_page_type is derived from the RESOLVED target file — for
+    // rewrite_title_meta briefs page_type is already 'metadata' (decision
+    // router), so it says nothing about the target. Blog targets keep the
+    // full meta completeness contract; resolution failure fails CLOSED to
+    // the blog contract (stricter) — such a target cannot publish anyway.
+    let targetPageType = 'supporting-blog';
+    try {
+      const publisher = getAstroPublisher();
+      const resolved = publisher?.resolveExistingAstroFileForTarget
+        ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.page_url)
+        : null;
+      if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+    } catch (_) { /* keep the stricter blog contract */ }
+    const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: targetPageType };
     const qualityContext = {
       siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
       previewBuildSuccess: true,
@@ -2765,6 +2800,47 @@ class AutonomousRunner {
     // bucket.
     const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
     const baseService = opp.service || brief.service || null;
+    // Brief-mandated internal links are binding writer instructions (the
+    // prompt calls internal_links_to_add a checklist), so they are allowed on
+    // top of the guardrails' static internal-route allowlist — same posture
+    // as requiredSourceUrls on the external-link gate. The curated operator
+    // hub_link (a city page outside the static set) is part of that contract.
+    let briefLinks = brief?.internal_links_to_add;
+    if (typeof briefLinks === 'string') { try { briefLinks = JSON.parse(briefLinks); } catch (_) { briefLinks = []; } }
+    // hub_link is read un-bucket-gated (like faqBlockedTopic above): spoke
+    // seeds carry it outside the intercept bucket and the quality gate's
+    // hub_link_present check REQUIRES the draft to contain it.
+    const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link || null;
+    const allowedInternalLinks = [
+      ...(Array.isArray(briefLinks) ? briefLinks : []),
+      ...(curatedHubLink ? [curatedHubLink] : []),
+    ];
+    const isRefresh = brief.action_type === 'refresh_existing_page';
+    // Refresh drafts rewrite an EXISTING live body. The structure gates
+    // grandfather what that prior body already carried but police writer
+    // ADDITIONS — so the prior body itself is part of the guard options.
+    // A load failure is INFRA, not a writer mistake: throw the same class
+    // of fail-closed error as the domains load above so the caller parks
+    // the run for review instead of burning a redraft retry. (The
+    // guardrails' P1 REFRESH_PRIOR_BODY_UNAVAILABLE stays as the backstop
+    // for callers that pass isRefresh without this derivation.)
+    let priorBody = null;
+    if (isRefresh) {
+      const publisher = getAstroPublisher();
+      if (publisher?.loadExistingPageBody) {
+        try {
+          priorBody = (await publisher.loadExistingPageBody(brief.target_url || opp.page_url))?.body || null;
+        } catch (err) {
+          logger.warn(`[autonomous-runner] prior-body load for refresh guardrails failed: ${err.message}`);
+        }
+      }
+      if (!priorBody) {
+        const e = new Error(`Could not read the live prior body for ${brief.target_url || opp.page_url} — the refresh structure gates cannot grandfather preserved content (fail closed)`);
+        e.code = 'REFRESH_PRIOR_BODY_LOAD_FAILED';
+        e.statusCode = 422;
+        throw e;
+      }
+    }
     return {
       service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
       primaryKeyword: brief.target_keyword || null,
@@ -2772,6 +2848,9 @@ class AutonomousRunner {
       operatorFaqException,
       requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
       operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
+      allowedInternalLinks,
+      isRefresh,
+      priorBody,
     };
   }
 

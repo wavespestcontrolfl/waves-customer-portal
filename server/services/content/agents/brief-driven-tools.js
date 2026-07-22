@@ -58,12 +58,23 @@ const getFrontmatter = lazy('frontmatter', '../../content-astro/frontmatter');
  */
 const sessionDrafts = new Map();
 
+// Routes each session was SHOWN by check_existing_content. The writer
+// prompt mandates linking the existing post when writing a differentiated
+// angle, so these are legitimate link targets — the dispatcher hands them
+// back so the internal-route gate can allow them (checked_existing_routes).
+const sessionCheckedRoutes = new Map();
+
 function getDraft(sessionId) {
   return sessionDrafts.get(sessionId) || null;
 }
 
+function getCheckedRoutes(sessionId) {
+  return [...(sessionCheckedRoutes.get(sessionId) || [])];
+}
+
 function clearDraft(sessionId) {
   sessionDrafts.delete(sessionId);
+  sessionCheckedRoutes.delete(sessionId);
 }
 
 async function executeBriefTool(toolName, input, { sessionId } = {}) {
@@ -292,6 +303,20 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           });
         } catch (pendingErr) {
           pendingAutonomous = [{ error: `autonomous_runs read failed: ${pendingErr.message}` }];
+        }
+        // Only LIVE pages become allowed link targets (flat legacy slugs 301
+        // to their canonical, so those are live too). draft/queued/wp_draft
+        // rows and PR-pending autonomous runs stay visible for DEDUPE but a
+        // link to them would be dead until they publish — excluded here.
+        if (sessionId) {
+          const seen = sessionCheckedRoutes.get(sessionId) || new Set();
+          for (const row of matches) {
+            if (row.slug && row.status === 'published') seen.add(`/${String(row.slug).replace(/^\/+|\/+$/g, '')}/`);
+          }
+          for (const row of pendingAutonomous) {
+            if (row.route && row.outcome === 'completed_published') seen.add(`/${String(row.route).replace(/^\/+|\/+$/g, '')}/`);
+          }
+          sessionCheckedRoutes.set(sessionId, seen);
         }
         return { keyword, city, matches, pending_autonomous_drafts: pendingAutonomous };
       } catch (err) {
@@ -561,7 +586,8 @@ function urlToAstroPath(url) {
 module.exports = {
   executeBriefTool,
   getDraft,
+  getCheckedRoutes,
   clearDraft,
   // exposed for tests:
-  _internals: { sessionDrafts, urlToAstroPath, parseJsonbColumns },
+  _internals: { sessionDrafts, sessionCheckedRoutes, urlToAstroPath, parseJsonbColumns },
 };

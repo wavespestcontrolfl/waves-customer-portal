@@ -20,7 +20,7 @@
  */
 
 const logger = require('../../logger');
-const { executeBriefTool, getDraft, clearDraft } = require('./brief-driven-tools');
+const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft } = require('./brief-driven-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
@@ -234,6 +234,9 @@ class AgentDispatcher {
     }
 
     const draft = getDraft(sessionId);
+    // Captured BEFORE clearDraft — clearing drops the session's checked-route
+    // set alongside the draft.
+    const checkedExistingRoutes = getCheckedRoutes(sessionId);
     clearDraft(sessionId);
     if (!draft) {
       return {
@@ -248,6 +251,7 @@ class AgentDispatcher {
     return {
       ok: true,
       draft,
+      checked_existing_routes: checkedExistingRoutes,
       role: route.role,
       agent_id: route.agent_id,
       session_id: sessionId,

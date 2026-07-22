@@ -18,7 +18,7 @@ const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 const { buildSeoRequirements } = require('./blog-seo-contract');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, PAGE_CITY_SLUGS } = require('./content-guardrails');
 const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
@@ -771,7 +771,11 @@ class ContentBriefBuilder {
       const slug = SERVICE_CITY_SLUG[service];
       if (slug) {
         const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
-        links.add(`/${slug}-${citySlug}-fl/`);
+        // Only cities with PUBLISHED city-service pages get a city link —
+        // served towns without pages (Oneco, Gibsonton, …) would make the
+        // brief mandate a dead link, which the writer would dutifully add
+        // and the route gate would (rightly) refuse to allow.
+        if (PAGE_CITY_SLUGS.has(citySlug)) links.add(`/${slug}-${citySlug}-fl/`);
       }
     }
     // Only supporting-blog carries the conversion-CTA gate requirement;

@@ -88,6 +88,10 @@ function minTotalScoreFor(pageType) {
 const HARD_CHECKS = [
   { name: 'schema_valid', weight: 8, evaluate: checkSchemaValid },
   { name: 'title_meta_spam_free', weight: 0, evaluate: checkTitleMetaSpamFree },
+  // Truncation guard: the length BAND lives in title-meta-spam-gate (meta
+  // >190 hard / >160 soft) — this is the COMPLETENESS complement. Weight 0,
+  // same as title_meta_spam_free: pure hard gate, no score contribution.
+  { name: 'meta_description_complete', weight: 0, evaluate: checkMetaDescriptionComplete },
   { name: 'serp_brief_attached', weight: 4, evaluate: checkSerpBriefAttached },
   { name: 'gsc_signal_attached', weight: 4, evaluate: checkGscSignalAttached },
   { name: 'no_duplicate_intent', weight: 6, evaluate: checkNoDuplicateIntent },
@@ -270,6 +274,71 @@ function checkTitleMetaSpamFree(draft, brief) {
     ok: true,
     soft_warnings: result.soft_failures,
   };
+}
+
+// Meta descriptions that read as CUT OFF — no terminal punctuation, a
+// trailing ellipsis, or a dangling article/preposition/conjunction before
+// the period — shipped on generated posts (truncated mid-sentence metas were
+// a recurring Codex finding). The publisher's sentence-aware clamp fixes the
+// overflow path; this hard check parks drafts whose meta was AUTHORED
+// truncated. Absence is not failed here — presence/length are owned by the
+// schema + title-meta-spam checks.
+const DANGLING_META_ENDINGS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'nor', 'to', 'of', 'for', 'with',
+  'in', 'on', 'at', 'by', 'from', 'into', 'over', 'under', 'near', 'about',
+  'between', 'during', 'without', 'within', 'vs', 'versus', 'than', 'as',
+  'if', 'when', 'while', 'because', 'that', 'which', 'your', 'our', 'their',
+  'its', 'his', 'her', 'my',
+]);
+
+function checkMetaDescriptionComplete(draft, brief) {
+  // Two meta contracts. snake_case meta_description on a BLOG draft gets
+  // the full complete-sentence check. Snippet-style metas are legitimate on
+  // the non-blog surfaces — camelCase metaDescription (service/location
+  // refresh casing) AND metadata-only rewrites (page_type 'metadata', whose
+  // emit_metadata_only result is copied into top-level meta_description
+  // regardless of target page type) — there only authored TRUNCATION
+  // (ellipsis) is a hard fail.
+  const blogMeta = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  const refreshMeta = (draft.metaDescription || draft.frontmatter?.metaDescription || '').trim();
+  // When BOTH casings exist, camelCase is the RENDERED service/location
+  // field (publishMetadataRewrite treats snake_case duplicates as dead
+  // fields) — judge the rendered value, snippet-style.
+  const m = refreshMeta || blogMeta;
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  if (/(\.\.\.|…)["'”’)\]]*$/.test(m)) return { ok: false, reason: 'meta_ends_with_ellipsis' };
+  // Full sentence check applies only to BLOG-contract metas: a snake_case
+  // blog draft, or a metadata rewrite whose TARGET is a blog post
+  // (target_page_type rides on the wrapped metadata brief). Everything else
+  // — service/location refresh casings and non-blog metadata rewrites — is
+  // legitimate snippet style, gated on truncation only above.
+  // Classified by PAGE TYPE, not meta casing: city-service and
+  // customer-question drafts also carry snake_case meta_description but are
+  // snippet-legitimate surfaces. Only supporting-blog (directly, or as a
+  // metadata rewrite's resolved target) gets the full sentence contract;
+  // briefs without a page_type fall back to the casing heuristic (legacy
+  // scheduler drafts are blogs).
+  // 'refresh' says nothing about the TARGET either — a refresh that
+  // rewrites a blog post's meta_description keeps the full blog contract.
+  // The runner resolves target_page_type from the actual astro file (same
+  // derivation as the metadata lane); a refresh brief that arrives without
+  // it falls back to the casing heuristic (snake_case-only = blog).
+  const pt = brief?.page_type;
+  const casingHeuristicIsBlog = Boolean(blogMeta) && !refreshMeta;
+  const isBlogTarget = pt === 'metadata'
+    ? brief?.target_page_type === 'supporting-blog'
+    : pt === 'refresh'
+      ? (brief?.target_page_type ? brief.target_page_type === 'supporting-blog' : casingHeuristicIsBlog)
+      : (pt ? pt === 'supporting-blog' : casingHeuristicIsBlog);
+  if (!isBlogTarget) return { ok: true, reason: 'snippet_style_meta_allowed' };
+  const core = m.replace(/["'”’)\]]+$/, '');
+  if (!/[.!?]$/.test(core)) return { ok: false, reason: 'meta_missing_terminal_punctuation' };
+  const beforePunct = core.replace(/[.!?]+$/, '').trim();
+  const lastWord = (beforePunct.split(/\s+/).pop() || '').toLowerCase().replace(/[^a-z']/g, '');
+  if (DANGLING_META_ENDINGS.has(lastWord)) {
+    return { ok: false, reason: `meta_ends_with_dangling_word_${lastWord}` };
+  }
+  return { ok: true };
 }
 
 function isPageOnlyOpportunity(brief) {
@@ -924,13 +993,16 @@ function checkNoDuplicateTitle(draft, _brief, context) {
   return { ok: true };
 }
 
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor };
+// DANGLING_META_ENDINGS is exported as the single source of truth for
+// "words a meta may not end on" — astro-publisher's clamp fallback strips
+// against the SAME set so a clamped meta can never fail this gate.
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
-  checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
+  checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
   isOperatorAuthoredBrief, isCompetitorGapBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,

@@ -96,6 +96,20 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   return [base, focus, local, composition, style].join(' ');
 }
 
+// Alt text describing the image buildPrompt actually asks for — derived from
+// the SAME inputs (subject + setting), so the shipped hero_image_alt can
+// never describe a different picture than the one generated. Writers author
+// alt BEFORE the hero exists; publishers overwrite it with this at
+// generation time (astro-publisher stamps it alongside the hero src).
+function buildAltText({ title, topic, keyword, city, mode = 'blog-hero' } = {}) {
+  const subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  const setting = city
+    ? `a sunny ${city}-area Southwest Florida home with palm trees and sandy soil`
+    : 'a sunny Southwest Florida home with palm trees and tropical landscaping';
+  const kind = mode === 'social-square' ? 'Photorealistic social tile' : 'Photorealistic scene';
+  return `${kind} of ${setting}, illustrating ${subject}.`;
+}
+
 // ── providers ────────────────────────────────────────────────────────
 
 const IMAGE_REQUEST_TIMEOUT_MS = 60_000;
@@ -197,11 +211,16 @@ class ImageGenerator {
    * generate({ title, topic, keyword, city, mode })
    *
    * mode: 'blog-hero' (default) or 'social-square'.
-   * Returns: { dataUrl, mimeType, model, attempts: [...] }
+   * Returns: { dataUrl, mimeType, model, attempts: [...], prompt, alt }
+   *   prompt — the exact generation prompt used;
+   *   alt — accessibility text derived from the same subject/setting inputs
+   *   as the prompt, so callers can stamp an alt that describes the ACTUAL
+   *   generated image (null when a customPrompt made the fields unreliable).
    * Throws if every provider in the chain failed.
    */
   async generate({ title, topic, keyword, city, mode = 'blog-hero', prompt: customPrompt } = {}) {
     const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode });
+    const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode });
     const attempts = [];
 
     for (const slug of this.chain) {
@@ -220,7 +239,7 @@ class ImageGenerator {
 
       if (result.dataUrl) {
         logger.info(`[image-generator] generated via ${slug} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts };
+        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt, alt };
       }
       // Skipped / fatal / retryable → next provider. The whole point
       // of the chain is resilience: a 408/429/5xx on OpenAI should fall
@@ -304,6 +323,7 @@ module.exports._internals = {
   isFatalOpenAIError,
   sizeFor,
   buildPrompt,
+  buildAltText,
   callOpenAI,
   callGemini,
 };

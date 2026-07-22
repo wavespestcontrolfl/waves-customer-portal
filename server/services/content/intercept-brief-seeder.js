@@ -89,6 +89,10 @@ function serviceForBrief(brief) {
 // turf background (Augusta National) emphasized in the body for lawn-post
 // E-E-A-T — there is no separate author record, so both map to the same
 // frontmatter block and 'adam-augusta' adds a body-emphasis instruction.
+// Author frontmatter is whitelisted to name/role/fdacs_license/bio_url — no
+// years_*/tenure field, ever: the company was founded in 2024 and a
+// years-of-experience number is a fabricated claim (owner hard rule; the old
+// years_swfl: 12 here shipped on every generated intercept post).
 const BYLINE_AUTHORS = {
   adam: {
     author_slug: 'adam-benetti',
