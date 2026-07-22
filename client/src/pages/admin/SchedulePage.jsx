@@ -40,6 +40,7 @@ import AnnualPrepayLauncher from "../../components/schedule/AnnualPrepayLauncher
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
+import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import {
   describeCardRequestState,
@@ -7971,6 +7972,9 @@ export function CompletionPanel({
     return () => { live = false; };
   }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  // Treatment Zone mapper (owner 2026-07-22): the same tracer the tech portal
+  // has — admin closeouts can trace where we sprayed without switching apps.
+  const [zoneMapOpen, setZoneMapOpen] = useState(false);
   // Gates the pesticideOnly compliance fields (pollinator / IRAC-FRAC) in the
   // typed findings form — they appear once a pesticide-family product is on
   // the visit. Display-only: the server compliance validation is authoritative.
@@ -12374,6 +12378,30 @@ export function CompletionPanel({
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
                 it (companions have their own completion-photo gates). */}
+            {!quickComplete && (
+              <Field label="Treatment zone map">
+                <button
+                  type="button"
+                  onClick={() => setZoneMapOpen(true)}
+                  style={secondaryPill}
+                >
+                  Trace where we sprayed
+                </button>
+                {zoneMapOpen && (
+                  <TechTreatmentZoneModal
+                    serviceId={service.id}
+                    customerName={service.customerName || "Customer"}
+                    address={service.address || ""}
+                    lat={service.lat ?? service.customer_latitude}
+                    lng={service.lng ?? service.customer_longitude}
+                    onClose={() => setZoneMapOpen(false)}
+                  />
+                )}
+                <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
+                  Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report.
+                </span>
+              </Field>
+            )}
             {!quickComplete && !hideServicePhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
