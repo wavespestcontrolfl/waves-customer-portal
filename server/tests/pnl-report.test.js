@@ -345,15 +345,34 @@ describe('prorateDepreciation', () => {
       expect(prorateDepreciation([hybrid40], '2025-01-01', '2025-12-31')).toBe(0);
     });
 
-    test('disposed MACRS asset fails closed in the disposal year and after', () => {
+    test('disposed MACRS asset takes HALF the disposal-year amount (half-year disposition)', () => {
       const disposedVan = van({ disposal_date: '2027-12-31', disposed: true });
       // 2026 (before disposal): full year-2 $11,200.
       expect(prorateDepreciation([disposedVan], '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
-      // 2027 (disposal year): fail closed — half-year disposition + recapture
-      // is a CPA adjustment, not an arbitrary day fraction. A Dec-31 disposal
-      // must NOT quietly take the full annual %.
-      expect(prorateDepreciation([disposedVan], '2027-01-01', '2027-12-31')).toBe(0);
+      // 2027 (disposal year): HALF the year-3 amount = 0.5 × 19.2% × $35k =
+      // $3,360 (half-year disposition convention, not a day fraction — a
+      // Dec-31 disposal must NOT take the full annual %).
+      expect(prorateDepreciation([disposedVan], '2027-01-01', '2027-12-31')).toBeCloseTo(3360, 2);
+      // After the disposal year: nothing.
       expect(prorateDepreciation([disposedVan], '2028-01-01', '2028-12-31')).toBe(0);
+    });
+
+    test('the ≤50% guard gates ONLY GDS/§179 — a CPA-entered straight-line amount flows through', () => {
+      const adsVehicle = {
+        depreciation_method: 'straight_line', annual_depreciation: '2100',
+        placed_in_service_date: '2025-01-01', business_use_pct: '30',
+      };
+      expect(prorateDepreciation([adsVehicle], '2026-01-01', '2026-12-31')).toBeCloseTo(2100, 2);
+    });
+
+    test('mid-quarter year (>40% of basis in Q4) fails MACRS closed for CPA', () => {
+      const { annotateMidQuarter } = require('../services/pnl-report');
+      const q1 = van({ placed_in_service_date: '2026-02-01', purchase_cost: '10000' });
+      const q4 = van({ placed_in_service_date: '2026-11-01', purchase_cost: '40000' });
+      // 40k of 50k (80%) in Q4 → mid-quarter year → both fail closed.
+      expect(prorateDepreciation(annotateMidQuarter([q1, q4]), '2026-01-01', '2026-12-31')).toBe(0);
+      // A half-year year (all Q1) computes normally.
+      expect(prorateDepreciation(annotateMidQuarter([van()]), '2026-01-01', '2026-12-31')).toBeCloseTo(11200, 2);
     });
 
     test('business use ≤50% FAILS CLOSED (ADS/CPA territory, not GDS)', () => {

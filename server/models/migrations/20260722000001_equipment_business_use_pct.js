@@ -18,12 +18,22 @@ exports.up = async function up(knex) {
       t.decimal('business_use_pct', 5, 2).notNullable().defaultTo(100);
     });
   }
+  // MACRS averaging convention. Only 'half_year' is computed; buildPnlReport
+  // auto-detects mid-quarter years (>40% of the year's basis placed in Q4) and
+  // fails those assets closed for CPA computation, and a CPA can also set the
+  // value explicitly. Default 'half_year' is correct for every current asset
+  // (all placed in service in Q1).
+  if (!(await knex.schema.hasColumn('equipment_register', 'depreciation_convention'))) {
+    await knex.schema.alterTable('equipment_register', (t) => {
+      t.string('depreciation_convention', 20).notNullable().defaultTo('half_year');
+    });
+  }
 };
 
 exports.down = async function down(knex) {
-  if (await knex.schema.hasColumn('equipment_register', 'business_use_pct')) {
-    await knex.schema.alterTable('equipment_register', (t) => {
-      t.dropColumn('business_use_pct');
-    });
+  for (const col of ['business_use_pct', 'depreciation_convention']) {
+    if (await knex.schema.hasColumn('equipment_register', col)) {
+      await knex.schema.alterTable('equipment_register', (t) => { t.dropColumn(col); });
+    }
   }
 };

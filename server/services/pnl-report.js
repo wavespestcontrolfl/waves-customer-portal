@@ -201,20 +201,21 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   const disposed = toUTCDay(asset?.disposal_date);
   let total = 0;
 
-  // Listed property (vehicles) used ≤50% for business is disqualified from BOTH
-  // §179 AND GDS declining-balance MACRS — Pub 946 requires ADS straight-line
-  // and may trigger recapture. FAIL CLOSED for the whole asset (surface it for
-  // CPA/ADS treatment) rather than report a wrong deduction. business_use_pct
-  // defaults 100 (unset → 1.0), so only an explicitly-lowered asset trips this.
+  // Listed property (vehicles) used ≤50% for business is disqualified from
+  // §179 AND GDS declining-balance MACRS (Pub 946 → ADS straight-line +
+  // possible recapture). The guard is applied ONLY to those two paths below,
+  // NOT globally: a CPA-entered annual_depreciation (their ADS/straight-line
+  // figure) must still flow through even at low business use. business_use_pct
+  // defaults 100 (unset → 1.0), so only an explicitly-lowered asset is gated.
   const bizUse = businessUseFraction(asset?.business_use_pct);
-  if (bizUse <= 0.5) return 0;
+  const gdsEligible = bizUse > 0.5;
 
   // Immediate expensing (§179 / 100% bonus): the WHOLE deduction is recognized
   // in the placed-in-service year — never day-prorated. (annual NULL, so
   // filtering on the annual field alone silently dropped it from the P&L / CPA
   // package.) The elected amount is the business figure the CPA entered.
   const method = String(asset?.depreciation_method || '');
-  const s179Immediate = (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
+  const s179Immediate = gdsEligible && (method === 'section_179' || method === 'bonus_100' || asset?.section_179_elected)
     ? (parseFloat(asset?.section_179_amount ?? asset?.purchase_cost) || 0) : 0;
   if (s179Immediate > 0 && inService && inService >= periodStart && inService <= periodEnd) {
     total += s179Immediate;
@@ -225,24 +226,31 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
   // business-use%, THEN minus §179 (already in the basis, so the schedule
   // isn't scaled again). A flat annual_depreciation can't model the schedule,
   // which is why MACRS assets showed $0.
-  if (MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
+  if (gdsEligible && MACRS_HALF_YEAR[String(asset?.irs_class || '').trim()] && method === 'MACRS') {
+    // Only the HALF-YEAR convention is modeled. The mid-quarter convention is
+    // mandatory when >40% of the YEAR's aggregate basis is placed in service in
+    // Q4 — a cross-asset determination made in buildPnlReport, which fails
+    // closed for those years. A per-asset override other than 'half_year' also
+    // fails closed for CPA computation rather than silently using half-year.
+    const convention = String(asset?.depreciation_convention || 'half_year');
+    if (convention !== 'half_year') return total;
     const cost = parseFloat(asset?.purchase_cost || 0) || 0;
     const macrsBasis = Math.max(0, cost * bizUse - s179Immediate);
     const inSvcYear = inService ? inService.getUTCFullYear() : null;
     const disposalYear = disposed ? disposed.getUTCFullYear() : null;
     if (macrsBasis > 0 && inSvcYear && inService) {
       for (let y = periodStart.getUTCFullYear(); y <= periodEnd.getUTCFullYear(); y++) {
-        // Disposal year and after: the MACRS half-year DISPOSITION convention
-        // (half the year's %, plus recapture) is a CPA adjustment — FAIL CLOSED
-        // here; prior years already booked their full amounts. The sole
-        // vehicle is not disposed, so this is defensive.
-        if (disposalYear != null && y >= disposalYear) continue;
-        const yearAmount = macrsYearAmount(asset.irs_class, macrsBasis, inSvcYear, y);
+        if (disposalYear != null && y > disposalYear) continue; // nothing after disposal
+        let yearAmount = macrsYearAmount(asset.irs_class, macrsBasis, inSvcYear, y);
+        // Disposal YEAR: the half-year disposition convention takes HALF the
+        // year's scheduled amount (not an arbitrary day fraction). Recapture on
+        // any gain is separate and remains a CPA adjustment on the sale.
+        if (disposalYear != null && y === disposalYear) yearAmount *= 0.5;
         if (yearAmount <= 0) continue;
         // Attribute across the asset's coverage in year y (in-service date, or
         // Jan 1 for later years, through year-end), prorated by the report
-        // window's overlap: a full-year window keeps the whole half-year-
-        // convention amount; a window ending before in-service gets nothing.
+        // window's overlap: a full-year window keeps the whole convention
+        // amount; a window ending before in-service gets nothing.
         const yStart = new Date(Date.UTC(y, 0, 1));
         const yEnd = new Date(Date.UTC(y, 11, 31));
         const covStart = inService > yStart ? inService : yStart;
@@ -272,6 +280,38 @@ function prorateAssetDepreciation(asset, startDate, endDate) {
     if (days > 0) total += annual * (days / daysInYear(y));
   }
   return total;
+}
+
+// Detect MACRS mid-quarter years and mark their assets so prorateAssetDepreciation
+// FAILS CLOSED for them (only half-year is computed). The mid-quarter convention
+// is mandatory when >40% of a year's aggregate MACRS depreciable basis is placed
+// in service in Q4 (Oct–Dec). Returns a shallow-cloned list; already-set
+// non-half_year conventions are preserved. Pure.
+function annotateMidQuarter(assets) {
+  const byYear = new Map(); // year → { total, q4 }
+  for (const a of assets || []) {
+    if (String(a?.depreciation_method || '') !== 'MACRS') continue;
+    const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
+    if (!d) continue;
+    const s179 = a?.section_179_elected ? (parseFloat(a?.section_179_amount ?? a?.purchase_cost) || 0) : 0;
+    const basis = Math.max(0, (parseFloat(a?.purchase_cost || 0) || 0) - s179);
+    if (basis <= 0) continue;
+    const y = d.getUTCFullYear();
+    const rec = byYear.get(y) || { total: 0, q4: 0 };
+    rec.total += basis;
+    if (d.getUTCMonth() >= 9) rec.q4 += basis; // Oct(9)–Dec(11)
+    byYear.set(y, rec);
+  }
+  const midQuarterYears = new Set();
+  for (const [y, rec] of byYear) if (rec.total > 0 && rec.q4 > 0.4 * rec.total) midQuarterYears.add(y);
+  if (!midQuarterYears.size) return assets || [];
+  return (assets || []).map((a) => {
+    if (String(a?.depreciation_method || '') !== 'MACRS') return a;
+    const d = toUTCDay(a?.placed_in_service_date) || toUTCDay(a?.purchase_date);
+    return d && midQuarterYears.has(d.getUTCFullYear())
+      ? { ...a, depreciation_convention: 'mid_quarter' } // fail closed → CPA
+      : a;
+  });
 }
 
 /** Sum of prorateAssetDepreciation over the asset list. Pure. */
@@ -728,8 +768,8 @@ async function buildPnlReport(db, startDate, endDate) {
         // deducting a vehicle's MACRS/§179 beside it double-counts.
         'asset_category',
         // MACRS computation inputs: recovery class + listed-property business
-        // use (vehicles). business_use_pct defaults 100 in the schema.
-        'irs_class', 'business_use_pct',
+        // use (vehicles) + averaging convention. Schema defaults: 100 / half_year.
+        'irs_class', 'business_use_pct', 'depreciation_convention',
       )
       .catch(missingTableOnly([])),
     // The vehicle-method election (newest financials row, same accessor every
@@ -783,6 +823,9 @@ async function buildPnlReport(db, startDate, endDate) {
     ? financialsRow.vehicle_deduction_method
     : null;
 
+  // Flag MACRS mid-quarter years (fail closed → CPA) before depreciating.
+  const depreciableAssets = annotateMidQuarter(assets);
+
   const report = assemblePnl({
     serviceRevenue,
     otherRevenue: 0,
@@ -799,7 +842,7 @@ async function buildPnlReport(db, startDate, endDate) {
     opexRows,
     processingFees: parseFloat(feeRow?.total || 0),
     mileageDeduction: parseFloat(mileageRow?.total || 0),
-    depreciationTotal: prorateDepreciation(assets, startDate, endDate),
+    depreciationTotal: prorateDepreciation(depreciableAssets, startDate, endDate),
     vehicleMethod,
     // A held vehicle on MACRS/§179 is barred from the standard mileage rate
     // (Pub 463). The P&L never applies the rate regardless; this only sharpens
@@ -876,6 +919,7 @@ module.exports = {
   prorateDepreciation,
   prorateAssetDepreciation,
   macrsYearAmount,
+  annotateMidQuarter,
   rateAsOf,
   costLaborByDay,
   dateCellStr,
