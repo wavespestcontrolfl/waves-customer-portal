@@ -2134,3 +2134,21 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('round 7: while splits, inherited-subject includes, city customers, include lists', () => {
+    for (const body of [
+      'Our service area excludes Naples, but includes Tampa.',
+      'Customers in Tampa call us every week.',
+      'Our Tampa customers ask about WaveGuard.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'We treat Sarasota lawns while Tampa faces different rules.',
+      'Cities outside our service area include Naples and Fort Myers.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });

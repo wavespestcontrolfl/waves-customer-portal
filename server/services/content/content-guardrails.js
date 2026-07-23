@@ -642,7 +642,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? (?:in|throughout|across|around)|operates? (?:in|throughout|across|around))'
-  + '|same.day|we offer|free (?:quote|estimate|inspection)'
+  + '|same.day|we offer|free (?:quote|estimate|inspection)|customers?\\s+(?:\\w+\\s+){0,3}?(?:call|text|contact|ask)\\b|our\\s+(?:\\w+\\s+){0,2}?customers\\b|^\\s*(?:and |but |yet )?(?:also |now |still )?(?:includes?|covers?|extends? (?:to|into)|reaches?)\\b'
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\s+(?:(?!(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|about|on|regarding|of|for|to)\\b)[a-z-]+\\s+){0,2}?(?:(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+)?(?:control|care|treatment|service|plan|program|inspection|removal|exterminat)\\w*\\b(?!\\s+(?:(?!(?:and|or|nor|plus|as)\\b)[a-z-]+\\s+){0,2}?(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|myths?|history)\\b)"
   // Editorial-FIRST mixed objects ("we provide pest control advice and
   // services in Naples") — an in/near-anchored "…services in <place>" after
@@ -755,7 +755,7 @@ const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)
 // disclaimer half hides an affirmative half. "and" splits ONLY before a
 // new we/our subject: a bare ", and" boundary would sever the tail of an
 // Oxford-comma object list ("We serve Sarasota, Venice, and Naples").
-const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)/i;
+const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|whereas|while)\s+|\s+(?:but|however|yet|though|although|whereas|while)\s+|,?\s+and\s+(?=(?:we|our|waves|waveguard)\b)/i;
 
 // "We serve Sarasota; Venice; and Naples." renders as ONE claim list — a
 // semicolon before a capitalized continuation (optionally "and"/"or") is a
@@ -784,7 +784,7 @@ function rejoinListSemicolons(sentence) {
 // Cape Coral."): separators, list connectors, and capitalized place words
 // only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
 // glue and the trailing city flags. Case-sensitive on purpose.
-const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|as well|too|of|the|is|are)[\s,;:]*|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*\.?\s*$/;
+const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|includes?|such as|as well as|as well|too|of|the|is|are)[\s,;:]*|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*\.?\s*$/;
 
 // City list BEFORE the disclaimer: "Naples, Fort Myers, Cape Coral, Bonita
 // Springs, Estero, and Marco Island are outside our service area." — the
