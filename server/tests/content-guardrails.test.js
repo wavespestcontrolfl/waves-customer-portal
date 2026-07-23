@@ -2056,3 +2056,23 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
     }
   });
+
+  test('round 3: work throughout/across, bare title packaging, too/as-well disclaimer tails', () => {
+    for (const body of [
+      'We work throughout Naples.',
+      'We work across Cape Coral every week.',
+      'Cape Coral pest control services',
+      'Pest control Cape Coral',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Naples is outside our service area; Cape Coral too.',
+      'Naples is outside our service area, and Fort Myers is too.',
+      'Chinch bugs thrive in dry St. Augustine turf across Naples summers.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });

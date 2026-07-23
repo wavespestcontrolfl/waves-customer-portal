@@ -640,7 +640,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
   + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
-  + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? in|operates? in)'
+  + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? (?:in|throughout|across|around)|operates? (?:in|throughout|across|around))'
   + '|same.day|we offer|free (?:quote|estimate|inspection)'
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\s+(?:(?!(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|about|on|regarding|of|for|to)\\b)[a-z-]+\\s+){0,2}?(?:(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+)?(?:control|care|treatment|service|plan|program|inspection|removal|exterminat)\\w*\\b(?!\\s+(?:(?!(?:and|or|nor|plus|as)\\b)[a-z-]+\\s+){0,2}?(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|myths?|history)\\b)"
   // Editorial-FIRST mixed objects ("we provide pest control advice and
@@ -649,13 +649,17 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // editorial noun sits between.
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?:(?!\\b(?:about|regarding|concerning)\\b)[^.!?;]){0,40}?\\bservices?\\s+(?:in|near|throughout|across)\\b"
   + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
+  // A short punctuation-free segment built around the keyword is a bare
+  // packaging TITLE/META ("Cape Coral pest control services") — prose
+  // sentences carry terminal punctuation and never match the anchored form.
+  + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}[^.!?]{0,25}$`
   + `|\\b(?<!\\b(?:about|regarding|concerning)\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   // "Our pest control services guide explains…" is editorial packaging of
   // CONTENT, not of service — the guide-compound lookahead mirrors the
   // keyword suffix's own guard.
   + `|(?:your|our)\\s+(?:\\w+\\s+){0,2}?${SERVICE_KEYWORD_SOURCE}\\b(?!(?:\\s+(?:service|plan|program)s?)?\\s+guides?\\b)`
   + '|\\b(?:waves\\w*|waveguard|(?:our|this|the)\\s+(?:\\w+\\s+){0,2}?(?:service|plan|program|membership|treatment)s?)\\b[^.!?]{0,20}?\\b(?:is|are)\\s+(?:now\\s+)?available\\s+(?:in|throughout|across)\\b'
-  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|treat(?:s|ed|ing)?|cover(?:s|ed|ing)?|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|work(?:s|ed|ing)? in|operat(?:es|ed|ing)? in)"
+  + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|treat(?:s|ed|ing)?|cover(?:s|ed|ing)?|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|work(?:s|ed|ing)? (?:in|throughout|across|around)|operat(?:es|ed|ing)? (?:in|throughout|across|around))"
   + '|(?:is|are|has been|have been) (?:proudly )?(?:covered|served|serviced|treated|protected) by (?:our (?:team|techs?|technicians?)|waves(?: pest control)?))\\b',
   'i',
 );
@@ -779,7 +783,7 @@ function rejoinListSemicolons(sentence) {
 // Cape Coral."): separators, list connectors, and capitalized place words
 // only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
 // glue and the trailing city flags. Case-sensitive on purpose.
-const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|of|the)\s+|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*$/;
+const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|such as|as well as|as well|too|of|the|is|are)[\s,;:]*|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*\.?\s*$/;
 
 // City list BEFORE the disclaimer: "Naples, Fort Myers, Cape Coral, Bonita
 // Springs, Estero, and Marco Island are outside our service area." — the
