@@ -35,9 +35,13 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: () => authState,
 }));
 
-// Ambient portal session surface: token present + a fetchRaw spy, so tests
-// can prove token-entry confirms never ride the authenticated path.
-const apiMock = vi.hoisted(() => ({ token: 'ambient-token', fetchRaw: vi.fn() }));
+// Ambient portal session surface: token present + a fetchRaw spy that
+// delegates to the (stubbed) global fetch, so tests can prove which path a
+// confirm rode without breaking the walk.
+const apiMock = vi.hoisted(() => ({
+  token: 'ambient-token',
+  fetchRaw: vi.fn((url, opts) => globalThis.fetch(url, opts)),
+}));
 vi.mock('../utils/api', () => ({ api: apiMock, default: apiMock }));
 
 function jsonResponse(body, status = 200) {
@@ -74,6 +78,7 @@ beforeEach(() => {
   authState.error = null;
   authState.sendCode = vi.fn(async () => true);
   authState.verifyCode = vi.fn(async () => false);
+  apiMock.fetchRaw.mockClear();
 });
 
 afterEach(() => {
@@ -213,5 +218,33 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     expect(await screen.findByLabelText('Service address')).toBeInTheDocument();
     expect(screen.queryByText('Book your next visit')).not.toBeInTheDocument();
+  });
+
+  it('a signed-in customer still sends the bearer when the config fetch failed open', async () => {
+    // The Authorization decision keys on the SESSION, not the config-derived
+    // gate flag — otherwise a /booking/config blip would strip the header
+    // while the server gate is on, 403ing a real customer (Codex round-4 P2).
+    authState.isAuthenticated = true;
+    authState.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: 'pat@example.com' };
+    stubFetch({ config: 'error' });
+
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const firstName = await screen.findByLabelText('First name');
+    fireEvent.change(firstName, { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550101' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+
+    await waitFor(() => {
+      const confirmCalls = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/confirm'));
+      expect(confirmCalls).toHaveLength(1);
+    });
   });
 });

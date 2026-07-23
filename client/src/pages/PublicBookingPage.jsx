@@ -480,18 +480,23 @@ export default function PublicBookingPage() {
     setError('');
     setRefusal(null);
     try {
-      // Customers-only mode: prove "current customer" with the portal bearer
-      // minted by the OTP gate. Verified sessions go through api.fetchRaw —
-      // the one client path that attaches the bearer AND refreshes + retries
-      // on 401, so a customer who spends >15 min picking a slot isn't
-      // refused on an expired access token (the server answers that case
-      // with a refreshable TOKEN_EXPIRED 401). Token entries (estimate /
-      // accept links) deliberately stay unauthenticated even when the
-      // browser holds a portal session: the server prefers bearer identity,
-      // so an ambient signed-in account would otherwise hijack — or be
-      // address-refused on — a link that belongs to the ESTIMATE's customer.
-      // Gate-off requests keep the plain fetch — byte-identical to today's.
-      const doConfirmFetch = (customersOnly && isAuthenticated && !tokenEntry)
+      // Prove "current customer" with the portal bearer whenever the visitor
+      // is signed in — keyed on the SESSION, not on the config-derived
+      // customersOnly flag, because /booking/config failing open must not
+      // strip the header while the server's gate is actually on (a real
+      // customer would eat the 403 quote card; Codex round-4 P2). Verified
+      // sessions go through api.fetchRaw — the one client path that attaches
+      // the bearer AND refreshes + retries on 401, so a customer who spends
+      // >15 min picking a slot isn't refused on an expired access token
+      // (the server answers that case with a refreshable TOKEN_EXPIRED 401).
+      // Token entries (estimate / accept links) deliberately stay
+      // unauthenticated even when the browser holds a portal session: the
+      // server prefers bearer identity, so an ambient signed-in account
+      // would otherwise hijack — or be address-refused on — a link that
+      // belongs to the ESTIMATE's customer. Signed-out and token entries
+      // keep the plain unauthenticated fetch; with the gate off the server
+      // never reads the header either way.
+      const doConfirmFetch = (isAuthenticated && !tokenEntry)
         ? (url, opts) => api.fetchRaw(url, opts)
         : (url, opts) => fetch(url, opts);
       const res = await doConfirmFetch(`${API_BASE}/booking/confirm`, {

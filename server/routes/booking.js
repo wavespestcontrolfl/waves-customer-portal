@@ -1425,18 +1425,39 @@ async function createSelfBooking(payload = {}) {
     // dead end.
     if (customersOnly && !custId) {
       const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-      // Two token-proven entries pass: the quote-wizard pricing handoff
-      // (pricing_estimate_id + its HMAC), and the accepted-estimate booking
-      // link (source_estimate_id + a namespaced HMAC minted by
-      // estimate-public's accept/retry SMS — those links carry only the
-      // correlation id, and their customers already accepted; Codex P1).
+      // Two token-proven entries pass. (1) The quote-wizard pricing handoff
+      // (pricing_estimate_id + its HMAC) — quote-first booking is the
+      // sanctioned funnel for new customers, and the wizard hands the token
+      // to the person who just typed their own contact. (2) The
+      // accepted-estimate / admin-resend booking link (source_estimate_id +
+      // the namespaced accept HMAC) — but possession alone is NOT identity
+      // (Codex round-4 P1: links forward). The accept pass is BOUND to the
+      // estimate it names: an estimate with a customer books AS that
+      // customer (custId set here, so the typed contact can't re-point it —
+      // same possession precedent as estimate_share_token above), and a
+      // customer-less estimate books only if the typed phone matches the
+      // estimate's own contact phone. Anything else falls to the refusal.
       // The namespace keeps the two token kinds from substituting for each
       // other.
-      const gateHandoffValid = (!!pricing_estimate_id
-        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token))
-        || (!!source_estimate_id && !!accept_token
-          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token));
-      if (!gateHandoffValid) {
+      const gateHandoffValid = !!pricing_estimate_id
+        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
+      let acceptPassValid = false;
+      if (!gateHandoffValid && !!source_estimate_id && !!accept_token
+          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
+        const acceptEstimate = await db('estimates')
+          .where('id', source_estimate_id)
+          .first()
+          .catch(() => null);
+        if (acceptEstimate?.customer_id) {
+          custId = acceptEstimate.customer_id;
+          acceptPassValid = true;
+        } else if (acceptEstimate?.customer_phone) {
+          const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+          const typed = last10(new_customer?.phone);
+          acceptPassValid = !!typed && typed.length === 10 && typed === last10(acceptEstimate.customer_phone);
+        }
+      }
+      if (!gateHandoffValid && !acceptPassValid) {
         const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
         return {
           ok: false,

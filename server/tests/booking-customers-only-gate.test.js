@@ -31,7 +31,7 @@ jest.mock('../config/feature-gates', () => ({
 // the per-table firstResults value. The gate paths under test touch at most
 // booking_config (config defaults on null) and customers (bearer resolution /
 // account property rows / phone match).
-const firstResults = { booking_config: null, customers: null };
+const firstResults = { booking_config: null, customers: null, estimates: null };
 const listResults = { customers: [] };
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -101,6 +101,7 @@ beforeEach(() => {
   gateState.bookingCustomersOnly = true;
   firstResults.booking_config = null;
   firstResults.customers = null;
+  firstResults.estimates = null;
   listResults.customers = [];
 });
 
@@ -216,7 +217,8 @@ describe('createSelfBooking — customers-only gate', () => {
     })).toEqual(REFUSAL);
   });
 
-  test('accepted-estimate links (source_estimate_id + namespaced accept_token) pass the gate', async () => {
+  test('accepted-estimate links (source_estimate_id + namespaced accept_token) book AS the estimate customer', async () => {
+    firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
     const acceptToken = mintEstimateAcceptToken('est-9');
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -231,12 +233,44 @@ describe('createSelfBooking — customers-only gate', () => {
     // The retry SMS chases accepted-but-never-booked customers well past the
     // quote handoff's TTL; an expired token would bounce an already-accepted
     // customer off the gate (Codex round-2 P2).
+    firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
     const monthOld = mintEstimateAcceptToken('est-9', Date.now() - 30 * 86400000);
     const result = await createSelfBooking({
       ...strangerBody(),
       customersOnly: true,
       source_estimate_id: 'est-9',
       accept_token: monthOld,
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('a leaked/forwarded accept link cannot book an unrelated stranger (Codex round-4 P1)', async () => {
+    // Customer-less estimate + a typed contact that is NOT the estimate's:
+    // possession of the link alone is not identity — refuse to the quote flow.
+    firstResults.estimates = { id: 'est-9', customer_id: null, customer_phone: '(941) 555-9999' };
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: mintEstimateAcceptToken('est-9'),
+    })).toEqual(REFUSAL);
+    // A valid token naming an estimate that doesn't exist refuses too.
+    firstResults.estimates = null;
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: mintEstimateAcceptToken('est-9'),
+    })).toEqual(REFUSAL);
+  });
+
+  test("a customer-less estimate's OWN contact (phone match) still books through its accept link", async () => {
+    firstResults.estimates = { id: 'est-9', customer_id: null, customer_phone: '+1 941-555-0101' };
+    const result = await createSelfBooking({
+      ...strangerBody(), // types 941-555-0101 — the estimate's contact
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: mintEstimateAcceptToken('est-9'),
     });
     expect(result).toEqual(BEYOND_WINDOW);
   });
