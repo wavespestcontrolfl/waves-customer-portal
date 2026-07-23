@@ -114,6 +114,58 @@ describe('estimate converter annual prepay amount', () => {
       recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
       estimateData: { membershipSnapshot: { isExistingCustomer: true } },
     })).toBe(false);
+    // Operator-stated waiver (agent adjustment channel, 2026-07-23): a true
+    // per-estimate removal — never invoiced even on a qualifying solo mix.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner waived' } },
+    })).toBe(false);
+    // The waiver flag must be an explicit true — a discount-only adjustment
+    // leaves the fee in place.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { operatorPriceAdjustment: { type: 'PERCENT', value: 5, label: 'Loyalty' } },
+    })).toBe(true);
+  });
+
+  test('operator-waived setup fee converts a solo mix to the 5% prepay path (owner ruling 2026-07-23)', () => {
+    const { annualPrepayDiscountComponents } = require('../services/estimate-converter');
+    const soloPest = [{ service: 'pest_control', name: 'Pest Control' }];
+    // Unwaived solo pest: fee-waiver-with-prepay is the incentive — no %.
+    expect(annualPrepayDiscountComponents({
+      recurringServices: soloPest,
+      estimateData: {},
+    }).discountRate).toBe(0);
+    // Operator waived the fee outright: prepay keeps a real reward — the
+    // standard 5% applies instead of the option disappearing.
+    expect(annualPrepayDiscountComponents({
+      recurringServices: soloPest,
+      estimateData: { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner waived' } },
+    }).discountRate).toBeCloseTo(0.05, 5);
+  });
+
+  test('acknowledged floor breach disarms render clamps but KEEPS the prepay protected floor', () => {
+    const { resolveLawnProgramMinimumMonthlyForEstimate, annualPrepayDiscountComponents } = require('../services/estimate-converter');
+    const breached = {
+      result: {
+        pricingMetadata: {
+          lawnProgramMinimumMonthly: 50,
+          manualDiscountFloorBreach: { acknowledged: true, bypassedCapReason: 'lawn_program_minimum' },
+        },
+        lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 540 }],
+      },
+    };
+    // Render/accept re-clamps stand down for the authorized sub-floor price…
+    expect(resolveLawnProgramMinimumMonthlyForEstimate(breached)).toBe(0);
+    // …but the prepay protection still counts the stamped $50/mo floor
+    // ($600/yr protected slice), so a customer-selected prepay % can only be
+    // capped by it — never stack a further cut below the authorized number
+    // (codex P2 on #2947 round 4).
+    const { protectedFloor } = annualPrepayDiscountComponents({
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: breached,
+    });
+    expect(protectedFloor).toBeGreaterThanOrEqual(600);
   });
 
   test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {

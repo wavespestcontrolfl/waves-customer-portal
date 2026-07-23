@@ -75,6 +75,10 @@ const mockShorten = jest.fn(async () => 'https://wvs.link/sec1');
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: (...a) => mockShorten(...a),
 }));
+const mockSendSetupInvitation = jest.fn(async () => ({ sent: true }));
+jest.mock('../services/card-enrollment-email', () => ({
+  sendAutopaySetupInvitation: (...a) => mockSendSetupInvitation(...a),
+}));
 const mockGetTemplate = jest.fn(async () => 'Hi Pat! Secure your visit: https://wvs.link/sec1');
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: (...a) => mockGetTemplate(...a),
@@ -909,5 +913,55 @@ describe('loadSecureCardPageData — page state machine', () => {
     mockCreateAppointmentCardSetupIntent.mockResolvedValueOnce(null);
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('unavailable');
+  });
+});
+
+describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => {
+  test('confirmed-dispatched SMS fires the invitation email with funnel-composed vars', async () => {
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'office' });
+    expect(res.action).toBe('sent');
+    // fire-and-forget — let the microtask settle before asserting
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
+    expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      scheduledServiceId: 'svc-1',
+      serviceType: 'Pest Control',
+      secureUrl: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
+      dateLine: expect.stringContaining(' on '),
+    }));
+  });
+
+  test('a definitively blocked SMS sends NOTHING on either channel', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_blocked:SUPPRESSED');
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+
+  test('an UNCERTAIN SMS outcome keeps the email leg dark too', async () => {
+    // The claim is consumed (maybe a text left) but nothing is confirmed —
+    // the email must not become the channel that guarantees exposure of a
+    // bearer link the SMS rails treat as ambiguous.
+    mockSendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_outcome_uncertain');
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+
+  test('an email-leg failure never changes the funnel result', async () => {
+    mockSendSetupInvitation.mockRejectedValueOnce(new Error('sendgrid down'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+    await new Promise((r) => setImmediate(r));
+  });
+
+  test('inline delivery (the /book card step) never emails — no invite message exists yet', async () => {
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(res.action).toBe('link_created');
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
   });
 });

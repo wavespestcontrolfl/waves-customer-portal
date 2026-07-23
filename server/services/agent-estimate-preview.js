@@ -47,6 +47,10 @@ function agentEstimatePreviewFingerprint(preview = {}) {
     engineResult: preview.engine_result_digest
       || agentEngineResultDigest(preview.engineResult),
     presentation: preview.presentation || null,
+    // Operator-stated price adjustment (label, value, floor-breach flag):
+    // same totals could otherwise be confirmed under a different discount
+    // label/reason than the card displayed.
+    operatorPriceAdjustment: preview.operator_price_adjustment || null,
     customerId: preview.customer_account?.customer_id || null,
     customerRecognized: preview.customer_account?.recognized === true,
     currentTier: preview.customer_account?.current_tier || null,

@@ -1395,7 +1395,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -1517,6 +1517,26 @@ async function persistCallSecondaryContact(customerId, contact) {
     // The extracted relationship (home_buyer/tenant/...) — recorded so
     // role-aware recipient selection is possible later; 'unknown' stays null.
     [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
+    // Consent artifact (#2948): stamp ONLY when (a) the V2 extraction
+    // recorded explicit SMS consent on the call (the same
+    // v2SmsConsentExplicit rail that gates same-call fanout), AND (b) the
+    // resulting stamp describes only consented people — i.e. the row had
+    // no other contact phones, or its existing contacts were already
+    // stamped. Conversely, adding a phone WITHOUT explicit consent to a
+    // stamped row must CLEAR the stamp — the old stamp never described the
+    // new phone, and leaving it would authorize texting them (codex r5).
+    ...((contact.phone && smsConsentExplicit
+      && (!SERVICE_CONTACT_SLOTS.some((s) => String(customer[s.phone] || '').trim())
+        || customer.service_contacts_consent_at)) ? {
+      service_contacts_consent_at: new Date(),
+      service_contacts_consent_source: 'call_pipeline_request',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+    } : {}),
+    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
+    } : {}),
   });
   if (!updated) return 'skipped_slot_race';
   return 'written';
@@ -5860,7 +5880,7 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). Stop early when slots run out.
       for (const secondaryEntry of callSecondaryContacts) {
       try {
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry);
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another

@@ -127,6 +127,96 @@ describe('serverRecomputeFromEstimateData', () => {
     expect(res.reason).toBe('ENGINE_ERROR');
     expect(res.error.message).toBe('boom');
   });
+
+  it('re-injects the stored operator price adjustment as the engine manualDiscount', async () => {
+    const generateEstimate = jest.fn(() => ({ lineItems: [] }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    const res = await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { lawn: { track: 'st_augustine', lawnFreq: 9 } } }),
+        operatorPriceAdjustment: {
+          type: 'FIXED',
+          value: 84,
+          label: 'Neighbor match',
+          internalReason: 'matching next door',
+          floorBreachAcknowledged: true,
+          waiveSetupFee: false,
+        },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(res.recomputed).toBe(true);
+    const injected = generateEstimate.mock.calls[0][0].manualDiscount;
+    expect(injected).toMatchObject({
+      source: 'agent_operator',
+      type: 'FIXED',
+      value: 84,
+      label: 'Neighbor match',
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: true,
+    });
+    // Audit-only text never enters the engine input — replayed summaries echo it.
+    expect(injected.internalReason).toBeUndefined();
+  });
+
+  it('keeps a manualDiscount already stored in the inputs and skips waiver-only adjustments', async () => {
+    const generateEstimate = jest.fn(() => ({ lineItems: [] }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({
+          manualDiscount: { type: 'PERCENT', value: 10, label: 'Admin editor' },
+          services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+        }),
+        operatorPriceAdjustment: { type: 'FIXED', value: 84, label: 'Operator' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(generateEstimate.mock.calls[0][0].manualDiscount)
+      .toMatchObject({ type: 'PERCENT', value: 10, label: 'Admin editor' });
+
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { lawn: { track: 'st_augustine', lawnFreq: 9 } } }),
+        operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'fee comp' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(generateEstimate.mock.calls[1][0].manualDiscount).toBeUndefined();
+  });
+
+  it('zeroes the pest initialFee before mapping when the operator waived the setup fee', async () => {
+    const generateEstimate = jest.fn(() => ({
+      lineItems: [
+        { service: 'pest_control', initialFee: 99, annual: 650 },
+        { service: 'mosquito', annual: 500 },
+      ],
+    }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    const res = await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { pest: { frequency: 'quarterly' } } }),
+        operatorPriceAdjustment: { waiveSetupFee: true },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(res.recomputed).toBe(true);
+    // The mapper counts pestLI.initialFee into oneTime.total/year1 — a
+    // waived fee must not re-enter the stored totals on reprice.
+    const mapped = mapV1ToLegacyShape.mock.calls[0][0];
+    expect(mapped.lineItems.find((li) => li.service === 'pest_control').initialFee).toBe(0);
+
+    // Without the waiver the fee passes through untouched.
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { pest: { frequency: 'quarterly' } } }),
+        operatorPriceAdjustment: { type: 'FIXED', value: 25, label: 'Discount only' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    const mappedUnwaived = mapV1ToLegacyShape.mock.calls[1][0];
+    expect(mappedUnwaived.lineItems.find((li) => li.service === 'pest_control').initialFee).toBe(99);
+  });
 });
 
 describe('resolveServerAuthoritativePricing', () => {

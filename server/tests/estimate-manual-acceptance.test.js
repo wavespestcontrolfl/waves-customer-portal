@@ -9,6 +9,18 @@ jest.mock('../services/estimate-converter', () => ({
       .map((s) => s && s.service).filter(Boolean)));
     return keys.length === 1 && ['pest_control', 'mosquito'].includes(keys[0]);
   },
+  // Real-enough mirrors of the per-estimate stamps the fee/clamp gates read
+  // (operator setup-fee waiver + acknowledged floor breach, #2947) so
+  // estimate-public's strip/ladder paths work under this module mock.
+  estimateOperatorSetupFeeWaived: (estData = {}) => (
+    estData?.operatorPriceAdjustment?.waiveSetupFee === true
+  ),
+  estimateManualDiscountFloorBreachAcknowledged: (estData = {}) => (
+    (estData?.result?.pricingMetadata?.manualDiscountFloorBreach
+      ?? estData?.engineResult?.pricingMetadata?.manualDiscountFloorBreach)?.acknowledged === true
+    || (estData?.result?.manualDiscount ?? estData?.result?.summary?.manualDiscount
+      ?? estData?.summary?.manualDiscount)?.floorBreach?.acknowledged === true
+  ),
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the

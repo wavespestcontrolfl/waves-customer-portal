@@ -333,6 +333,13 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
 // ─── service-contact slot persistence ──────────────────────────────────────
 
 describe('persistCallSecondaryContact', () => {
+  // Every phone-bearing slot write stamps the row-level consent artifact
+  // (#2955): the account holder requested the contact on a recorded call.
+  const CALL_CONSENT_STAMP = {
+    service_contacts_consent_at: expect.any(Date),
+    service_contacts_consent_source: 'call_pipeline_request',
+    service_contacts_consent_text_version: 'call-2026-07-23',
+  };
   const buyer = {
     first_name: 'Joseph', last_name: 'Haught', phone: '+19542901693',
     email: 'joseph.haught89431@gmail.com', role: 'home_buyer',
@@ -394,13 +401,16 @@ describe('persistCallSecondaryContact', () => {
 
   test('writes the first empty slot and keeps the primary on appointment texts AND service reports', async () => {
     const writes = makeDb({ customer: bareCustomer });
-    const result = await persistCallSecondaryContact('cust-1', buyer);
+    const result = await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true });
     expect(result).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: 'joseph.haught89431@gmail.com',
       service_contact_role: 'home_buyer',
+      // Phone contact requested on a recorded call → consent artifact
+      // stamps in the same atomic write (#2955).
+      ...CALL_CONSENT_STAMP,
     }]);
     // Emptiness re-asserted in the UPDATE's WHERE (race guard) — one
     // predicate per slot column.
@@ -423,11 +433,65 @@ describe('persistCallSecondaryContact', () => {
 
   test('new phone but an email already on the record: phone is kept, duplicate email is dropped', async () => {
     const writes = makeDb({ customer: { ...bareCustomer, email: 'joseph.haught89431@gmail.com' } });
-    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: null,
+      service_contact_role: 'home_buyer',
+      ...CALL_CONSENT_STAMP,
+    }]);
+  });
+
+  test('already-stamped row + explicit consent: adding a contact refreshes the stamp (#2955 r3)', async () => {
+    const writes = makeDb({
+      customer: {
+        ...bareCustomer,
+        service_contact_name: 'Property Manager',
+        service_contact_phone: '+19415557777',
+        service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      },
+    });
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact2_name: 'Joseph Haught',
+      service_contact2_phone: '+19542901693',
+      service_contact2_email: 'joseph.haught89431@gmail.com',
+      service_contact2_role: 'home_buyer',
+      ...CALL_CONSENT_STAMP,
+    }]);
+  });
+
+  test('unconsented phone added to a STAMPED row clears the stamp (codex r5 P1)', async () => {
+    const writes = makeDb({
+      customer: {
+        ...bareCustomer,
+        service_contact_name: 'Property Manager',
+        service_contact_phone: '+19415557777',
+        service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      },
+    });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact2_name: 'Joseph Haught',
+      service_contact2_phone: '+19542901693',
+      service_contact2_email: 'joseph.haught89431@gmail.com',
+      service_contact2_role: 'home_buyer',
+      // The old stamp never described the new phone — cleared, so the
+      // fanout gate holds the whole list until re-attestation.
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
+    }]);
+  });
+
+  test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact_name: 'Joseph Haught',
+      service_contact_phone: '+19542901693',
+      service_contact_email: 'joseph.haught89431@gmail.com',
       service_contact_role: 'home_buyer',
     }]);
   });
@@ -527,7 +591,9 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({
       customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777' },
     });
-    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
+    // Slot 1 already held an UNSTAMPED phone contact — the call only spoke
+    // for the buyer, so no row-level stamp is minted (#2955 r3).
     expect(writes.updates).toEqual([{
       service_contact2_name: 'Joseph Haught',
       service_contact2_phone: '+19542901693',
