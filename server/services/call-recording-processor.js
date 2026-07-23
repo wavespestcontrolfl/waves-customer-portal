@@ -1522,14 +1522,20 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // v2SmsConsentExplicit rail that gates same-call fanout), AND (b) the
     // resulting stamp describes only consented people — i.e. the row had
     // no other contact phones, or its existing contacts were already
-    // stamped. A row whose stamp an admin edit cleared must not be
-    // re-authorized by a call that only spoke for the NEW recipient.
+    // stamped. Conversely, adding a phone WITHOUT explicit consent to a
+    // stamped row must CLEAR the stamp — the old stamp never described the
+    // new phone, and leaving it would authorize texting them (codex r5).
     ...((contact.phone && smsConsentExplicit
       && (!SERVICE_CONTACT_SLOTS.some((s) => String(customer[s.phone] || '').trim())
         || customer.service_contacts_consent_at)) ? {
       service_contacts_consent_at: new Date(),
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
+    } : {}),
+    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
     } : {}),
   });
   if (!updated) return 'skipped_slot_race';

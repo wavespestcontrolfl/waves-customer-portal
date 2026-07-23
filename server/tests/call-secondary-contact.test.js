@@ -462,6 +462,29 @@ describe('persistCallSecondaryContact', () => {
     }]);
   });
 
+  test('unconsented phone added to a STAMPED row clears the stamp (codex r5 P1)', async () => {
+    const writes = makeDb({
+      customer: {
+        ...bareCustomer,
+        service_contact_name: 'Property Manager',
+        service_contact_phone: '+19415557777',
+        service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      },
+    });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact2_name: 'Joseph Haught',
+      service_contact2_phone: '+19542901693',
+      service_contact2_email: 'joseph.haught89431@gmail.com',
+      service_contact2_role: 'home_buyer',
+      // The old stamp never described the new phone — cleared, so the
+      // fanout gate holds the whole list until re-attestation.
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
+    }]);
+  });
+
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
     const writes = makeDb({ customer: bareCustomer });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
