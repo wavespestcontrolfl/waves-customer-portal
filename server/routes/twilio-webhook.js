@@ -896,6 +896,23 @@ router.post('/status', async (req, res) => {
           logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
         }
 
+        // Recipient double opt-in: a failed/undelivered confirmation ask
+        // flips its pending row to ask_failed so the next consented save
+        // retries — otherwise the recipient sits pending forever without
+        // ever having received the YES request. Best-effort, keyed on the
+        // undelivered number (rows are per customer+phone; all pending
+        // rows for the number failed the same delivery).
+        try {
+          const { recipientPhoneKey } = require('../services/recipient-optin');
+          const failedKey = recipientPhoneKey(To);
+          if (failedKey) {
+            void db('recipient_optin')
+              .where({ phone_key: failedKey, status: 'pending' })
+              .update({ status: 'ask_failed', updated_at: new Date() })
+              .catch(() => {});
+          }
+        } catch { /* best-effort */ }
+
         // Channel-agnostic landline learning: a carrier 30006 ("landline or
         // unreachable carrier") means this number can't receive ANY SMS. Suppress
         // it so every automated path (invoice dunning, review requests, …) stops

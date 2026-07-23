@@ -698,7 +698,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // they reply YES. No row = grandfathered. Shared with the twilio.js
   // en-route/arrived loops; fail-open on lookup errors.
   const { filterRecipientsByOptin } = require('./recipient-optin');
-  const allowedContacts = await filterRecipientsByOptin(contacts);
+  const allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)

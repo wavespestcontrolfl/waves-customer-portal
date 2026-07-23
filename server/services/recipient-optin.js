@@ -39,11 +39,13 @@ function optinBlocksSend(row, gateOn = isDoubleOptinEnabled()) {
   return row.status !== 'confirmed';
 }
 
-async function getRecipientOptin(phone) {
+async function getRecipientOptin(phone, customerId = null) {
   const key = recipientPhoneKey(phone);
   if (!key) return null;
   try {
-    return await db('recipient_optin').where({ phone_key: key }).first() || null;
+    const q = db('recipient_optin').where({ phone_key: key });
+    if (customerId) q.where({ customer_id: customerId });
+    return await q.first() || null;
   } catch (err) {
     // Fail CLOSED while the gate is on: a transient lookup failure must
     // hold the send rather than treat a possibly-pending/declined phone as
@@ -65,6 +67,9 @@ async function markRecipientOptin(phone, status) {
     const stamp = status === 'confirmed'
       ? { status, confirmed_at: new Date(), updated_at: new Date() }
       : { status, declined_at: new Date(), updated_at: new Date() };
+    // Phone-wide by design: the reply comes from the person, and rows only
+    // exist for properties that actually sent them an ask — a YES confirms
+    // every outstanding ask to that person; a STOP declines them all.
     const updated = await db('recipient_optin').where({ phone_key: key }).update(stamp);
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     return updated > 0;
@@ -79,14 +84,14 @@ async function markRecipientOptin(phone, status) {
 // whose recipient_optin row is not confirmed. Primary rows and phones with
 // no row pass through untouched. Fail-CLOSED: while the gate is on, a
 // lookup error holds the service contact's text.
-async function filterRecipientsByOptin(contacts = []) {
+async function filterRecipientsByOptin(contacts = [], customerId = null) {
   if (!isDoubleOptinEnabled()) return contacts;
   const { isServiceContactRole } = require('./customer-contact');
   const kept = [];
   for (const contact of contacts) {
     if (!isServiceContactRole(contact.role)) { kept.push(contact); continue; }
     try {
-      const row = await getRecipientOptin(contact.phone);
+      const row = await getRecipientOptin(contact.phone, customerId);
       if (optinBlocksSend(row, true)) {
         logger.info(`[recipient-optin] holding send to unconfirmed recipient (${row.status})`);
         continue;
@@ -137,7 +142,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
       // already stored — priorPhones only grandfathers phones that were
       // never routed through the ask flow.
       const reclaimed = templateDark ? 0 : await dbc('recipient_optin')
-        .where({ phone_key: key, status: 'ask_failed' })
+        .where({ phone_key: key, customer_id: customer?.id || null, status: 'ask_failed' })
         .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
@@ -159,10 +164,10 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
           requested_by: 'portal_contact_save',
           template_version: OPTIN_TEMPLATE_VERSION,
           requested_at: new Date(),
-        }).onConflict('phone_key').ignore().returning('phone_key');
+        }).onConflict(['customer_id', 'phone_key']).ignore().returning('phone_key');
         if (!claimed || !claimed.length) continue; // row already exists — never re-text
       }
-      claims.push({ key, phone: contact.phone, body });
+      claims.push({ key, customerId: customer?.id || null, phone: contact.phone, body });
     } catch (err) {
       // Fail CLOSED: a claim error must fail the contact save — silently
       // proceeding would store a phone with no row (grandfathered) and
@@ -196,13 +201,13 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
         // deleting it would grandfather a phone that never got the ask.
-        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
       requested += 1;
     } catch (err) {
-      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+      await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }

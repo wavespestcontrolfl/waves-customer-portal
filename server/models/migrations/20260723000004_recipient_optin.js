@@ -6,12 +6,18 @@
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('recipient_optin'))) {
     await knex.schema.createTable('recipient_optin', (t) => {
-      // Last-10-digit key, matching the webhook's phone lookup convention.
-      t.string('phone_key', 10).primary();
+      // Scoped per property (customers row): the same phone can be a
+      // recipient for two different properties/accounts, and a YES for one
+      // property's ask must not silently authorize another property's
+      // texts without its own ask. Last-10-digit phone convention matches
+      // the webhook lookup.
+      t.uuid('customer_id').notNullable();
+      t.string('phone_key', 10).notNullable();
+      t.primary(['customer_id', 'phone_key']);
+      t.index('phone_key'); // webhook YES/STOP resolves by phone alone
       t.string('phone_e164', 20);
       // 16 chars fits every state: pending / confirmed / declined / ask_failed.
       t.string('status', 16).notNullable().defaultTo('pending');
-      t.uuid('customer_id').nullable();
       t.string('requested_by', 40).notNullable().defaultTo('portal_contact_save');
       t.string('template_version', 40);
       t.timestamp('requested_at', { useTz: true });

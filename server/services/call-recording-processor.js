@@ -7958,8 +7958,10 @@ const CallRecordingProcessor = {
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
                       const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                      const extraContacts = !v2SmsConsentExplicit ? [] : getAppointmentContacts(freshCustomer || {}, prefsRow)
-                        .filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
+                      const { filterRecipientsByOptin } = require('./recipient-optin');
+                      const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
+                        getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
+                      )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
                       for (const contact of extraContacts) {
                         const contactBody = await renderSmsTemplate('appointment_confirmation', {
                           first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
