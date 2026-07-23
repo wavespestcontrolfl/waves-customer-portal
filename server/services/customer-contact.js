@@ -80,6 +80,14 @@ function getServiceContactSlots(customer) {
   }));
 }
 
+// SMS to a service contact requires the row-level consent artifact
+// (#2948). Shared by every phone-resolving path in this module. Kill
+// switch: DISABLE_CONTACT_CONSENT_GATE=1.
+function serviceContactsConsented(customer = {}) {
+  return !!customer.service_contacts_consent_at
+    || process.env.DISABLE_CONTACT_CONSENT_GATE === '1';
+}
+
 function getServiceContact(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
@@ -92,6 +100,20 @@ function getServiceContact(customer) {
     name: svcName || primary.name,
     role: 'service_contact',
   };
+}
+
+// SMS-channel resolver for the single review/ask recipient: the slot-1
+// service contact WHEN the row carries the consent artifact, else the
+// primary account holder as a coherent identity (phone AND name together —
+// never the primary's phone addressed with the contact's name). Email
+// callers keep getServiceContact, which stays ungated.
+function getServiceContactSmsRecipient(customer) {
+  if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
+  const svcPhone = clean(customer.service_contact_phone);
+  if (svcPhone && !serviceContactsConsented(customer)) {
+    return { ...getPrimaryContact(customer), role: 'primary' };
+  }
+  return getServiceContact(customer);
 }
 
 function getBillingContact(customer, prefs = {}) {
@@ -119,17 +141,26 @@ function getAppointmentContacts(customer, prefs = {}) {
   const primary = getPrimaryContact(customer);
   const contacts = [];
 
-  for (const slot of getServiceContactSlots(customer)) {
-    const distinct = !!slot.phone
-      && !samePhone(slot.phone, primary.phone)
-      && !contacts.some(c => samePhone(c.phone, slot.phone));
-    if (!distinct) continue;
-    contacts.push({
-      phone: slot.phone,
-      email: slot.email || primary.email,
-      name: slot.name || primary.name,
-      role: slot.role,
-    });
+  // Consent gate (#2948 follow-up, owner-authorized 2026-07-23): service
+  // contacts are texting targets, so they only fan out when the customer
+  // row carries a consent artifact (portal attestation or the grandfather
+  // backfill — every row with contacts has one as of 20260723000003).
+  // Rows without a stamp fall back to texting the primary account holder
+  // only. Kill switch: DISABLE_CONTACT_CONSENT_GATE=1 restores the old
+  // ungated fanout.
+  if (serviceContactsConsented(customer)) {
+    for (const slot of getServiceContactSlots(customer)) {
+      const distinct = !!slot.phone
+        && !samePhone(slot.phone, primary.phone)
+        && !contacts.some(c => samePhone(c.phone, slot.phone));
+      if (!distinct) continue;
+      contacts.push({
+        phone: slot.phone,
+        email: slot.email || primary.email,
+        name: slot.name || primary.name,
+        role: slot.role,
+      });
+    }
   }
 
   const notifyPrimary = !contacts.length || prefs.appointment_notify_primary === true;
@@ -224,6 +255,7 @@ module.exports = {
   firstNameFrom,
   getPrimaryContact,
   getServiceContact,
+  getServiceContactSmsRecipient,
   getServiceContactSlots,
   isServiceContactRole,
   getBillingContact,
