@@ -3765,13 +3765,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // The cross-field contradiction rules ran on the pre-derivation values —
       // re-run them so a derived 'Inspection only' can't sit beside an
       // applied-treatment detail field (e.g. pre-emergent marked Yes with
-      // zero products recorded).
+      // zero products recorded). Companion context must ride along: when the
+      // values came from a tree_shrub COMPANION section they legally carry
+      // the companionOnly detail fields, which primary-context validation
+      // rejects as unknown — that would 400-block every combo completion
+      // that recorded condition detail (codex P2 r2 on #2950).
       {
         const derivedValidation = ActivityIndicators.validateTypedFindings({
           type: 'tree_shrub',
           values: treeShrubComplianceValues,
           expectedType: 'tree_shrub',
           enforceRequired: false,
+          companion: typedFindingsType !== 'tree_shrub',
         });
         if (!derivedValidation.ok) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));

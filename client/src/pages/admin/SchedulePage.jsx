@@ -8613,10 +8613,20 @@ export function CompletionPanel({
   // but a draft saved BEFORE the change can still restore stale room/zone
   // chips into hidden state, where the tech can't see or clear them and the
   // submit/recap/report paths would still consume them (codex P3 on #2950).
-  // Clear the state whenever it appears so every consumer sees empty.
+  // Clear the state whenever it appears so every consumer sees empty. The
+  // same applies to each restored product's applicationArea: with the chips
+  // gone the per-product area selector never renders (it requires
+  // areasServiced.length), so a stale 'Kitchen'-style value would submit
+  // invisibly from p.applicationArea (codex P3 r2 on #2950).
   useEffect(() => {
-    if (treeShrubCloseoutOn && areasServiced.length) setAreasServiced([]);
-  }, [treeShrubCloseoutOn, areasServiced]);
+    if (!treeShrubCloseoutOn) return;
+    if (areasServiced.length) setAreasServiced([]);
+    setSelectedProducts((prev) => (
+      prev.some((p) => p && p.applicationArea)
+        ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
+        : prev
+    ));
+  }, [treeShrubCloseoutOn, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
