@@ -373,14 +373,17 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
           });
       })
         // …or a demonstrated cadence: ≥2 live lawn-flavored visits inside
-        // the trailing window (a single visit is a one-time job).
+        // the TRAILING window — bounded on both sides (pre-push P1: with
+        // only the lower bound, two future one-time bookings would count;
+        // future visits belong to the recurring-marker branch above).
         .orWhereRaw(
           `(SELECT COUNT(*) FROM scheduled_services ss2
              WHERE ss2.customer_id = c.id
                AND ss2.status NOT IN (${nonLivePlaceholders})
                AND ss2.scheduled_date >= ?
+               AND ss2.scheduled_date <= ?
                AND (${lawnLikeSql})) >= 2`,
-          [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
+          [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, todayET, ...LAWN_SERVICE_TYPE_LIKES],
         );
     })
     .select(

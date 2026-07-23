@@ -587,6 +587,9 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       expect(sql).toContain('exists');
       expect(sql).toContain('"scheduled_services"');
       expect(sql).toMatch(/SELECT COUNT\(\*\) FROM scheduled_services ss2[\s\S]*>= 2/);
+      // The trailing-window count is bounded on BOTH sides (pre-push P1:
+      // lower-bound-only let two future one-time bookings count).
+      expect(sql).toMatch(/ss2\.scheduled_date >= \?[\s\S]*ss2\.scheduled_date <= \?/);
       // Recurring-series marker on the upcoming branch (Codex #2954 P2):
       // a future ONE-TIME lawn job must not qualify.
       expect(sql).toContain('"ss"."is_recurring" = ?');
