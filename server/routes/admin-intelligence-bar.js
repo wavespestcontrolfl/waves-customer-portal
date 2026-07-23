@@ -442,28 +442,49 @@ function summarizeProposal(toolName, params) {
   return summary + ripple;
 }
 
-function confirmationDisplayParams(toolName, params, preview) {
-  if (toolName !== AGENT_ESTIMATE_WRITE_TOOL) return params;
-  // Operator-stated price adjustment: the Confirm click is the authorization
-  // for the discount (and any floor breach), so the card must spell out the
-  // engine anchor, the adjusted price, and the breach — never just the final
-  // number.
-  const adj = preview?.operator_price_adjustment || null;
+// Operator-stated price adjustment: the Confirm click is the authorization
+// for the discount (and any floor breach), so the card must spell out the
+// engine anchor, the adjusted price, and the breach — never just the final
+// number. Shared by BOTH estimate write cards (agent draft + pending
+// estimate); codex P2 on #2947 caught the pending-estimate card shipping
+// without the disclosure.
+function operatorAdjustmentCardLine(adj) {
+  if (!adj) return null;
   const adjHasDiscount = !!adj?.requested?.type;
-  const adjustmentLine = adj
-    ? (adjHasDiscount
-      ? `${adj.requested.label}: ${adj.requested.type === 'PERCENT' ? `${adj.requested.value}% off` : `-$${adj.requested.value}`}`
-        + ` — engine $${adj.anchor_monthly_total}/mo → $${adj.adjusted_monthly_total}/mo`
-        + (adj.anchor_onetime_total !== adj.adjusted_onetime_total
-          ? `, one-time $${adj.anchor_onetime_total} → $${adj.adjusted_onetime_total}`
-          : '')
-        + (adj.floor_breach
-          ? ` — BELOW-FLOOR AUTHORIZED (lawn floor breached by $${adj.floor_breach.below_floor_annual}/yr)`
-          : (adj.capped ? ` — capped (${adj.cap_reason})` : ''))
-      : '')
-      + (adj.setup_fee_waived ? `${adjHasDiscount ? ' — ' : ''}$99 WaveGuard setup fee WAIVED (removed from estimate + first invoice)` : '')
-      + ` [reason: ${adj.requested.internal_reason}]`
-    : null;
+  return (adjHasDiscount
+    ? `${adj.requested.label}: ${adj.requested.type === 'PERCENT' ? `${adj.requested.value}% off` : `-$${adj.requested.value}`}`
+      + ` — engine $${adj.anchor_monthly_total}/mo → $${adj.adjusted_monthly_total}/mo`
+      + (adj.anchor_onetime_total !== adj.adjusted_onetime_total
+        ? `, one-time $${adj.anchor_onetime_total} → $${adj.adjusted_onetime_total}`
+        : '')
+      + (adj.floor_breach
+        ? ` — BELOW-FLOOR AUTHORIZED (lawn floor breached by $${adj.floor_breach.below_floor_annual}/yr)`
+        : (adj.capped ? ` — capped (${adj.cap_reason})` : ''))
+    : '')
+    + (adj.setup_fee_waived ? `${adjHasDiscount ? ' — ' : ''}$99 WaveGuard setup fee WAIVED (removed from estimate + first invoice)` : '')
+    + ` [reason: ${adj.requested.internal_reason}]`;
+}
+
+function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'create_pending_estimate') {
+    const adjustmentLine = operatorAdjustmentCardLine(preview?.operator_price_adjustment || null);
+    // Without an adjustment the raw-params card stays (legacy behavior);
+    // with one, the card must lead with the priced disclosure.
+    if (!adjustmentLine) return params;
+    return {
+      customer: params?.customerName || null,
+      address: params?.address || null,
+      services: Object.keys(params?.engineInputs?.services || {}).join(', ') || null,
+      monthly: preview?.priced_totals?.monthly ?? null,
+      annual: preview?.priced_totals?.annual ?? null,
+      one_time: preview?.priced_totals?.oneTime ?? null,
+      price_adjustment: adjustmentLine,
+      reasoning: params?.reasoning || null,
+      leadId: params?.leadId || null,
+    };
+  }
+  if (toolName !== AGENT_ESTIMATE_WRITE_TOOL) return params;
+  const adjustmentLine = operatorAdjustmentCardLine(preview?.operator_price_adjustment || null);
   return {
     action: preview?.action || (params?.estimateId ? 'revise draft' : 'create draft'),
     customer: params?.customerName || null,
@@ -513,6 +534,31 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+    // create_pending_estimate with an operator price adjustment: the Confirm
+    // card must show the engine anchor vs adjusted totals and any floor
+    // outcome (codex P2 on #2947). compute_estimate is read-only, so running
+    // it here for the disclosure keeps the never-execute rule intact — and a
+    // failure now is the same failure the confirmed reprice would hit.
+    if (toolUse.name === 'create_pending_estimate' && params.operatorPriceAdjustment && params.engineInputs) {
+      const priced = await executeToolByName('compute_estimate', {
+        ...params.engineInputs,
+        ...(params.leadId ? { leadId: params.leadId } : {}),
+        ...(params.address ? { address: params.address } : {}),
+        operatorPriceAdjustment: params.operatorPriceAdjustment,
+      }, null);
+      if (isToolFailure(priced)) {
+        return { failed: true, modelResult: priced };
+      }
+      preview = {
+        ...preview,
+        operator_price_adjustment: priced.operator_price_adjustment || null,
+        priced_totals: {
+          monthly: priced.monthly_total,
+          annual: priced.annual_total,
+          oneTime: priced.onetime_total,
+        },
+      };
+    }
   }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);

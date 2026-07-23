@@ -2961,6 +2961,11 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     const mergedData = { ...currentData, ...payload.data };
     if (!payload.data.membershipSnapshot) delete mergedData.membershipSnapshot;
     if (!payload.data.priorQualifyingServices) delete mergedData.priorQualifyingServices;
+    // Omitting operatorPriceAdjustment on a revision is the documented way to
+    // REMOVE the discount/fee waiver — a surviving stale key would be
+    // re-injected as manualDiscount by the public replay even though the
+    // confirmed totals exclude it (codex P1 on #2947).
+    if (!payload.data.operatorPriceAdjustment) delete mergedData.operatorPriceAdjustment;
     if (currentData.proposal?.enabled) {
       delete mergedData.proposal;
       delete mergedData.proposalDelivery;
@@ -3250,10 +3255,14 @@ function presentationRowMatches(row, wanted) {
     .some((candidate) => candidate && normalizeServiceMatchText(candidate) === wanted);
 }
 
-// Every stored shape the public payload builders read display names from.
-// displayName wins the fallback chain at every assembly site, so setting
-// displayName + label re-labels the rendered section without touching the
-// priced service key (pricing, scheduling, and conversion stay unchanged).
+// Every stored shape the public payload builders read display names from —
+// recurring rows, engine line items, AND the nested one-time/specialty
+// shapes v1/admin estimates persist (result.oneTime.items / specItems and
+// their results.* nesting), which the public accept/view path reads
+// (codex P2 on #2947). displayName wins the fallback chain at every
+// assembly site, so setting displayName + label re-labels the rendered
+// section without touching the priced service key (pricing, scheduling,
+// and conversion stay unchanged).
 function presentationRowArrays(estData = {}) {
   return [
     estData.engineResult?.lineItems,
@@ -3262,6 +3271,14 @@ function presentationRowArrays(estData = {}) {
     estData.result?.recurring?.services,
     estData.oneTimeServices,
     estData.result?.oneTimeServices,
+    estData.oneTime?.items,
+    estData.oneTime?.specItems,
+    estData.result?.oneTime?.items,
+    estData.result?.oneTime?.specItems,
+    estData.result?.results?.oneTime?.items,
+    estData.result?.results?.oneTime?.specItems,
+    estData.result?.specItems,
+    estData.specItems,
   ].filter(Array.isArray);
 }
 
@@ -3381,7 +3398,10 @@ async function setEstimatePresentation(input, actionContext = {}) {
     const updated = await trx('estimates')
       .where({ id: estimate.id })
       .whereIn('status', [...PRESENTATION_EDITABLE_STATUSES])
-      .update({ estimate_data: JSON.stringify(lockedData) });
+      // updated_at is part of the pricing-cache KEY — bumping it in the same
+      // write invalidates cached bundles on EVERY web process, not just the
+      // one whose in-memory cache we clear below (codex P2 on #2947).
+      .update({ estimate_data: JSON.stringify(lockedData), updated_at: trx.fn.now() });
     if (!updated) {
       return { error: 'Estimate status changed mid-write — presentation is frozen once accepted. Nothing was changed.' };
     }

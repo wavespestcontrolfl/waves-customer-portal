@@ -1740,8 +1740,21 @@ function normalizeManualDiscountSummary(estData = {}) {
   const manual = candidates.find((item) => item && Number(item.amount) > 0);
   if (!manual) return null;
   const amount = Math.round(Number(manual.amount) * 100) / 100;
+  // Operator/admin audit metadata rides the stored engine summary
+  // (internalReason, eligibility override notes, floor-breach internals) and
+  // this normalized object is spread into the public /:token/data pricing
+  // payload — strip it HERE, the single boundary every public serialization
+  // passes through, so an internal reason can never reach a customer link
+  // (codex P1 on #2947). The customer-facing fields (label, type, value,
+  // amounts, cap state) pass through untouched.
+  const {
+    internalReason: _internalReason,
+    eligibilityOverrideReason: _eligibilityOverrideReason,
+    floorBreach: _floorBreach,
+    ...customerSafe
+  } = manual;
   return {
-    ...manual,
+    ...customerSafe,
     amount,
     label: manual.label || manual.catalogName || (manual.type === 'PERCENT' ? `Discount (${manual.value}%)` : 'Discount'),
     scope: manual.scope || 'recurring_annual_after_waveguard',
@@ -15896,8 +15909,66 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   return next;
 }
 
+// Operator presentation relabels (set_estimate_presentation, #2947): the
+// tool rewrites STORED rows, but recomputed bundles re-derive section labels
+// from service keys/default display names — a relabel would silently vanish
+// from engine-backed and solo recurring payloads. Re-apply the audit-trail
+// overrides at this choke point so every bundle path (fresh build, snapshot,
+// cache restore) renders the operator's name. Only service-name fields are
+// rewritten; cadence labels on frequency rows are left alone.
+function presentationOverrideNormalize(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
+  const overrides = Array.isArray(estData?.presentationOverrides) ? estData.presentationOverrides : [];
+  if (!overrides.length) return payload;
+  // Last override per matched target wins (revision order preserved).
+  const renames = [];
+  for (const entry of overrides) {
+    const wanted = presentationOverrideNormalize(entry?.service);
+    const displayName = String(entry?.display_name || '').trim();
+    if (!wanted || !displayName) continue;
+    // Also match by the names the entry replaced — a recomputed row can
+    // resurface under its pre-relabel default name.
+    const keys = new Set([wanted, ...((entry.previous_names || []).map(presentationOverrideNormalize).filter(Boolean))]);
+    renames.push({ keys, displayName });
+  }
+  if (!renames.length) return payload;
+  const renameFor = (candidates) => {
+    let hit = null;
+    for (const rename of renames) {
+      if (candidates.some((candidate) => candidate && rename.keys.has(presentationOverrideNormalize(candidate)))) {
+        hit = rename.displayName;
+      }
+    }
+    return hit;
+  };
+  const renameSection = (section) => {
+    if (!section || typeof section !== 'object') return section;
+    const hit = renameFor([section.key, section.serviceKey, section.service, section.serviceCategory, section.label, section.name, section.displayName]);
+    if (!hit) return section;
+    return { ...section, label: hit, ...(section.name !== undefined ? { name: hit } : {}), ...(section.displayName !== undefined ? { displayName: hit } : {}) };
+  };
+  const renameItemRow = (row) => {
+    if (!row || typeof row !== 'object') return row;
+    const hit = renameFor([row.service, row.serviceKey, row.key, row.name, row.label, row.displayName]);
+    if (!hit) return row;
+    return { ...row, ...(row.name !== undefined ? { name: hit } : { name: hit }), ...(row.label !== undefined ? { label: hit } : {}), ...(row.displayName !== undefined ? { displayName: hit } : {}) };
+  };
+  const next = { ...payload };
+  if (Array.isArray(next.services)) next.services = next.services.map(renameSection);
+  if (next.oneTimeBreakdown && Array.isArray(next.oneTimeBreakdown.items)) {
+    next.oneTimeBreakdown = { ...next.oneTimeBreakdown, items: next.oneTimeBreakdown.items.map(renameItemRow) };
+  }
+  return next;
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
-  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
+  const alignedPayload = applyPresentationOverridesToBundle(
+    alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData),
+    estData,
+  );
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
