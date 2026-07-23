@@ -26,6 +26,7 @@ import {
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch } from "../utils/admin-fetch";
+import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
   ADMIN_MOBILE_TABS,
@@ -161,6 +162,15 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0, behavior: "instant" });
   }, [location.pathname]);
+
+  // First-party usage beacon (Settings → Portal Usage). Fire-and-forget,
+  // dedup'd inside the lib; PostHog is banned from /admin so this is the
+  // only record of which admin surfaces get used. Waits for auth so an
+  // expired session can't spray 401s.
+  useEffect(() => {
+    if (authStatus !== "ready") return;
+    trackAdminPageView({ pathname: location.pathname, search: location.search });
+  }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -438,6 +448,7 @@ export default function AdminLayoutV2() {
                     aria-current={isActive ? "page" : undefined}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                      markUsageSource("sidebar");
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                         e.preventDefault();
                         navigate(path);
@@ -625,6 +636,7 @@ export default function AdminLayoutV2() {
                   to={path}
                   onClick={(e) => {
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                    markUsageSource("tabbar");
                     if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                       e.preventDefault();
                       navigate(path);

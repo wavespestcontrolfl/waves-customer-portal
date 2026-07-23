@@ -485,6 +485,7 @@ app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
+app.use('/api/admin/usage', require('./routes/admin-usage'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/turf-height', require('./routes/admin-turf-height'));
