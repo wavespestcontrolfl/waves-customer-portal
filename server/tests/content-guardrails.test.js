@@ -2337,6 +2337,36 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 16 + astro r28 parity: dash lists, table resets/denials, coverage subjects, inherited verbs, negation crossings, help claims, e.g. lists', () => {
+    for (const body of [
+      'We serve Sarasota — Naples too.',
+      'We serve communities across Southwest Florida — Naples, Fort Myers, Cape Coral, and Sarasota.',
+      'We serve Southwest Florida, e.g. Naples, Fort Myers, Cape Coral.',
+      'Our coverage includes Naples.',
+      'Our coverage extends to Naples.',
+      "We don't serve Sarasota but now serve Naples.",
+      'We do not provide service in Sarasota and pest control in Tampa is available from Waves.',
+      'Our service area excludes Naples and includes Tampa.',
+      'Waves can help in Naples.',
+      'We help Naples homeowners with pest control.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'We serve Sarasota — Naples is not in our service area.',
+      '| Areas we serve |\n| --- |\n| Naples | No, outside our service area |',
+      '| Areas we serve |\n| --- |\n| Venice |\n\n| Naples ants | Season |\n| --- | --- |\n| spring | high |',
+      'Our customers in Sarasota compare Naples and Jacksonville climates.',
+      'If you need pest control in Naples, we do not serve that area.',
+      'We help you understand Naples pest pressure.',
+      'We do not serve Naples, Tampa, or Miami.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',
