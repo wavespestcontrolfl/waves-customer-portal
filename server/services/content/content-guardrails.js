@@ -762,8 +762,15 @@ function markdownSegments(body) {
   const segments = [];
   for (const block of String(body || '').split(/\n{2,}/)) {
     let current = '';
-    for (const line of block.split('\n')) {
-      if (MARKDOWN_SELF_CLOSING_LINE_RE.test(line) || line.includes('|')) {
+    const lines = block.split('\n');
+    for (let li = 0; li < lines.length; li += 1) {
+      const line = lines[li];
+      const pipeCount = (line.match(/\|/g) || []).length;
+      const tableish = /^\s*\|/.test(line) || pipeCount >= 2
+        || (pipeCount === 1 && (/^[\s:|-]+$/.test(line) && line.includes('-')
+          || /^[\s:|-]+$/.test(lines[li + 1] || '') && (lines[li + 1] || '').includes('-')
+          || /^[\s:|-]+$/.test(lines[li - 1] || '') && (lines[li - 1] || '').includes('-')));
+      if (MARKDOWN_SELF_CLOSING_LINE_RE.test(line) || tableish) {
         if (current) { segments.push(current); current = ''; }
         segments.push(line);
       } else if (MARKDOWN_CONTINUABLE_MARKER_RE.test(line)) {
@@ -858,7 +865,7 @@ function offFootprintCityFinding(text) {
     .replace(/<\/(?:h\d|p|li|blockquote|td|th|tr|div)>/gi, '$&\n')
     // A quoted phrase attributed to a third party (or discussed AS a
     // phrase) is not Waves' own claim — blank the quote content.
-    .replace(/((?<!\bour )(?<!\bwe )(?:competitor|company|provider|firm|phrase|wording|term|example)s?\b[^.!?"\u201c]{0,25}["\u201c])([^"\u201d]{0,120})(["\u201d])/gi, '$1…$3')
+    .replace(/((?:(?:a|an|another|one|some|that|this)\s+(?:competitor|compan(?:y|ies)|provider|firm)s?|(?<!\bour )(?<!\bwe )(?:phrase|wording|term|example)s?)\b[^.!?"\u201c]{0,25}["\u201c])([^"\u201d]{0,120})(["\u201d])/gi, '$1…$3')
     .replace(/\s(?:href|src)\s*=\s*\"[^\"]*\"/gi, ' ')
     .replace(/\s(?:href|src)\s*=\s*'[^']*'/gi, ' ')
     .replace(/\]\(\s*[^)]*\)/g, '](#)')
