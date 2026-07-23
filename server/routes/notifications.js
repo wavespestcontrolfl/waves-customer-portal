@@ -653,11 +653,16 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       const slot1 = serviceContactSlotUpdates([contact], beforeRow);
+      // Same artifact rule as the list save (codex #2948 P2): a consented
+      // legacy save stamps; any legacy edit without a fresh attestation
+      // clears the stale stamp — it described a list this save just changed.
+      const legacyContacts = [contact].filter((c) => c.name || c.phone || c.email);
       await db('customers').where({ id: req.params.customerId }).update({
         service_contact_name: slot1.service_contact_name,
         service_contact_phone: slot1.service_contact_phone,
         service_contact_email: slot1.service_contact_email,
         service_contact_role: slot1.service_contact_role,
+        ...serviceContactConsentUpdates(legacyContacts, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
     }
