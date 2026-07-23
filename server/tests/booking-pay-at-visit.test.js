@@ -151,37 +151,39 @@ describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadenc
   });
 });
 
-// The quote→book handoff mint gate (public-quote.js) calls
-// resolveBookingVisitPrice({ estimate: {estimate_data, annual_total,
-// monthly_total}, serviceKey: 'pest_control', bookingVisits: 4 }) over the
-// wizard-mirror shape it just stored, and mints a token only when that prices —
-// so a token is never minted for a shape /booking/confirm can't price. These
-// pin that predicate over the STORED wizard shape (services is an OBJECT in the
-// wizard payload, so engineResult.lineItems is the only recurring source).
-describe('quote→book handoff mint gate — wizard-mirror shape priceability', () => {
+// /booking/confirm's pricing branch calls resolveBookingVisitPrice({
+// estimate: {estimate_data, annual_total, monthly_total}, serviceKey:
+// 'pest_control', bookingVisits: 4 }) over the STORED wizard-mirror shape
+// (services is an OBJECT in the wizard payload, so engineResult.lineItems is
+// the only recurring source). The handoff token now mints for EVERY
+// self-bookable shape (it doubles as the customers-only gate pass), so this
+// predicate is what decides pay-at-visit STAMPING at confirm — an unpriceable
+// shape carries a token, passes the gate, and books price-less. These pin
+// that confirm-side predicate.
+describe('confirm-side pricing predicate — wizard-mirror shape priceability', () => {
   const wizardEst = (lineItems, annual, monthly = null) => ({
     annual_total: annual,
     monthly_total: monthly,
     estimate_data: { services: { pest: true }, engineResult: { lineItems } },
   });
-  const mintGate = (estimate) => !!resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: 4 });
+  const confirmPrices = (estimate) => !!resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: 4 });
 
-  test('single quarterly pest line (stored frequency:4) → mints', () => {
-    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 }], 387.96))).toBe(true);
+  test('single quarterly pest line (stored frequency:4) → prices', () => {
+    expect(confirmPrices(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 }], 387.96))).toBe(true);
   });
 
-  test('lawn-only quote → NO token (confirm only prices quarterly pest)', () => {
-    expect(mintGate(wizardEst([{ service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 }], 480))).toBe(false);
+  test('lawn-only quote → books price-less (confirm only prices quarterly pest)', () => {
+    expect(confirmPrices(wizardEst([{ service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 }], 480))).toBe(false);
   });
 
-  test('pest+lawn (two priced recurring lines) → NO token (ambiguous total)', () => {
-    expect(mintGate(wizardEst([
+  test('pest+lawn (two priced recurring lines) → books price-less (ambiguous total)', () => {
+    expect(confirmPrices(wizardEst([
       { service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 },
       { service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 },
     ], 867.96))).toBe(false);
   });
 
-  test('monthly pest quote → NO token (cadence ≠ the quarterly series confirm seeds)', () => {
-    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
+  test('monthly pest quote → books price-less (cadence ≠ the quarterly series confirm seeds)', () => {
+    expect(confirmPrices(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
   });
 });

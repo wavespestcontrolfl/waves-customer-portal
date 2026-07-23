@@ -210,6 +210,25 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
+  test('estimator handoff passes the gate for NON-pest quotes too (2026-07-23 estimator lockout)', async () => {
+    // The wizard mints the handoff token for EVERY self-bookable quote shape,
+    // not just quarterly pest — the token IS the gate pass, and a lawn-only
+    // estimator lead must not be walled out of the funnel their own quote
+    // invited them into. The wizard's draft is bound to the customer row it
+    // minted (pipeline_stage new_lead — lead stages only refuse the BEARER
+    // path, never the token path).
+    firstResults.estimates = { id: 'pe-lawn', customer_id: CUST_ID };
+    firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'new_lead' };
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      service_type: 'Lawn Care',
+      customersOnly: true,
+      pricing_estimate_id: 'pe-lawn',
+      estimate_token: mintEstimateHandoffToken('pe-lawn'),
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
   test('a handoff token cannot re-point the booking at an unrelated contact (Codex round-5 P1)', async () => {
     // Valid HMAC, but the typed phone is NOT the handoff estimate's contact —
     // a self-minted quote token must not unlock the legacy identity paths.

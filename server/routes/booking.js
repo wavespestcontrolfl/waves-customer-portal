@@ -1954,11 +1954,27 @@ async function createSelfBooking(payload = {}) {
         // declined) a not-yet-expired token must not stamp pricing from a quote
         // that is no longer the live self-serve draft.
         const pricingEstData = pricingEstimate?.estimate_data || {};
+        // Mixed recurring + one-time drafts must never stamp pay-at-visit
+        // pricing: the resolver prices the recurring line's annual÷cadence
+        // while every one-time add-on (roach chip, lawn-pest knockdown)
+        // silently vanishes from the booked series' billing — an undercharge.
+        // Row-shape mirror of public-quote's estimateBlocksBookingHandoff
+        // (which reads the LIVE engine summary; keep the two predicates in
+        // sync). Checked HERE, not only at mint time, because the handoff
+        // token is minted for every self-bookable shape (it doubles as the
+        // customers-only gate pass) and a wizard draft is refreshed IN PLACE —
+        // a token minted while the quote was pure-recurring must not price a
+        // snapshot that has since gained a one-time add-on.
+        const pricingSummary = pricingEstData.engineResult?.summary || {};
+        const pricingMixedBilling =
+          Number(pricingSummary.recurringAnnualAfterDiscount ?? pricingSummary.recurringAnnual ?? pricingEstData.annual ?? 0) > 0
+          && Number(pricingSummary.oneTimeTotal ?? pricingEstData.oneTimeTotal ?? 0) > 0;
         const pricingEstimateEligible = !!pricingEstimate
           && pricingEstimate.source === 'quote_wizard'
           && pricingEstimate.status === 'draft'
           && !pricingEstData.commercialEstimatedPricing
-          && !pricingEstData.quoteRequired;
+          && !pricingEstData.quoteRequired
+          && !pricingMixedBilling;
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);

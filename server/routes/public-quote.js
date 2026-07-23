@@ -1105,7 +1105,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
     let draftEstimateId = null;
-    let handoffPriceable = false;
     try {
       const estimateDataObj = {
         lead_id: lead.id,
@@ -1191,21 +1190,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
       };
-      // Mint a quote→book handoff ONLY for shapes /booking/confirm can actually
-      // price today: a single quarterly PEST recurring line (confirm seeds a
-      // series cadence — bookingVisits=4 — only for quarterly pest_control).
-      // Same resolver over the same stored fields confirm will read back, so
-      // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
-      // quotes get NO token rather than one that silently prices nothing;
-      // widening the handoff means extending confirm's cadence support first.
-      // A roach-chip quote also gets NO token: its one-time pest_initial_roach
-      // add-on is outside what confirm bills (see estimateBlocksBookingHandoff).
-      const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
-      handoffPriceable = !estimateBlocksBookingHandoff(estimate) && !!resolveBookingVisitPrice({
-        estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
-        serviceKey: 'pest_control',
-        bookingVisits: 4,
-      });
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
         draftEstimateId = existingEst.id;
@@ -1322,11 +1306,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
         else if (recurringServiceLabelParam) bookingParams.set('service_label', recurringServiceLabelParam);
-        // Quote→book handoff on the emailed/texted booking link too, so an invite
-        // booking is priced from this exact estimate (not just the astro CTA).
-        // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
-        // handoffPriceable-only (quarterly pest, the one shape confirm prices).
-        if (draftEstimateId && handoffPriceable && !isOneTimeOnly) {
+        // Quote→book handoff on EVERY self-book link (this builder already runs
+        // only for self-bookable shapes — see the estimateBlocksSelfBookLink
+        // gate above). The token is the customers-only gate pass
+        // (GATE_BOOKING_CUSTOMERS_ONLY): without it a fresh quote-wizard lead
+        // is refused at /booking/confirm and walled off the funnel they were
+        // just invited into (owner directive 2026-07-23: the gate locks BARE
+        // /book entries, never the estimator handoff). Whether the booking
+        // also gets pay-at-visit PRICING is decided confirm-side per shape
+        // (quarterly-pest-only, mixed-billing drift re-checked there) — an
+        // unpriceable shape books price-less exactly as a bare entry did.
+        if (draftEstimateId) {
           const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
           const inviteToken = mintEstimateHandoffToken(draftEstimateId);
           if (inviteToken) {
@@ -1535,19 +1525,30 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.disclaimer = commercialDisclaimer;
     }
     // Quote→book handoff: expose the draft estimate id + a server-trusted token
-    // so a booking made from this quote can be priced from THIS exact estimate
-    // (see /booking/confirm), instead of inferring which quote it came from.
-    // Gated like the self-booking link above (!quoteRequired && !commercialDetected)
-    // plus recurring-only (!isOneTimeOnly) plus handoffPriceable (a single
-    // quarterly pest line — the one shape /booking/confirm prices today).
-    // Commercial/manual/one-time/non-pest shapes get no handoff (they'd
-    // otherwise mint a token booking.js can't price).
-    if (draftEstimateId && handoffPriceable && !quoteRequired && !commercialDetected && !isOneTimeOnly) {
+    // whenever the quote is a self-bookable shape — the SAME predicate the
+    // bookingUrl builder above uses, so every surface that offers "book online"
+    // carries the handoff. The token is both the pricing correlation AND the
+    // customers-only gate pass (GATE_BOOKING_CUSTOMERS_ONLY): estimator leads
+    // must reach /booking/confirm with it or the gate walls them out of the
+    // funnel they were just quoted in (owner directive 2026-07-23 — the gate
+    // locks BARE /book entries, never the estimator handoff). Shapes the
+    // office schedules (commercial, manual-review, mixed recurring+one-time,
+    // bed bug) get no token AND no booking_url — the client renders a
+    // we'll-reach-out CTA instead of a book link. Pricing stays confirm-side:
+    // unpriceable shapes book price-less.
+    if (draftEstimateId && !quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
       const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
       response.estimate_id = draftEstimateId;
       const estimateToken = mintEstimateHandoffToken(draftEstimateId);
       if (estimateToken) response.estimate_token = estimateToken;
     }
+    // The server-built /book link (short URL; includes the correct portal
+    // service id, quote-wizard source, and the handoff params above when
+    // minted). The astro estimator CTA links HERE instead of hand-building
+    // portal URLs from marketing slugs the portal can't parse. Null when the
+    // office schedules this shape — the client must then show reach-out copy,
+    // never a book link (same rule as nextStepSummary).
+    if (bookingUrl) response.booking_url = bookingUrl;
     res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });

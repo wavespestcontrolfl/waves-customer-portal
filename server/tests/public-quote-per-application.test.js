@@ -413,12 +413,28 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(estimateBlocksSelfBookLink(palm)).toBe(false);
   });
 
-  test('mint + link sites consult the blockers (confirm bills annual/4 only; generic /book prices nothing)', () => {
+  test('mint matches the self-book-link predicate; confirm-side guard owns mixed billing', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
-    expect(source).toMatch(/handoffPriceable = !estimateBlocksBookingHandoff\(estimate\) && !!resolveBookingVisitPrice\(/);
-    expect(source).toMatch(/!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)/);
+    // The handoff token mints for EVERY self-bookable shape (it is the
+    // customers-only gate pass — estimator leads must carry it into
+    // /booking/confirm or the gate walls them out of their own funnel).
+    // Response mint mirrors the bookingUrl predicate exactly; the invite
+    // link inside the builder mints unconditionally (the builder already
+    // runs only for self-bookable shapes).
+    expect(source).toMatch(/if \(draftEstimateId && !quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)\) \{/);
+    expect(source).toMatch(/if \(draftEstimateId\) \{\s*\n\s*const \{ mintEstimateHandoffToken \}/);
+    // The astro estimator CTA consumes the server-built link, so the response
+    // must expose it whenever it was built.
+    expect(source).toMatch(/response\.booking_url = bookingUrl/);
+    // Mint-time no longer runs the priceability predicate — the mixed-billing
+    // undercharge block lives at the CONFIRM pricing site instead (a wizard
+    // draft refreshes in place, so confirm must re-check the CURRENT shape).
+    expect(source).not.toMatch(/handoffPriceable/);
+    const bookingSource = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+    expect(bookingSource).toMatch(/pricingMixedBilling/);
+    expect(bookingSource).toMatch(/&& !pricingMixedBilling/);
     // Palm-only recurring bookings carry their quoted label into /book.
     expect(source).toMatch(/recurringServiceLabelParam = bookingServiceLabel/);
     expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);
