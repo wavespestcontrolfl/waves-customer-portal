@@ -13,30 +13,48 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import {
-  DEFAULT_ZOOM,
-  FALLBACK_ZOOM,
   MAP_WIDTH,
   MAP_HEIGHT,
   buildSettledAccum,
   composeSnapshot,
-  loadMapImage,
+  loadBestMapImage,
   pathLengthPx,
   pixelToLatLng,
   pxToFeet,
   startSprayEngine,
-  staticMapUrl,
   exportMapPng,
 } from './treatmentZoneSpray';
 
+// Two appearances, one component. `dark` is the tech-portal chrome (that
+// surface stays Montserrat + dark palette by rule — see TechHomePage.jsx).
+// `light` mirrors the admin CompletionPanel "M" theme (near-white surfaces,
+// #111 ink, hairline borders, black pill CTAs, Roboto — the closeout host
+// this modal opens from via "Trace where we sprayed").
 const DARK = {
   bg: '#0f1923',
   card: '#1e293b',
   border: '#334155',
-  teal: '#0ea5e9',
+  accent: '#0ea5e9',
   red: '#ef4444',
   green: '#22c55e',
   text: '#e2e8f0',
   muted: '#94a3b8',
+  mapBackdrop: '#0a0f14',
+  scrim: 'rgba(0,0,0,0.7)',
+};
+
+const LIGHT = {
+  bg: '#FAFAFA',
+  card: '#FFFFFF',
+  border: '#E5E5E5',
+  accent: '#111111',
+  red: '#C2410C',
+  green: '#16A34A',
+  text: '#111111',
+  muted: '#737373',
+  mapBackdrop: '#F5F5F5',
+  scrim: 'rgba(0,0,0,0.4)',
+  font: "'Roboto', Arial, sans-serif",
 };
 
 // Spray visuals stay in customer brand colors (mist + sprayer head), separate
@@ -48,21 +66,46 @@ const API = import.meta.env.VITE_API_URL || '';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const CLOSE_TAP_CSS_PX = 22;
 
-const btnStyle = (kind, disabled) => ({
-  padding: '10px 14px',
-  borderRadius: 8,
-  fontSize: 14,
-  fontWeight: 700,
-  cursor: disabled ? 'not-allowed' : 'pointer',
-  opacity: disabled ? 0.5 : 1,
-  border: kind === 'primary' ? 'none' : `1px solid ${DARK.border}`,
-  background: kind === 'primary' ? DARK.teal : 'transparent',
-  color: kind === 'primary' ? '#fff' : DARK.text,
-});
-
 export default function TechTreatmentZoneModal({
   serviceId, customerName, address, lat, lng, onClose, onSaved,
+  appearance = 'dark',
 }) {
+  const light = appearance === 'light';
+  const T = light ? LIGHT : DARK;
+  // Light buttons are the M-theme pills (44px, rounded-full, UPPERCASE 500);
+  // dark keeps the original tech-portal buttons untouched.
+  const btnStyle = (kind, disabled) => (light
+    ? {
+        height: 44,
+        padding: '0 16px',
+        borderRadius: 999,
+        fontFamily: LIGHT.font,
+        fontSize: 14,
+        fontWeight: 500,
+        textTransform: 'uppercase',
+        letterSpacing: '0.3px',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        border: kind === 'primary' ? 'none' : `1px solid ${LIGHT.text}`,
+        background: kind === 'primary' ? LIGHT.accent : 'transparent',
+        color: kind === 'primary' ? '#FFFFFF' : LIGHT.text,
+      }
+    : {
+        padding: '10px 14px',
+        borderRadius: 8,
+        fontSize: 14,
+        fontWeight: 700,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        border: kind === 'primary' ? 'none' : `1px solid ${DARK.border}`,
+        background: kind === 'primary' ? DARK.accent : 'transparent',
+        color: kind === 'primary' ? '#fff' : DARK.text,
+      });
+  // Admin weight cap is 400/500; the dark variant keeps its original weights.
+  const strong = light ? 500 : 700;
   const [mapState, setMapState] = useState({ status: 'loading' });
   const [existing, setExisting] = useState(null);
   const [step, setStep] = useState('trace');
@@ -130,16 +173,7 @@ export default function TechTreatmentZoneModal({
           }
         }
         if (!center) throw new Error('No location on file for this visit.');
-        let zoom = DEFAULT_ZOOM;
-        let url = staticMapUrl(center.lat, center.lng, zoom, MAPS_KEY);
-        let image;
-        try {
-          image = await loadMapImage(url);
-        } catch {
-          zoom = FALLBACK_ZOOM;
-          url = staticMapUrl(center.lat, center.lng, zoom, MAPS_KEY);
-          image = await loadMapImage(url);
-        }
+        const { image, url, zoom } = await loadBestMapImage(center.lat, center.lng, MAPS_KEY);
         if (!cancelled) setMapState({ status: 'ready', center, zoom, url, image });
       } catch (err) {
         if (!cancelled) setMapState({ status: 'error', message: err.message || 'Map failed to load.' });
@@ -326,10 +360,10 @@ export default function TechTreatmentZoneModal({
         position: 'relative',
         width: '100%',
         aspectRatio: '4 / 3',
-        borderRadius: 10,
+        borderRadius: light ? 12 : 10,
         overflow: 'hidden',
-        background: '#0a0f14',
-        border: `1px solid ${DARK.border}`,
+        background: T.mapBackdrop,
+        border: `1px solid ${T.border}`,
         ...extraStyle,
       }}
     >
@@ -347,7 +381,7 @@ export default function TechTreatmentZoneModal({
     <div
       onClick={guardedClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        position: 'fixed', inset: 0, background: T.scrim,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
         zIndex: 1000,
       }}
@@ -355,16 +389,17 @@ export default function TechTreatmentZoneModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: DARK.bg, width: '100%', maxWidth: 560,
+          background: T.bg, width: '100%', maxWidth: 560,
           borderTopLeftRadius: 16, borderTopRightRadius: 16,
           padding: 16, maxHeight: '92vh', overflowY: 'auto',
-          border: `1px solid ${DARK.border}`,
+          border: `1px solid ${T.border}`,
+          fontFamily: T.font,
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h2 style={{
-            margin: 0, fontSize: 18, fontWeight: 700, color: DARK.text,
-            fontFamily: "'Montserrat', sans-serif",
+            margin: 0, fontSize: 18, fontWeight: strong, color: T.text,
+            fontFamily: light ? LIGHT.font : "'Montserrat', sans-serif",
           }}>
             Treatment Zone
           </h2>
@@ -372,20 +407,20 @@ export default function TechTreatmentZoneModal({
             onClick={guardedClose}
             disabled={saving}
             style={{
-              background: 'transparent', border: 'none', color: DARK.muted,
+              background: 'transparent', border: 'none', color: T.muted,
               fontSize: 24, cursor: saving ? 'wait' : 'pointer',
               opacity: saving ? 0.4 : 1, padding: '0 4px', lineHeight: 1,
             }}
           >×</button>
         </div>
         {customerName && (
-          <p style={{ margin: '0 0 12px', fontSize: 13, color: DARK.muted }}>{customerName}</p>
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: T.muted }}>{customerName}</p>
         )}
 
         {existing && step === 'trace' && points.length === 0 && (
           <div style={{
-            background: `${DARK.green}18`, border: `1px solid ${DARK.green}`,
-            color: DARK.green, padding: '8px 10px', borderRadius: 6,
+            background: `${T.green}18`, border: `1px solid ${T.green}`,
+            color: T.green, padding: '8px 10px', borderRadius: 6,
             fontSize: 13, marginBottom: 12,
           }}>
             Already traced ({existing.linear_ft ?? '?'} linear ft). Tracing again replaces it.
@@ -393,13 +428,13 @@ export default function TechTreatmentZoneModal({
         )}
 
         {mapState.status === 'loading' && (
-          <p style={{ color: DARK.muted, fontSize: 14, textAlign: 'center', padding: 40 }}>
+          <p style={{ color: T.muted, fontSize: 14, textAlign: 'center', padding: 40 }}>
             Loading satellite photo…
           </p>
         )}
         {mapState.status === 'error' && (
           <div style={{
-            background: `${DARK.red}22`, border: `1px solid ${DARK.red}`, color: DARK.red,
+            background: `${T.red}22`, border: `1px solid ${T.red}`, color: T.red,
             padding: '10px 12px', borderRadius: 6, fontSize: 14,
           }}>
             {mapState.message}
@@ -408,14 +443,14 @@ export default function TechTreatmentZoneModal({
 
         {mapState.status === 'ready' && step === 'trace' && (
           <>
-            <p style={{ margin: '0 0 10px', fontSize: 13, color: DARK.muted }}>
+            <p style={{ margin: '0 0 10px', fontSize: 13, color: T.muted }}>
               {points.length === 0
                 ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself.'
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
             {suggestNote ? (
-              <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: DARK.teal }}>{suggestNote}</p>
+              <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: light ? 500 : 600, color: T.accent }}>{suggestNote}</p>
             ) : null}
             {mapFrame(
               <svg
@@ -449,7 +484,7 @@ export default function TechTreatmentZoneModal({
               </svg>,
               { cursor: 'crosshair', touchAction: 'none' },
             )}
-            <p style={{ margin: '10px 0', fontSize: 13, fontWeight: 700, color: DARK.text }}>
+            <p style={{ margin: '10px 0', fontSize: 13, fontWeight: strong, color: T.text }}>
               {points.length} point{points.length === 1 ? '' : 's'}
               {points.length > 1 ? ` · ~${Math.round(totalFeet)} linear ft` : ''}
               {closed ? ' · loop closed' : ''}
@@ -501,22 +536,22 @@ export default function TechTreatmentZoneModal({
               />,
             )}
             <p style={{
-              margin: '10px 0', fontSize: 14, fontWeight: 700,
-              color: settled ? DARK.green : DARK.text,
+              margin: '10px 0', fontSize: 14, fontWeight: strong,
+              color: settled ? T.green : T.text,
             }}>
               {statusText}
             </p>
             {saveState === 'saving' && (
-              <p style={{ margin: '0 0 10px', fontSize: 13, color: DARK.muted }}>Saving to the service report…</p>
+              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.muted }}>Saving to the service report…</p>
             )}
             {saveState === 'saved' && (
-              <p style={{ margin: '0 0 10px', fontSize: 13, color: DARK.green }}>
+              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.green }}>
                 Saved — this map now appears on the customer&apos;s service report.
               </p>
             )}
             {saveState && saveState !== 'saving' && saveState !== 'saved' && (
               <div style={{
-                background: `${DARK.red}22`, border: `1px solid ${DARK.red}`, color: DARK.red,
+                background: `${T.red}22`, border: `1px solid ${T.red}`, color: T.red,
                 padding: '8px 10px', borderRadius: 6, fontSize: 13, marginBottom: 10,
               }}>
                 {saveState}

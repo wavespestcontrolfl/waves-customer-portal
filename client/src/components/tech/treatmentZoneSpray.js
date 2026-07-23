@@ -14,8 +14,10 @@ export const MAP_LOGICAL_HEIGHT = 480;
 export const MAP_SCALE = 2;
 export const MAP_WIDTH = MAP_LOGICAL_WIDTH * MAP_SCALE;
 export const MAP_HEIGHT = MAP_LOGICAL_HEIGHT * MAP_SCALE;
-export const DEFAULT_ZOOM = 20;
-export const FALLBACK_ZOOM = 19;
+// Owner ask (2026-07-23): frame the home tighter. Zoom 21 first, stepping
+// down where Google has no imagery that deep — the traced zoom is saved in
+// the payload, so all downstream px→ft/latLng math follows automatically.
+export const ZOOM_ATTEMPTS = [21, 20, 19];
 
 export function staticMapUrl(lat, lng, zoom, apiKey) {
   const params = new URLSearchParams({
@@ -37,6 +39,59 @@ export function loadMapImage(url) {
     img.onerror = () => reject(new Error('The satellite photo failed to load.'));
     img.src = url;
   });
+}
+
+// Over-zoomed satellite requests fail two different ways depending on the
+// area: the image errors outright, or Google returns a valid-but-flat tile
+// (solid black / "no imagery" gray). Sample luminance spread to catch the
+// second kind — a real aerial photo is far busier than any placeholder.
+function imageLooksBlank(image) {
+  const SAMPLE = 64;
+  try {
+    const c = document.createElement('canvas');
+    c.width = SAMPLE;
+    c.height = SAMPLE;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(image, 0, 0, SAMPLE, SAMPLE);
+    const { data } = ctx.getImageData(0, 0, SAMPLE, SAMPLE);
+    const n = SAMPLE * SAMPLE;
+    let sum = 0;
+    const lums = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) {
+      const o = i * 4;
+      const lum = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+      lums[i] = lum;
+      sum += lum;
+    }
+    const mean = sum / n;
+    let busy = 0;
+    for (let i = 0; i < n; i += 1) {
+      if (Math.abs(lums[i] - mean) > 10) busy += 1;
+    }
+    // Placeholder tiles are near-uniform (text glyphs are a tiny fraction of
+    // pixels). Bias toward accepting: a false "blank" only costs one zoom step.
+    return busy / n < 0.05;
+  } catch {
+    // Tainted canvas — can't inspect, accept the tile (same as before).
+    return false;
+  }
+}
+
+/** Try each zoom in order; resolve the first one with real imagery. */
+export async function loadBestMapImage(lat, lng, apiKey, zooms = ZOOM_ATTEMPTS) {
+  let lastErr = null;
+  for (let i = 0; i < zooms.length; i += 1) {
+    const zoom = zooms[i];
+    const url = staticMapUrl(lat, lng, zoom, apiKey);
+    try {
+      const image = await loadMapImage(url);
+      if (i < zooms.length - 1 && imageLooksBlank(image)) continue;
+      return { image, url, zoom };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('The satellite photo failed to load.');
 }
 
 /** Meters per physical image pixel at this latitude/zoom (scale-2 imagery). */

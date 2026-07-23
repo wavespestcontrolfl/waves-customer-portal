@@ -12363,6 +12363,7 @@ export function CompletionPanel({
                     lng={service.lng ?? service.customer_longitude}
                     onClose={() => setZoneMapOpen(false)}
                     onSaved={applyTracedTreatmentZone}
+                    appearance="light"
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
