@@ -92,7 +92,14 @@ async function hasTextReachableApptRecipient(customer) {
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
 
-  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+  // Same opt-in hold as the send path: a held (unconfirmed) recipient can't
+  // count as text-reachable, or the no-reachable-channel human alert gets
+  // suppressed by a phone we deliberately are not texting (#2956 r4).
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  const reachableContacts = await filterRecipientsByOptin(
+    getAppointmentContacts(customer, prefs || {}), customer.id
+  ).catch(() => getAppointmentContacts(customer, prefs || {}));
+  for (const contact of reachableContacts) {
     const digits = lastTenDigits(contact.phone);
     if (!digits) continue;
     const delivered = await db('sms_log')

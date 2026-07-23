@@ -694,9 +694,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // list save — the legacy shape must not be a loophole that enrolls a
       // new phone without the confirmation flow or its rollback semantics.
       let legacyClaims = [];
-      const legacyOptinArgs = updates.serviceContactsConsent === true && contact.phone ? {
+      // Full post-save list, not just slot 1: ask_failed survivors in
+      // slots 2/3 must retry on this consented save too (#2956 r4).
+      const legacyOptinArgs = updates.serviceContactsConsent === true && postSave.some((c) => c.phone) ? {
         customer: beforeRow,
-        contacts: [{ name: contact.name, firstName: String(contact.name || '').split(/\s+/)[0], phone: contact.phone }],
+        contacts: postSave.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;

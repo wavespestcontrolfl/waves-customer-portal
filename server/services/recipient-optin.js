@@ -202,7 +202,13 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         identityTrustLevel: 'service_contact_authorized',
         metadata: { original_message_type: 'recipient_optin_request' },
       });
-      if (result.blocked || result.sent === false) {
+      // Success-shaped sentinels (gate-blocked / template-disabled /
+      // internal-redirect / suppressed) mean NO confirmation text reached
+      // the recipient — no Twilio status callback will ever flip the row,
+      // so treat them as failed asks and release to ask_failed for the
+      // save-triggered retry (#2956 r4).
+      const sentinelSid = /^(gate|template|internal)-/.test(String(result?.sid || ''));
+      if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
         // deleting it would grandfather a phone that never got the ask.
