@@ -69,22 +69,46 @@ async function markRecipientOptin(phone, status) {
   }
 }
 
-// Portal contacts-save hook: request confirmation from each newly saved
-// phone recipient. Skips silently (in order) when: gate off, phone missing/
-// same as the account holder, a row already exists (any status — never
-// re-text), or the template is inactive/missing. Only inserts the pending
-// row when a confirmation text actually went out, so a dark template can
-// never strand recipients in "pending" without ever being asked.
-async function requestRecipientOptins({ customer, contacts = [], propertyAddress = '' }) {
+// Send-path filter shared by every fanout loop (appointment reminders +
+// the twilio.js en-route/arrived sends): drops service-contact recipients
+// whose recipient_optin row is pending/declined. Primary rows and phones
+// with no row pass through untouched. Fail-open: an opt-in lookup error
+// must never block a send path.
+async function filterRecipientsByOptin(contacts = []) {
+  if (!isDoubleOptinEnabled()) return contacts;
+  const { isServiceContactRole } = require('./customer-contact');
+  const kept = [];
+  for (const contact of contacts) {
+    if (!isServiceContactRole(contact.role)) { kept.push(contact); continue; }
+    try {
+      const row = await getRecipientOptin(contact.phone);
+      if (optinBlocksSend(row, true)) {
+        logger.info(`[recipient-optin] holding send to unconfirmed recipient (${row.status})`);
+        continue;
+      }
+    } catch { /* fail open */ }
+    kept.push(contact);
+  }
+  return kept;
+}
+
+// Portal contacts-save hook: request confirmation from each NEWLY ADDED
+// phone recipient (phones already stored on the row before this save are
+// grandfathered and never asked). Skips silently (in order) when: gate
+// off, phone missing/same as the account holder/already on the row, the
+// template is inactive/missing, or another save already claimed the phone.
+// The pending row is the CLAIM — inserted (onConflict ignore) before the
+// Twilio dispatch so two concurrent saves can't both text the same phone;
+// a blocked/failed send releases the claim so a later save can retry.
+async function requestRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '' }) {
   if (!isDoubleOptinEnabled()) return { requested: 0 };
   const accountKey = recipientPhoneKey(customer?.phone);
+  const priorKeys = new Set(priorPhones.map(recipientPhoneKey).filter(Boolean));
   let requested = 0;
   for (const contact of contacts) {
     const key = recipientPhoneKey(contact.phone);
-    if (!key || key === accountKey) continue;
+    if (!key || key === accountKey || priorKeys.has(key)) continue;
     try {
-      const existing = await db('recipient_optin').where({ phone_key: key }).first();
-      if (existing) continue;
       const { renderSmsTemplate } = require('./sms-template-renderer');
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
         recipient_first_name: String(contact.firstName || contact.name || '').trim().split(/\s+/)[0] || 'there',
@@ -92,6 +116,17 @@ async function requestRecipientOptins({ customer, contacts = [], propertyAddress
         property_address: String(propertyAddress || '').trim() || 'your service property',
       });
       if (!body) continue; // template dark — owner has not approved copy yet
+      // Atomic claim: only the insert that lands owns the ask.
+      const claimed = await db('recipient_optin').insert({
+        phone_key: key,
+        phone_e164: String(contact.phone || '').trim(),
+        status: 'pending',
+        customer_id: customer?.id || null,
+        requested_by: 'portal_contact_save',
+        template_version: OPTIN_TEMPLATE_VERSION,
+        requested_at: new Date(),
+      }).onConflict('phone_key').ignore().returning('phone_key');
+      if (!claimed || !claimed.length) continue; // row already exists — never re-text
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({
         to: contact.phone,
@@ -104,18 +139,12 @@ async function requestRecipientOptins({ customer, contacts = [], propertyAddress
         metadata: { original_message_type: 'recipient_optin_request' },
       });
       if (result.blocked || result.sent === false) {
+        // Release the claim: they were never asked, so they must not sit
+        // in pending (which would hold their appointment texts forever).
+        await db('recipient_optin').where({ phone_key: key, status: 'pending' }).del().catch(() => {});
         logger.warn(`[recipient-optin] request blocked for ***${key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
-      await db('recipient_optin').insert({
-        phone_key: key,
-        phone_e164: String(contact.phone || '').trim(),
-        status: 'pending',
-        customer_id: customer?.id || null,
-        requested_by: 'portal_contact_save',
-        template_version: OPTIN_TEMPLATE_VERSION,
-        requested_at: new Date(),
-      }).onConflict('phone_key').ignore();
       requested += 1;
     } catch (err) {
       logger.warn(`[recipient-optin] request failed for ***${key.slice(-4)}: ${err.message}`);
@@ -132,5 +161,6 @@ module.exports = {
   optinBlocksSend,
   getRecipientOptin,
   markRecipientOptin,
+  filterRecipientsByOptin,
   requestRecipientOptins,
 };

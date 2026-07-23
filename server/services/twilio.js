@@ -687,7 +687,11 @@ const TwilioService = {
 
     const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
-    const contacts = getAppointmentContacts(customer, prefs);
+    // Recipient double opt-in hold (gated) — same filter as the
+    // appointment-reminder fanout: unconfirmed third-party recipients
+    // (pending/declined recipient_optin row) don't get en-route texts.
+    const { filterRecipientsByOptin } = require("./recipient-optin");
+    const contacts = await filterRecipientsByOptin(getAppointmentContacts(customer, prefs));
     // No early return on an empty contact list: a customer with an email but no
     // appointment phone contacts should still get the en-route notice by email
     // (handled by the fallback below).
@@ -863,7 +867,9 @@ const TwilioService = {
     if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
-    const contacts = getAppointmentContacts(customer, prefs);
+    // Same recipient double opt-in hold as the en-route path above.
+    const { filterRecipientsByOptin } = require("./recipient-optin");
+    const contacts = await filterRecipientsByOptin(getAppointmentContacts(customer, prefs));
     if (channel === "sms" && !contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
 
     const results = [];

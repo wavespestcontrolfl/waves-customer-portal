@@ -693,22 +693,13 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   }
 
   let sentAny = false;
-  for (const contact of contacts) {
-    // Recipient double opt-in hold (gated): a third-party contact the
-    // portal flow has asked to confirm (pending/declined row) doesn't get
-    // texts until they reply YES. No row = grandfathered, sends normally.
-    if (isServiceContactRole(contact.role)) {
-      try {
-        const { isDoubleOptinEnabled, getRecipientOptin, optinBlocksSend } = require('./recipient-optin');
-        if (isDoubleOptinEnabled()) {
-          const optin = await getRecipientOptin(contact.phone);
-          if (optinBlocksSend(optin, true)) {
-            logger.info(`[appt-remind] Holding ${messageType} for unconfirmed recipient (${optin.status}) on customer ${customer.id}`);
-            continue;
-          }
-        }
-      } catch { /* opt-in check must never block the send path */ }
-    }
+  // Recipient double opt-in hold (gated): third-party contacts the portal
+  // flow has asked to confirm (pending/declined row) don't get texts until
+  // they reply YES. No row = grandfathered. Shared with the twilio.js
+  // en-route/arrived loops; fail-open on lookup errors.
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  const allowedContacts = await filterRecipientsByOptin(contacts);
+  for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
