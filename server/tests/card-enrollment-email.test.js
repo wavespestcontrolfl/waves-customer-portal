@@ -415,3 +415,29 @@ describe('seeded invitation template row (migration 20260721100010)', () => {
     expect(invite.optional).toContain('date_line');
   });
 });
+
+describe('signature rewrite migration (20260721100020) — authored sign-offs survive', () => {
+  const { _test } = require('../models/migrations/20260721100020_signature_the_waves_team');
+
+  test('plain company sign-offs are replaced whole', () => {
+    const next = _test.rewriteBlocks([
+      { type: 'signature', content: 'The Waves Pest Control team' },
+      { type: 'paragraph', content: 'Waves Pest Control is licensed in FL.' },
+    ]);
+    expect(next[0].content).toBe('— The Waves Team');
+    // Body copy naming the company is never a signature block — verbatim.
+    expect(next[1].content).toBe('Waves Pest Control is licensed in FL.');
+  });
+
+  test('person-authored signature keeps the tech name, swaps only the company (pre-push P1)', () => {
+    const next = _test.rewriteBlocks([
+      { type: 'signature', content: 'See you next visit. — {{tech_first_name}}, Waves Pest Control' },
+    ]);
+    expect(next[0].content).toBe('See you next visit. — {{tech_first_name}}, The Waves Team');
+  });
+
+  test('signatures without the company name are untouched (no rewrite, returns null)', () => {
+    expect(_test.rewriteBlocks([{ type: 'signature', content: '— The Waves Team' }])).toBe(null);
+    expect(_test.rewriteBlocks([{ type: 'signature', content: '— Virginia' }])).toBe(null);
+  });
+});

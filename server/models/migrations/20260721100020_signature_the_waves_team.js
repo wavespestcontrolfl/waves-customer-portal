@@ -8,8 +8,11 @@
  * published later must not resurrect the old sign-off).
  *
  * Scope guard: ONLY blocks of type 'signature' whose content mentions the
- * company name are rewritten — bespoke sign-offs (a person's name, a
- * two-line authored signature) are untouched, and body copy that names
+ * company name are rewritten, and in two tiers — a PERSON-AUTHORED
+ * signature (it carries template variables, e.g. "See you next visit. —
+ * {{tech_first_name}}, Waves Pest Control" from 20260711000011) keeps its
+ * authored line and only swaps the retired company name for "The Waves
+ * Team"; a plain company sign-off is replaced whole. Body copy that names
  * the company (e.g. locked authorization text) is never a signature
  * block, so it stays verbatim.
  *
@@ -24,6 +27,10 @@
 
 const NEW_SIGNATURE = '— The Waves Team';
 const COMPANY_RE = /waves\s+pest\s+control/i;
+// "The Waves Pest Control team" / "Waves Pest Control" (any case) →
+// "The Waves Team", used only inside person-authored signatures.
+const COMPANY_SWAP_RE = /(?:the\s+)?waves\s+pest\s+control(?:\s+team)?/gi;
+const AUTHORED_VAR_RE = /\{\{[^}]+\}\}/;
 
 function rewriteBlocks(rawBlocks) {
   let blocks;
@@ -37,6 +44,12 @@ function rewriteBlocks(rawBlocks) {
   const next = blocks.map((block) => {
     if (block && block.type === 'signature' && typeof block.content === 'string' && COMPANY_RE.test(block.content)) {
       changed = true;
+      // Person-authored signatures keep their authored line — erasing
+      // {{tech_first_name}} from the issued-card email would remove the
+      // technician's name, not just the retired company sign-off.
+      if (AUTHORED_VAR_RE.test(block.content)) {
+        return { ...block, content: block.content.replace(COMPANY_SWAP_RE, 'The Waves Team') };
+      }
       return { ...block, content: NEW_SIGNATURE };
     }
     return block;
