@@ -722,6 +722,26 @@ function compactServiceContactSlots(updates, before = {}) {
     });
   });
 
+  // Consent artifact sync (#2948): the consent stamp describes the exact
+  // people stored when it was recorded. If this save changes any slot's
+  // identity (name/phone/email), the old stamp no longer describes the
+  // stored list — clear it rather than leave one person's consent attached
+  // to another. Admin saves have no attestation flow, so clearing (never
+  // restamping) is the only honest write here; identity-preserving saves
+  // (role-only updates, echoed unchanged fields) keep the stamp.
+  const consentCompareValue = (value) => {
+    const normalized = normalizedValue(value);
+    return typeof normalized === 'string' ? normalized.trim() : normalized;
+  };
+  const identityChanged = SERVICE_CONTACT_SLOT_FIELDS
+    .flatMap((fields) => fields.slice(0, 3))
+    .some((field) => consentCompareValue(updates[field]) !== consentCompareValue(before[field]));
+  if (identityChanged) {
+    updates.service_contacts_consent_at = null;
+    updates.service_contacts_consent_source = null;
+    updates.service_contacts_consent_text_version = null;
+  }
+
   return updates;
 }
 

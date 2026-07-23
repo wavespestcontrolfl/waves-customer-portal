@@ -47,8 +47,6 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
-import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -8519,12 +8517,13 @@ export function CompletionPanel({
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
-  // Tree & Shrub closeout AI review (flag-gated). treeShrubReview holds the preview
-  // { scores, observations, findings }; decisions live in the summary and are
-  // captured into the ref on Complete + Send so the submit body can carry them.
+  // Tree & Shrub AI photo review. Runs silently in the background (owner
+  // 2026-07-23: no closeout card, no tech review step) — treeShrubReview holds
+  // the signed preview { scores, observations, findings } so the submit body
+  // can carry it and the server persists the scores without a second vision
+  // pass. Absent (still analyzing / preview failed) → the server auto-scores
+  // at completion and the report finalizes on its own.
   const [treeShrubReview, setTreeShrubReview] = useState(null);
-  const [treeShrubAiStatus, setTreeShrubAiStatus] = useState("idle"); // idle|pending|complete|failed
-  const treeShrubDecisionsRef = useRef(null);
   const treeShrubScoredKeyRef = useRef("");
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
@@ -8578,10 +8577,10 @@ export function CompletionPanel({
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
-  // dual-vision scoring lives server-side (no persistence) and returns the findings
-  // the tech reviews. Keyed by a photo FINGERPRINT (not just count) so swapping a
-  // photo for another at the same count still re-runs. Fully guarded — a failure
-  // just shows "Will finalize after" and the server's auto-score still backstops.
+  // dual-vision scoring lives server-side (no persistence); the result rides the
+  // submit body silently. Keyed by a photo FINGERPRINT (not just count) so swapping
+  // a photo for another at the same count still re-runs. Fully guarded — on failure
+  // the server's auto-score at completion still backstops.
   useEffect(() => {
     if (!treeShrubCloseoutOn) return undefined;
     const photos = (servicePhotos || []).filter((p) => p && p.data);
@@ -8595,8 +8594,6 @@ export function CompletionPanel({
     // or fails, completing must NOT submit the stale scores (the server's count check
     // could otherwise persist them against the new photos). Null → server auto-scores.
     setTreeShrubReview(null);
-    treeShrubDecisionsRef.current = null;
-    setTreeShrubAiStatus("pending");
     // adminFetch resolves to the parsed JSON (and throws on non-2xx) — consume it
     // directly; do NOT treat the result as a Response.
     adminFetch(`/admin/dispatch/${service.id}/tree-shrub/assess-preview`, {
@@ -8606,17 +8603,30 @@ export function CompletionPanel({
       .then((result) => {
         if (cancelled) return;
         if (result && result.scores) {
-          // Tag with the photo fingerprint so the closeout summary resets the tech's
-          // per-finding decisions when a NEW preview (new photos) arrives.
           setTreeShrubReview({ ...result, _fingerprint: fingerprint });
-          setTreeShrubAiStatus("complete");
-        } else {
-          setTreeShrubAiStatus("failed");
         }
       })
-      .catch(() => { if (!cancelled) setTreeShrubAiStatus("failed"); });
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [treeShrubCloseoutOn, servicePhotos, service.id]);
+  // T&S completions dropped the Areas-treated picker (owner 2026-07-23) —
+  // but a draft saved BEFORE the change can still restore stale room/zone
+  // chips into hidden state, where the tech can't see or clear them and the
+  // submit/recap/report paths would still consume them (codex P3 on #2950).
+  // Clear the state whenever it appears so every consumer sees empty. The
+  // same applies to each restored product's applicationArea: with the chips
+  // gone the per-product area selector never renders (it requires
+  // areasServiced.length), so a stale 'Kitchen'-style value would submit
+  // invisibly from p.applicationArea (codex P3 r2 on #2950).
+  useEffect(() => {
+    if (!treeShrubCloseoutOn) return;
+    if (areasServiced.length) setAreasServiced([]);
+    setSelectedProducts((prev) => (
+      prev.some((p) => p && p.applicationArea)
+        ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
+        : prev
+    ));
+  }, [treeShrubCloseoutOn, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -9446,7 +9456,10 @@ export function CompletionPanel({
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
       // dedupe, so re-selecting can't submit both strings). Other values pass through.
-      Array.isArray(savedDraft.areasServiced)
+      // T&S never restores areas — the picker is gone there (owner 2026-07-23) and a
+      // pre-change draft's chips would sit invisible in state (codex P3 on #2950);
+      // the treeShrubCloseoutOn clearing effect backstops any other entry path.
+      !treeShrubCloseoutOn && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
     );
@@ -10747,9 +10760,11 @@ export function CompletionPanel({
         observations: reportObservations,
         recommendations: reportRecommendations,
         lawnAssessmentId,
-        // Tree & Shrub tech-reviewed assessment (flag-gated). When the closeout AI
-        // review ran, carry the scores + the tech's confirm/hide/edit decisions so
-        // the server persists THOSE (no re-score). Absent → server auto-scores.
+        // Tree & Shrub AI photo assessment. When the background review ran,
+        // carry the signed scores so the server persists them without a second
+        // vision pass. There is no tech review step (owner 2026-07-23) — every
+        // finding rides as its default "monitor" action, which keeps the
+        // report's signals-only language. Absent → server auto-scores.
         treeShrubReview:
           treeShrubCloseoutOn && treeShrubReview && treeShrubReview.scores
             ? {
@@ -10760,8 +10775,7 @@ export function CompletionPanel({
                 scoredCount: treeShrubReview.scoredCount,
                 // Server HMAC proving these scores came from /assess-preview (anti-tamper).
                 signature: treeShrubReview.signature,
-                decisions: treeShrubDecisionsRef.current
-                  || (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
+                decisions: (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
               }
             : undefined,
         completionPhotos: servicePhotos.map((photo, index) => ({
@@ -11329,35 +11343,6 @@ export function CompletionPanel({
             animation: "slideIn 0.25s ease",
           }}
         >
-          {treeShrubCloseoutOn && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <TreeShrubCloseoutSummary
-                summary={{
-                  productsReady: selectedProducts.length > 0,
-                  protocolReady: true,
-                  photoCount: servicePhotos.length,
-                  areasTreated: (areasServiced || []).join(", "),
-                  smsEnabled: true,
-                  aiAnalysisStatus: treeShrubAiStatus === "idle" ? "pending" : treeShrubAiStatus,
-                  aiSummary: treeShrubReview?.aiSummary || "",
-                  suggestedCustomerAction: treeShrubReview?.suggestedCustomerAction || "",
-                  findings: treeShrubReview?.findings || [],
-                  scores: treeShrubReview?.scores || null,
-                  // Don't advertise one-tap completion while regulatory closeout fields
-                  // (bed sqft, pollinator status, IRAC/FRAC, product actuals) are still
-                  // required — the same gate handleSubmit enforces.
-                  canComplete: !submitting && servicePhotos.length >= 2 && !treeShrubCompletionBlocked,
-                }}
-                reviewKey={treeShrubReview?._fingerprint || ""}
-                completing={submitting}
-                onDecisionsChange={(d) => { treeShrubDecisionsRef.current = d; }}
-                onComplete={(decided) => {
-                  treeShrubDecisionsRef.current = decided?.findings || [];
-                  handleSubmit();
-                }}
-              />
-            </div>
-          )}
           {success && (
             <div
               style={{
@@ -12924,8 +12909,11 @@ export function CompletionPanel({
                 </div>
               )}
             </Field>
-            {/* Areas serviced */}
-            {!quickComplete && (
+            {/* Areas serviced — hidden for Tree & Shrub (owner 2026-07-23):
+                the area chips are structural-pest rooms/zones that don't
+                describe plant work, and the Treatment Zone trace already
+                records where the visit treated. */}
+            {!quickComplete && !treeShrubCloseoutOn && (
               <Field label="Areas treated">
                 {" "}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -15004,8 +14992,10 @@ export function CompletionPanel({
               ))}
             </div>
           )}
-          {/* Areas Serviced */}
-          {!quickComplete && (
+          {/* Areas Serviced — hidden for Tree & Shrub (owner 2026-07-23): the
+              area chips don't describe plant work and the Treatment Zone trace
+              records where the visit treated. */}
+          {!quickComplete && !treeShrubCloseoutOn && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}

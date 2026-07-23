@@ -3083,6 +3083,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
+  // Per-property attestation that listed on-location contacts agreed to
+  // receive service texts. Re-attested on every contact save.
+  const [contactConsent, setContactConsent] = useState({});
 
   const loadSchedule = useCallback(() => {
     setLoading(true);
@@ -3231,6 +3234,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         ? { ...p, serviceContacts: updater(displayContacts(p)) }
         : p
     )));
+    // Any edit (change/add/remove) voids a previously checked attestation —
+    // the stored consent must describe the list the account holder actually
+    // saw when they checked the box (codex #2948 P2).
+    setContactConsent(prev => (prev[propertyId] ? { ...prev, [propertyId]: false } : prev));
   };
 
   const handlePropertyContactChange = (propertyId, index, key, value) => {
@@ -3261,11 +3268,16 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       phone: c.phone || '',
       email: c.email || '',
     }));
+    if (savedContacts.some(c => c.phone.trim()) && !contactConsent[propertyId]) {
+      showCustomerAlert('Please confirm the text-message consent statement before saving a contact with a phone number.');
+      return;
+    }
     const lockKey = `${propertyId}:contact`;
     setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
     try {
       const result = await api.updatePropertyNotificationPrefs(propertyId, {
         serviceContacts: savedContacts,
+        serviceContactsConsent: !!contactConsent[propertyId],
       });
       setPropertyPrefs(prev => prev.map(p => (
         p.id === propertyId
@@ -3941,9 +3953,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               type="button"
                               onClick={() => handlePropertyContactRemove(property.id, idx)}
                               disabled={!!prefsLocked[contactLockKey]}
+                              className="waves-focus-ring"
                               style={{
-                                border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
-                                fontSize: 12, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
+                                border: 'none', background: 'none', cursor: 'pointer', padding: '12px 10px',
+                                fontSize: 14, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
                               }}
                             >
                               Remove
@@ -3951,43 +3964,63 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                           </div>
                         )}
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
-                          <input
-                            value={contact.firstName || ''}
-                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
-                            placeholder="First name"
-                            disabled={!!prefsLocked[contactLockKey]}
-                            autoCapitalize="words"
-                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                          />
-                          <input
-                            value={contact.lastName || ''}
-                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
-                            placeholder="Last name"
-                            disabled={!!prefsLocked[contactLockKey]}
-                            autoCapitalize="words"
-                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                          />
+                          <label htmlFor={`svc-contact-${property.id}-${idx}-first`} style={{ display: 'grid', gap: 4 }}>
+                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>First name</span>
+                            <input
+                              id={`svc-contact-${property.id}-${idx}-first`}
+                              value={contact.firstName || ''}
+                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
+                              disabled={!!prefsLocked[contactLockKey]}
+                              autoCapitalize="words"
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} given-name`}
+                              className="waves-focus-ring"
+                              style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
+                            />
+                          </label>
+                          <label htmlFor={`svc-contact-${property.id}-${idx}-last`} style={{ display: 'grid', gap: 4 }}>
+                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Last name</span>
+                            <input
+                              id={`svc-contact-${property.id}-${idx}-last`}
+                              value={contact.lastName || ''}
+                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
+                              disabled={!!prefsLocked[contactLockKey]}
+                              autoCapitalize="words"
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} family-name`}
+                              className="waves-focus-ring"
+                              style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
+                            />
+                          </label>
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-                          <input
-                            value={contact.phone || ''}
-                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
-                            placeholder="Phone number"
-                            disabled={!!prefsLocked[contactLockKey]}
-                            type="tel"
-                            inputMode="tel"
-                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                          />
-                          <input
-                            value={contact.email || ''}
-                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
-                            placeholder="Email address"
-                            disabled={!!prefsLocked[contactLockKey]}
-                            type="email"
-                            inputMode="email"
-                            autoCapitalize="none"
-                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                          />
+                          <label htmlFor={`svc-contact-${property.id}-${idx}-phone`} style={{ display: 'grid', gap: 4 }}>
+                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Phone number</span>
+                            <input
+                              id={`svc-contact-${property.id}-${idx}-phone`}
+                              value={contact.phone || ''}
+                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
+                              disabled={!!prefsLocked[contactLockKey]}
+                              type="tel"
+                              inputMode="tel"
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} tel`}
+                              className="waves-focus-ring"
+                              style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
+                            />
+                          </label>
+                          <label htmlFor={`svc-contact-${property.id}-${idx}-email`} style={{ display: 'grid', gap: 4 }}>
+                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Email address</span>
+                            <input
+                              id={`svc-contact-${property.id}-${idx}-email`}
+                              value={contact.email || ''}
+                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
+                              disabled={!!prefsLocked[contactLockKey]}
+                              type="email"
+                              inputMode="email"
+                              autoCapitalize="none"
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} email`}
+                              className="waves-focus-ring"
+                              style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
+                            />
+                          </label>
                         </div>
                       </div>
                     ))}
@@ -3996,15 +4029,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         type="button"
                         onClick={() => handlePropertyContactAdd(property.id)}
                         disabled={!!prefsLocked[contactLockKey]}
+                        className="waves-focus-ring"
                         style={{
-                          border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px',
+                          border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '12px 14px',
                           background: 'none', cursor: 'pointer', marginBottom: 10,
-                          fontSize: 14, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
+                          fontSize: 16, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
                         }}
                       >
                         + Add another contact
                       </button>
                     )}
+                    <label htmlFor={`svc-contact-consent-${property.id}`} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', margin: '2px 0 12px', cursor: 'pointer' }}>
+                      <input
+                        id={`svc-contact-consent-${property.id}`}
+                        type="checkbox"
+                        checked={!!contactConsent[property.id]}
+                        onChange={(e) => setContactConsent(prev => ({ ...prev, [property.id]: e.target.checked }))}
+                        disabled={!!prefsLocked[contactLockKey]}
+                        className="waves-focus-ring"
+                        style={{ width: 20, height: 20, marginTop: 2, accentColor: B.glassNavy, flexShrink: 0 }}
+                      />
+                      <span style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+                        Each person listed with a phone number has agreed to receive automated service and appointment text messages from Waves Pest Control at that number. Message frequency varies and message &amp; data rates may apply. They can reply STOP to any text to opt out, or HELP for help.
+                      </span>
+                    </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4 }}>
                         These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Me too” to send those texts to you as well.' : 'You’ll keep getting them too.'}
@@ -4013,12 +4061,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         type="button"
                         onClick={() => handlePropertyContactSave(property.id)}
                         disabled={!!prefsLocked[contactLockKey]}
+                        className="waves-focus-ring"
                         style={{
                           ...PORTAL_BUTTON_BASE,
-                          padding: '9px 14px',
+                          padding: '12px 16px',
+                          minHeight: 44,
                           background: B.glassNavy,
                           color: '#fff',
-                          fontSize: 14,
+                          fontSize: 16,
                           borderRadius: 8,
                           boxShadow: 'none',
                           flexShrink: 0,
@@ -7495,19 +7545,10 @@ function LearnTab({ customer }) {
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
-                        {activeTierName && (q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
-                          <div style={{
-                            marginTop: 10,
-                            padding: '9px 11px',
-                            borderRadius: 8,
-                            background: `${B.green}10`,
-                            fontSize: 12,
-                            color: B.glassNavy,
-                            fontWeight: 850,
-                          }}>
-                            As a {tierName} member, you have unlimited callbacks between services.
-                          </div>
-                        )}
+                        {/* Callback-coverage banner removed 2026-07-22: it promised
+                            unconditional unlimited callbacks while Plan coverage says
+                            callbacks run 30 days from service — the service-specific
+                            coverage copy on the Plan tab is the single source now. */}
                       </div>
                     )}
                   </div>
@@ -8102,15 +8143,15 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                 }}
               >
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                  <span style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>WaveGuard {tierName}</span>
-                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
+                  <span style={{ fontSize: 16, color: B.glassNavy, fontWeight: 850 }}>WaveGuard {tierName}</span>
+                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>
-                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850 }}>
+                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 14, fontWeight: 850 }}>
                   {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
                 </span>
                 <span style={{ display: 'grid', gap: 5, marginTop: 10 }}>
                   {(TIER_SERVICE_NAMES[tierName] || []).map(service => (
-                    <span key={service} style={{ display: 'flex', gap: 6, color: B.grayDark, fontSize: 12, lineHeight: 1.35 }}>
+                    <span key={service} style={{ display: 'flex', gap: 6, color: B.grayDark, fontSize: 14, lineHeight: 1.35 }}>
                       <Icon name="check" size={13} strokeWidth={2} style={{ color: B.glassNavy, marginTop: 1 }} />
                       <span>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </span>
@@ -8145,7 +8186,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
             {canPriceTier ? (
               <button type="button" onClick={runPricing} disabled={loading} data-glass-accent="" style={{
                 ...primaryButton,
-                minHeight: 40,
+                minHeight: 44,
+                fontSize: 16,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -8159,7 +8201,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
             ) : (
               <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
                 ...secondaryButton,
-                minHeight: 40,
+                minHeight: 44,
+                fontSize: 16,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -8197,15 +8240,16 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         setSelectedId(e.target.value);
                         setRequested(false);
                       }}
+                      className="waves-focus-ring"
                       style={{
                         width: '100%',
-                        minHeight: 42,
+                        minHeight: 48,
                         borderRadius: 8,
                         border: '1px solid #D8D0C0',
                         background: '#fff',
                         color: B.glassNavy,
-                        padding: '9px 12px',
-                        fontSize: 14,
+                        padding: '11px 12px',
+                        fontSize: 16,
                         fontFamily: FONTS.body,
                       }}
                     >
@@ -8258,8 +8302,11 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
                           ...primaryButton,
                           width: compact ? '100%' : 'fit-content',
+                          minHeight: 44,
+                          fontSize: 16,
                           display: 'inline-flex',
                           alignItems: 'center',
+                          justifyContent: 'center',
                           gap: 8,
                           opacity: requesting ? 0.65 : 1,
                           cursor: requesting ? 'wait' : 'pointer',
@@ -8275,8 +8322,11 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                 <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
                   ...secondaryButton,
                   width: compact ? '100%' : 'fit-content',
+                  minHeight: 44,
+                  fontSize: 16,
                   display: 'inline-flex',
                   alignItems: 'center',
+                  justifyContent: 'center',
                   gap: 8,
                 }}>
                   <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
@@ -9392,10 +9442,10 @@ function MyPlanTab({ customer, focusService }) {
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
                   {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
-                    <button key={r} type="button" onClick={() => setCancelReason(r)} style={{
-                      padding: '7px 11px',
+                    <button key={r} type="button" onClick={() => setCancelReason(r)} className="waves-focus-ring" style={{
+                      padding: '13px 16px',
                       borderRadius: 999,
-                      fontSize: 12,
+                      fontSize: 14,
                       fontWeight: 800,
                       border: `1px solid ${cancelReason === r ? B.red : '#D8D0C0'}`,
                       background: cancelReason === r ? `${B.red}10` : '#fff',
@@ -9415,9 +9465,9 @@ function MyPlanTab({ customer, focusService }) {
                   style={{
                     width: '100%',
                     marginTop: 10,
-                    padding: '10px 12px',
+                    padding: '12px 14px',
                     borderRadius: 8,
-                    fontSize: 14,
+                    fontSize: 16,
                     border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
                     resize: 'vertical',
@@ -9445,11 +9495,11 @@ function MyPlanTab({ customer, focusService }) {
                         setCancelSubmitting(false);
                       }
                     }}
-                    style={{ ...primaryButton, background: B.grayMid, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
+                    style={{ ...primaryButton, background: B.grayMid, minHeight: 44, fontSize: 16, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
                   >
                     {cancelSubmitting ? 'Sending...' : 'Submit Request'}
                   </button>
-                  <button type="button" onClick={() => setShowCancelForm(false)} style={secondaryButton}>Keep My Plan</button>
+                  <button type="button" onClick={() => setShowCancelForm(false)} style={{ ...secondaryButton, minHeight: 44, fontSize: 16 }}>Keep My Plan</button>
                 </div>
               </div>
             )}
@@ -13522,6 +13572,19 @@ export default function PortalPage() {
   // Question handed from the Waves AI bar into the assistant on open.
   const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // Desktop section nav floats (owner 2026-07-22): it sticks just below the
+  // sticky header while the customer scrolls. The header's height varies
+  // (safe-area inset, wrapping), so measure it instead of hardcoding.
+  const headerRef = useRef(null);
+  const [navStickyTop, setNavStickyTop] = useState(64);
+  useEffect(() => {
+    const measure = () => {
+      if (headerRef.current) setNavStickyTop(headerRef.current.offsetHeight);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
@@ -13621,7 +13684,7 @@ export default function PortalPage() {
           sticky header (styles in index.css). */}
       <a href="#portal-main" className="waves-skip-link">Skip to content</a>
       {/* Header */}
-      <div data-glass="soft" style={{
+      <div ref={headerRef} data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -14047,7 +14110,12 @@ export default function PortalPage() {
             borderRadius: 14,
             padding: 5,
             marginBottom: 12,
-            position: 'relative',
+            // Floats with the scroll (owner 2026-07-22): pinned right below
+            // the measured sticky header. Under the header (z 100) and the
+            // account/scrim layers; above tab content.
+            position: 'sticky',
+            top: navStickyTop,
+            zIndex: 90,
           }}>
             {headerNavItems.map(headerNavButton)}
           </nav>
