@@ -43,6 +43,13 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
+  // Counts failed code verifications for the current code session. The
+  // server deliberately answers send-code uniformly (anti-enumeration), so a
+  // number Waves doesn't have still reaches the code screen and can never
+  // verify — after 2 failures we show a standing "may not be on file" hint
+  // (audit S2-3). Shown regardless of the failure's real cause, so it leaks
+  // nothing about which numbers have accounts.
+  const [failedVerifies, setFailedVerifies] = useState(0);
   useGlassSurface(true, 'full', 'app');
 
   useEffect(() => {
@@ -65,6 +72,7 @@ export default function LoginPage() {
     if (success) {
       setCode('');
       setStep('code');
+      setFailedVerifies(0);
     }
   };
 
@@ -76,6 +84,7 @@ export default function LoginPage() {
     if (success) {
       navigate(nextPath, { replace: true });
     } else {
+      setFailedVerifies((n) => n + 1);
       setSending(false);
     }
   };
@@ -628,7 +637,7 @@ export default function LoginPage() {
                   <button
                     type="button"
                     className="portal-login-secondary"
-                    onClick={() => { clearError(); setStep('phone'); setCode(''); }}
+                    onClick={() => { clearError(); setStep('phone'); setCode(''); setFailedVerifies(0); }}
                   >
                     Use Different Number
                   </button>
@@ -641,6 +650,26 @@ export default function LoginPage() {
               <div className="portal-login-error" role="alert">
                 <Icon name="warning" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
                 <span>{friendlyError}</span>
+              </div>
+            )}
+
+            {step === 'code' && failedVerifies >= 2 && (
+              <div style={{
+                marginTop: 10,
+                padding: '12px 14px',
+                borderRadius: 10,
+                background: '#FFF7ED',
+                border: '1px solid #FED7AA',
+                fontSize: 14,
+                lineHeight: 1.5,
+                color: CUSTOMER_SURFACE.body,
+                fontFamily: FONTS.body,
+              }}>
+                Still not working? That number may not be on file —{' '}
+                <a href="tel:+19412975749" style={{ color: B.glassNavy, fontWeight: 700, whiteSpace: 'nowrap' }}>call (941) 297-5749</a>
+                {' '}and we&rsquo;ll get it corrected, or{' '}
+                <a href="/estimate" style={{ color: B.glassNavy, fontWeight: 700 }}>get a free quote</a>
+                {' '}if you&rsquo;re new to Waves.
               </div>
             )}
           </div>

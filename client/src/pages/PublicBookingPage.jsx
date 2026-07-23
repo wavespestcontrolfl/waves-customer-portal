@@ -231,8 +231,11 @@ export default function PublicBookingPage() {
       // so a stale FAILURE can't clear the current request's availability
       // or surface a stale error either.
       if (seq !== addressLookupSeqRef.current) return;
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not load availability');
+      // Parse AFTER tolerating a non-JSON body (proxy 5xx, dropped
+      // connection): the raw SyntaxError ("Unexpected end of JSON input")
+      // used to land verbatim in the customer-facing banner (audit S3-17).
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "We couldn't load times right now. Try again in a moment, or call (941) 297-5749.");
       if (seq !== addressLookupSeqRef.current) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setAvailability(data.days || []);
@@ -466,8 +469,9 @@ export default function PublicBookingPage() {
           },
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Booking failed');
+      // Same non-JSON tolerance as loadAvailability (audit S3-17).
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "We couldn't complete your booking. Try again in a moment, or call (941) 297-5749 and we'll get you scheduled.");
       setConfCode(data.confirmationCode || 'WPC-????');
       // Card-on-file step (dark until the funnel's gate flips): when the
       // server minted an inline capture link, the confirmation screen shows
@@ -522,8 +526,9 @@ export default function PublicBookingPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, ...slotSearchBody() }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Search failed');
+    // Same non-JSON tolerance as loadAvailability (audit S3-17).
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "We couldn't run that search right now — try again in a moment.");
     // Address edited mid-search: don't restore this address's result or
     // capture token onto the new one.
     if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
