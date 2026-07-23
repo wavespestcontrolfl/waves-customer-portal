@@ -5892,7 +5892,7 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (result === 'written' && secondaryEntry?.phone) {
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -5917,7 +5917,21 @@ const CallRecordingProcessor = {
               }
             }
           } catch (optErr) {
-            optinClaimFailedPhones.add(String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10));
+            const failedKey = String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10);
+            optinClaimFailedPhones.add(failedKey);
+            // Durable fail-closed: the slot is already committed, so leave a
+            // BLOCKING ask_failed row (save-retryable) — the in-memory set
+            // only protects this processing run.
+            if (failedKey) {
+              await db('recipient_optin').insert({
+                phone_key: failedKey,
+                phone_e164: String(secondaryEntry.phone || '').trim(),
+                status: 'ask_failed',
+                customer_id: customerId,
+                requested_by: 'call_pipeline',
+                requested_at: new Date(),
+              }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+            }
             logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
           }
         }

@@ -955,7 +955,29 @@ router.post('/status', async (req, res) => {
                 }
                 return db('recipient_optin')
                   .where({ provider_sid: MessageSid, status: 'pending' })
-                  .update({ status: 'ask_failed', updated_at: new Date() });
+                  .update({ status: 'ask_failed', updated_at: new Date() })
+                  .then((flipped) => {
+                    // Callback raced BOTH the sms_log insert and the SID
+                    // stamp: nothing matched now, but both writes land within
+                    // seconds — retry once after 60s (best-effort; the
+                    // sweep's failed-ask pass is the durable backstop).
+                    if (!flipped && !logRow) {
+                      setTimeout(() => {
+                        void db('sms_log').where({ twilio_sid: MessageSid }).first()
+                          .then((lateRow) => {
+                            if (!lateRow) return null;
+                            const lateMeta = typeof lateRow.metadata === 'string' ? lateRow.metadata : JSON.stringify(lateRow.metadata || {});
+                            const lateOptin = lateRow.message_type === 'recipient_optin_request' || lateMeta.includes('recipient_optin_request');
+                            if (!lateOptin || !lateRow.customer_id) return null;
+                            return db('recipient_optin')
+                              .where({ phone_key: failedKey, customer_id: lateRow.customer_id, status: 'pending' })
+                              .update({ status: 'ask_failed', updated_at: new Date() });
+                          })
+                          .catch(() => {});
+                      }, 60 * 1000);
+                    }
+                    return flipped;
+                  });
               })
               .catch(() => {});
           }
