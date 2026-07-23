@@ -644,25 +644,37 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // against any previous slot) keeps their pipeline-recorded role; a
       // genuinely new person never inherits the old one.
       const contact = normalizeContactInput(updates.serviceContact);
+      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
+      // Consent decisions must describe what will actually be STORED after
+      // this save — the new slot 1 plus the untouched slot 2/3 people — not
+      // just the payload (codex #2948 r5): a slot-1-only edit neither
+      // bypasses the guard while other phone recipients remain, nor strips
+      // their stamp semantics by looking at slot 1 alone.
+      const survivors = [2, 3]
+        .map((n) => ({
+          name: String(beforeRow[`service_contact${n}_name`] || '').trim(),
+          phone: String(beforeRow[`service_contact${n}_phone`] || '').trim(),
+          email: String(beforeRow[`service_contact${n}_email`] || '').trim(),
+        }))
+        .filter((c) => c.name || c.phone || c.email);
+      const postSave = [contact, ...survivors].filter((c) => c.name || c.phone || c.email);
       // Same consent rail as the list save — the legacy shape must not be
       // a loophole for storing an unattested texting target.
-      if (serviceContactsRequireConsent([contact], updates.serviceContactsConsent)) {
+      if (serviceContactsRequireConsent(postSave, updates.serviceContactsConsent)) {
         return res.status(400).json({
           error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
         });
       }
-      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       const slot1 = serviceContactSlotUpdates([contact], beforeRow);
-      // Same artifact rule as the list save (codex #2948 P2): a consented
-      // legacy save stamps; any legacy edit without a fresh attestation
-      // clears the stale stamp — it described a list this save just changed.
-      const legacyContacts = [contact].filter((c) => c.name || c.phone || c.email);
+      // Same artifact rule as the list save: a consented save stamps for the
+      // post-save list; an edit without a fresh attestation clears the stale
+      // stamp — it described a list this save just changed.
       await db('customers').where({ id: req.params.customerId }).update({
         service_contact_name: slot1.service_contact_name,
         service_contact_phone: slot1.service_contact_phone,
         service_contact_email: slot1.service_contact_email,
         service_contact_role: slot1.service_contact_role,
-        ...serviceContactConsentUpdates(legacyContacts, updates.serviceContactsConsent),
+        ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
     }
