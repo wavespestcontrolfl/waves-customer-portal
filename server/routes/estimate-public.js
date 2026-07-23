@@ -16875,6 +16875,7 @@ async function buildPricingBundle(estimate) {
     // Run the engine 3x with different pest frequencies. Each call is
     // pure JS; no external I/O beyond the engine's own DB constants
     // sync which is cached internally.
+    const savedPestFrequency = engineInputs?.services?.pest?.frequency || null;
     for (const ladder of FREQUENCY_LADDER) {
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
@@ -16882,6 +16883,19 @@ async function buildPricingBundle(estimate) {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
       };
+      // The operator's below-floor acknowledgement covered ONE computed
+      // price at the SAVED pest cadence — alternate customer-selectable
+      // cadences replay with the discount but WITHOUT the breach flag, so
+      // the lawn floors cap them exactly like unapproved lawn ladder rows
+      // (codex P1 on #2947 round 7). Fails closed: an unidentifiable saved
+      // cadence strips the flag from every replay.
+      if (inputsForFrequency.manualDiscount?.floorBreachAcknowledged === true
+        && ladder.engineFrequency !== savedPestFrequency) {
+        inputsForFrequency.manualDiscount = {
+          ...inputsForFrequency.manualDiscount,
+          floorBreachAcknowledged: false,
+        };
+      }
       try {
         const engineResult = generateEstimate(inputsForFrequency);
         if (!anchorEngineResult) anchorEngineResult = engineResult;
