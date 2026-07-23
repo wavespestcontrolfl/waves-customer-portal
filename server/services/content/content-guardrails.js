@@ -676,7 +676,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // A short punctuation-free segment built around the keyword is a bare
   // packaging TITLE/META ("Cape Coral pest control services") — prose
   // sentences carry terminal punctuation and never match the anchored form.
-  + `|^(?:(?!\\b(?:not|no|never|unavailable|unserved|isn|aren|without|guides?|compar\\w+|vs)\\b)[^.!?]){0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|faqs?)\\b)(?:(?!\\b(?:not|no|never|unavailable|unserved|isn|aren)\\b)[^.!?]){0,25}$`
+  + `|^(?:(?!\\b(?:not|no|never|unavailable|unserved|isn|aren|without|guides?|compar\\w+|vs)\\b)[^.!?]){0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|checklists?|facts?|overviews?|comparisons?|roundups?|reviews?|breakdowns?|explainers?|faqs?)\\b)(?:(?!\\b(?:not|no|never|unavailable|unserved|isn|aren)\\b)[^.!?]){0,25}$`
   + `|\\b(?<!\\b(?:about|regarding|concerning|on)\\b[^.!?]{0,20})(?<!\\bcompar\\w+\\b[^.!?]{0,25})(?<!\\b(?:director(?:y|ies)|lists?|overview|roundup|comparison|index|map)\\s+of\\b[^.!?]{0,20})(?<!\\bguides?\\s+to\\b[^.!?]{0,20})(?<!\\b(?:contact|call|hire|choose|find|use)\\s+(?:a\\s+|an\\s+|your\\s+)?(?:local|nearby|area|another|different|licensed)\\s+(?:provider|compan(?:y|ies)|firm|exterminator|pro(?:fessional)?)s?\\b[^.!?]{0,25})(?<!\\b(?:provid|offer|deliver)\\w*\\b[^.!?]{0,30}\\bfor\\b[^.!?]{0,20})(?<!\\b(?:competitors?|other\\s+(?:compan|provider|firm)\\w*|national\\s+chains?|local\\s+(?:compan|provider|firm)\\w*|the\\s+county|the\\s+city|the\\s+state|counties|municipalit\\w+)\\b[^.!?]{0,25})(?<!\\bno\\s+(?:(?!(?:wonder|one|doubt|matter|surprise)\\s)[\\w']+\\s+){0,2})(?<!\\bnot\\s+(?:[\\w']+\\s+){0,2})(?<!\\bnever\\s)(?<!\\bwithout\\s)(?<!\\blocal\\s)(?<!\\bnearby\\s)${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|quotes?|plans?|company|companies|available)\\b(?![^.!?]{0,40}\\b(?:without\\s+a\\s+licen\\w*|without\\s+training|yourself|diy)\\b)(?![^.!?]{0,40}\\bwith\\s+(?:another|other|a different|any|that|your current)\\s+(?:compan|provider|firm|exterminator)\\w*)(?![^.!?]{0,60}\\b(?:contact|call|hire|choose|find|use)\\s+(?:a\\s+|an\\s+|your\\s+)?(?:local|nearby|area|another|different|licensed)\\s+(?:provider|compan(?:y|ies)|firm|exterminator|pro(?:fessional)?)s?\\b)(?![^.!?]{0,60}\\b(?:we|waves\\w*)\\b[^.!?]{0,20}?\\b(?:do not|don'?t|does not|doesn'?t|cannot|can'?t|won'?t)\\b)(?![^.!?]{0,30}\\b(?:is|are|was|were|has|have|be|may|might|can|could|will|would|should|must|costs?|varies|vary|differs?|depends?|remains?|tends?|requires?|use[sd]?|using|rel(?:y|ies|ied)|charge[sd]?|charging|follow(?:s|ed)?|recommend(?:s|ed)?|report(?:s|ed)?|typically|often|usually|commonly|generally)\\b(?!(?:\\s+(?!(?:not|no|never|rarely|hardly)\\b)[a-z]+){0,2}?\\s+(?:(?:available|offered|provided|book(?:ed|able)?|scheduled|requested|reserved)\\b(?!\\s+(?:around|during|before|after|when|while)\\b)(?![^.!?]{0,40}\\b(?:by|from)\\s+(?:the\\s+county|the\\s+city|the\\s+state|counties|municipalit\\w+|other\\s+(?:compan|provider|firm)\\w*|competitors?|national\\s+chains?|local\\s+(?:compan|provider|firm)\\w*)\\b)|(?:handled|performed|managed|covered|treated|serviced|delivered|done)\\s+by\\s+(?:waves|us|our)\\b)))`
   // "Our pest control services guide explains…" is editorial packaging of
   // CONTENT, not of service — the guide-compound lookahead mirrors the
@@ -719,7 +719,7 @@ function tenureClaimFinding(text) {
 // negates a service line, not the footprint — so negation exempts a city
 // only when the city itself is the OBJECT of the negated verb (see
 // cityNegationRe). Tested on apostrophe-normalized text.
-const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a (?:waves(?: pest control)?(?:'s|')? )?(?:service|coverage) area|one of (?:our|waves(?:'s|')?) (?:service|coverage) areas)\b|beyond our (?:(?:service|coverage) )?(?:areas?|footprints?)|our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?) (?:excludes?|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a (?:waves(?: pest control)?(?:'s|')? )?(?:service|coverage) area|one of (?:our|waves(?:'s|')?) (?:service|coverage) areas)\b|beyond our (?:(?:service|coverage) )?(?:areas?|footprints?)|our (?:(?:service|coverage) )?(?:areas?|footprints?) (?:excludes?|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
 
 // "…does not include Tampa", "we no longer serve Naples" — the negated
 // verb's object (within a few words) is this specific city.
@@ -839,7 +839,7 @@ function rejoinListSemicolons(sentence) {
 // Cape Coral."): separators, list connectors, and capitalized place words
 // only. Any lowercase verb ("…: Naples, our techs treat Tampa") breaks the
 // glue and the trailing city flags. Case-sensitive on purpose.
-const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|includes?|such as|as well as|as well|too|of|the|is|are|count(?:y|ies)|for now|for the moment|today|currently|at this time|right now|yet|so far|at present)[\s,;:]*|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*\.?\s*$/;
+const DISCLAIMER_LIST_GLUE_RE = /^[\s:;,–—-]*(?:(?:and|or|nor|plus|including|include\b|such as|as well as|as well|too|of|the|is|are|count(?:y|ies)|for now|for the moment|today|currently|at this time|right now|yet|so far|at present)[\s,;:]*|[A-Z][A-Za-z'.&-]*[\s,;:–—-]*)*\.?\s*$/;
 
 // City list BEFORE the disclaimer: "Naples, Fort Myers, Cape Coral, Bonita
 // Springs, Estero, and Marco Island are outside our service area." — the
@@ -867,7 +867,7 @@ function offFootprintCityFinding(text) {
     .replace(/<\/(?:h\d|p|li|blockquote|td|th|tr|div)>/gi, '$&\n')
     // A quoted phrase attributed to a third party (or discussed AS a
     // phrase) is not Waves' own claim — blank the quote content.
-    .replace(/((?:(?:(?<!\bas\s)a|(?<!\bas\s)an|another|one|some|that|this|(?<!\bwaves\s+is\s)(?<!\bwe\s+are\s)the)\s+(?:competitor|compan(?:y|ies)|provider|firm)s?|competitors\b|providers\b|(?<!\bour )(?<!\bwe )(?:phrase|wording|term|example)s?)\b[^.!?"\u201c]{0,25}["\u201c])([^"\u201d]{0,120})(["\u201d])/gi, '$1…$3')
+    .replace(/((?:(?:(?<!\bas\s)a|(?<!\bas\s)an|another|one|some|that|this|(?<!\bwaves\s+is\s)(?<!\bwe\s+are\s)the)\s+(?:competitor|compan(?:y|ies)|provider|firm)s?|competitors\b|providers\b|(?<!\bour )(?<!\bwe )(?:phrase|wording|term|example)s?)\b[^.!?"\u201c]{0,25}["\u201c])([^"\u201d]{0,120})(["\u201d])(?![^.!?]{0,40}\b(?:and so do we|so do we|we do too|as do we|including us|same here|so does waves)\b)/gi, '$1…$3')
     .replace(/\s(?:href|src)\s*=\s*\"[^\"]*\"/gi, ' ')
     .replace(/\s(?:href|src)\s*=\s*'[^']*'/gi, ' ')
     .replace(/\]\(\s*[^)]*\)/g, '](#)')
@@ -912,7 +912,7 @@ function offFootprintCityFinding(text) {
     const trimmed = segment.trim();
     const nextTrimmed = (allSegments[segIndex + 1] || '').trim();
     const sepLike = (t) => /^[\s:|-]+$/.test(t) && t.includes('-');
-    if (/^\|.+/.test(trimmed) || (trimmed.includes('|') && (sepLike(nextTrimmed) || sepLike(trimmed) || tableIntro))) {
+    if (/^\|.+/.test(trimmed) || (trimmed.includes('|') && (sepLike(nextTrimmed) || sepLike(trimmed) || (tableIntro && (/^\|/.test(trimmed) || (trimmed.match(/\|/g) || []).length >= 2 || !/[.!?]/.test(trimmed)))))) {
       listIntro = '';
       // A row directly above a separator row is the NEXT table's header —
       // never carry a previous table's claim context onto it.
@@ -928,7 +928,7 @@ function offFootprintCityFinding(text) {
           if (/\?/.test(trimmed) && qCells.length > 1 && qCells.length === aCells.length
             && qCells.filter((c) => /\?/.test(c)).length > 1) {
             for (let ci = 0; ci < qCells.length; ci += 1) {
-              if (/^(?:\*\*)?yes\b/i.test(aCells[ci])) {
+              if (/^(?:\*\*)?(?:yes|sure|definitely|certainly|yeah|indeed|you bet)\b(?![^.!?]{0,40}\b(?:but\s+not\s+(?:from|by|through|with|us|waves)|not\s+from\s+waves|(?:choose|contact|call|try)\s+a\s+local)\b)/i.test(aCells[ci])) {
                 scanUnits.push(qCells[ci]
                   .replace(/\b(?:do|does|can|could|will|would)\s+(?:you|your\s+\w+|waves\w*)\s+(?:have|carry)\s+/i, 'we offer ')
                   .replace(/\b(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\s+/i, 'our team ')
@@ -948,7 +948,7 @@ function offFootprintCityFinding(text) {
           continue;
         }
         if (/\?/.test(trimmed)
-          && /(?:^|\|)\s*(?:\*\*)?yes\b(?![^|]{0,40}\b(?:local|another|different)\s+(?:provider|compan\w*|firm|exterminator|option)s?\b)(?![^|]{0,40}\bnot from waves\b)/i.test((allSegments[segIndex + 2] || '').trim())) {
+          && /(?:^|\|)\s*(?:\*\*)?(?:yes|sure|definitely|certainly|yeah|indeed|you bet)\b(?![^|]{0,40}\b(?:local|another|different)\s+(?:provider|compan\w*|firm|exterminator|option)s?\b)(?![^|]{0,40}\bnot from waves\b)/i.test((allSegments[segIndex + 2] || '').trim())) {
           scanUnits.push(`${trimmed
             .replace(/\b(?:do|does|can|could|will|would)\s+(?:you|your\s+\w+|waves\w*)\s+(?:have|carry)\s+/i, 'we offer ')
             .replace(/\b(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\s+/i, 'our team ')
