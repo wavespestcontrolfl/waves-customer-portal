@@ -47,14 +47,18 @@ async function getRecipientOptin(phone, customerId = null) {
     if (customerId) q.where({ customer_id: customerId });
     return await q.first() || null;
   } catch (err) {
-    // Fail OPEN on lookup infrastructure errors: a brief DB blip must not
-    // silently drop appointment notices while the reminder row is marked
-    // sent. Safe because the row-level consent gate (#2955,
-    // getAppointmentContacts) independently blocks unconsented service
-    // contacts — this per-phone hold is the second layer, and outage
-    // behavior degrades to the documented pre-opt-in state.
-    logger.warn(`[recipient-optin] lookup failed (${err.message}) — failing open to row-level consent`);
-    return null;
+    // Split by failure type: a missing relation (42P01 — un-migrated env)
+    // is the documented pre-opt-in state and fails OPEN to the #2955
+    // row-level consent layer. Any OTHER error rethrows so
+    // filterRecipientsByOptin's catch HOLDS the service contact — a live
+    // DB blip must not text a possibly-declined recipient; held-and-
+    // alerted (no-reachable-channel path) beats silently sent.
+    if (err && err.code === '42P01') {
+      logger.warn('[recipient-optin] table missing — failing open to row-level consent');
+      return null;
+    }
+    logger.warn(`[recipient-optin] lookup failed (${err.message}) — holding via filter`);
+    throw err;
   }
 }
 

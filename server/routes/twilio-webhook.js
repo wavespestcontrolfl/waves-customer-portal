@@ -265,7 +265,7 @@ router.post('/sms', async (req, res) => {
     // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
     // (carrier compliance) instead of letting it fall into normal routing.
     const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
-    if (detectHelp(Body)) {
+    if (detectHelp(Body).help) {
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
