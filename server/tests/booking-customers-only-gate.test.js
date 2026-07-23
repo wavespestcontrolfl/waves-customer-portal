@@ -196,7 +196,10 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
-  test('valid estimate-accept handoff (pricing_estimate_id + HMAC token) still books', async () => {
+  test('quote-wizard handoff books its OWN quoter (contact-phone bound), never a generic pass', async () => {
+    // The wizard's draft estimate carries the quoter's contact; the handoff
+    // pass mints THAT person's record. Same body phone as the estimate.
+    firstResults.estimates = { id: 'pe-123', customer_id: null, customer_phone: '941-555-0101' };
     const token = mintEstimateHandoffToken('pe-123');
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -205,6 +208,28 @@ describe('createSelfBooking — customers-only gate', () => {
       estimate_token: token,
     });
     expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('a handoff token cannot re-point the booking at an unrelated contact (Codex round-5 P1)', async () => {
+    // Valid HMAC, but the typed phone is NOT the handoff estimate's contact —
+    // a self-minted quote token must not unlock the legacy identity paths.
+    firstResults.estimates = { id: 'pe-123', customer_id: null, customer_phone: '(941) 555-9999' };
+    const token = mintEstimateHandoffToken('pe-123');
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      pricing_estimate_id: 'pe-123',
+      estimate_token: token,
+      customer_id: '99999999-9999-4999-8999-999999999999',
+    })).toEqual(REFUSAL);
+    // A handoff naming a missing estimate refuses too.
+    firstResults.estimates = null;
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      pricing_estimate_id: 'pe-123',
+      estimate_token: mintEstimateHandoffToken('pe-123'),
+    })).toEqual(REFUSAL);
   });
 
   test('tampered / cross-estimate handoff token does NOT pass the gate', async () => {
@@ -219,6 +244,7 @@ describe('createSelfBooking — customers-only gate', () => {
 
   test('accepted-estimate links (source_estimate_id + namespaced accept_token) book AS the estimate customer', async () => {
     firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
+    firstResults.customers = BEARER_ROW(); // the estimate's customer; address matches the submission
     const acceptToken = mintEstimateAcceptToken('est-9');
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -229,17 +255,71 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
+  test('an accept-bound booking gets the same address bind as bearers (Codex round-5 P2)', async () => {
+    // The estimate's customer exists but lives at a DIFFERENT address than
+    // the one typed — dispatch must not silently go to the on-file door.
+    firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
+    firstResults.customers = { ...BEARER_ROW(), address_line1: '999 Other Rd', zip: '34220' };
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: mintEstimateAcceptToken('est-9'),
+    });
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      error: expect.stringMatching(/doesn't match what we have on file/i),
+    });
+    // And a vanished customer row refuses to the quote flow.
+    firstResults.customers = null;
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: mintEstimateAcceptToken('est-9'),
+    })).toEqual(REFUSAL);
+  });
+
   test('accept tokens outlive the 14-day quote window — a month-old acceptance still books', async () => {
     // The retry SMS chases accepted-but-never-booked customers well past the
     // quote handoff's TTL; an expired token would bounce an already-accepted
     // customer off the gate (Codex round-2 P2).
     firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
+    firstResults.customers = BEARER_ROW();
     const monthOld = mintEstimateAcceptToken('est-9', Date.now() - 30 * 86400000);
     const result = await createSelfBooking({
       ...strangerBody(),
       customersOnly: true,
       source_estimate_id: 'est-9',
       accept_token: monthOld,
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('gate on: a RAW verified-estimate id no longer resolves identity — the share token is required (Codex round-5 P1)', async () => {
+    // Estimate UUIDs ride URLs/SMS/logs; id-without-token must refuse.
+    firstResults.estimates = { id: 'est-verified', source: 'admin', customer_id: CUST_ID, token: 'share-tok' };
+    expect(await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      estimate_id: 'est-verified',
+    })).toEqual(REFUSAL);
+    // With the share token, the legacy tokened page still books under the gate.
+    const withToken = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      estimate_id: 'est-verified',
+      estimate_share_token: 'share-tok',
+    });
+    expect(withToken).toEqual(BEYOND_WINDOW);
+  });
+
+  test('gate off: bare verified-estimate ids keep their legacy behavior', async () => {
+    firstResults.estimates = { id: 'est-verified', source: 'admin', customer_id: CUST_ID, token: 'share-tok' };
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      estimate_id: 'est-verified',
     });
     expect(result).toEqual(BEYOND_WINDOW);
   });

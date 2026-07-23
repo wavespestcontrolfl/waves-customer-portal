@@ -1326,51 +1326,57 @@ async function createSelfBooking(payload = {}) {
     const verifiedCurrentCustomer = (authedCustomer
       && !(customersOnly && PRE_CUSTOMER_PIPELINE_STAGES.has(String(authedCustomer.pipeline_stage || ''))))
       ? authedCustomer : null;
+    // A known-customer identity (portal bearer, or an estimate bound by a
+    // server-issued token below) proves the ACCOUNT, not the typed address —
+    // and the committed booking dispatches to the bound customer row's
+    // address while capacity/slot-sig were checked against the SUBMITTED one
+    // (Codex P1/P2, rounds 1 + 5). So when an address was submitted, bind
+    // the booking to whichever of the account's property rows it matches
+    // (same addressMatchesCustomer rule as the customer_id path below); no
+    // match → refuse with a fix-it path instead of silently dispatching to
+    // the wrong door. No submitted address → the row's own address is the
+    // booking address, bind directly.
+    const bindCustomerRowByAddress = async (row) => {
+      const submittedLine1 = new_customer?.address_line1;
+      if (!submittedLine1) return { custId: row.id };
+      let matched = addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2)
+        ? row : null;
+      if (!matched) {
+        const accountId = row.account_id || row.id;
+        const accountRows = await db('customers')
+          .where(function () {
+            this.where('account_id', accountId).orWhere('id', accountId);
+          })
+          .whereNot('id', row.id)
+          .whereNull('deleted_at')
+          .andWhere(function () {
+            this.whereNull('active').orWhere('active', true);
+          })
+          .limit(25);
+        matched = (accountRows || []).find(
+          (r) => addressMatchesCustomer(r, submittedLine1, new_customer?.zip, new_customer?.address_line2),
+        ) || null;
+      }
+      if (!matched) {
+        return {
+          error: {
+            ok: false,
+            status: 400,
+            error: "That address doesn't match what we have on file for your account. Double-check the street address, or call (941) 297-5749 and we'll get it updated.",
+          },
+        };
+      }
+      return { custId: matched.id };
+    };
     // Verified portal bearer wins identity outright (customers-only gate):
     // the row came from a JWT the route resolved server-side, so client-sent
     // customer_id / phone-match / estimate identity paths below are all
     // skipped via their existing `!custId` guards — a crafted body can't
     // re-point a verified customer's booking at someone else.
-    //
-    // But the bearer proves the ACCOUNT, not the typed address — and the
-    // committed booking dispatches to the bound customer row's address while
-    // capacity/slot-sig were checked against the SUBMITTED one (Codex P1).
-    // So when an address was submitted, bind the booking to whichever of the
-    // account's property rows it matches (same addressMatchesCustomer rule as
-    // the customer_id path below); no match → refuse with a fix-it path
-    // instead of silently dispatching to the wrong door.
     if (verifiedCurrentCustomer) {
-      const submittedLine1 = new_customer?.address_line1;
-      if (submittedLine1) {
-        let matched = addressMatchesCustomer(verifiedCurrentCustomer, submittedLine1, new_customer?.zip, new_customer?.address_line2)
-          ? verifiedCurrentCustomer : null;
-        if (!matched) {
-          const accountId = verifiedCurrentCustomer.account_id || verifiedCurrentCustomer.id;
-          const accountRows = await db('customers')
-            .where(function () {
-              this.where('account_id', accountId).orWhere('id', accountId);
-            })
-            .whereNot('id', verifiedCurrentCustomer.id)
-            .whereNull('deleted_at')
-            .andWhere(function () {
-              this.whereNull('active').orWhere('active', true);
-            })
-            .limit(25);
-          matched = (accountRows || []).find(
-            (row) => addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2),
-          ) || null;
-        }
-        if (!matched) {
-          return {
-            ok: false,
-            status: 400,
-            error: "That address doesn't match what we have on file for your account. Double-check the street address, or call (941) 297-5749 and we'll get it updated.",
-          };
-        }
-        custId = matched.id;
-      } else {
-        custId = verifiedCurrentCustomer.id;
-      }
+      const bound = await bindCustomerRowByAddress(verifiedCurrentCustomer);
+      if (bound.error) return bound.error;
+      custId = bound.custId;
     }
     // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
     // share token the caller possesses) may write a submitted unit onto an
@@ -1386,7 +1392,19 @@ async function createSelfBooking(payload = {}) {
       // book under that customer. Only verified estimates (admin/accepted,
       // source !== 'quote_wizard') resolve identity; quote handoffs are used for
       // PRICING only, via pricing_estimate_id.
-      if (!custId && estimate && estimate.source !== 'quote_wizard') {
+      //
+      // Under the customers-only gate, a RAW verified-estimate id is no longer
+      // enough (Codex round-5 P1): estimate UUIDs ride URLs/SMS/logs beside
+      // their HMACs, so id-without-token would let anyone who saw a link (or
+      // stripped its token) book as that estimate's customer, skipping the
+      // gate entirely. Gate on → this branch also demands the SHARE token —
+      // the legacy /book/:estimateToken page posts it — putting it on the
+      // same possession footing as the wizard branch below. Gate off →
+      // unchanged.
+      if (!custId && estimate && estimate.source !== 'quote_wizard'
+          && (!customersOnly
+            || (estimate.token && estimate_share_token
+              && String(estimate.token) === String(estimate_share_token)))) {
         custId = estimate.customer_id;
         unitBackfillAllowed = true;
       }
@@ -1425,39 +1443,64 @@ async function createSelfBooking(payload = {}) {
     // dead end.
     if (customersOnly && !custId) {
       const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-      // Two token-proven entries pass. (1) The quote-wizard pricing handoff
-      // (pricing_estimate_id + its HMAC) — quote-first booking is the
-      // sanctioned funnel for new customers, and the wizard hands the token
-      // to the person who just typed their own contact. (2) The
-      // accepted-estimate / admin-resend booking link (source_estimate_id +
-      // the namespaced accept HMAC) — but possession alone is NOT identity
-      // (Codex round-4 P1: links forward). The accept pass is BOUND to the
-      // estimate it names: an estimate with a customer books AS that
-      // customer (custId set here, so the typed contact can't re-point it —
-      // same possession precedent as estimate_share_token above), and a
-      // customer-less estimate books only if the typed phone matches the
-      // estimate's own contact phone. Anything else falls to the refusal.
-      // The namespace keeps the two token kinds from substituting for each
-      // other.
-      const gateHandoffValid = !!pricing_estimate_id
-        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
-      let acceptPassValid = false;
-      if (!gateHandoffValid && !!source_estimate_id && !!accept_token
-          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
-        const acceptEstimate = await db('estimates')
-          .where('id', source_estimate_id)
+      // Two token-proven entries can pass: the quote-wizard pricing handoff
+      // (pricing_estimate_id + its HMAC — quote-first booking is the
+      // sanctioned funnel for new customers) and the accepted-estimate /
+      // admin-resend booking link (source_estimate_id + the namespaced
+      // accept HMAC). The namespace keeps the two token kinds from
+      // substituting for each other.
+      //
+      // But possession alone is NOT identity (Codex rounds 4-5: links
+      // forward, and anyone can mint a pricing handoff by running the
+      // public quote wizard). BOTH passes are therefore BOUND to the
+      // estimate the token names, never generic:
+      //   - the estimate's customer books AS that customer, through the
+      //     same address-to-account-property bind as the bearer path
+      //     (custId set here → the legacy typed-phone / customer_id paths
+      //     below are all skipped, so a self-minted handoff can no longer
+      //     re-point a booking at an unrelated on-file customer);
+      //   - a customer-less estimate books only if the typed phone matches
+      //     the estimate's own contact phone (its new-customer mint);
+      //   - a missing estimate, a vanished customer row, an address that
+      //     matches no account property, or a foreign contact all fall to
+      //     the refusal / fix-it responses below.
+      const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      const bindGateEstimate = async (estimateId) => {
+        const gateEstimate = await db('estimates')
+          .where('id', estimateId)
           .first()
           .catch(() => null);
-        if (acceptEstimate?.customer_id) {
-          custId = acceptEstimate.customer_id;
-          acceptPassValid = true;
-        } else if (acceptEstimate?.customer_phone) {
-          const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-          const typed = last10(new_customer?.phone);
-          acceptPassValid = !!typed && typed.length === 10 && typed === last10(acceptEstimate.customer_phone);
+        if (!gateEstimate) return { valid: false };
+        if (gateEstimate.customer_id) {
+          const estCustomer = await db('customers')
+            .where('id', gateEstimate.customer_id)
+            .whereNull('deleted_at')
+            .first()
+            .catch(() => null);
+          if (!estCustomer) return { valid: false };
+          const bound = await bindCustomerRowByAddress(estCustomer);
+          if (bound.error) return { valid: true, error: bound.error };
+          return { valid: true, custId: bound.custId };
         }
+        if (gateEstimate.customer_phone) {
+          const typed = last10(new_customer?.phone);
+          if (typed.length === 10 && typed === last10(gateEstimate.customer_phone)) {
+            return { valid: true, custId: null }; // the estimate's own contact, minting their record
+          }
+        }
+        return { valid: false };
+      };
+      let gatePass = { valid: false };
+      if (pricing_estimate_id && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+        gatePass = await bindGateEstimate(pricing_estimate_id);
       }
-      if (!gateHandoffValid && !acceptPassValid) {
+      if (!gatePass.valid && source_estimate_id && accept_token
+          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
+        gatePass = await bindGateEstimate(source_estimate_id);
+      }
+      if (gatePass.valid && gatePass.error) return gatePass.error;
+      if (gatePass.valid && gatePass.custId) custId = gatePass.custId;
+      if (!gatePass.valid) {
         const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
         return {
           ok: false,
