@@ -582,10 +582,16 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       // customers from leads — customers.active is TRUE on lead rows.
       expect(sql).toContain('"c"."pipeline_stage" in (?, ?, ?)');
       // REQUIRED recurring-lawn evidence (owner 2026-07-09 refined): an
-      // upcoming live lawn-flavored visit OR ≥2 in the trailing window.
+      // upcoming live lawn-flavored visit ON A RECURRING SERIES OR ≥2 in
+      // the trailing window.
       expect(sql).toContain('exists');
       expect(sql).toContain('"scheduled_services"');
       expect(sql).toMatch(/SELECT COUNT\(\*\) FROM scheduled_services ss2[\s\S]*>= 2/);
+      // Recurring-series marker on the upcoming branch (Codex #2954 P2):
+      // a future ONE-TIME lawn job must not qualify.
+      expect(sql).toContain('"ss"."is_recurring" = ?');
+      expect(sql).toContain('"ss"."recurring_parent_id" is not null');
+      expect(sql).toContain('"ss"."recurring_pattern" is not null');
       // Tier and lawn_type are NOT eligibility — WaveGuard tiers are shared
       // across pest and lawn programs (86% of the tier-qualified audience
       // was verified pest-only), and the turf profile is grass-type

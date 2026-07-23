@@ -292,9 +292,11 @@ function buildWeeklyEmailDecision({
  * grass-type corroboration only (resolveGrassType), never a qualifier.
  *
  * The enforceable evidence (validated against prod, without hardcoding
- * cadence names): an UPCOMING live lawn-flavored visit, OR ≥2 lawn-flavored
- * visits inside the trailing window — one visit is a one-time job; two or
- * more inside 180 days is a real cadence.
+ * cadence names): an UPCOMING live lawn-flavored visit ON A RECURRING
+ * SERIES (is_recurring / recurring_parent_id / recurring_pattern — a
+ * future one-time lawn job must not qualify, Codex #2954), OR ≥2
+ * lawn-flavored visits inside the trailing window — one visit is a
+ * one-time job; two or more inside 180 days is a real cadence.
  *
  * Customers who turned email off portal-wide (notification_prefs.email_enabled
  * = false) or opted out of Seasonal Lawn Tips are excluded — this is an
@@ -355,6 +357,15 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
           .whereRaw('ss.customer_id = c.id')
           .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
           .where('ss.scheduled_date', '>=', todayET)
+          // Recurring-series marker REQUIRED on the upcoming branch
+          // (Codex #2954 P2): a future one-time lawn job would otherwise
+          // qualify the moment it's booked. The seeder stamps all three
+          // markers on series visits; any one of them is proof.
+          .where(function recurringMarker() {
+            this.where('ss.is_recurring', true)
+              .orWhereNotNull('ss.recurring_parent_id')
+              .orWhereNotNull('ss.recurring_pattern');
+          })
           .where(function serviceTypes() {
             for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
               this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
