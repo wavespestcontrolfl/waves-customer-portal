@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
@@ -112,7 +112,12 @@ export default function PublicBookingPage() {
   // portal session, and never prefill from it: a signed-in household member
   // opening someone else's link must not re-point that booking.
   const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
-  const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
+  // ?service= may be a composite id from a multi-service recovery link
+  // (a+b+c) — parse every valid component; unknown parts drop.
+  const initialServiceIds = [...new Set(serviceParam.split('+')
+    .map((id) => id.trim())
+    .filter((id) => SERVICES.some((s) => s.id === id)))];
+  const initialService = SERVICES.find(s => s.id === initialServiceIds[0]) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
   // Post height updates to parent when embedded in an iframe
@@ -138,6 +143,10 @@ export default function PublicBookingPage() {
   // its refusal carries the quote link, so nothing insecure leaks through.
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
   const [customersOnly, setCustomersOnly] = useState(null);
+  // Multi-service selector (GATE_MULTI_SERVICE_BOOKING) — fail-closed:
+  // renders only when /booking/config affirms; the server also refuses
+  // composite service keys while the gate is off.
+  const [multiServiceEnabled, setMultiServiceEnabled] = useState(false);
   const [gatePhone, setGatePhone] = useState('');
   const [gateCode, setGateCode] = useState('');
   const [gateStep, setGateStep] = useState('phone');
@@ -153,13 +162,75 @@ export default function PublicBookingPage() {
     let cancelled = false;
     fetch(`${API_BASE}/booking/config`)
       .then((r) => (r.ok ? r.json() : {}))
-      .then((cfg) => { if (!cancelled) setCustomersOnly(cfg?.customers_only === true); })
+      .then((cfg) => {
+        if (cancelled) return;
+        setCustomersOnly(cfg?.customers_only === true);
+        const multiOn = cfg?.multi_service === true;
+        setMultiServiceEnabled(multiOn);
+        // Kill-switch fail-closed for deep/recovery links: a composite
+        // ?service= selection must collapse to its first service when the
+        // gate is off — otherwise the server normalizes the composite key
+        // to '' and /confirm rejects every slot (#2957 codex r4).
+        if (!multiOn) {
+          setSelectedServiceIds((prev) => (prev.length > 1 ? [prev[0]] : prev));
+        }
+      })
       .catch(() => { if (!cancelled) setCustomersOnly(false); });
     return () => { cancelled = true; };
   }, []);
 
   const [step, setStep] = useState(1);
-  const [service, setService] = useState(initialService);
+  // Selected service ids, anchor first (the query-param service). The
+  // rendered `service` object is derived: single selection = the catalog
+  // entry unchanged; multi = composite id (sorted, '+'-joined — mirrors
+  // the server's canonical key), joined label, summed duration.
+  const [selectedServiceIds, setSelectedServiceIds] = useState(
+    initialServiceIds.length ? initialServiceIds.slice(0, 3) : [initialService.id]
+  );
+  const selectedServices = selectedServiceIds
+    .map((id) => SERVICES.find((s) => s.id === id))
+    .filter(Boolean);
+  // Memoized: loadAvailability depends on `service`, so a fresh object every
+  // render would re-create the callback and loop availability fetches while
+  // step 2 renders (#2957 codex P1).
+  const service = useMemo(() => (
+    selectedServices.length > 1
+      ? {
+        id: [...selectedServiceIds].sort().join('+'),
+        label: selectedServices.map((s) => s.label).join(' + '),
+        duration: selectedServices.reduce((sum, s) => sum + s.duration, 0),
+        icon: selectedServices[0].icon,
+      }
+      : (selectedServices[0] || initialService)
+    // Keyed on the joined id string deliberately — the arrays are rebuilt
+    // each render; the string is the stable identity.
+  ), [selectedServiceIds.join('+')]);
+  const toggleService = (id) => {
+    setSelectedServiceIds((prev) => {
+      if (prev.includes(id)) {
+        // The anchor (first selection) can't be removed below one service.
+        const next = prev.filter((x) => x !== id);
+        return next.length ? next : prev;
+      }
+      return prev.length >= 3 ? prev : [...prev, id];
+    });
+    // A different service set voids EVERY previously fetched offer — the
+    // old slot_sigs were minted for the old scope and /confirm would
+    // reject them (#2957 codex P2). Clear the main availability AND the
+    // AI-search/browse/open-day slot sources so step 2 refetches for the
+    // new scope.
+    setAvailability([]);
+    setSelectedDate(null);
+    setSelectedSlot(null);
+    setSearchResult(null);
+    setBrowseDays(null);
+    setOpenDay(null);
+    // Bump the same sequence the address edit uses: any IN-FLIGHT
+    // find-slots/browse/availability response for the old service scope
+    // fails its seq guard instead of repopulating stale-scope slot_sigs
+    // (#2957 codex r3).
+    addressLookupSeqRef.current += 1;
+  };
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
@@ -474,9 +545,17 @@ export default function PublicBookingPage() {
     // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
+  // Cadence: a bundle that includes Pest Control is a PEST-family series
+  // regardless of chip order (mosquito-first + pest must still seed the
+  // quarterly pest series — #2957 codex r3); otherwise the anchor (first
+  // selected) service's pattern. v1 books the combined FIRST visit; the
+  // office sets up add-on cadences from the owner alert.
+  const cadenceServiceId = selectedServiceIds.includes('pest_control')
+    ? 'pest_control'
+    : selectedServiceIds[0];
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
-    : RECURRING_SERVICE_PATTERNS[service.id] || null;
+    : RECURRING_SERVICE_PATTERNS[cadenceServiceId] || null;
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -947,6 +1026,46 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
+            {multiServiceEnabled && !quotedServiceLabel && !tokenEntry && (
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8 }}>
+                  What can we help with? <span style={{ fontWeight: 400, color: '#6B7280' }}>Pick up to 3 — one visit, one arrival window.</span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {SERVICES.map((s) => {
+                    const selected = selectedServiceIds.includes(s.id);
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => toggleService(s.id)}
+                        aria-pressed={selected}
+                        className="waves-focus-ring"
+                        style={{
+                          padding: '11px 14px',
+                          minHeight: 44,
+                          borderRadius: 999,
+                          fontSize: 14,
+                          fontWeight: 600,
+                          border: `1.5px solid ${selected ? COLORS.glassNavy : '#D1D5DB'}`,
+                          background: selected ? COLORS.glassNavy : '#fff',
+                          color: selected ? '#fff' : COLORS.glassNavy,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {selected && <Icon name="check" size={14} strokeWidth={2.5} style={{ marginRight: 5, verticalAlign: -2 }} />}
+                        {s.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedServices.length > 1 && (
+                  <div style={{ marginTop: 8, fontSize: 14, color: '#6B7280' }}>
+                    {service.label} — about {Math.round(service.duration / 60 * 10) / 10} hours in one visit.
+                  </div>
+                )}
+              </div>
+            )}
             <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
               <div>
                 <AddressAutocomplete
