@@ -2326,13 +2326,24 @@ async function createSelfBooking(payload = {}) {
     // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
     // Both must independently map to pest_control (a legit quarterly pest
     // booking signs pest and labels pest, so this only tightens the gate).
-    const signedServiceKeyIsPest =
-      RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    // Composite-aware: a multi-service booking whose SIGNED key includes
+    // pest_control is a pest booking for series purposes — serviceKeyFor's
+    // regex order would otherwise classify "mosquito+pest_control" (or the
+    // joined label) as mosquito and silently drop the quarterly series the
+    // customer just bought (#2957 codex P1). Component check runs on the
+    // signed key ONLY — the label side stays serviceKeyFor so a crafted
+    // label still can't conjure a pest series from a non-pest signature.
+    const signedKeyComponents = String(serviceKey || '').split('+').filter(Boolean);
+    const signedServiceKeyIsPest = signedKeyComponents.includes('pest_control')
+      || RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    const resolvedLabelIsPest = signedKeyComponents.length > 1
+      ? String(resolvedServiceType || '').toLowerCase().includes('pest control')
+      : RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
       && signedServiceKeyIsPest
-      && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+      && resolvedLabelIsPest;
     // Duplicate-series guard: don't seed a SECOND active series of the same
     // service family — the booked visit itself stays (the customer chose it),
     // but the 3 seeded follow-ups are what mint a duplicate quarterly series

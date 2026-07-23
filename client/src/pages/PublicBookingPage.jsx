@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
@@ -112,7 +112,12 @@ export default function PublicBookingPage() {
   // portal session, and never prefill from it: a signed-in household member
   // opening someone else's link must not re-point that booking.
   const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
-  const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
+  // ?service= may be a composite id from a multi-service recovery link
+  // (a+b+c) — parse every valid component; unknown parts drop.
+  const initialServiceIds = serviceParam.split('+')
+    .map((id) => id.trim())
+    .filter((id) => SERVICES.some((s) => s.id === id));
+  const initialService = SERVICES.find(s => s.id === initialServiceIds[0]) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
   // Post height updates to parent when embedded in an iframe
@@ -171,18 +176,27 @@ export default function PublicBookingPage() {
   // rendered `service` object is derived: single selection = the catalog
   // entry unchanged; multi = composite id (sorted, '+'-joined — mirrors
   // the server's canonical key), joined label, summed duration.
-  const [selectedServiceIds, setSelectedServiceIds] = useState([initialService.id]);
+  const [selectedServiceIds, setSelectedServiceIds] = useState(
+    initialServiceIds.length ? initialServiceIds.slice(0, 3) : [initialService.id]
+  );
   const selectedServices = selectedServiceIds
     .map((id) => SERVICES.find((s) => s.id === id))
     .filter(Boolean);
-  const service = selectedServices.length > 1
-    ? {
-      id: [...selectedServiceIds].sort().join('+'),
-      label: selectedServices.map((s) => s.label).join(' + '),
-      duration: selectedServices.reduce((sum, s) => sum + s.duration, 0),
-      icon: selectedServices[0].icon,
-    }
-    : (selectedServices[0] || initialService);
+  // Memoized: loadAvailability depends on `service`, so a fresh object every
+  // render would re-create the callback and loop availability fetches while
+  // step 2 renders (#2957 codex P1).
+  const service = useMemo(() => (
+    selectedServices.length > 1
+      ? {
+        id: [...selectedServiceIds].sort().join('+'),
+        label: selectedServices.map((s) => s.label).join(' + '),
+        duration: selectedServices.reduce((sum, s) => sum + s.duration, 0),
+        icon: selectedServices[0].icon,
+      }
+      : (selectedServices[0] || initialService)
+    // Keyed on the joined id string deliberately — the arrays are rebuilt
+    // each render; the string is the stable identity.
+  ), [selectedServiceIds.join('+')]);
   const toggleService = (id) => {
     setSelectedServiceIds((prev) => {
       if (prev.includes(id)) {
@@ -192,6 +206,12 @@ export default function PublicBookingPage() {
       }
       return prev.length >= 3 ? prev : [...prev, id];
     });
+    // A different service set voids any previously fetched offers — the
+    // old slot_sig was minted for the old scope and /confirm would reject
+    // it (#2957 codex P2). Clear so step 2 refetches for the new scope.
+    setAvailability([]);
+    setSelectedDate(null);
+    setSelectedSlot(null);
   };
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
