@@ -970,7 +970,15 @@ const TwilioService = {
       return classifyMiss(emailRes);
     }
 
-    // sms (default) — unchanged legacy behavior.
+    // sms (default) — legacy behavior, plus: when the opt-in hold emptied a
+    // NON-empty recipient list there is no SMS leg at all; send the email
+    // fallback and classify from it so the arrival isn't retried as the
+    // same no-op forever (#2956 codex r6).
+    if (channel === "sms" && !contacts.length && unfilteredContacts.length) {
+      const emailRes = await sendArrivedEmail();
+      if (emailRes?.ok) return { success: true, results, emailSent: true };
+      return classifyMiss(emailRes);
+    }
     if (await attemptSmsLegs()) return { success: true, results };
 
     // Nothing delivered. Distinguish a RETRYABLE miss from deterministic

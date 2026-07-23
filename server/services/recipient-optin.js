@@ -170,7 +170,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
                 .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000));
             });
         })
-        .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
+        .update({ status: 'pending', requested_at: new Date(), dispatched_at: null, updated_at: new Date() });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
       if (!retryClaim && priorKeys.has(key)) continue;
@@ -296,9 +296,14 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // just stamp dispatched_at — never send a duplicate confirmation.
       const priorSend = await db('sms_log')
         .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [row.phone_key])
+        // Scoped to THIS property's customer: property A's delivered ask is
+        // not proof property B's ask went out.
+        .where({ customer_id: row.customer_id })
         .where(function optinAsk() {
           this.where({ message_type: 'recipient_optin_request' })
-            .orWhere('metadata', 'like', '%recipient_optin_request%');
+            // metadata is JSONB — cast before LIKE or the query errors and
+            // the catch defeats reconciliation entirely.
+            .orWhereRaw("metadata::text like '%recipient_optin_request%'");
         })
         .whereNotIn('status', ['failed', 'undelivered'])
         .first('id')
