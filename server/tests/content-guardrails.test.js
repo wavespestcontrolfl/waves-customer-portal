@@ -2195,3 +2195,32 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('astro r19 parity: modal booking, list-glue allowlist, brand verbs, Tampa Bay, denials, whether, negated CTAs, close disclaimers', () => {
+    for (const body of [
+      'Pest control in Tampa can be booked online.',
+      'Waves Pest Control visits Naples homes.',
+      'Waves Pest Control inspects Miami attics.',
+      'We treat Tampa Bay homes.',
+      'Our Naples customers ask about WaveGuard.',
+      'Book pest control in Naples today.',
+      'We serve Naples, even though Naples is outside our service area.',
+      'We serve Sarasota; Naples during mosquito season.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Mosquito control in Miami must be scheduled around rain.',
+      'We serve Sarasota; Tampa humidity spikes after storms.',
+      'We serve Sarasota lawns that drain toward Tampa Bay.',
+      'Our pest control service is not available in Naples.',
+      'WaveGuard is unavailable in Miami.',
+      'Our customers in Sarasota ask whether Naples termites behave differently.',
+      "You can't book pest control in Naples through Waves.",
+      'Naples is outside our service area.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
