@@ -14,6 +14,8 @@ const customer = {
   service_contact_name: 'Terry Tenant',
   service_contact_phone: '+15552220000',
   service_contact_email: 'terry@example.com',
+  // SMS fanout to service contacts requires the consent artifact (#2948).
+  service_contacts_consent_at: '2026-07-22T00:00:00Z',
 };
 
 describe('customer contact recipient routing', () => {
@@ -186,6 +188,7 @@ describe('customer contact recipient routing', () => {
       service_contact2_name: 'Sam Spouse',
       service_contact2_phone: '+15553330000',
       service_contact2_email: 'sam@example.com',
+      service_contacts_consent_at: '2026-07-22T00:00:00Z',
     };
     expect(getAppointmentContacts(onlySlot2, {})).toEqual([
       expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
@@ -193,5 +196,29 @@ describe('customer contact recipient routing', () => {
     expect(getServiceReportEmailRecipients(onlySlot2, {})).toEqual([
       expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
     ]);
+  });
+
+  test('SMS fanout skips service contacts when the consent artifact is missing (#2948 gate)', () => {
+    const unstamped = { ...customer, service_contacts_consent_at: null };
+    // Service-contact texting targets drop; the primary still gets texts.
+    expect(getAppointmentContacts(unstamped, {})).toEqual([
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+    ]);
+    // Email routing is NOT part of the SMS consent gate.
+    expect(getServiceReportEmailRecipients(unstamped, {})).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+    ]);
+  });
+
+  test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
+    const unstamped = { ...customer, service_contacts_consent_at: null };
+    process.env.DISABLE_CONTACT_CONSENT_GATE = '1';
+    try {
+      expect(getAppointmentContacts(unstamped, {})).toEqual([
+        expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      ]);
+    } finally {
+      delete process.env.DISABLE_CONTACT_CONSENT_GATE;
+    }
   });
 });
