@@ -18,10 +18,13 @@
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Segments that are record identifiers, not route structure: UUIDs, numeric
-// ids, and long opaque tokens all collapse to ':id'.
+// ids, and long opaque tokens all collapse to ':id'. Opaque = ≥20 chars with
+// at least one uppercase/digit/underscore — hyphenated lowercase route words
+// ('pricing-reality-check') are route structure, not tokens. Mirrored
+// server-side in routes/admin-usage.js.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMERIC_RE = /^\d+$/;
-const OPAQUE_RE = /^[A-Za-z0-9_-]{20,}$/;
+const OPAQUE_RE = /^(?=[A-Za-z0-9_-]*[A-Z0-9_])[A-Za-z0-9_-]{20,}$/;
 
 const TAB_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const PAGE_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;

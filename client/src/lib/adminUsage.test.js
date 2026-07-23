@@ -36,6 +36,13 @@ describe('normalizeAdminPath', () => {
     ).toEqual({ pageKey: 'contracts', path: '/admin/contracts/:id' });
   });
 
+  it('keeps long hyphenated route words — they are structure, not opaque tokens', () => {
+    expect(normalizeAdminPath('/admin/pricing-reality-check')).toEqual({
+      pageKey: 'pricing-reality-check',
+      path: '/admin/pricing-reality-check',
+    });
+  });
+
   it('returns null off /admin and for non-slug first segments', () => {
     expect(normalizeAdminPath('/tech/protocols')).toBeNull();
     expect(normalizeAdminPath('/administrator')).toBeNull();

@@ -22,6 +22,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 import PortalUsageTab from "../../components/admin/PortalUsageTab";
+import { trackAdminPageView } from "../../lib/adminUsage";
 import {
   DEFAULT_KPI_TARGETS,
   KPI_METRIC_LABELS,
@@ -187,6 +188,16 @@ export default function SettingsPage() {
     : "general";
   const [tab, setTab] = useState(initialTab);
 
+  // Desktop sub-tab switches are state-only (no URL change), so the
+  // AdminLayoutV2 route beacon can't see them — record the leaf visit
+  // explicitly or the usage report undercounts the Settings tabs it is
+  // meant to rank. Dedupe/settle in the lib absorb the ?tab= deep-link
+  // overlap (same key → dropped). Codex #2961 r2.
+  const selectTab = (leafKey) => {
+    setTab(leafKey);
+    trackAdminPageView({ pathname: "/admin/settings", search: `?tab=${leafKey}` });
+  };
+
   // Mobile section links change ?tab= on the already-mounted page (the mobile
   // index and the tab panel share this route/component) — sync the param into
   // state so those taps actually switch tabs instead of leaving the prior one.
@@ -234,7 +245,7 @@ export default function SettingsPage() {
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
           const g = SETTINGS_TAB_GROUPS.find((x) => x.key === key);
-          if (g) setTab(g.tabs[0]);
+          if (g) selectTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
       />
@@ -255,7 +266,7 @@ export default function SettingsPage() {
               <button
                 key={leafKey}
                 type="button"
-                onClick={() => setTab(leafKey)}
+                onClick={() => selectTab(leafKey)}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",

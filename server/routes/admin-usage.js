@@ -29,6 +29,29 @@ const TAB_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
 const EVENT_TYPES = new Set(['page_view']);
 
+// Mirror of the client normalizer's ID detection (lib/adminUsage.js). The
+// privacy contract above must hold even against a regressed or hostile
+// authenticated client, so raw identifiers are stripped HERE too, not just
+// client-side (Codex #2961 r2). Opaque = ≥20 chars with at least one
+// uppercase/digit/underscore — hyphenated lowercase route words
+// ('pricing-reality-check') are route structure, not tokens.
+const UUID_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NUMERIC_SEGMENT_RE = /^\d+$/;
+const OPAQUE_SEGMENT_RE = /^(?=[A-Za-z0-9_-]*[A-Z0-9_])[A-Za-z0-9_-]{20,}$/;
+
+function isIdSegment(seg) {
+  return UUID_SEGMENT_RE.test(seg) || NUMERIC_SEGMENT_RE.test(seg) || OPAQUE_SEGMENT_RE.test(seg);
+}
+
+/** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.
+ *  Returns null when the path isn't rooted at /admin. */
+function stripIdSegments(path) {
+  const segments = path.split('/').filter(Boolean);
+  if (segments[0] !== 'admin') return null;
+  const rest = segments.slice(1).map((seg) => (isIdSegment(seg) ? ':id' : seg));
+  return `/admin${rest.length ? `/${rest.join('/')}` : ''}`;
+}
+
 // ET day expression for regularity counts. Constant string by construction —
 // never interpolate request input into raw SQL.
 const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
@@ -37,11 +60,18 @@ router.post('/track', async (req, res, next) => {
   try {
     const { pageKey, path, tab, source, eventType } = req.body || {};
 
-    if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey)) {
+    if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
     }
-    if (path != null && (typeof path !== 'string' || path.length > 160 || !PATH_RE.test(path))) {
-      return res.status(400).json({ error: 'Invalid path' });
+    let cleanPath = null;
+    if (path != null) {
+      if (typeof path !== 'string' || path.length > 160) {
+        return res.status(400).json({ error: 'Invalid path' });
+      }
+      cleanPath = stripIdSegments(path);
+      if (!cleanPath || !PATH_RE.test(cleanPath)) {
+        return res.status(400).json({ error: 'Invalid path' });
+      }
     }
     if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab))) {
       return res.status(400).json({ error: 'Invalid tab' });
@@ -57,7 +87,7 @@ router.post('/track', async (req, res, next) => {
       technician_id: req.technicianId,
       event_type: eventType || 'page_view',
       page_key: pageKey,
-      path: path || null,
+      path: cleanPath,
       tab: tab || null,
       source: source || null,
     });

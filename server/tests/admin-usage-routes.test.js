@@ -143,9 +143,42 @@ describe('admin usage: POST /track', () => {
     });
   });
 
+  test('strips raw identifier segments from path server-side (privacy backstop)', async () => {
+    const chain = makeChain();
+    db.mockImplementation(() => chain);
+    await withServer(async (baseUrl) => {
+      const post = (body) => fetch(`${baseUrl}/admin/usage/track`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      // A regressed/hostile client posting a raw customer uuid must not
+      // persist it — the server strips it exactly like the client normalizer.
+      let res = await post({
+        pageKey: 'customers',
+        path: '/admin/customers/8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1/notes',
+      });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/customers/:id/notes');
+      // Numeric ids and opaque tokens collapse too…
+      res = await post({
+        pageKey: 'estimates',
+        path: '/admin/estimates/12345/aVeryLongOpaqueToken_1234567890',
+      });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/estimates/:id/:id');
+      // …but long hyphenated lowercase ROUTE words are structure, not tokens.
+      res = await post({ pageKey: 'pricing-reality-check', path: '/admin/pricing-reality-check' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/pricing-reality-check');
+    });
+  });
+
   test.each([
     ['pageKey with uppercase', { pageKey: 'Customers' }],
     ['pageKey with slash', { pageKey: 'customers/detail' }],
+    ['uuid pageKey', { pageKey: '8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1' }],
+    ['numeric pageKey', { pageKey: '12345' }],
     ['path with query string', { pageKey: 'leads', path: '/admin/leads?source_name=x' }],
     ['path outside /admin', { pageKey: 'leads', path: '/tech/route' }],
     ['tab with spaces', { pageKey: 'leads', tab: 'my search' }],
