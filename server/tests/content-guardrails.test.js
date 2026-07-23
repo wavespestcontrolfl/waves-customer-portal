@@ -2251,6 +2251,33 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 10: negation bounds at claim subjects, area/community fragments, leading-city demand, by-Waves copulars, denial titles, editorial work objects', () => {
+    for (const body of [
+      'No need for extra prep before we provide pest control in Naples.',
+      'We serve Sarasota; Naples area.',
+      'We serve Sarasota; Naples communities.',
+      'Naples customers call us every week.',
+      'Pest control in Naples is handled by our team.',
+      'Termite treatment in Tampa is performed by Waves.',
+      'We serve the Naples market, which lies south of Sarasota.',
+      'Our pest control service is not available in Sarasota and is available in Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Exterminators in Naples use a range of methods for German roaches.',
+      'Exterminators in Naples typically charge more in summer.',
+      'No pest control services in Naples',
+      'We work across Naples records to compare seasons.',
+      'We operate around Tampa regulations in this article.',
+      'Naples sits south of our service area.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',
@@ -2266,6 +2293,30 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     for (const body of [
       'Fort Myers sits outside our service area.',
       'Homeowners often try to get rid of ants before calling anyone.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('astro r22 parity: service nouns, leading-range demand, service-area binding, county plurals, third-party subjects, disclaimer qualifiers, route coverage', () => {
+    for (const body of [
+      'Need ant control in Naples?',
+      'Need flea treatment in Naples?',
+      'From Sarasota down through Naples, the call is one of the most common we get.',
+      'Naples is now part of our service area.',
+      'We serve Lee and Collier counties.',
+      'Our routes cover Naples.',
+      'Our Sarasota route extends to Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Naples humidity differs from our service area.',
+      'Competitors offer pest control services in Naples.',
+      'The county offers mosquito control in Naples.',
+      'Outside our service area: Naples for now.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
