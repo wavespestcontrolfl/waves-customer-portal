@@ -136,7 +136,7 @@ function samePhone(a, b) {
   return !!da && !!db && da === db;
 }
 
-function getAppointmentContacts(customer, prefs = {}) {
+function getAppointmentContacts(customer, prefs = {}, { skipConsentGate = false } = {}) {
   if (!customer) return [];
   const primary = getPrimaryContact(customer);
   const contacts = [];
@@ -147,8 +147,11 @@ function getAppointmentContacts(customer, prefs = {}) {
   // backfill — every row with contacts has one as of 20260723000003).
   // Rows without a stamp fall back to texting the primary account holder
   // only. Kill switch: DISABLE_CONTACT_CONSENT_GATE=1 restores the old
-  // ungated fanout.
-  if (serviceContactsConsented(customer)) {
+  // ungated fanout. The artifact attests to TEXTS specifically, so the
+  // email resolver passes skipConsentGate — without it, an unstamped row
+  // rerouted email to the primary against appointment_notify_primary=false
+  // AND double-delivered via the slot sweep (main regression 2026-07-23).
+  if (skipConsentGate || serviceContactsConsented(customer)) {
     for (const slot of getServiceContactSlots(customer)) {
       const distinct = !!slot.phone
         && !samePhone(slot.phone, primary.phone)

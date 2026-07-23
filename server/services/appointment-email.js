@@ -134,7 +134,10 @@ async function resolveRecipients(customer) {
   // mislabels the email (phone-only buyer/tenant slots made this common).
   const primary = getPrimaryContact(customer);
   const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
-  for (const c of getAppointmentContacts(customer, prefs || {})) {
+  // skipConsentGate: the consent artifact attests to receiving TEXTS; email
+  // routing follows notification prefs alone (see the recipient spec in
+  // tests/appointment-email-recipients.test.js).
+  for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);
