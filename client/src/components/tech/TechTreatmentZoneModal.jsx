@@ -36,20 +36,31 @@ const DARK = {
   border: '#334155',
   accent: '#0ea5e9',
   red: '#ef4444',
-  green: '#22c55e',
+  ok: '#22c55e',
+  noticeBg: '#22c55e18',
+  noticeBorder: '#22c55e',
+  noticeText: '#22c55e',
   text: '#e2e8f0',
   muted: '#94a3b8',
   mapBackdrop: '#0a0f14',
   scrim: 'rgba(0,0,0,0.7)',
 };
 
+// Owner rule (2026-07-23): the admin appearance is strictly black and white —
+// success/info chrome renders in ink, never green. `red` stays only for
+// genuine failures (the admin spec's red-is-for-alerts-only line). The spray
+// visuals on the photo keep customer brand colors; that snapshot is a
+// customer-report artifact, not admin chrome.
 const LIGHT = {
   bg: '#FAFAFA',
   card: '#FFFFFF',
   border: '#E5E5E5',
   accent: '#111111',
   red: '#C2410C',
-  green: '#16A34A',
+  ok: '#111111',
+  noticeBg: '#FFFFFF',
+  noticeBorder: '#E5E5E5',
+  noticeText: '#111111',
   text: '#111111',
   muted: '#737373',
   mapBackdrop: '#F5F5F5',
@@ -419,8 +430,8 @@ export default function TechTreatmentZoneModal({
 
         {existing && step === 'trace' && points.length === 0 && (
           <div style={{
-            background: `${T.green}18`, border: `1px solid ${T.green}`,
-            color: T.green, padding: '8px 10px', borderRadius: 6,
+            background: T.noticeBg, border: `1px solid ${T.noticeBorder}`,
+            color: T.noticeText, padding: '8px 10px', borderRadius: 6,
             fontSize: 13, marginBottom: 12,
           }}>
             Already traced ({existing.linear_ft ?? '?'} linear ft). Tracing again replaces it.
@@ -537,7 +548,7 @@ export default function TechTreatmentZoneModal({
             )}
             <p style={{
               margin: '10px 0', fontSize: 14, fontWeight: strong,
-              color: settled ? T.green : T.text,
+              color: settled ? T.ok : T.text,
             }}>
               {statusText}
             </p>
@@ -545,7 +556,7 @@ export default function TechTreatmentZoneModal({
               <p style={{ margin: '0 0 10px', fontSize: 13, color: T.muted }}>Saving to the service report…</p>
             )}
             {saveState === 'saved' && (
-              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.green }}>
+              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.ok }}>
                 Saved — this map now appears on the customer&apos;s service report.
               </p>
             )}
