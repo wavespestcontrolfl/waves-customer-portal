@@ -222,6 +222,52 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
   }
 }
 
+// Auto Pay setup INVITATION — the email leg of the appointment card-request
+// funnel (owner delivery rule 2026-07-23: an invite goes out on BOTH
+// channels). Fired by requestCardForAppointment strictly AFTER the SMS
+// leg's one-text-ever claim resolved to a dispatched text, so this email
+// can never revive a visit the funnel skipped, exempted, or auto-secured —
+// every eligibility rule stays enforced in one place. Idempotent per visit:
+// a stale-claim retry that re-enters the funnel can't double-send the
+// email any more than it can re-text.
+async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl } = {}) {
+  try {
+    if (!emailsEnabled() || !customerId || !scheduledServiceId || !secureUrl) return null;
+    const { customer, email } = await loadCustomerEmail(customerId);
+    if (!customer) {
+      logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping setup invitation`);
+      return null;
+    }
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'autopay.setup_invitation',
+      to: email,
+      payload: {
+        first_name: clean(customer.first_name) || 'there',
+        service_type: clean(serviceType) || 'service',
+        date_line: dateLine || '',
+        secure_link: secureUrl,
+        customer_portal_url: portalUrl('/login'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_email: BILLING_EMAIL,
+      },
+      recipientType: 'customer',
+      recipientId: customerId,
+      idempotencyKey: `autopay.setup_invitation:${scheduledServiceId}`,
+      triggerEventId: `autopay.setup_invitation:${scheduledServiceId}`,
+      categories: ['autopay_setup_invitation'],
+      suppressProviderErrorLog: true,
+    });
+    logger.info(`[card-enrollment-email] setup invitation sent for visit ${scheduledServiceId}`);
+    return result;
+  } catch (err) {
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : EmailTemplateLibrary.redactEmailAddresses(err.message);
+    logger.error(`[card-enrollment-email] setup invitation failed for visit ${scheduledServiceId}: ${reason}`);
+    return null;
+  }
+}
+
 async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
   try {
     if (!emailsEnabled() || !estimateId || !customerId) return null;
@@ -285,6 +331,7 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
 
 module.exports = {
   sendAutopayEnrollmentConfirmation,
+  sendAutopaySetupInvitation,
   sendCardHoldConfirmation,
   _private: { cardLineFor, emailsEnabled },
 };

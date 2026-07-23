@@ -518,6 +518,26 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     }
 
     await markSendOutcome();
+    // Email leg (owner delivery rule 2026-07-23: an invite goes out on
+    // BOTH channels). Strictly after a CONFIRMED-dispatched text — the
+    // uncertain/blocked paths above send nothing on either channel, so the
+    // email can never outrun the one-text rails or reach a visit the
+    // funnel skipped. Best-effort fire-and-forget: the gate being off, no
+    // email on file, or a SendGrid failure never changes the funnel result.
+    try {
+      const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
+      sendAutopaySetupInvitation({
+        customerId: visit.customer_id,
+        scheduledServiceId: visit.id,
+        serviceType: visit.service_type || 'service',
+        dateLine: dateLineFor(visit.scheduled_date),
+        secureUrl,
+      }).catch((emailErr) => {
+        logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
+      });
+    } catch (emailErr) {
+      logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
+    }
     logger.info(`[appt-card-request] secure-card link sent for visit ${visit.id} (trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent' };
   } catch (err) {

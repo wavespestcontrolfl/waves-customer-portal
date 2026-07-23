@@ -30,6 +30,7 @@ jest.mock('../models/db', () => {
 
 const {
   sendAutopayEnrollmentConfirmation,
+  sendAutopaySetupInvitation,
   sendCardHoldConfirmation,
   _private,
 } = require('../services/card-enrollment-email');
@@ -335,5 +336,82 @@ describe('seeded template rows stay inside the admin route enums (Codex r3)', ()
     expect(byKey['cardhold.confirmation'].required).toContain('surcharge_line');
     expect(byKey['autopay.enrollment_confirmation_ach'].required)
       .toEqual(expect.arrayContaining(['bank_line', 'debit_timing_line', 'authorization_text']));
+  });
+});
+
+describe('autopay setup invitation (email leg of the card-request funnel)', () => {
+  const ARGS = {
+    customerId: 'cust-1',
+    scheduledServiceId: 'visit-9',
+    serviceType: 'Quarterly Pest Control',
+    dateLine: ' on Sat, Jul 25',
+    secureUrl: 'https://portal.wavespestcontrol.com/secure/tok',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_CARD_ENROLLMENT_EMAILS = 'true';
+    state.tables = { customers: [CUSTOMER] };
+  });
+  afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
+
+  test('OFF gate: total no-op', async () => {
+    delete process.env.GATE_CARD_ENROLLMENT_EMAILS;
+    expect(await sendAutopaySetupInvitation(ARGS)).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('missing visit id or secure link: no send (the funnel owns eligibility)', async () => {
+    expect(await sendAutopaySetupInvitation({ ...ARGS, scheduledServiceId: null })).toBe(null);
+    expect(await sendAutopaySetupInvitation({ ...ARGS, secureUrl: null })).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('no usable email on file: skip, never throws into the funnel', async () => {
+    state.tables = { customers: [{ id: 'cust-1', first_name: 'Taylor', email: '  ' }] };
+    expect(await sendAutopaySetupInvitation(ARGS)).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('sends the invitation keyed per visit with the funnel-composed vars', async () => {
+    const result = await sendAutopaySetupInvitation(ARGS);
+    expect(result).toEqual({ sent: true });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    const call = mockSendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe('autopay.setup_invitation');
+    expect(call.to).toBe('taylor@example.com');
+    // Idempotency rides the VISIT id — a funnel re-entry (stale-claim
+    // adoption) can no more double-send the email than re-text.
+    expect(call.idempotencyKey).toBe('autopay.setup_invitation:visit-9');
+    expect(call.payload).toMatchObject({
+      first_name: 'Taylor',
+      service_type: 'Quarterly Pest Control',
+      date_line: ' on Sat, Jul 25',
+      secure_link: 'https://portal.wavespestcontrol.com/secure/tok',
+    });
+  });
+
+  test('sendTemplate failure is swallowed (best-effort contract)', async () => {
+    mockSendTemplate.mockRejectedValueOnce(new Error('sendgrid down'));
+    expect(await sendAutopaySetupInvitation(ARGS)).toBe(null);
+  });
+});
+
+describe('seeded invitation template row (migration 20260721100010)', () => {
+  const { _TEMPLATES: INVITE_TEMPLATES } = require('../models/migrations/20260721100010_seed_autopay_invitation_email_template');
+  const invite = INVITE_TEMPLATES.find((t) => t.key === 'autopay.setup_invitation');
+
+  test('exists, financial sensitivity inside the admin enum, operational stream', () => {
+    expect(invite).toBeTruthy();
+    const allowed = new Set(['normal', 'financial', 'account', 'health_safety', 'property_sensitive']);
+    expect(allowed.has(invite.sensitivity)).toBe(true);
+    // An INVITATION must respect operational suppression — never the
+    // transactional_required stream the confirmation copies ride.
+    expect(invite.stream).toBe('service_operational');
+  });
+
+  test('sender-passed variables are declared on the template', () => {
+    expect(invite.required).toEqual(expect.arrayContaining(['first_name', 'service_type', 'secure_link']));
+    expect(invite.optional).toContain('date_line');
   });
 });

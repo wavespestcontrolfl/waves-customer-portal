@@ -359,13 +359,16 @@ function renderBlocks(blocks, payload) {
       htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
       textParts.push('---');
     } else if (block.type === 'signature') {
-      const content = renderInline(block.content || 'The Waves Pest Control team', payload);
+      // Default sign-off is "— The Waves Team" (owner call 2026-07-21) —
+      // company-name signatures were retired across every template by
+      // migration 20260721100020.
+      const content = renderInline(block.content || '— The Waves Team', payload);
       // white-space:pre-line lets authored signatures split onto two lines
       // ("We look forward to servicing your home.\n— The Waves Team")
       // without HTML in block content; single-line signatures render
       // exactly as before.
       htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
-      textParts.push(renderInline(block.content || 'The Waves Pest Control team', payload, { html: false }));
+      textParts.push(renderInline(block.content || '— The Waves Team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
       if (content) {
