@@ -54,6 +54,19 @@ const FAQ_BETWEEN_VISITS_RECURRING =
 const FAQ_PRICE =
   'Yes — for the quoted service, your price holds until the expiration date on your estimate. We’ll always tell you before anything changes.';
 
+// Report-tour marketing videos (owner 2026-07-23: "videos to get potential
+// customers excited about signing up"). Motion tours of the REAL report
+// pages (fixture data, current UI) hosted as portal static assets; the
+// email module renders an animated preview linked to the mp4. Truth scope:
+// a category only gets a video of the report type its plan actually
+// produces — pest/lawn/tree_shrub their own, palm injection folds into the
+// tree & shrub report (its visits are documented on that report), bundle
+// gets the generic-captioned pest tour (every bundle visit is documented in
+// a service report). mosquito/rodent/termite/commercial/unknown get NO
+// video (empty slots — the renderer drops the blocks) rather than a
+// mismatched report tour.
+const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
+
 // smsHook completes the phrase "your Waves {smsHook}" so brand
 // identification survives in every SMS body.
 // `included` ("what your plan covers") and `process` ("how it works") are
@@ -81,6 +94,7 @@ const PACKS = {
       betweenVisits: FAQ_BETWEEN_VISITS_RECURRING,
       price: FAQ_PRICE,
     },
+    video: { slug: 'pest', caption: 'Tap to watch — what a real Waves pest control report looks like.' },
   },
   lawn: {
     label: 'lawn care',
@@ -97,6 +111,7 @@ const PACKS = {
       betweenVisits: FAQ_BETWEEN_VISITS_RECURRING,
       price: FAQ_PRICE,
     },
+    video: { slug: 'lawn', caption: 'Tap to watch — what a real Waves lawn report looks like.' },
   },
   mosquito: {
     label: 'mosquito protection',
@@ -129,6 +144,7 @@ const PACKS = {
       betweenVisits: FAQ_BETWEEN_VISITS_RECURRING,
       price: FAQ_PRICE,
     },
+    video: { slug: 'tree-shrub', caption: 'Tap to watch — what a real Waves tree & shrub report looks like.' },
   },
   palm_injection: {
     label: 'palm injection',
@@ -145,6 +161,7 @@ const PACKS = {
       betweenVisits: FAQ_BETWEEN_VISITS_RECURRING,
       price: FAQ_PRICE,
     },
+    video: { slug: 'tree-shrub', caption: 'Tap to watch — what a real Waves tree & shrub report looks like.' },
   },
   rodent: {
     label: 'rodent defense',
@@ -189,6 +206,7 @@ const PACKS = {
     included: 'Every service on your plan was priced from your actual property — one plan, one schedule, one team accountable for all of it.',
     process: 'Approve online once and we schedule everything — each service runs on its own right cadence, and every visit is documented in your report.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
+    video: { slug: 'pest', caption: 'Tap to watch — what a real Waves service report looks like.' },
   },
   // Property-generic claims only, so nothing service-specific can be wrong
   // (same rule as glassEstimateCopyFor's unknown fallback).
@@ -247,6 +265,11 @@ function followupEmailVars(estimate) {
     faq_terms: pack.faq.terms,
     faq_between_visits: pack.faq.betweenVisits,
     faq_price: pack.faq.price,
+    // Video slots are empty strings off-scope — the email image/small_note
+    // blocks drop on blank src/content, so the module vanishes cleanly.
+    report_video_preview: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour-preview.gif` : '',
+    report_video_url: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour.mp4` : '',
+    report_video_caption: pack.video ? pack.video.caption : '',
   };
 }
 
