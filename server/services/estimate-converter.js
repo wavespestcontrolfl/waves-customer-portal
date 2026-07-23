@@ -1024,16 +1024,29 @@ function estimateManualDiscountFloorBreachAcknowledged(estimateData = {}) {
   return summaryDiscount?.floorBreach?.acknowledged === true;
 }
 
-function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
-  if (estimateManualDiscountFloorBreachAcknowledged(estimateData)) return 0;
+// Pre-breach resolution (stamp → legacy evidence → live global). The
+// breach-aware resolver below layers the per-estimate disarm on top; prepay
+// protection deliberately uses THIS one — see lawnProgramMinimumProtectedAnnual.
+function resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData = {}) {
   const signal = estimateLawnProgramMinimumSignal(estimateData);
   if (signal != null) return signal;
   const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
   return Number.isFinite(live) && live > 0 ? live : 0;
 }
 
+function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  if (estimateManualDiscountFloorBreachAcknowledged(estimateData)) return 0;
+  return resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
+}
+
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
-  const minMonthly = resolveLawnProgramMinimumMonthlyForEstimate(estimateData);
+  // Deliberately IGNORES an acknowledged floor breach (codex P2 on #2947
+  // round 4): the breach disarm exists so render/accept never clamp the
+  // authorized sub-floor price back UP — but this protection only ever CAPS
+  // the annual-prepay discount (callers Math.min against it, never raise).
+  // Dropping it on a breached estimate would let a customer-selected prepay
+  // % stack a further cut below the number the confirmation card authorized.
+  const minMonthly = resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {

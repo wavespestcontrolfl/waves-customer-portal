@@ -15948,10 +15948,16 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
   }
   if (!renames.length) return payload;
   const renameFor = (candidates) => {
+    // Chain hits (codex P3 on #2947): a second relabel keyed by the FIRST
+    // relabel's display name must still land on recomputed rows that carry
+    // only the canonical key — each hit's name joins the candidate pool for
+    // the overrides that follow, so A→B then B→C resolves A-keyed rows to C.
     let hit = null;
+    const pool = candidates.filter(Boolean).map(presentationOverrideNormalize);
     for (const rename of renames) {
-      if (candidates.some((candidate) => candidate && rename.keys.has(presentationOverrideNormalize(candidate)))) {
+      if (pool.some((candidate) => rename.keys.has(candidate))) {
         hit = rename.displayName;
+        pool.push(presentationOverrideNormalize(hit));
       }
     }
     return hit;

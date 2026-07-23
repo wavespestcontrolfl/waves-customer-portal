@@ -128,6 +128,30 @@ describe('estimate converter annual prepay amount', () => {
     })).toBe(true);
   });
 
+  test('acknowledged floor breach disarms render clamps but KEEPS the prepay protected floor', () => {
+    const { resolveLawnProgramMinimumMonthlyForEstimate, annualPrepayDiscountComponents } = require('../services/estimate-converter');
+    const breached = {
+      result: {
+        pricingMetadata: {
+          lawnProgramMinimumMonthly: 50,
+          manualDiscountFloorBreach: { acknowledged: true, bypassedCapReason: 'lawn_program_minimum' },
+        },
+        lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 540 }],
+      },
+    };
+    // Render/accept re-clamps stand down for the authorized sub-floor price…
+    expect(resolveLawnProgramMinimumMonthlyForEstimate(breached)).toBe(0);
+    // …but the prepay protection still counts the stamped $50/mo floor
+    // ($600/yr protected slice), so a customer-selected prepay % can only be
+    // capped by it — never stack a further cut below the authorized number
+    // (codex P2 on #2947 round 4).
+    const { protectedFloor } = annualPrepayDiscountComponents({
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: breached,
+    });
+    expect(protectedFloor).toBeGreaterThanOrEqual(600);
+  });
+
   test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {
     // No-fee mix (lawn): the full 5% applies — the $50/mo lawn program
     // minimum that used to protect a floor slice is DISARMED (owner ruling

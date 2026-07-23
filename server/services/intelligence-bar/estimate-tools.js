@@ -986,7 +986,13 @@ function validateOperatorPriceAdjustment(raw) {
     return { error: 'operatorPriceAdjustment must be an object' };
   }
   const waiveSetupFee = raw.waiveSetupFee === true;
-  const hasDiscountFields = raw.type !== undefined || raw.value !== undefined;
+  // Idempotent on its own output (codex P2 on #2947): a waiver-only spec
+  // normalizes to { type: null, value: 0, ... } and createPendingEstimate
+  // feeds the NORMALIZED object back through computeEstimate's validation at
+  // confirm time — present-but-empty discount fields must read as "no
+  // discount", not as a malformed one, or the confirmed write fails after a
+  // successful preview.
+  const hasDiscountFields = raw.type != null || (raw.value !== undefined && Number(raw.value) > 0);
   if (!hasDiscountFields && !waiveSetupFee) {
     return { error: 'operatorPriceAdjustment requires a discount (type + value + label) and/or waiveSetupFee: true' };
   }
