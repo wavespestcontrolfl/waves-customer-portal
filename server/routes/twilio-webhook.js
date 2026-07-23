@@ -936,8 +936,21 @@ router.post('/status', async (req, res) => {
                 // pending and is reconciled by the recovery sweep (its
                 // sms_log status is failed → the sweep re-dispatches).
                 if (isOptinAsk && logRow.customer_id) {
+                  // Strict SID match, with one carve-out for the race where
+                  // the callback lands before provider_sid is stamped: a
+                  // null-SID pending row flips only when this log row's ask
+                  // was created AFTER the row's claim (it IS this claim's
+                  // ask — an old SID's ask predates a reclaimed row's
+                  // requested_at and cannot match).
                   return db('recipient_optin')
-                    .where({ phone_key: failedKey, customer_id: logRow.customer_id, status: 'pending', provider_sid: MessageSid })
+                    .where({ phone_key: failedKey, customer_id: logRow.customer_id, status: 'pending' })
+                    .where(function sidOrRace() {
+                      this.where({ provider_sid: MessageSid })
+                        .orWhere(function raced() {
+                          this.whereNull('provider_sid');
+                          if (logRow.created_at) this.where('requested_at', '<=', logRow.created_at);
+                        });
+                    })
                     .update({ status: 'ask_failed', updated_at: new Date() });
                 }
                 return db('recipient_optin')
