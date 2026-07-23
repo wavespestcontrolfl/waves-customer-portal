@@ -2251,6 +2251,27 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
+    for (const body of [
+      'Our Tampa technicians treat ants.',
+      'Waves Tampa team services yards.',
+      'We get rid of ants in Tampa.',
+      'Waves gets rid of rodents in Naples.',
+      'We serve Naples, which is outside our service area.',
+      'We service Tampa, which falls outside our footprint.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Fort Myers sits outside our service area.',
+      'Homeowners often try to get rid of ants before calling anyone.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
