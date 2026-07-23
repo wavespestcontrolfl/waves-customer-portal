@@ -152,3 +152,46 @@ describe('followupSmsHook', () => {
     }
   });
 });
+
+describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
+  // Truth scope: a category only advertises the report tour its plan
+  // actually produces; everything else gets empty slots so the email
+  // module drops (same mechanism as the FAQ rows).
+  const VIDEO_SLUGS = {
+    pest: 'pest',
+    lawn: 'lawn',
+    tree_shrub: 'tree-shrub',
+    palm_injection: 'tree-shrub',
+    bundle: 'pest',
+  };
+  const NO_VIDEO = ['mosquito', 'rodent', 'termite', 'commercial', 'unknown'];
+
+  test.each(Object.entries(VIDEO_SLUGS))('%s pack advertises the %s report tour', (category, slug) => {
+    if (category === 'bundle') lanes('pest', 'lawn');
+    else lanes(category);
+    const vars = followupEmailVars({ id: 'e1' });
+    expect(vars.report_video_preview).toBe(
+      `https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour-preview.gif`,
+    );
+    expect(vars.report_video_url).toBe(
+      `https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour.mp4`,
+    );
+    expect(vars.report_video_caption).toMatch(/^Tap to watch/);
+  });
+
+  test.each(NO_VIDEO)('%s pack emits empty video slots (module drops)', (category) => {
+    if (category === 'commercial') lanes('commercial_pest');
+    else if (category === 'unknown') lanes();
+    else lanes(category);
+    const vars = followupEmailVars({ id: 'e1' });
+    expect(vars.report_video_preview).toBe('');
+    expect(vars.report_video_url).toBe('');
+    expect(vars.report_video_caption).toBe('');
+  });
+
+  test('every configured video is one of the three produced tours', () => {
+    for (const pack of Object.values(PACKS)) {
+      if (pack.video) expect(['pest', 'lawn', 'tree-shrub']).toContain(pack.video.slug);
+    }
+  });
+});
