@@ -2367,6 +2367,34 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 17: wrappers, coverage denials, E.g. lists, pipe-less tables, FAQ paraphrases, no-need CTAs, colon titles, here-to-help, referral answers', () => {
+    for (const body of [
+      '## *Naples pest control services*',
+      '`Naples pest control services`',
+      'We serve Southwest Florida, E.g. Naples, Fort Myers.',
+      '| Areas we serve | Notes\n| --- | ---\n| Naples | Yes',
+      'Do you serve Naples? We do.',
+      'Are your techs available in Naples? They are.',
+      'No need for an appointment to book pest control in Naples.',
+      'Our service areas: Naples',
+      "We're here to help in Naples.",
+      'Waves is here to help in Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Naples is not included in our coverage area.',
+      'Naples is not part of our coverage area.',
+      'No need for pest control in Naples.',
+      'Need pest control in Naples? Contact a local provider instead.',
+      'If you need pest control in Naples, Waves Pest Control does not serve that area.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',
