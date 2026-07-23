@@ -2323,6 +2323,26 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 11: bare operate, archival determiners, city-preposition demand spans, singular mouse', () => {
+    for (const body of [
+      'Our technicians operate in Naples.',
+      'Waves techs operate in Tampa.',
+      'Our customers in Naples ask about WaveGuard.',
+      'Need mouse control in Naples?',
+      'Mouse control in Tampa',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'We work across the Naples records to compare seasons.',
+      'We operate around the Tampa regulations in this article.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
