@@ -312,9 +312,12 @@ const LAWN_SERVICE_RECENCY_DAYS = 180;
 // recent completed lawn visit is exactly the cadence evidence wanted.
 const NON_LIVE_VISIT_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
 
-// Lawn-flavored service_type match (the same set the earlier CURRENT-service
-// branch used).
-const LAWN_SERVICE_TYPE_LIKES = ['%lawn%', '%waveguard%', '%fertiliz%', '%fungicide%', '%turf%'];
+// Lawn-flavored service_type match. '%waveguard%' is deliberately NOT in
+// this set (Codex #2954 r2): WaveGuard Membership / Initial Setup are
+// generic specialty rows shared across programs, not lawn visits — a
+// lawn service that happens to carry the WaveGuard name still matches
+// '%lawn%'.
+const LAWN_SERVICE_TYPE_LIKES = ['%lawn%', '%fertiliz%', '%fungicide%', '%turf%'];
 
 async function findEligibleCustomers({ now = new Date() } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
@@ -356,6 +359,10 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
           .from('scheduled_services as ss')
           .whereRaw('ss.customer_id = c.id')
           .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+          // A same-ET-date row already COMPLETED is not upcoming evidence
+          // (Codex #2954 r2 P3): without this, a lapsed recurring-marked
+          // customer passes on the day of their last visit.
+          .whereNot('ss.status', 'completed')
           .where('ss.scheduled_date', '>=', todayET)
           // Recurring-series marker REQUIRED on the upcoming branch
           // (Codex #2954 P2): a future one-time lawn job would otherwise
@@ -376,10 +383,16 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
         // the TRAILING window — bounded on both sides (pre-push P1: with
         // only the lower bound, two future one-time bookings would count;
         // future visits belong to the recurring-marker branch above).
+        // Follow-up CHILD rows are excluded (Codex #2954 r2): a one-time
+        // lawn treatment plus its linked follow-up (parent_service_id
+        // stamped, same service_type) is still one job, not a cadence;
+        // recurring-series children carry recurring_parent_id, never
+        // parent_service_id, so real cadences are unaffected.
         .orWhereRaw(
           `(SELECT COUNT(*) FROM scheduled_services ss2
              WHERE ss2.customer_id = c.id
                AND ss2.status NOT IN (${nonLivePlaceholders})
+               AND ss2.parent_service_id IS NULL
                AND ss2.scheduled_date >= ?
                AND ss2.scheduled_date <= ?
                AND (${lawnLikeSql})) >= 2`,

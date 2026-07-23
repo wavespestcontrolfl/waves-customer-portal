@@ -595,6 +595,13 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       expect(sql).toContain('"ss"."is_recurring" = ?');
       expect(sql).toContain('"ss"."recurring_parent_id" is not null');
       expect(sql).toContain('"ss"."recurring_pattern" is not null');
+      // r2: a same-day COMPLETED row is not upcoming evidence…
+      expect(sql).toMatch(/not "ss"\."status" = \?/);
+      // …follow-up children never pad the cadence count…
+      expect(sql).toContain('ss2.parent_service_id IS NULL');
+      // …and generic WaveGuard membership/setup rows are not lawn evidence.
+      expect(bindings).not.toContain('%waveguard%');
+      expect(bindings).toContain('%lawn%');
       // Tier and lawn_type are NOT eligibility — WaveGuard tiers are shared
       // across pest and lawn programs (86% of the tier-qualified audience
       // was verified pest-only), and the turf profile is grass-type
