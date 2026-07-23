@@ -2043,3 +2043,16 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     const repeated = guardrails.evaluate({ body: 'Naples is outside our service area, and Naples remains outside our service area.' }, {});
     expect(repeated.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
   });
+
+  test('round 2: referential about-services, adverbial conjoined claims, multi-audience fragments', () => {
+    const referential = guardrails.evaluate({ body: 'We provide information about pest control services in Naples.' }, {});
+    expect(referential.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    for (const body of [
+      'We do not provide service in Naples and proudly serve Tampa.',
+      'We serve Sarasota; Naples homes and Tampa businesses.',
+      'We provide pest control advice and services in Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
