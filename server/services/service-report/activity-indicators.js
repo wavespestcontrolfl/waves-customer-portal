@@ -1047,7 +1047,12 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
 
   const fields = PROJECT_TYPES[type].findingsFields || [];
-  const knownKeys = new Set(fields.map((f) => f.key));
+  // companionOnly fields are legal ONLY on companion submissions — a primary
+  // submission carrying one (stale client / pre-cutover draft) fails as
+  // unknown, keeping the 2026-07-23 primary cutover total.
+  const knownKeys = new Set(
+    fields.filter((f) => companion || !f.companionOnly).map((f) => f.key),
+  );
   for (const key of Object.keys(values)) {
     if (!knownKeys.has(key)) errors.push(`Unknown findings field: ${key}`);
   }
@@ -1118,15 +1123,50 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
 
   // Cross-field consistency (Tree & Shrub): the report tells one coherent
-  // plant-health story — "Inspection only" can't sit beside applied
-  // treatments. (The old observed-conditions / palm-module contradiction
-  // checks retired with those fields — owner directive 2026-07-23: condition
-  // detail comes from the AI photo review, not hand-entered dropdowns.)
+  // plant-health story — a "no major issues" claim can't sit beside recorded
+  // issues, "Inspection only" can't sit beside applied treatments, and palm
+  // findings need Palms in the service scope. On the PRIMARY path the
+  // condition/detail fields no longer exist (owner 2026-07-23 — the AI photo
+  // review carries condition detail), so these checks are value-driven and
+  // effectively guard COMPANION sections, the one place the fields survive.
   if (type === 'tree_shrub') {
+    const observed = String(values.observed_conditions || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const issueChips = observed.filter((c) => c !== 'No major issues observed' && c !== 'Healthy / new growth');
+    const heavyPressure = ['pest_pressure', 'disease_pressure', 'deficiency_symptoms', 'bed_weed_pressure']
+      .some((key) => ['Moderate', 'Heavy'].includes(String(values[key] || '')));
+    // EVERY issue-flavored Yes toggle contradicts the no-issues claim, not
+    // just the two palm flags (Codex P2 round 2) — "no major issues" next
+    // to "A pruning issue was observed" is incoherent.
+    const issueToggles = [
+      'ganoderma_conk_observed', 'palm_trunk_concern', 'palm_nutrient_stress',
+      'pruning_issue_observed', 'irrigation_issue_observed', 'mulch_depth_concern',
+    ].some((key) => String(values[key] || '') === 'Yes');
+    if (observed.includes('No major issues observed') && (issueChips.length || heavyPressure || issueToggles)) {
+      errors.push('"No major issues observed" contradicts the recorded issues — remove it or the conflicting findings');
+    }
     const treatments = String(values.treatments_completed || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
     if (treatments.includes('Inspection only') && treatments.length > 1) {
       errors.push('"Inspection only" cannot be combined with applied treatments');
+    }
+    // pre_emergent_applied is an APPLICATION field — it can't ride an
+    // inspection-only visit either (Codex P2 round 2).
+    if (treatments.includes('Inspection only') && String(values.pre_emergent_applied) === 'Yes') {
+      errors.push('"Inspection only" contradicts "Pre-emergent applied" — record the treatment or clear the bed module field');
+    }
+    const groups = String(values.plant_groups || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    // Palm-module findings without Palms in the service scope would put
+    // palm claims on a report whose scope contradicts them (Codex P2) —
+    // the tech either serviced palms (add the group) or didn't (clear the
+    // fields).
+    const palmModuleFilled = [
+      'palms_serviced', 'palm_condition', 'palm_nutrient_stress', 'spear_leaf_condition',
+      'canopy_density', 'palm_trunk_concern', 'ganoderma_conk_observed', 'injection_recommended',
+    ].filter((key) => values[key] != null && String(values[key]).trim() !== '');
+    if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
+      errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
     }
   }
 
@@ -1774,10 +1814,11 @@ function buildTodaysResult({
 
   // Tree & Shrub has no pest gauge — the owner template (§6) leads with the
   // overall landscape condition and tells the plant-health story: scope,
-  // treatments, next step. (The Ganoderma palm note retired with the manual
-  // palm module — owner directive 2026-07-23: palm/canopy/disease detail now
-  // reaches the customer through the AI photo review on the V2 report, so a
-  // hand-entered reassurance sentence has no truthful source anymore.)
+  // treatments, palm notes (Ganoderma reassurance/flag), next step. PRIMARY
+  // completions no longer collect the Ganoderma/trunk fields (owner
+  // 2026-07-23 — the AI photo review carries palm detail on the V2 report),
+  // so the palm note only composes for COMPANION sections, where the
+  // companionOnly fields still capture it.
   if (projectType === 'tree_shrub' && values.landscape_condition) {
     const condition = String(values.landscape_condition);
     const conditionHeadlines = {
@@ -1797,9 +1838,24 @@ function buildTodaysResult({
       const scopeSentence = groups.length
         ? `Completed Tree & Shrub service for the ${joinPhrases(groups)}.`
         : 'Completed your Tree & Shrub service today.';
+      // Ganoderma is the question palm owners actually have — say the answer
+      // plainly, but ONLY when palms were actually serviced (Codex P2: a
+      // shrub/bed-only visit with stray palm-module values must not claim
+      // palm findings the visit scope contradicts). The "No" sentence
+      // couples trunk decay only when the trunk check also came back clean.
+      let palmNote = '';
+      if (groups.includes('palms')) {
+        if (String(values.ganoderma_conk_observed) === 'Yes') {
+          palmNote = ' A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.';
+        } else if (String(values.ganoderma_conk_observed) === 'No') {
+          palmNote = String(values.palm_trunk_concern) === 'No'
+            ? ' No visible Ganoderma conks or trunk decay were observed on the palms today.'
+            : ' No visible Ganoderma conks were observed on the palms today.';
+        }
+      }
       return {
         headline,
-        body: `${scopeSentence} ${whatWeDid} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        body: `${scopeSentence} ${whatWeDid}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
         nextStep,
       };
     }
@@ -2221,6 +2277,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
     copyMapVersion: COPY_MAP_VERSION,
     fields: (config.findingsFields || [])
       .filter((f) => {
+        // companionOnly fields exist for COMPANION sections only (combined
+        // visits run no per-line AI assessment, so hand capture stays the
+        // condition source there) — the primary slice never serves them.
+        if (f.companionOnly && !companion) return false;
         const rule = moduleRules && f.section ? moduleRules[f.section] : null;
         if (!rule) return true;
         if (!serviceKey) return true;

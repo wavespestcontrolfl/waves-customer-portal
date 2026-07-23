@@ -31,10 +31,13 @@ const BASE_VALUES = {
   customer_recommendations: 'Avoid over-pruning, Keep mulch off trunks / stems, Monitor decline',
 };
 
-// The hand-entered condition/detail fields removed 2026-07-23 (the AI photo
-// review is the source for all of this now). Submitting any of them must
-// reject as an unknown field — the cutover is total, not soft.
-const RETIRED_FIELD_KEYS = [
+// The hand-entered condition/detail fields left the PRIMARY form 2026-07-23
+// (the AI photo review is the source there). They survive as companionOnly:
+// COMPANION T&S sections on combined visits run no per-line photo
+// assessment, so hand capture stays the only condition source there (codex
+// P2 on #2950). A primary submission carrying any of them must reject as an
+// unknown field — the primary cutover is total, not soft.
+const COMPANION_ONLY_FIELD_KEYS = [
   'observed_conditions', 'palms_serviced', 'palm_condition',
   'palm_nutrient_stress', 'spear_leaf_condition', 'canopy_density',
   'palm_trunk_concern', 'ganoderma_conk_observed', 'injection_recommended',
@@ -45,17 +48,17 @@ const RETIRED_FIELD_KEYS = [
 ];
 
 describe('tree & shrub schema', () => {
-  test('registered with the simplified sections and a required core', () => {
+  test('primary slice carries the simplified sections and a required core', () => {
     const config = PROJECT_TYPES.tree_shrub;
     expect(config).toBeTruthy();
-    const sections = new Set(config.findingsFields.map((f) => f.section));
+    const primarySections = new Set(findingsSchemaForType('tree_shrub').fields.map((f) => f.section));
     for (const section of ['Service scope', 'Treatments', 'Compliance', 'Recommendations']) {
-      expect(sections.has(section)).toBe(true);
+      expect(primarySections.has(section)).toBe(true);
     }
-    // Owner directive 2026-07-23: the detail modules are gone entirely — the
-    // AI photo review carries condition detail, so no module sections remain.
+    // Owner directive 2026-07-23: the detail modules are gone from the
+    // PRIMARY form — the AI photo review carries condition detail there.
     for (const section of ['Observed conditions', 'Palm module', 'Shrub & ornamental module', 'Bed & pre-emergent module']) {
-      expect(sections.has(section)).toBe(false);
+      expect(primarySections.has(section)).toBe(false);
     }
     // Only scope + condition are typed by hand — treatments derive from
     // products, everything condition-grade comes from the AI photo review.
@@ -73,8 +76,8 @@ describe('tree & shrub schema', () => {
     // products list on combined visits can't be attributed per line).
     expect(byKey.treatments_completed.autoFilled).toBe(true);
     expect(byKey.treatments_completed.type).toBe('multi_select');
-    // The manual condition/detail fields are gone from the served schema.
-    for (const key of RETIRED_FIELD_KEYS) {
+    // The manual condition/detail fields are gone from the primary slice.
+    for (const key of COMPANION_ONLY_FIELD_KEYS) {
       expect({ key, present: key in byKey }).toEqual({ key, present: false });
     }
     // Core scope fields stay primary (no expander left to hide behind).
@@ -88,6 +91,21 @@ describe('tree & shrub schema', () => {
     // is shared with chips so downstream consumers are unaffected.
     expect(byKey.plant_groups.type).toBe('multi_select');
     expect(byKey.customer_recommendations.type).toBe('multi_select');
+  });
+
+  test('companion slice keeps the condition detail fields behind the expander (codex P2 on #2950)', () => {
+    // Combined visits (lawn + T&S companion) run no per-line AI assessment,
+    // so the companion form retains the hand-entered condition capture the
+    // primary form dropped — collapsed as optional detail, exactly as the
+    // pre-cutover form served them.
+    const companion = findingsSchemaForType('tree_shrub', { companion: true });
+    const byKey = Object.fromEntries(companion.fields.map((f) => [f.key, f]));
+    for (const key of COMPANION_ONLY_FIELD_KEYS) {
+      expect({ key, present: key in byKey, detail: byKey[key]?.detail }).toEqual({ key, present: true, detail: true });
+    }
+    // The companion core matches the primary core.
+    expect(byKey.plant_groups.detail).toBe(false);
+    expect(byKey.landscape_condition.detail).toBe(false);
   });
 
   test('no pest activity gauge — condition narrative leads instead', () => {
@@ -129,10 +147,11 @@ describe('owner template composition', () => {
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
-  test('no hand-entered palm note — palm/canopy detail belongs to the AI photo review (owner 2026-07-23)', () => {
-    // Even a palms-in-scope visit composes without the retired Ganoderma
-    // reassurance sentence: the tech no longer records a trunk/conk check,
-    // so a hand-entered claim would have no truthful source.
+  test('primary completions compose without a palm note — the fields no longer exist there (owner 2026-07-23)', () => {
+    // BASE_VALUES is the post-cutover primary shape (no Ganoderma/trunk
+    // fields), so even a palms-in-scope primary visit composes without the
+    // reassurance sentence; palm detail reaches the customer through the AI
+    // photo review on the V2 report.
     const result = buildTodaysResult({
       projectType: 'tree_shrub',
       reportTypeLabel: 'Tree & Shrub Service Summary',
@@ -142,22 +161,54 @@ describe('owner template composition', () => {
       visitSequence: 1,
     });
     expect(result.body).not.toContain('Ganoderma');
+  });
 
-    const shrubsOnly = buildTodaysResult({
+  test('companion values keep the coupled Ganoderma reassurance / flag (codex P2 on #2950)', () => {
+    // Companion sections still hand-capture the palm module, so their
+    // Today's Result keeps the owner-template palm note.
+    const companionValues = { ...BASE_VALUES, ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' };
+    const clean = buildTodaysResult({
       projectType: 'tree_shrub',
       reportTypeLabel: 'Tree & Shrub Service Summary',
-      values: {
-        plant_groups: 'Shrubs, Hedges',
-        landscape_condition: 'Good',
-        treatments_completed: 'Fertilizer',
-        customer_recommendations: 'Continue program',
-      },
+      values: companionValues,
       chips: ['Continue Tree & Shrub program'],
       activity: null,
       visitSequence: 1,
     });
-    expect(shrubsOnly.headline).toBe('Overall landscape condition is good.');
-    expect(shrubsOnly.body).not.toContain('Ganoderma');
+    expect(clean.body).toContain('No visible Ganoderma conks or trunk decay were observed on the palms today.');
+
+    const flagged = buildTodaysResult({
+      projectType: 'tree_shrub',
+      reportTypeLabel: 'Tree & Shrub Service Summary',
+      values: { ...companionValues, ganoderma_conk_observed: 'Yes', landscape_condition: 'Declining' },
+      chips: ['Arborist review recommended'],
+      activity: null,
+      visitSequence: 1,
+    });
+    expect(flagged.headline).toBe('Overall landscape condition is declining — see the recommendations below.');
+    expect(flagged.body).toContain('A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.');
+
+    const trunkConcern = buildTodaysResult({
+      projectType: 'tree_shrub',
+      reportTypeLabel: 'Tree & Shrub Service Summary',
+      values: { ...companionValues, palm_trunk_concern: 'Yes' },
+      chips: ['Monitor plant response'],
+      activity: null,
+      visitSequence: 1,
+    });
+    expect(trunkConcern.body).toContain('No visible Ganoderma conks were observed on the palms today.');
+    expect(trunkConcern.body).not.toContain('or trunk decay');
+
+    // Stray palm values never claim palm findings on a non-palm visit.
+    const nonPalm = buildTodaysResult({
+      projectType: 'tree_shrub',
+      reportTypeLabel: 'Tree & Shrub Service Summary',
+      values: { ...companionValues, plant_groups: 'Shrubs' },
+      chips: ['Continue Tree & Shrub program'],
+      activity: null,
+      visitSequence: 1,
+    });
+    expect(nonPalm.body).not.toContain('Ganoderma');
   });
 });
 
@@ -176,11 +227,12 @@ describe('validation', () => {
     expect(result.missing).toEqual([]);
   });
 
-  test('retired detail fields reject as unknown — the cutover is total (owner 2026-07-23)', () => {
+  test('companion-only fields reject as unknown on the PRIMARY path — the cutover is total (owner 2026-07-23)', () => {
     // A stale client (or restored pre-cutover draft that escaped the client
-    // prune) submitting any removed field must fail loudly, not persist
-    // hand-entered condition data the form can no longer edit.
-    for (const key of RETIRED_FIELD_KEYS) {
+    // prune) submitting any companion-only field on a primary completion
+    // must fail loudly, not persist hand-entered condition data the primary
+    // form can no longer edit.
+    for (const key of COMPANION_ONLY_FIELD_KEYS) {
       const result = validateTypedFindings({
         type: 'tree_shrub',
         values: { ...BASE_VALUES, [key]: key === 'palms_serviced' ? '4' : 'Yes' },
@@ -190,6 +242,70 @@ describe('validation', () => {
       expect({ key, ok: result.ok }).toEqual({ key, ok: false });
       expect(result.errors.join(' ')).toMatch(new RegExp(`Unknown findings field: ${key}`));
     }
+  });
+
+  test('companion submissions accept the condition detail fields (codex P2 on #2950)', () => {
+    const result = validateTypedFindings({
+      type: 'tree_shrub',
+      values: {
+        plant_groups: 'Palms, Shrubs',
+        landscape_condition: 'Good',
+        treatments_completed: 'Fertilizer',
+        observed_conditions: 'Scale, Yellowing / chlorosis',
+        palm_condition: 'Fair',
+        ganoderma_conk_observed: 'No',
+        pest_pressure: 'Light',
+      },
+      expectedType: 'tree_shrub',
+      enforceRequired: true,
+      companion: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.missing).toEqual([]);
+  });
+
+  test('companion cross-field coherence still enforced (No-major-issues / palm scope / pre-emergent)', () => {
+    const base = {
+      plant_groups: 'Palms, Shrubs',
+      landscape_condition: 'Fair',
+      treatments_completed: 'Fertilizer',
+    };
+    for (const extra of [
+      { observed_conditions: 'No major issues observed, Scale' },
+      { observed_conditions: 'No major issues observed', pest_pressure: 'Heavy' },
+      { observed_conditions: 'No major issues observed', ganoderma_conk_observed: 'Yes' },
+      { observed_conditions: 'No major issues observed', pruning_issue_observed: 'Yes' },
+    ]) {
+      const result = validateTypedFindings({
+        type: 'tree_shrub',
+        values: { ...base, ...extra },
+        expectedType: 'tree_shrub',
+        enforceRequired: true,
+        companion: true,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.join(' ')).toMatch(/No major issues observed/);
+    }
+
+    const palmScope = validateTypedFindings({
+      type: 'tree_shrub',
+      values: { ...base, plant_groups: 'Shrubs, Hedges', palm_condition: 'Fair', ganoderma_conk_observed: 'No' },
+      expectedType: 'tree_shrub',
+      enforceRequired: true,
+      companion: true,
+    });
+    expect(palmScope.ok).toBe(false);
+    expect(palmScope.errors.join(' ')).toMatch(/Palms is not among the serviced plant groups/);
+
+    const preEmergent = validateTypedFindings({
+      type: 'tree_shrub',
+      values: { ...base, treatments_completed: 'Inspection only', pre_emergent_applied: 'Yes' },
+      expectedType: 'tree_shrub',
+      enforceRequired: true,
+      companion: true,
+    });
+    expect(preEmergent.ok).toBe(false);
+    expect(preEmergent.errors.join(' ')).toMatch(/Pre-emergent applied/);
   });
 
   test('"Inspection only" cannot ride with applied treatments', () => {
@@ -224,10 +340,10 @@ describe('snapshot', () => {
     expect(findBannedCustomerCopy(JSON.stringify(snapshot))).toEqual([]);
   });
 
-  test('legacy value labels stay renderable for previously stored snapshots', () => {
-    // Old visits persisted these fields into their immutable snapshots; the
-    // copy maps must keep rendering them even though the form no longer
-    // collects them.
+  test('detail-field value labels stay renderable (legacy snapshots + companion sections)', () => {
+    // Old visits persisted these fields into their immutable snapshots, and
+    // companion sections still collect them live — the copy maps must keep
+    // rendering them even though the primary form no longer does.
     expect(customerLabelForValue('ganoderma_conk_observed', 'Yes')).toContain('arborist');
     expect(customerLabelForValue('pre_emergent_applied', 'Yes')).toContain('Pre-emergent');
     expect(customerLabelForValue('new_growth_present', 'No')).toBe('No new growth observed yet');

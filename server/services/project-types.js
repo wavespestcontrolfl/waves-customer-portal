@@ -750,14 +750,21 @@ const PROJECT_TYPES = {
   },
 
   // Tree & Shrub program visit (owner spec 2026-06-12, Phase 2 §6; simplified
-  // by owner directive 2026-07-21 and again 2026-07-23) — the tech records
-  // scope + overall condition only. Everything condition-grade the old
-  // palm/shrub/bed detail modules captured by hand (pest/disease pressure,
-  // deficiency, canopy, spear leaf, Ganoderma, bed weeds, …) now comes from
-  // the AI photo review (tree-shrub-assessment.js dual-vision scoring), and
-  // treatments derive from the recorded products. The two `internal: true`
-  // compliance fields feed the ported closeout checks (pollinator block,
-  // IRAC/FRAC) and never render on customer reports.
+  // by owner directive 2026-07-21 and again 2026-07-23) — on a PRIMARY T&S
+  // completion the tech records scope + overall condition only. Everything
+  // condition-grade the old palm/shrub/bed detail modules captured by hand
+  // (pest/disease pressure, deficiency, canopy, spear leaf, Ganoderma, bed
+  // weeds, …) now comes from the AI photo review (tree-shrub-assessment.js
+  // dual-vision scoring), and treatments derive from the recorded products.
+  // The detail fields survive as `companionOnly: true`: COMPANION T&S
+  // sections on combined visits (e.g. lawn + T&S) run no per-line photo
+  // assessment, so hand capture stays the only condition source there —
+  // the same reason treatments_completed is companion-collected (codex P2
+  // on #2950). findingsSchemaForType drops companionOnly fields from the
+  // primary slice, and validateTypedFindings rejects them on primary
+  // submissions. The two `internal: true` compliance fields feed the ported
+  // closeout checks (pollinator block, IRAC/FRAC) and never render on
+  // customer reports.
   tree_shrub: {
     label: 'Tree & Shrub Service',
     short: 'Tree & Shrub',
@@ -772,6 +779,13 @@ const PROJECT_TYPES = {
       { key: 'landscape_condition', label: 'Overall landscape condition', type: 'select', section: 'Service scope', options: [
         'Excellent', 'Good', 'Fair', 'Poor', 'Declining', 'Recovering',
       ] },
+      { key: 'observed_conditions', label: 'Observed plant conditions', type: 'multi_select', section: 'Observed conditions', detail: true, companionOnly: true, options: [
+        'Healthy / new growth', 'Yellowing / chlorosis', 'Leaf spot', 'Scale',
+        'Mealybug', 'Aphids', 'Whitefly', 'Mites', 'Caterpillar damage',
+        'Sooty mold', 'Fungal pressure', 'Nutrient deficiency', 'Drought stress',
+        'Overwatering stress', 'Pruning stress', 'Freeze / cold damage',
+        'Salt / wind stress', 'No major issues observed',
+      ] },
       // Derived from the products applied at completion (owner directive
       // 2026-07-21 — "just add solutions used"): the tech never fills this
       // by hand; deriveTreeShrubTreatments maps product categories to these
@@ -782,6 +796,24 @@ const PROJECT_TYPES = {
         'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
         'Soil amendment / acidifier', 'Inspection only',
       ] },
+      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm module', detail: true, companionOnly: true },
+      { key: 'palm_condition', label: 'Palm condition', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Good', 'Fair', 'Poor', 'Declining'] },
+      { key: 'palm_nutrient_stress', label: 'Palm nutrient stress', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'spear_leaf_condition', label: 'Spear leaf condition', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Firm', 'Soft', 'Pulling', 'Not checked'] },
+      { key: 'canopy_density', label: 'Canopy density', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Full', 'Moderate', 'Thin', 'Declining'] },
+      { key: 'palm_trunk_concern', label: 'Trunk concern', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'ganoderma_conk_observed', label: 'Visible Ganoderma conk', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'injection_recommended', label: 'Injection recommended', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'pest_pressure', label: 'Pest pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'deficiency_symptoms', label: 'Deficiency symptoms', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'new_growth_present', label: 'New growth present', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'pruning_issue_observed', label: 'Pruning issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'irrigation_issue_observed', label: 'Irrigation issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'bed_weed_pressure', label: 'Bed weeds present', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, placeholder: 'Front bed near driveway…' },
       // Ported closeout compliance (internal-only; see tree-shrub-closeout
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance

@@ -8609,6 +8609,14 @@ export function CompletionPanel({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [treeShrubCloseoutOn, servicePhotos, service.id]);
+  // T&S completions dropped the Areas-treated picker (owner 2026-07-23) —
+  // but a draft saved BEFORE the change can still restore stale room/zone
+  // chips into hidden state, where the tech can't see or clear them and the
+  // submit/recap/report paths would still consume them (codex P3 on #2950).
+  // Clear the state whenever it appears so every consumer sees empty.
+  useEffect(() => {
+    if (treeShrubCloseoutOn && areasServiced.length) setAreasServiced([]);
+  }, [treeShrubCloseoutOn, areasServiced]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -9438,7 +9446,10 @@ export function CompletionPanel({
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
       // dedupe, so re-selecting can't submit both strings). Other values pass through.
-      Array.isArray(savedDraft.areasServiced)
+      // T&S never restores areas — the picker is gone there (owner 2026-07-23) and a
+      // pre-change draft's chips would sit invisible in state (codex P3 on #2950);
+      // the treeShrubCloseoutOn clearing effect backstops any other entry path.
+      !treeShrubCloseoutOn && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
     );
