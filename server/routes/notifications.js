@@ -638,6 +638,17 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         updated_at: new Date(),
       });
       savedContacts = contacts.map(serviceContactPayload);
+      // Recipient double opt-in (gated + dark template): ask each newly
+      // saved phone recipient to confirm by reply. Fire-and-forget — the
+      // save response never waits on Twilio.
+      if (updates.serviceContactsConsent === true && contacts.length) {
+        const { requestRecipientOptins } = require('../services/recipient-optin');
+        requestRecipientOptins({
+          customer: beforeRow,
+          contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
+          propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
+        }).catch(() => {});
+      }
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
       // mirrors the list save: the same person (matched by phone/email/name

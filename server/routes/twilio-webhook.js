@@ -215,6 +215,11 @@ router.post('/sms', async (req, res) => {
         source: `twilio_webhook_${optCommand.detectionMethod}`,
         capturedBody: Body,
       });
+      // Recipient double opt-in: a pending third-party recipient who replies
+      // STOP is recorded as declined (no-op when no recipient row exists).
+      try {
+        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'declined');
+      } catch { /* never block the STOP path */ }
       try {
         if (customer) {
           await db('notification_prefs')
@@ -263,6 +268,11 @@ router.post('/sms', async (req, res) => {
         phone: normalizedFrom || From,
         source: `twilio_webhook_${optCommand.detectionMethod}`,
       });
+      // Recipient double opt-in: YES from a pending third-party recipient
+      // confirms them (no-op when no recipient row exists).
+      try {
+        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'confirmed');
+      } catch { /* never block the opt-in path */ }
       try {
         if (customer) {
           await db('notification_prefs')
