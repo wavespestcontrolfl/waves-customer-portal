@@ -2395,6 +2395,34 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 18: no-need CTA bounds, pipe-less denials, coverage lists, guarded here-to-help, from-competitors, etc. splits, fragment verbs, wrapped FAQs, stale intros', () => {
+    for (const body of [
+      'No need for a subscription, book pest control in Naples today.',
+      'No need for a consultation before scheduling pest control in Naples.',
+      "We're here to help in Naples.",
+      'Our service area excludes Naples, but includes Tampa.',
+      '*Do you serve Naples?* Yes.',
+      '`Do you serve Naples?` Yes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'No need for pest control in Naples.',
+      '| Areas we serve | Notes\n| --- | ---\n| Naples | No',
+      'Outside our coverage area: Naples, Fort Myers.',
+      "We're here to help you understand Naples pest pressure.",
+      'Pest control is available in Naples from competitors.',
+      'Naples termite research covers ants, roaches, etc. We serve Sarasota homes.',
+      'Includes Naples weather data from UF/IFAS',
+      '**Do you serve Naples?** No.',
+      'We serve these areas:\n\n| City |\n| --- |\n| Venice |\n\n- Naples termite research topics',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',

@@ -652,12 +652,12 @@ const DEMAND_CONTEXT_SOURCE =
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv(?:e|es|ed|ing)\\b(?!\\s+up\\b)|servic\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*|visit\\w*|spray\\w*|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|get(?:s|ting)? rid of\\b|help(?:s|ing|ed)?\\b(?!\\s+(?:you|readers?|homeowners?)\\s+(?:understand|identify|learn|compare|decide|research|choose|spot))|manag(?:e|es|ed|ing)\\b(?!\\s+to\\b))"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
-  + "|(?:we(?:'re| are)?|waves(?: pest control)?(?:'s|')?(?: is| are)?|our (?:team|techs?|technicians?|crews?)(?: is| are)?)\\s*here to help\\b"
+  + "|(?:we(?:'re| are)?|waves(?: pest control)?(?:'s|')?(?: is| are)?|our (?:team|techs?|technicians?|crews?)(?: is| are)?)\\s*here to help\\b(?!\\s+(?:you|readers?|homeowners?)\\s+(?:understand|identify|learn|compare|decide|research|choose|spot))"
   + "|we(?:'re| are|'ll| will|'ve| have)?(?: been)?(?: also| now| currently| proudly| still)? (?:work(?:s|ed|ing)?|operat(?:e|es|ed|ing)) (?:in|throughout|across|around)\\b(?!\\s+(?:\\w+\\s+){0,2}?(?:records?|data|datasets?|research|studies|regulations?|rules|ordinances?|history|archives?|reports?|statistics|literature|documents?)\\b)|\\b(?:and|or)\\s+(?:now\\s+|currently\\s+|also\\s+|still\\s+|\\w+ly\\s+)?(?:work(?:s|ing)?|operat(?:e|es|ing)) (?:in|throughout|across|around)\\b|\\b(?:and|or)\\s+(?:now\\s+|currently\\s+|also\\s+|still\\s+|\\w+ly\\s+)?(?:visit|visits|spray|sprays|treat|treats|cover|covers|protect|protects|inspect|inspects|handle|handles|serve|serves|service|services|include|includes|extend|extends|reach|reaches)\\b(?!\\s+up\\b)(?!\\s+(?:\\w+\\s+){0,2}?(?:records?|data|datasets?|research|studies|regulations?|rules|ordinances?|history|archives?|reports?|statistics|literature|documents?)\\b)"
   + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bstopped\\s)(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?)(?:\\s*(?=:)|\\s+(?:now\\s+)?(?:includes?|covers?|extends?|reaches?|adds?|added|gained|grew|grows|growing)\\b)|(?:part of|one of|includ(?:ed|ing) in|joins?|joined|joining|added to|adding to|expands? (?:to|into)|expanding (?:to|into)|within|inside)\\s+our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?)\\b|our coverage\\s+(?:now\\s+)?(?:includes?|covers?|extends?|reaches?|adds?|added|grew|grows|growing)\\b|(?:is|are|lies?|sits?|falls?)\\s+(?:now\\s+|currently\\s+|proudly\\s+)?in\\s+our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?)\\b|(?:is|are)\\s+(?:now\\s+|also\\s+|officially\\s+)?(?:(?:a|our|one of our|among our)\\s+)?(?:newest\\s+)?(?:service|coverage)\\s+(?:areas?|footprints?)\\b|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|(?:schedule|book(?:ing)?)\\b(?![^.!?]{0,50}\\bwith\\s+(?:another|other|a different|any|that|your current)\\s+(?:compan|provider|firm|exterminator)\\w*)(?![^.!?]{0,60}\\b(?:contact|call|hire|choose|find|use)\\s+(?:a\\s+|an\\s+|your\\s+)?(?:local|nearby|area|another|different|licensed)\\s+(?:provider|compan(?:y|ies)|firm|exterminator|pro(?:fessional)?)s?\\b)(?![^.!?]{0,60}\\b(?:we|waves\\w*)\\s+(?:do not|don\'?t|does not|doesn\'?t|cannot|can\'?t|won\'?t)\\b)'
   + "|(?:our|waves(?: pest control)?(?:'s|')?) (?:[\\w-]+ ){0,2}?(?:technicians?|techs?|team|routes?|trucks?|vans?|crews?|offices?|branch(?:es)?|plans?|programs?|memberships?)(?:\\s+\\w+){0,2}\\s+(?:available (?:in|throughout|across|to|for|near)\\b|includ(?:e|es|ed|ing)\\b|help(?:s|ing|ed)?\\b(?!\\s+(?:you|readers?|homeowners?)\\s+(?:understand|identify|learn|compare|decide|research|choose|spot))|get(?:s|ting)? rid of\\b|extend(?:s|ed|ing)? (?:to|into)\\b|reach(?:es|ed|ing)?\\b|exterminat\\w+\\b|remov(?:e|es|ed|ing)\\b|eliminat\\w+\\b|proud to (?:serve|service|treat|cover|protect)\\b|treat(?:s|ing|ed)?\\b|serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|cover(?:s|ing|ed)?\\b|visit(?:s|ing|ed)?\\b|inspect(?:s|ing|ed)?\\b|handl(?:e|es|ing|ed)\\b|spray(?:s|ing|ed)?\\b|run(?:s|ning)?\\b|protect(?:s|ing|ed)?\\b|work(?:s|ing|ed)? (?:in|throughout|across|around)|operat(?:e|es|ing|ed)? (?:in|throughout|across|around))"
-  + '|same.day|we offer|free (?:quote|estimate|inspection)|' + DEMAND_CONTEXT_SOURCE + '|^\\s*(?:and |but |yet )?(?:also |now |still |currently )?(?:includes?|covers?|extends? (?:to|into)|reaches?|serves?|services?|treats?|visits?|sprays?|inspects?|protects?|handles?|helps?)\\b(?!\\s+up\\b)'
+  + '|same.day|we offer|free (?:quote|estimate|inspection)|' + DEMAND_CONTEXT_SOURCE + '|^\\s*(?:and |but |yet )?(?:also |now |still |currently )?(?:includes?|covers?|extends? (?:to|into)|reaches?|serves?|services?|treats?|visits?|sprays?|inspects?|protects?|handles?|helps?)\\b(?!\\s+up\\b)(?![^.!?]{0,30}\\b(?:data|research|weather|statistics|figures|information|charts?|tables?|topics?|sources?|studies)\\b)'
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\s+(?:(?!(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|about|on|regarding|of|for|to)\\b)[a-z-]+\\s+){0,2}?(?:(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+)?(?:control|care|treatment|service|plan|program|inspection|removal|exterminat)\\w*\\b(?!\\s+(?:(?!(?:and|or|nor|plus|as)\\b)[a-z-]+\\s+){0,2}?(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|myths?|history|overviews?|checklists?|comparisons?|roundups?|director(?:y|ies)|summar(?:y|ies)|glossar(?:y|ies)|calendars?|faqs?)\\b)"
   // Editorial-FIRST mixed objects ("we provide pest control advice and
   // services in Naples") — an in/near-anchored "…services in <place>" after
@@ -680,7 +680,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|treat(?:s|ed|ing)?|cover(?:s|ed|ing)?|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|visit(?:s|ed|ing)?\\b|spray(?:s|ed|ing)?\\b|inspect\\w*|handl\\w+|protect\\w*|get(?:s|ting)? rid of\\b|help(?:s|ing|ed)?\\b(?!\\s+(?:you|readers?|homeowners?)\\s+(?:understand|identify|learn|compare|decide|research|choose|spot))|manag(?:e|es|ed|ing)\\b(?!\\s+to\\b)|proud to (?:serve|service|treat|cover|protect)\\b|work(?:s|ed|ing)? (?:in|throughout|across|around)|operat(?:es|ed|ing)? (?:in|throughout|across|around))"
   + "|(?:is|are|has been|have been) (?:proudly |now |regularly )?(?:covered|served|serviced|treated|protected|inspected|sprayed|visited) by (?:our (?:team|techs?|technicians?|crews?)|waves(?: pest control)?(?:'s|')?)"
   + "|we(?:'re| are) (?:now |also |still |currently )?available (?:in|throughout|across|to|for|near)\\b"
-  + `|(?<!\\bno\\s+(?:[\\w']+\\s+){0,2})(?<!\\bnot\\s+(?:[\\w']+\\s+){0,2})${SERVICE_KEYWORD_SOURCE}\\s+(?:is|are|can be|may be)\\s+(?:now\\s+)?(?:available|offered|provided|booked|bookable|scheduled|requested|reserved)\\s*(?:to|for|in|near|throughout|across)\\b(?![^.!?]{0,40}\\bby\\s+(?:the\\s+county|the\\s+city|the\\s+state|counties|municipalit\\w+|other\\s+(?:compan|provider|firm)\\w*|competitors?|national\\s+chains?|local\\s+(?:compan|provider|firm)\\w*)\\b))\\b`,
+  + `|(?<!\\bno\\s+(?:[\\w']+\\s+){0,2})(?<!\\bnot\\s+(?:[\\w']+\\s+){0,2})${SERVICE_KEYWORD_SOURCE}\\s+(?:is|are|can be|may be)\\s+(?:now\\s+)?(?:available|offered|provided|booked|bookable|scheduled|requested|reserved)\\s*(?:to|for|in|near|throughout|across)\\b(?![^.!?]{0,40}\\b(?:by|from)\\s+(?:the\\s+county|the\\s+city|the\\s+state|counties|municipalit\\w+|other\\s+(?:compan|provider|firm)\\w*|competitors?|national\\s+chains?|local\\s+(?:compan|provider|firm)\\w*)\\b))\\b`,
   'i',
 );
 
@@ -711,7 +711,7 @@ function tenureClaimFinding(text) {
 // negates a service line, not the footprint — so negation exempts a city
 // only when the city itself is the OBJECT of the negated verb (see
 // cityNegationRe). Tested on apostrophe-normalized text.
-const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a service area|one of our service areas)\b|beyond our (?:(?:service|coverage) )?(?:areas?|footprints?)|our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?) (?:excludes?|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
+const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:in|within|inside|(?:a )?part of|included in|covered by) our (?:(?:service|coverage) )?(?:areas?|footprints?)|(?:not|isn'?t|aren'?t) (?:currently )?(?:a service area|one of our service areas)\b|beyond our (?:(?:service|coverage) )?(?:areas?|footprints?)|our (?:(?:service|coverage)\\s+)?(?:areas?|footprints?) (?:excludes?|does not (?:include|extend|reach)|doesn'?t (?:include|extend|reach))\b)\b/i;
 
 // "…does not include Tampa", "we no longer serve Naples" — the negated
 // verb's object (within a few words) is this specific city.
@@ -734,7 +734,7 @@ function blankDisclaimers(text, ranges) {
 
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t|is not|isn'?t|are not|aren'?t|was not|wasn'?t|were not|weren'?t) (?:currently |yet |now )?(?:includ(?:e|ing)|cover(?:ing)?|serv(?:e|ing)|servic(?:e|ing)|extend(?:ing)?(?: to| into)?|reach(?:ing)?|treat(?:ing)?|visit(?:ing)?|book(?:ing)?|schedul(?:e|ing)|offer(?:ing)?|provid(?:e|ing)|deliver(?:ing)?)|excludes?|stops? (?:short of|before|at)|(?:is|are|was|were)?\\s*(?:not|never|no longer)\\s+(?:currently\\s+)?(?:available|offered|provided)\\s+(?:in|to|for|near|throughout|across)|unavailable\\s+(?:in|to|for|near|throughout|across)|no (?:need|reason) (?:for\\b|to (?!(?:wait|delay|hesitate|put off|hold off|postpone|rush)\\b)\\w+))(?:(?!,\\s*(?:we|our|waves|waveguard|you)\\b|\\sand\\s+(?:you\\s+)?(?:can\\s+|could\\s+|will\\s+|would\\s+|may\\s+|might\\s+|do\\s+|does\\s+|now\\s+|still\\s+|also\\s+|\\w+ly\\s+){0,2}(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat|book|schedul|visit|spray|inspect|handl|protect|includ|extend|reach|help)|\\s(?:and|but|yet)\\s+(?:is|are|was|were)\\b|\\bto\\s+(?:book|schedul|call|order|get|claim|redeem)\\w*\\b|\\sand\\s+[^.!?;]{0,30}?\\b(?:is|are)\\s+(?:now\\s+)?(?:available|offered|provided)\\b|\\b(?:we|our|waves|waveguard)\\s+(?:\\w+\\s+){0,2}?(?:provid|offer|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat|book|schedul|visit|spray|inspect|handl|protect|get)\\w*\\b)[^.!?;–—]){0,60}?\\b${citySource}|(?<!\\b(?:serv(?:e|es|ing|ice|ices|icing)|treat(?:s|ing)?|cover(?:s|ing)?|visit(?:s|ing)?|spray(?:s|ing)?|inspect(?:s|ing)?|protect(?:s|ing)?|handl(?:e|es|ing)|exterminat\\w+|in|throughout|across)\\s+)${citySource}(?:(?!\\b(?:we|our|waves|waveguard)\\b\\s+(?:\\w+\\s+){0,2}?(?:serv|treat|cover|visit|spray|inspect|protect|handl|exterminat|book|schedul|offer|provid|deliver|get)\\w*)[^.!?]){0,40}\\b(?:is|sits|falls|lies) (?:just )?(?:outside|beyond|out of|past|(?:south|north|east|west) of\\b(?=[^.!?]{0,30}\\b(?:our|the)\\s+(?:service\\s+)?(?:area|footprint)\\b))\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t|is not|isn'?t|are not|aren'?t|was not|wasn'?t|were not|weren'?t) (?:currently |yet |now )?(?:includ(?:e|ing)|cover(?:ing)?|serv(?:e|ing)|servic(?:e|ing)|extend(?:ing)?(?: to| into)?|reach(?:ing)?|treat(?:ing)?|visit(?:ing)?|book(?:ing)?|schedul(?:e|ing)|offer(?:ing)?|provid(?:e|ing)|deliver(?:ing)?)|excludes?|stops? (?:short of|before|at)|(?:is|are|was|were)?\\s*(?:not|never|no longer)\\s+(?:currently\\s+)?(?:available|offered|provided)\\s+(?:in|to|for|near|throughout|across)|unavailable\\s+(?:in|to|for|near|throughout|across)|no (?:need|reason) (?:for\\b|to (?!(?:wait|delay|hesitate|put off|hold off|postpone|rush)\\b)\\w+))(?:(?!,\\s*(?:we|our|waves|waveguard|you)\\b|\\sand\\s+(?:you\\s+)?(?:can\\s+|could\\s+|will\\s+|would\\s+|may\\s+|might\\s+|do\\s+|does\\s+|now\\s+|still\\s+|also\\s+|\\w+ly\\s+){0,2}(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat|book|schedul|visit|spray|inspect|handl|protect|includ|extend|reach|help)|\\s(?:and|but|yet)\\s+(?:is|are|was|were)\\b|\\bto\\s+(?:book|schedul|call|order|get|claim|redeem)\\w*\\b|,\\s*(?:book|schedul|call|order|get)\\w*\\b|\\b(?:before|when|while|after)\\s+(?:book|schedul|call|order)\\w*\\b|\\sand\\s+[^.!?;]{0,30}?\\b(?:is|are)\\s+(?:now\\s+)?(?:available|offered|provided)\\b|\\b(?:we|our|waves|waveguard)\\s+(?:\\w+\\s+){0,2}?(?:provid|offer|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat|book|schedul|visit|spray|inspect|handl|protect|get)\\w*\\b)[^.!?;–—]){0,60}?\\b${citySource}|(?<!\\b(?:serv(?:e|es|ing|ice|ices|icing)|treat(?:s|ing)?|cover(?:s|ing)?|visit(?:s|ing)?|spray(?:s|ing)?|inspect(?:s|ing)?|protect(?:s|ing)?|handl(?:e|es|ing)|exterminat\\w+|in|throughout|across)\\s+)${citySource}(?:(?!\\b(?:we|our|waves|waveguard)\\b\\s+(?:\\w+\\s+){0,2}?(?:serv|treat|cover|visit|spray|inspect|protect|handl|exterminat|book|schedul|offer|provid|deliver|get)\\w*)[^.!?]){0,40}\\b(?:is|sits|falls|lies) (?:just )?(?:outside|beyond|out of|past|(?:south|north|east|west) of\\b(?=[^.!?]{0,30}\\b(?:our|the)\\s+(?:service\\s+)?(?:area|footprint)\\b))\\b`,
     'i',
   );
 }
@@ -777,7 +777,7 @@ function markdownSegments(body) {
 // Sentence split preserves dotted place abbreviations (St. Petersburg); a
 // rare genuine "St."-final sentence merges with the next, which only widens
 // the claim scope — fails closed. Clause split mirrors the astro-side gate.
-const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)(?<!\b[eE]\.[gG]\.)(?<!\b[iI]\.[eE]\.)(?<!\betc\.)(?<!\bvs\.)\s+/;
+const FOOTPRINT_SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\bSt\.)(?<!\bFt\.)(?<!\bMt\.)(?<!\b[eE]\.[gG]\.)(?<!\b[iI]\.[eE]\.)(?<!\bvs\.)\s+/;
 // Bare adversatives and "and we/our …" split too — the joints where a
 // disclaimer half hides an affirmative half. "and" splits ONLY before a
 // new we/our subject: a bare ", and" boundary would sever the tail of an
@@ -842,6 +842,9 @@ function offFootprintCityFinding(text) {
     // MDX/HTML comments never render — commented-out copy is not a claim.
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
+    // Wrapper chars trailing sentence punctuation ("?*" / ".**") hide the
+    // sentence end from the splitter — drop them; rendering is unchanged.
+    .replace(/([.!?])[*_`]+(\s|$)/g, '$1$2')
     .replace(/\]\(\s*[^)]*\)/g, '](#)')
     .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '');
   if (!s) return null;
@@ -883,6 +886,7 @@ function offFootprintCityFinding(text) {
     const segment = allSegments[segIndex];
     const trimmed = segment.trim();
     if (/^\|.+/.test(trimmed)) {
+      listIntro = '';
       // A row directly above a separator row is the NEXT table's header —
       // never carry a previous table's claim context onto it.
       if (/^\|[\s:|-]+\|?\s*$/.test((allSegments[segIndex + 1] || '').trim())) {
@@ -898,7 +902,7 @@ function offFootprintCityFinding(text) {
       lastTableRow = trimmed;
       if (!tableIntro) {
         scanUnits.push(segment);
-      } else if (/\|\s*(?:\*\*)?(?:no\s*[,.!;:—–-][^|]{0,60}|no|not\b[^|]{0,60}|unavailable[^|]{0,60}|outside\b[^|]{0,40}|✗|✕|x|—|–|-)(?:\*\*)?\s*\|/i.test(trimmed)
+      } else if (/\|\s*(?:\*\*)?(?:no\s*[,.!;:—–-][^|]{0,60}|no|not\b[^|]{0,60}|unavailable[^|]{0,60}|outside\b[^|]{0,40}|✗|✕|x|—|–|-)(?:\*\*)?\s*(?:\||$)/i.test(trimmed)
         || FOOTPRINT_DISCLAIMER_RE.test(trimmed)) {
         // A denial cell ("| Naples | No |") marks the row as boundary
         // status, not a claim — scan the row without the header's claim
@@ -921,14 +925,19 @@ function offFootprintCityFinding(text) {
   const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
   for (let sentenceIndex = 0; sentenceIndex < sentences.length; sentenceIndex += 1) {
     let sentence = sentences[sentenceIndex];
+    // Inline wrappers (bold/italic/code/links) render as plain text — strip
+    // them up front so the FAQ question checks see the rendered words.
+    const faqProbe = sentence
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/[*_`]+/g, '');
     // A second-person service question answered "Yes" is a rendered claim
     // ("### Do you serve Naples?" / "Yes.") — rewrite the subject to
     // first person so the claim arms see it. DIY questions ("Can you treat
     // your lawn yourself?") stay reader-directed.
-    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\b(?:\b(?:St|Ft|Mt)\.|[^.!?])*\b(?:serv|treat|cover|visit|spray|inspect|protect|handl|exterminat|work|operat|available|run)\w*(?:\b(?:St|Ft|Mt)\.|[^.!?])*\?\**\s*$/i.test(sentence)
-      && !/\b(?:yourself|your own|diy)\b/i.test(sentence)
+    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\b(?:\b(?:St|Ft|Mt)\.|[^.!?])*\b(?:serv|treat|cover|visit|spray|inspect|protect|handl|exterminat|work|operat|available|run)\w*(?:\b(?:St|Ft|Mt)\.|[^.!?])*\?\**\s*$/i.test(faqProbe)
+      && !/\b(?:yourself|your own|diy)\b/i.test(faqProbe)
       && /^\s*(?:yes\b|absolutely\b|of course\b|yep\b|we (?:do|are|can|sure do)\b|they (?:do|are)\b)/i.test((sentences[sentenceIndex + 1] || '').replace(/[‘’]/g, "'").replace(/^[\s*_~`>#-]+/, ''))) {
-      sentence = sentence.replace(/\b(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\s+/i, 'our team ');
+      sentence = faqProbe.replace(/\b(?:do|does|can|could|will|would|is|are)\s+(?:you|your\s+\w+|waves\w*)\s+/i, 'our team ');
     }
     // A boundary FAQ asks about service and then denies it ("Do we serve
     // Naples? No.") — the interrogative sentence is a question, not a
@@ -936,7 +945,7 @@ function offFootprintCityFinding(text) {
     // The "No" must be a standalone denial answer ("No." / "No, we…") —
     // affirmative no-prefixed CTAs ("No problem—call today", "No
     // appointment needed") are not denials.
-    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|did|can|could|will|would|should|is|are|was|were|need|want|looking)\b(?:\b(?:St|Ft|Mt)\.|[^.!?])*\?\**\s*$/i.test(sentence)
+    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|did|can|could|will|would|should|is|are|was|were|need|want|looking)\b(?:\b(?:St|Ft|Mt)\.|[^.!?])*\?\**\s*$/i.test(faqProbe)
       && /^\s*(?:no\s*[.,!;:—–-]|no\s+(?:we|unfortunately|sorry|not)\b|not\b|nope\b|unfortunately\b|sadly\b|we (?:do not|don'?t|cannot|can'?t)|(?:contact|call|try|choose|find|use)\s+(?:a|an|your)?\s*(?:local|nearby|another|different|licensed))/i.test((sentences[sentenceIndex + 1] || '').replace(/[‘’]/g, "'").replace(/^[\s*_~`>#-]+/, ''))) {
       continue;
     }
