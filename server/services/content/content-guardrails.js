@@ -628,7 +628,7 @@ const SERVICE_NOUN_SOURCE = '(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed
 // The optional trailing "services/plans/programs" keeps compound phrasings
 // like "pest control services in Naples" inside one keyword match — the
 // in/near/for context arm anchors right after the keyword.
-const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?(?!\\s+guides?\\b))?`;
+const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)\\s*${SERVICE_NOUN_SOURCE})*\\s+(?:control|care|removal|treatment|exterminat\\w+|inspection|service)s?(?:\\s+(?:service|plan|program)s?\\b(?!\\s+guides?\\b))?`;
 // "serve up"/"serving up" is the editorial idiom ("serving up a
 // Naples-vs-Sarasota comparison") — guarded on every serve-form arm.
 // offer/provide/deliver assert operation like serve/treat, but ONLY when a
@@ -648,13 +648,13 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // services in Naples") — an in/near-anchored "…services in <place>" after
   // a first-person/brand offer verb is an operating claim no matter what
   // editorial noun sits between.
-  + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?:(?!\\b(?:about|regarding|concerning)\\b)[^.!?;]){0,40}?\\bservices?\\s+(?:in|near|throughout|across)\\b"
+  + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?:(?!\\b(?:about|regarding|concerning|on|for)\\b)[^.!?;]){0,40}?\\bservices?\\s+(?:in|near|throughout|across)\\b"
   + `|(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
   // A short punctuation-free segment built around the keyword is a bare
   // packaging TITLE/META ("Cape Coral pest control services") — prose
   // sentences carry terminal punctuation and never match the anchored form.
-  + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}[^.!?]{0,25}$`
-  + `|\\b(?<!\\b(?:about|regarding|concerning)\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
+  + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|faqs?)\\b)[^.!?]{0,25}$`
+  + `|\\b(?<!\\b(?:about|regarding|concerning|on|for)\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   // "Our pest control services guide explains…" is editorial packaging of
   // CONTENT, not of service — the guide-compound lookahead mirrors the
   // keyword suffix's own guard.
@@ -768,7 +768,7 @@ const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|w
 // separator (a short trailing qualifier like "year-round" is tolerated); a
 // fragment with real lowercase prose is a clause and stays split — "We serve Sarasota; Tampa mosquito season starts earlier" must
 // NOT glue Tampa onto the claim.
-const LIST_FRAGMENT_RE = /^\s*(?!(?:We|Our|Waves|WaveGuard)\b)(?:(?:and|or|nor)\s+|[&/+]\s*|(?!(?:We|Our|Waves|WaveGuard)\b)[A-Z][A-Za-z'.&-]*[\s,–—-]*(?:(?:homes?|properties|lawns?|yards?|businesses?|neighborhoods?)[\s,]*)?)+(?:(?:year-round|weekly|monthly|quarterly|seasonally|daily|too|as well|and more)[\s,]*)?\.?\s*$/;
+const LIST_FRAGMENT_RE = /^\s*(?!(?:We|Our|Waves|WaveGuard)\b)(?:(?:and|or|nor)\s+|[&/+]\s*|(?!(?:We|Our|Waves|WaveGuard)\b)[A-Z][A-Za-z'.&-]*[\s,–—-]*(?:(?:homes?|properties|lawns?|yards?|businesses?|neighborhoods?)[\s,]*)?)+(?:(?:year-round|year\s+round|weekly|monthly|quarterly|seasonally|daily|too|as well|and more|every\s+(?:week|month|day|year|season|visit)|each\s+(?:week|month|visit))[\s,]*)?\.?\s*$/;
 
 function rejoinListSemicolons(sentence) {
   const out = [];
