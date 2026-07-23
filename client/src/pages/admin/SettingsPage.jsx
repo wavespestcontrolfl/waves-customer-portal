@@ -1332,6 +1332,7 @@ const WEEKDAY_CHIP_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function BlackoutDaysTab() {
   const [blackouts, setBlackouts] = useState([]);
   const [weeklyDaysOff, setWeeklyDaysOff] = useState([]);
+  const [weeklySaving, setWeeklySaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState("");
   const [reason, setReason] = useState("");
@@ -1350,10 +1351,14 @@ function BlackoutDaysTab() {
   useEffect(load, []);
 
   const toggleWeeklyDay = async (dow) => {
+    // Whole-array PUT: chips are disabled while a save is in flight so an
+    // older snapshot can never finish last and overwrite a newer click.
+    if (weeklySaving) return;
     const prev = weeklyDaysOff;
     const next = prev.includes(dow)
       ? prev.filter((d) => d !== dow)
       : [...prev, dow].sort((a, b) => a - b);
+    setWeeklySaving(true);
     setWeeklyDaysOff(next); // optimistic — reverted on failure
     setError(null);
     try {
@@ -1366,6 +1371,8 @@ function BlackoutDaysTab() {
     } catch (e) {
       setWeeklyDaysOff(prev);
       setError(e.message);
+    } finally {
+      setWeeklySaving(false);
     }
   };
 
@@ -1438,13 +1445,16 @@ function BlackoutDaysTab() {
               key={label}
               type="button"
               onClick={() => toggleWeeklyDay(dow)}
+              disabled={weeklySaving}
               aria-pressed={off}
               aria-label={`${label} ${off ? "closed" : "open"} weekly`}
               style={{
                 background: off ? D.teal : "transparent",
                 border: `1px solid ${off ? D.teal : D.border}`,
                 borderRadius: 8, color: off ? "#fff" : D.muted,
-                fontWeight: 700, fontSize: 13, padding: "8px 14px", cursor: "pointer",
+                fontWeight: 700, fontSize: 13, padding: "8px 14px",
+                cursor: weeklySaving ? "default" : "pointer",
+                opacity: weeklySaving ? 0.6 : 1,
               }}
             >
               {label}
