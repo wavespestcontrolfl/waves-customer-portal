@@ -4,6 +4,7 @@ import {
   defaultApplicationMethod,
   derivedTotalAmount,
   productControlsTargets,
+  productTargetsNutrition,
 } from "./SchedulePage.jsx";
 
 describe("defaultApplicationMethod", () => {
@@ -64,12 +65,15 @@ describe("derivedTotalAmount", () => {
 });
 
 describe("productControlsTargets", () => {
-  it("hides targets for fertilizers, adjuvants, and soil products", () => {
-    expect(productControlsTargets({ category: "fertilizer" })).toBe(false);
+  it("hides targets for adjuvants, soil products, and growth regulators", () => {
     expect(productControlsTargets({ category: "Adjuvant" })).toBe(false);
     expect(productControlsTargets({ category: "soil_surfactant" })).toBe(false);
-    expect(productControlsTargets({ category: "Micronutrient Fertilizer" })).toBe(false);
     expect(productControlsTargets({ category: "Plant Growth Regulator" })).toBe(false);
+  });
+
+  it("keeps targets for fertilizers — they collect nutrition goals", () => {
+    expect(productControlsTargets({ category: "fertilizer" })).toBe(true);
+    expect(productControlsTargets({ category: "Micronutrient Fertilizer" })).toBe(true);
   });
 
   it("keeps targets for pest/weed/disease control products and unknown rows", () => {
@@ -78,5 +82,20 @@ describe("productControlsTargets", () => {
     expect(productControlsTargets({ category: "termiticide" })).toBe(true);
     expect(productControlsTargets({ category: "" })).toBe(true);
     expect(productControlsTargets(undefined)).toBe(true);
+  });
+});
+
+describe("productTargetsNutrition", () => {
+  it("flags fertilizer-family products for the nutrition suggestion list", () => {
+    expect(productTargetsNutrition({ category: "fertilizer" })).toBe(true);
+    expect(productTargetsNutrition({ category: "Micronutrient Fertilizer" })).toBe(true);
+    expect(productTargetsNutrition({ product_category: "Biostimulant" })).toBe(true);
+  });
+
+  it("stays false for control products and unknown rows", () => {
+    expect(productTargetsNutrition({ category: "insecticide" })).toBe(false);
+    expect(productTargetsNutrition({ category: "herbicide" })).toBe(false);
+    expect(productTargetsNutrition({ category: "" })).toBe(false);
+    expect(productTargetsNutrition(undefined)).toBe(false);
   });
 });

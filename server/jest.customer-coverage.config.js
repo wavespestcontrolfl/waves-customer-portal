@@ -13,6 +13,7 @@ module.exports = {
   testMatch: [
     '<rootDir>/tests/auth-token.test.js',
     '<rootDir>/tests/auth-logout-route.test.js',
+    '<rootDir>/tests/customer-auth-resolve-bearer.test.js',
     '<rootDir>/tests/customer-refresh-session.test.js',
     '<rootDir>/tests/autopay-eligibility.test.js',
     '<rootDir>/tests/portal-ach-add-bank.test.js',

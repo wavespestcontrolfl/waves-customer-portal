@@ -4697,6 +4697,27 @@ function BillingTab({ customer }) {
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
   const balanceTone = currentBalance > 0 ? B.orange : B.glassNavy;
+  // Open-invoice pay links (GATE_PORTAL_PAY_NOW; server includes them only
+  // while the gate is on). Each entry carries the invoice's existing
+  // tokenized /pay URL — the same checkout the SMS/email links open — so
+  // "Pay now" here is a link, not a new payment path.
+  const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
+  const primaryOpenInvoice = openInvoices[0] || null;
+  const payNowButtonStyle = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    padding: '0 16px',
+    borderRadius: 8,
+    background: B.glassNavy,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 850,
+    fontFamily: FONTS.heading,
+    textDecoration: 'none',
+    whiteSpace: 'nowrap',
+  };
   const autopayLabel = bannerConfig.badge;
   const defaultMethodLabel = methodLabel(defaultCard);
   const historyDescription = filteredPayments.length === payments.length
@@ -4823,6 +4844,30 @@ function BillingTab({ customer }) {
             <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
+            {primaryOpenInvoice && (
+              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+                <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
+                  Pay {money(primaryOpenInvoice.amountDue)} now
+                </a>
+                {openInvoices.slice(1).map((inv) => (
+                  <a
+                    key={inv.payUrl}
+                    href={inv.payUrl}
+                    style={{
+                      ...payNowButtonStyle,
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      background: '#fff',
+                      color: B.glassNavy,
+                      border: '1px solid #E7E2D7',
+                      fontWeight: 800,
+                    }}
+                  >
+                    {inv.invoiceNumber ? `${inv.invoiceNumber} · ` : ''}Pay {money(inv.amountDue)}
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -4897,6 +4942,13 @@ function BillingTab({ customer }) {
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
             {bannerConfig.detail}
           </div>
+          {bannerState === 'failed' && primaryOpenInvoice && (
+            <div style={{ marginTop: 10 }}>
+              <a href={primaryOpenInvoice.payUrl} style={payNowButtonStyle} data-glass-accent="">
+                Pay {money(primaryOpenInvoice.amountDue)} now
+              </a>
+            </div>
+          )}
         </div>
       </div>
       )}
@@ -5276,13 +5328,20 @@ function BillingTab({ customer }) {
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
               </div>
               {p.status === 'failed' && (
-                <button type="button" onClick={() => {
-                  document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                  handleAddCard();
-                }} style={{
-                  marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
-                  background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
-                }}>Update Payment Method</button>
+                <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {primaryOpenInvoice && (
+                    <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 36, fontSize: 12 }}>
+                      Pay {money(primaryOpenInvoice.amountDue)} now
+                    </a>
+                  )}
+                  <button type="button" onClick={() => {
+                    document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    handleAddCard();
+                  }} style={{
+                    minHeight: 36, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
+                    background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
+                  }}>Update Payment Method</button>
+                </div>
               )}
             </div>
             <div style={{ textAlign: 'right', flexShrink: 0 }}>

@@ -47,6 +47,7 @@ const KNOWN_FLAGS = [
   "tech_social_enabled", // gates the Tech portal "Social Post" tile (UI side of TECH_SOCIAL_ENABLED)
   "dashboard-ai-charts", // gates the dashboard AI chart builder + pinned widgets (PR #2130)
   "agent_estimate", // mobile-first, manual Agent Estimate workspace (new leads only)
+  "station-map-v1", // bait-station map: completion marking step + C360 panel (PR #2714)
 ];
 
 const DEFAULT_VISUAL_SETTINGS = {

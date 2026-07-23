@@ -461,9 +461,44 @@ function generateRefreshToken(customerId, accountId = null, options = {}) {
   );
 }
 
+// Optional-auth resolver for public routes that ACCEPT a customer bearer but
+// must not demand one (e.g. /booking/confirm under the customers-only gate).
+// Mirrors authenticateCore's access-token contract — refresh tokens rejected,
+// active non-deleted customer required, accountId consistency enforced — but
+// returns the customer row (or null) instead of writing 401 responses, so an
+// absent/expired/garbage header simply resolves to "not a verified customer"
+// and the caller decides what that means.
+//
+// One side-channel: an EXPIRED (but otherwise well-formed) access token stamps
+// req.bearerTokenExpired = true. Access tokens live 15 minutes and a customer
+// can easily spend longer picking a slot, so callers gating on the resolver
+// should answer that case with authenticateCore's refreshable
+// 401 { code: 'TOKEN_EXPIRED' } — the api client refreshes and retries —
+// instead of a terminal refusal. Garbage/forged headers get no such hint.
+async function resolveBearerCustomer(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (decoded.type === 'refresh' || !decoded.customerId) return null;
+    const customer = await db('customers')
+      .where({ id: decoded.customerId, active: true })
+      .whereNull('deleted_at')
+      .first();
+    if (!customer) return null;
+    const customerAccountId = customer.account_id || customer.id;
+    if (decoded.accountId && String(decoded.accountId) !== String(customerAccountId)) return null;
+    return customer;
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') req.bearerTokenExpired = true;
+    return null;
+  }
+}
+
 module.exports = {
   authenticate,
   authenticateAllowInactive,
+  resolveBearerCustomer,
   createRefreshSession,
   generateToken,
   generateRefreshToken,

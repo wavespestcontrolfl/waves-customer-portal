@@ -338,8 +338,9 @@ async function buildReportCopyContext({
   const { monthName, monthNum } = etMonth(serviceDate);
   const seasonHint = SWFL_SEASON_BY_MONTH[monthNum] || null;
 
-  // Pest targets the tech tagged per product today (PR2 surfaces the UI; the
-  // column already persists, so read it when present).
+  // Targets the tech tagged per product today. Species-specific for pest
+  // work (ghost ants, chinch bugs), weeds/diseases for lawn, and nutrition
+  // goals for fertilizer applications (iron chlorosis, nitrogen green-up).
   const targets = [...new Set(
     (Array.isArray(products) ? products : []).flatMap((p) => (Array.isArray(p.targets) ? p.targets : [])).map(cleanText).filter(Boolean),
   )];
@@ -358,7 +359,7 @@ async function buildReportCopyContext({
   sections.push(`SEASON (SW Florida, ${monthName}): ${seasonHint || 'No specific seasonal note.'}`);
 
   if (targets.length) {
-    sections.push(`PESTS TARGETED TODAY (tech-tagged): ${targets.join(', ')}`);
+    sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
   }
 
   // The current visit isn't scored at generate time, so buildPressureTrendContext
