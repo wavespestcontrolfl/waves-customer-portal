@@ -44,9 +44,14 @@ async function getRecipientOptin(phone) {
   if (!key) return null;
   try {
     return await db('recipient_optin').where({ phone_key: key }).first() || null;
-  } catch {
-    // Missing table (pre-migration env) must never block a send path.
-    return null;
+  } catch (err) {
+    // Fail CLOSED while the gate is on: a transient lookup failure must
+    // hold the send rather than treat a possibly-pending/declined phone as
+    // grandfathered. Callers see a row-like sentinel whose status is never
+    // 'confirmed'. (Migrations run pre-deploy, so a missing table only
+    // occurs on an un-migrated dev DB.)
+    logger.warn(`[recipient-optin] lookup failed (${err.message}) — failing closed`);
+    return { status: 'lookup_error' };
   }
 }
 
@@ -71,9 +76,9 @@ async function markRecipientOptin(phone, status) {
 
 // Send-path filter shared by every fanout loop (appointment reminders +
 // the twilio.js en-route/arrived sends): drops service-contact recipients
-// whose recipient_optin row is pending/declined. Primary rows and phones
-// with no row pass through untouched. Fail-open: an opt-in lookup error
-// must never block a send path.
+// whose recipient_optin row is not confirmed. Primary rows and phones with
+// no row pass through untouched. Fail-CLOSED: while the gate is on, a
+// lookup error holds the service contact's text.
 async function filterRecipientsByOptin(contacts = []) {
   if (!isDoubleOptinEnabled()) return contacts;
   const { isServiceContactRole } = require('./customer-contact');
@@ -86,20 +91,17 @@ async function filterRecipientsByOptin(contacts = []) {
         logger.info(`[recipient-optin] holding send to unconfirmed recipient (${row.status})`);
         continue;
       }
-    } catch { /* fail open */ }
+    } catch (err) {
+      // Fail closed: with the gate on, an error must hold this service
+      // contact's text, never default to sending.
+      logger.warn(`[recipient-optin] filter error (${err.message}) — holding send`);
+      continue;
+    }
     kept.push(contact);
   }
   return kept;
 }
 
-// Portal contacts-save hook: request confirmation from each NEWLY ADDED
-// phone recipient (phones already stored on the row before this save are
-// grandfathered and never asked). Skips silently (in order) when: gate
-// off, phone missing/same as the account holder/already on the row, the
-// template is inactive/missing, or another save already claimed the phone.
-// The pending row is the CLAIM — inserted (onConflict ignore) before the
-// Twilio dispatch so two concurrent saves can't both text the same phone;
-// a blocked/failed send releases the claim so a later save can retry.
 // Phase 1 — SYNCHRONOUS claim, called BEFORE the contact slots are written
 // to the customers row: renders the template and inserts the pending rows
 // (onConflict ignore = atomic one-ask-per-phone claim). Because the claim
@@ -113,7 +115,19 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
   const claims = [];
   for (const contact of contacts) {
     const key = recipientPhoneKey(contact.phone);
-    if (!key || key === accountKey || priorKeys.has(key)) continue;
+    if (!key || key === accountKey) continue;
+    // Save-triggered retry: a request_failed phone (ask never delivered)
+    // re-claims on the next consented save even though the phone is
+    // already stored — priorPhones only grandfathers phones that were
+    // never routed through the ask flow.
+    let retryClaim = false;
+    try {
+      const reclaimed = await db('recipient_optin')
+        .where({ phone_key: key, status: 'request_failed' })
+        .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
+      retryClaim = reclaimed > 0;
+    } catch { /* fall through to the normal path */ }
+    if (!retryClaim && priorKeys.has(key)) continue;
     try {
       const { renderSmsTemplate } = require('./sms-template-renderer');
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
@@ -121,17 +135,24 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
         account_first_name: String(customer?.first_name || '').trim() || 'Your account holder',
         property_address: String(propertyAddress || '').trim() || 'your service property',
       });
-      if (!body) continue; // template dark — owner has not approved copy yet
-      const claimed = await db('recipient_optin').insert({
-        phone_key: key,
-        phone_e164: String(contact.phone || '').trim(),
-        status: 'pending',
-        customer_id: customer?.id || null,
-        requested_by: 'portal_contact_save',
-        template_version: OPTIN_TEMPLATE_VERSION,
-        requested_at: new Date(),
-      }).onConflict('phone_key').ignore().returning('phone_key');
-      if (!claimed || !claimed.length) continue; // row already exists — never re-text
+      if (!body) {
+        // Template dark: release a retry re-claim back to request_failed so
+        // it stays blocking and retryable rather than pending-unasked.
+        if (retryClaim) await db('recipient_optin').where({ phone_key: key, status: 'pending' }).update({ status: 'request_failed' }).catch(() => {});
+        continue;
+      }
+      if (!retryClaim) {
+        const claimed = await db('recipient_optin').insert({
+          phone_key: key,
+          phone_e164: String(contact.phone || '').trim(),
+          status: 'pending',
+          customer_id: customer?.id || null,
+          requested_by: 'portal_contact_save',
+          template_version: OPTIN_TEMPLATE_VERSION,
+          requested_at: new Date(),
+        }).onConflict('phone_key').ignore().returning('phone_key');
+        if (!claimed || !claimed.length) continue; // row already exists — never re-text
+      }
       claims.push({ key, phone: contact.phone, body });
     } catch (err) {
       logger.warn(`[recipient-optin] claim failed for ***${key.slice(-4)}: ${err.message}`);
@@ -159,13 +180,16 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         metadata: { original_message_type: 'recipient_optin_request' },
       });
       if (result.blocked || result.sent === false) {
-        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).del().catch(() => {});
+        // They were never asked: keep a BLOCKING request_failed row (texts
+        // stay held) that the next consented save re-claims and retries —
+        // deleting it would grandfather a phone that never got the ask.
+        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'request_failed', updated_at: new Date() }).catch(() => {});
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
       requested += 1;
     } catch (err) {
-      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).del().catch(() => {});
+      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'request_failed', updated_at: new Date() }).catch(() => {});
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }

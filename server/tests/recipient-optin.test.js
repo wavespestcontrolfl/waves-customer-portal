@@ -25,6 +25,11 @@ describe('recipient double opt-in', () => {
     expect(optinBlocksSend({ status: 'confirmed' }, true)).toBe(false);
   });
 
+  test('request_failed and lookup_error rows also hold sends (never-asked/unknown state)', () => {
+    expect(optinBlocksSend({ status: 'request_failed' }, true)).toBe(true);
+    expect(optinBlocksSend({ status: 'lookup_error' }, true)).toBe(true);
+  });
+
   test('gate off disables the hold entirely', () => {
     expect(optinBlocksSend({ status: 'pending' }, false)).toBe(false);
     expect(optinBlocksSend({ status: 'declined' }, false)).toBe(false);
