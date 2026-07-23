@@ -1327,8 +1327,11 @@ function KpiTargetsSettingsTab({ canAdmin }) {
 // offer surface (booking funnel, reschedule links, estimate slots, Waves AI
 // searches) — enforced server-side at the slot engine's date enumeration.
 // Admin manual scheduling stays possible on purpose.
+const WEEKDAY_CHIP_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 function BlackoutDaysTab() {
   const [blackouts, setBlackouts] = useState([]);
+  const [weeklyDaysOff, setWeeklyDaysOff] = useState([]);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState("");
   const [reason, setReason] = useState("");
@@ -1337,11 +1340,34 @@ function BlackoutDaysTab() {
 
   const load = () => {
     adminFetch("/admin/schedule/blackout-dates")
-      .then((d) => setBlackouts(d.blackouts || []))
+      .then((d) => {
+        setBlackouts(d.blackouts || []);
+        setWeeklyDaysOff(d.weeklyDaysOff || []);
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
+
+  const toggleWeeklyDay = async (dow) => {
+    const prev = weeklyDaysOff;
+    const next = prev.includes(dow)
+      ? prev.filter((d) => d !== dow)
+      : [...prev, dow].sort((a, b) => a - b);
+    setWeeklyDaysOff(next); // optimistic — reverted on failure
+    setError(null);
+    try {
+      const d = await adminFetch("/admin/schedule/blackout-dates/weekly", {
+        method: "PUT",
+        body: JSON.stringify({ daysOff: next }),
+      });
+      if (d?.error) throw new Error(d.error);
+      setWeeklyDaysOff(d.weeklyDaysOff || next);
+    } catch (e) {
+      setWeeklyDaysOff(prev);
+      setError(e.message);
+    }
+  };
 
   const add = async () => {
     if (!date || saving) return;
@@ -1395,6 +1421,36 @@ function BlackoutDaysTab() {
         dates anywhere — booking funnel, reschedule links, estimate slots, and
         Waves AI searches all skip them. You can still schedule manually from
         dispatch if you choose to.
+      </div>
+
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+        Weekly days off
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
+        Highlighted days are closed every week — removed from all the same
+        customer-facing surfaces as the one-off dates below.
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
+        {WEEKDAY_CHIP_LABELS.map((label, dow) => {
+          const off = weeklyDaysOff.includes(dow);
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => toggleWeeklyDay(dow)}
+              aria-pressed={off}
+              aria-label={`${label} ${off ? "closed" : "open"} weekly`}
+              style={{
+                background: off ? D.teal : "transparent",
+                border: `1px solid ${off ? D.teal : D.border}`,
+                borderRadius: 8, color: off ? "#fff" : D.muted,
+                fontWeight: 700, fontSize: 13, padding: "8px 14px", cursor: "pointer",
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>

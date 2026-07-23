@@ -8886,6 +8886,8 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
       .where('date', '>=', db.raw("(now() AT TIME ZONE 'America/New_York')::date - interval '30 days'"))
       .orderBy('date', 'asc')
       .select('id', 'date', 'reason', 'created_at');
+    const { getWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+    const weekly = await getWeeklyDaysOff();
     res.json({
       blackouts: rows.map((r) => ({
         id: r.id,
@@ -8893,7 +8895,34 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
         reason: r.reason || null,
         createdAt: r.created_at,
       })),
+      weeklyDaysOff: [...weekly].sort((a, b) => a - b),
     });
+  } catch (err) { next(err); }
+});
+
+// Weekly days off — recurring weekday closures (0=Sun…6=Sat), stored in the
+// system_settings key/value store and enforced through the same
+// blackout-dates helpers as one-off dates. Whole-array PUT keeps the
+// day-chip UI idempotent.
+router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
+  try {
+    const raw = Array.isArray(req.body?.daysOff) ? req.body.daysOff : null;
+    if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
+    const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
+      .sort((a, b) => a - b);
+    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
+    await db('system_settings')
+      .insert({
+        key: WEEKLY_DAYS_OFF_KEY,
+        value: JSON.stringify(days),
+        category: 'scheduling',
+        description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
+      })
+      .onConflict('key')
+      .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
+    logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
+    flushEstimateSlotCaches();
+    res.json({ success: true, weeklyDaysOff: days });
   } catch (err) { next(err); }
 });
 
