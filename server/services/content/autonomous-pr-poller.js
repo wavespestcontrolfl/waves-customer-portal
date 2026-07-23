@@ -725,7 +725,7 @@ async function maybeAutoMerge(run, pr) {
         const p2Bar = await p2OnlyMergeEligible(pr.number, pr.head?.sha);
         if (p2Bar.eligible) {
           logger.info(`[autonomous-pr-poller] P2-only merge bar met for run ${run.id} PR #${pr.number}: ${p2Bar.p2Count} P2 finding(s) after ${p2Bar.rounds} remediation round(s) — proceeding toward merge (downstream guards still apply)`);
-          p2MergeInfo = { p2Count: p2Bar.p2Count, rounds: p2Bar.rounds };
+          p2MergeInfo = { p2Count: p2Bar.p2Count, rounds: p2Bar.rounds, declined: p2Bar.declined };
         } else {
           err.p2BarReason = p2Bar.reason;
         }
@@ -869,7 +869,7 @@ async function maybeAutoMerge(run, pr) {
     try {
       const fresh = await db('autonomous_runs').where({ id: run.id }).first();
       if (fresh) {
-        const note = `Merged with ${p2MergeInfo.p2Count} open Codex P2 finding(s) on head ${String(pr.head?.sha || '').slice(0, 7)} after ${p2MergeInfo.rounds} remediation round(s) (P2-only merge bar — P0/P1 always block; kill switch AUTONOMOUS_CODEX_P2_MERGE=false).`;
+        const note = `Merged with ${p2MergeInfo.p2Count} open Codex P2 finding(s) on head ${String(pr.head?.sha || '').slice(0, 7)} ${p2MergeInfo.declined ? 'after remediation declined the fix within its whitelist' : `after ${p2MergeInfo.rounds} remediation round(s)`} (P2-only merge bar — P0/P1 always block; kill switch AUTONOMOUS_CODEX_P2_MERGE=false).`;
         await db('autonomous_runs').where('id', run.id).update({
           reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
           updated_at: new Date(),
