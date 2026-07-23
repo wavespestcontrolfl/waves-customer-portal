@@ -381,6 +381,36 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
     }
   }
   if (swept) logger.info(`[recipient-optin] sweep dispatched ${swept} stale ask(s)`);
+  // Second pass — early-failure race: a failure callback that arrived
+  // BEFORE the SID/marker stamp couldn't identify its row; that row now
+  // sits pending+dispatched while its logged ask actually failed. Flip
+  // such rows to ask_failed so the next consented save (or this sweep's
+  // reclaim) re-asks.
+  try {
+    const { isFailureStatus } = require('./twilio-failure-alerts');
+    const dispatched = await db('recipient_optin')
+      .where({ status: 'pending' })
+      .whereNotNull('dispatched_at')
+      .where('dispatched_at', '<', new Date(Date.now() - 30 * 60 * 1000))
+      .limit(limit);
+    for (const row of dispatched) {
+      const lastAsk = await db('sms_log')
+        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [row.phone_key])
+        .where({ customer_id: row.customer_id })
+        .where(function optinAsk() {
+          this.where({ message_type: 'recipient_optin_request' })
+            .orWhereRaw("metadata::text like '%recipient_optin_request%'");
+        })
+        .orderBy('created_at', 'desc')
+        .first('status')
+        .catch(() => null);
+      if (lastAsk && isFailureStatus(lastAsk.status)) {
+        await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+      }
+    }
+  } catch { /* best-effort */ }
   return { swept };
 }
 

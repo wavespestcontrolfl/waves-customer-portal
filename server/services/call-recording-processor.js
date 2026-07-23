@@ -5882,6 +5882,40 @@ const CallRecordingProcessor = {
       try {
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        // Recipient double opt-in parity with the portal flow (#2956): a
+        // call-created phone recipient gets the same claim + confirmation
+        // ask (dark template = nothing pends; gate off = no-op). The CLAIM
+        // is awaited so the same-call fan-out below can never race a
+        // rowless (grandfathered-looking) new phone; the Twilio dispatch
+        // stays async.
+        if (result === 'written' && secondaryEntry?.phone) {
+          try {
+            const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
+            const custRow = await db('customers').where({ id: customerId }).first();
+            if (custRow) {
+              const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+              const claims = await claimRecipientOptins({
+                customer: custRow,
+                contacts: [{
+                  name: [secondaryEntry.first_name, secondaryEntry.last_name].filter(Boolean).join(' '),
+                  firstName: secondaryEntry.first_name || '',
+                  phone: secondaryEntry.phone,
+                }],
+                // The just-written slot must be ASKED — prior phones are the
+                // OTHER slots only.
+                priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                  .filter((ph) => optLast10(ph) !== optLast10(secondaryEntry.phone)),
+                propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+              });
+              if (claims.length) {
+                void dispatchRecipientOptins(claims, custRow)
+                  .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
+              }
+            }
+          } catch (optErr) {
+            logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
+          }
+        }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the

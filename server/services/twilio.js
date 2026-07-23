@@ -968,6 +968,9 @@ const TwilioService = {
       const emailRes = await sendArrivedEmail();
       if (emailRes?.ok) return { success: true, results, emailSent: true };
       if (smsLegAvailable && (await attemptSmsLegs())) return { success: true, results };
+      // SMS leg absent ONLY because the hold emptied a non-empty list: stay
+      // retryable — a YES mid-job restores the SMS leg (#2956 r11).
+      if (!contacts.length && unfilteredContacts.length) return { success: false, results };
       return classifyMiss(emailRes);
     }
 
