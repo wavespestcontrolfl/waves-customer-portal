@@ -2396,6 +2396,38 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 13 + astro r25 parity: plain membership, demand topic tails, no-answer CTAs, marker titles, passive availability, no-need CTAs, result clauses, staff verbs', () => {
+    for (const body of [
+      'Naples is in our service area.',
+      'Fort Myers lies in our service area.',
+      'Do we serve Naples? No problem—call today.',
+      'No need to wait to book pest control in Naples today.',
+      'No reason to delay scheduling mosquito control in Tampa.',
+      'Pest control is available to Naples homeowners.',
+      'Mosquito control is offered to Cape Coral properties.',
+      'Rodent removal can be booked for Naples homes.',
+      'We are available in Naples.',
+      'Naples homes are serviced by Waves.',
+      'Our team can protect Naples homes.',
+      'Our technicians are proud to serve Naples.',
+      '## Naples pest control services',
+      '- Naples pest control services',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'The calls we get from Sarasota about Naples termites are common.',
+      '## No Naples pest control services',
+      'Naples is not included in our service areas.',
+      'Naples has different pest pressure, so we treat Sarasota homes differently.',
+      '### Do we serve Naples?\n\nNo, we stay within our footprint.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
