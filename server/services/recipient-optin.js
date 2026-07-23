@@ -89,7 +89,9 @@ async function markRecipientOptin(phone, status) {
     // write crashed, and the person replied YES before the sweep
     // reconciled. If sms_log shows an accepted ask to this phone, honor
     // the YES for the still-pending rows (ask_failed stays excluded).
-    if (!updated && status === 'confirmed') {
+    // Runs regardless of the first update's count: property A's confirmed
+    // row must not skip reconciling property B's accepted-but-unmarked ask.
+    if (status === 'confirmed') {
       // Per-row reconciliation: only a row whose OWN property's ask was
       // accepted (customer-scoped sms_log) confirms — property B's
       // undispatched pending row stays pending when only A's ask went out.
