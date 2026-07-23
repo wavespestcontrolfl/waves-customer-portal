@@ -686,9 +686,20 @@ router.get('/balance', async (req, res, next) => {
     // off → field absent → payload byte-identical to today.
     let openInvoices;
     if (isEnabled('portalPayNow')) {
+      // Failed-DRAFT rescue (Codex round-3 P2): a failed completion autopay
+      // leaves the obligation on a draft invoice — counted in failedTotal
+      // above precisely because unpaidInvoices skips drafts — so the balance
+      // and the failed banner can both show with zero sent/viewed/overdue
+      // rows. Those drafts are payable at /pay (only statement-accrued
+      // tokens are blocked there), and they're the exact failure this CTA
+      // exists to repair, so their ids ride along with the open statuses.
+      const failedDraftInvoiceIds = failedInvoiceIds.filter((id) => !balanceCarryingInvoiceIds.has(id));
       const openRows = await db('invoices')
         .where({ customer_id: req.customerId })
-        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .where(function () {
+          this.whereIn('status', ['sent', 'viewed', 'overdue']);
+          if (failedDraftInvoiceIds.length) this.orWhereIn('id', failedDraftInvoiceIds);
+        })
         .whereNull('payer_id')
         .whereNull('payer_statement_id')
         // Positive balance in SQL, BEFORE the cap — otherwise five old

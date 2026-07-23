@@ -654,6 +654,16 @@ function bookingSlotWindow(config = {}) {
 // server's authority for what each funnel service's visit takes. A known key
 // pins the duration outright; the caller-sent minutes then only matter for
 // unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
+// Pipeline stages that mark a row as a PROSPECT, not a current customer —
+// the customers-only gate refuses these even after a successful phone verify
+// (the quote wizard mints active 'new_lead' rows for anyone who runs it, and
+// admin moves unconverted leads through the rest; 'lost' is a lost lead —
+// 'churned' ex-customers are deliberately NOT here). Subset of
+// admin-customers.js CUSTOMER_STAGES; keep the two in sync.
+const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
+]);
+
 const BOOKING_FUNNEL_SERVICE_DURATIONS = {
   pest_control: 60,
   lawn_care: 60,
@@ -1301,6 +1311,21 @@ async function createSelfBooking(payload = {}) {
     // Resolve customer
     let custId = null;
     let estimate = null;
+    // "Current customer" is narrower than "row in customers" (Codex round-3
+    // P2): the public quote wizard upserts brand-new prospects as ACTIVE
+    // customers rows (pipeline_stage 'new_lead', public-quote.js), and the
+    // portal OTP verifies any active phone match — so a stranger could quote
+    // themselves into the table and walk through the gate. Rows still in a
+    // pre-customer pipeline stage are NOT verified customers here; they fall
+    // through to the standing refusal (whose quote-wizard CTA is exactly
+    // their path: finish the quote, accept, book via the accept link).
+    // Unknown/legacy/null stages fail OPEN — a real customer with an unset
+    // stage must never be locked out of booking. Won/active and even
+    // churned/dormant rows pass: a lapsed customer self-booking a visit is
+    // winback, not a stranger.
+    const verifiedCurrentCustomer = (authedCustomer
+      && !(customersOnly && PRE_CUSTOMER_PIPELINE_STAGES.has(String(authedCustomer.pipeline_stage || ''))))
+      ? authedCustomer : null;
     // Verified portal bearer wins identity outright (customers-only gate):
     // the row came from a JWT the route resolved server-side, so client-sent
     // customer_id / phone-match / estimate identity paths below are all
@@ -1314,18 +1339,18 @@ async function createSelfBooking(payload = {}) {
     // account's property rows it matches (same addressMatchesCustomer rule as
     // the customer_id path below); no match → refuse with a fix-it path
     // instead of silently dispatching to the wrong door.
-    if (authedCustomer) {
+    if (verifiedCurrentCustomer) {
       const submittedLine1 = new_customer?.address_line1;
       if (submittedLine1) {
-        let matched = addressMatchesCustomer(authedCustomer, submittedLine1, new_customer?.zip, new_customer?.address_line2)
-          ? authedCustomer : null;
+        let matched = addressMatchesCustomer(verifiedCurrentCustomer, submittedLine1, new_customer?.zip, new_customer?.address_line2)
+          ? verifiedCurrentCustomer : null;
         if (!matched) {
-          const accountId = authedCustomer.account_id || authedCustomer.id;
+          const accountId = verifiedCurrentCustomer.account_id || verifiedCurrentCustomer.id;
           const accountRows = await db('customers')
             .where(function () {
               this.where('account_id', accountId).orWhere('id', accountId);
             })
-            .whereNot('id', authedCustomer.id)
+            .whereNot('id', verifiedCurrentCustomer.id)
             .whereNull('deleted_at')
             .andWhere(function () {
               this.whereNull('active').orWhere('active', true);
@@ -1344,7 +1369,7 @@ async function createSelfBooking(payload = {}) {
         }
         custId = matched.id;
       } else {
-        custId = authedCustomer.id;
+        custId = verifiedCurrentCustomer.id;
       }
     }
     // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose

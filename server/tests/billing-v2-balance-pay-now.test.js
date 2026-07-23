@@ -154,6 +154,25 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     expect(body.openInvoices).toEqual([]);
   });
 
+  test('gate on: a failed DRAFT invoice still gets its pay link — the exact failure Pay now repairs', async () => {
+    // Failed completion autopay: obligation lives on a draft invoice, so it
+    // rides failedTotal (not unpaidInvoices) — the pay-link query must pick
+    // the draft up by id or the CTA is absent in the one scenario it's for.
+    tableResults.failedRows = [{ amount: '89.00', metadata: JSON.stringify({ invoice_id: 'inv-draft' }) }];
+    tableResults.linkedNonDraftInvoices = []; // draft → not balance-carrying
+    tableResults.recentAttempts = [{ status: 'failed', metadata: null }];
+    tableResults.openInvoiceRows = [
+      { token: 'tok-draft', invoice_number: 'INV-DRAFT-1', due_date: null, total: '89.00', credit_applied: null },
+    ];
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(89);
+    expect(body.lastPaymentFailed).toBe(true);
+    expect(body.openInvoices).toEqual([
+      { payUrl: '/pay/tok-draft', amountDue: 89, invoiceNumber: 'INV-DRAFT-1', dueDate: null },
+    ]);
+  });
+
   test('gate off: field absent, rest of the payload unchanged (dark-ship contract)', async () => {
     isEnabled.mockImplementation((name) => name !== 'portalPayNow');
     tableResults.unpaidTotal = '107.00';

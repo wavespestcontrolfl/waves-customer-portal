@@ -132,6 +132,29 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
+  test('a phone-verified LEAD row (quote-wizard mint) is still refused — verified phone ≠ current customer', async () => {
+    // public-quote upserts prospects as ACTIVE customers rows with
+    // pipeline_stage 'new_lead'; OTP verifies any active phone match. The
+    // gate must not let that combination self-schedule (Codex round-3 P2).
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      authedCustomer: { ...BEARER_ROW(), pipeline_stage: 'new_lead' },
+    });
+    expect(result).toEqual(REFUSAL);
+  });
+
+  test('churned and legacy null-stage rows still book — winback is welcome, fail-open on unset stages', async () => {
+    expect(await createSelfBooking({
+      ...strangerBody(), customersOnly: true,
+      authedCustomer: { ...BEARER_ROW(), pipeline_stage: 'churned' },
+    })).toEqual(BEYOND_WINDOW);
+    expect(await createSelfBooking({
+      ...strangerBody(), customersOnly: true,
+      authedCustomer: { ...BEARER_ROW(), pipeline_stage: null },
+    })).toEqual(BEYOND_WINDOW);
+  });
+
   test('bearer + a submitted address that matches NO account property → refused with a fix-it path', async () => {
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -321,6 +344,15 @@ describe('POST /booking/confirm — gate wiring', () => {
     });
     expect(garbageRes.statusCode).toBe(403);
     expect(garbageRes.body.customersOnly).toBe(true);
+  });
+
+  test('a bearer for a LEAD-stage row is refused at the route too', async () => {
+    firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'estimate_sent' };
+    const res = await postConfirm(strangerBody(), {
+      authorization: `Bearer ${generateToken(CUST_ID)}`,
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.customersOnly).toBe(true);
   });
 
   test('bearer for a customer no longer on file (inactive/deleted) is refused', async () => {

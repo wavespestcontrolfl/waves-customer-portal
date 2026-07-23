@@ -6,6 +6,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -1941,7 +1942,17 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
       }
     } catch (_) { /* on parse failure fall through — no false positive */ }
 
-    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
+    // estimate_id stamps scheduled_services.source_estimate_id (same
+    // correlation the accept-flow links carry) and the namespaced accept
+    // token lets the recipient through the customers-only /book gate
+    // (GATE_BOOKING_CUSTOMERS_ONLY) — without it this admin-sent link
+    // dead-ends at the gate's 403 for anyone not yet on file. The token is
+    // never a pricing input (wrong namespace for the pricing-handoff check).
+    const gateToken = mintEstimateAcceptToken(
+      estimate.id,
+      estimate.accepted_at ? new Date(estimate.accepted_at).getTime() : Date.now(),
+    );
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend&estimate_id=${estimate.id}${gateToken ? `&accept_token=${encodeURIComponent(gateToken)}` : ''}`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
       kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
       leadId: await leadIdForEstimate(estimate),

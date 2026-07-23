@@ -62,6 +62,10 @@ jest.mock('../models/db', () => {
       // the failed-row status lookup uses whereIn('id', …) with no .first().
       if (wantFirst) return { total: tableResults.unpaidTotal };
       if (calls.some(([m]) => m === 'whereIn')) return tableResults.linkedNonDraftInvoices;
+      // Pay-now open-invoice list (status filter lives in a where-group, so
+      // no top-level whereIn; keyed off its whereNull payer filters). Not
+      // under test in this suite — return no rows.
+      if (calls.some(([m]) => m === 'whereNull')) return [];
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
