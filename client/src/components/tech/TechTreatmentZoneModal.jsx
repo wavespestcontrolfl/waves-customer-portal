@@ -117,6 +117,9 @@ export default function TechTreatmentZoneModal({
       });
   // Admin weight cap is 400/500; the dark variant keeps its original weights.
   const strong = light ? 500 : 700;
+  // The admin surface enforces a 14px floor for readable text (AGENTS.md);
+  // dark keeps the tech portal's original 13px small text.
+  const smallText = light ? 14 : 13;
   const [mapState, setMapState] = useState({ status: 'loading' });
   const [existing, setExisting] = useState(null);
   const [step, setStep] = useState('trace');
@@ -425,14 +428,14 @@ export default function TechTreatmentZoneModal({
           >×</button>
         </div>
         {customerName && (
-          <p style={{ margin: '0 0 12px', fontSize: 13, color: T.muted }}>{customerName}</p>
+          <p style={{ margin: '0 0 12px', fontSize: smallText, color: T.muted }}>{customerName}</p>
         )}
 
         {existing && step === 'trace' && points.length === 0 && (
           <div style={{
             background: T.noticeBg, border: `1px solid ${T.noticeBorder}`,
             color: T.noticeText, padding: '8px 10px', borderRadius: 6,
-            fontSize: 13, marginBottom: 12,
+            fontSize: smallText, marginBottom: 12,
           }}>
             Already traced ({existing.linear_ft ?? '?'} linear ft). Tracing again replaces it.
           </div>
@@ -454,14 +457,14 @@ export default function TechTreatmentZoneModal({
 
         {mapState.status === 'ready' && step === 'trace' && (
           <>
-            <p style={{ margin: '0 0 10px', fontSize: 13, color: T.muted }}>
+            <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>
               {points.length === 0
                 ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself.'
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
             {suggestNote ? (
-              <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: light ? 500 : 600, color: T.accent }}>{suggestNote}</p>
+              <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: light ? 500 : 600, color: T.accent }}>{suggestNote}</p>
             ) : null}
             {mapFrame(
               <svg
@@ -495,7 +498,7 @@ export default function TechTreatmentZoneModal({
               </svg>,
               { cursor: 'crosshair', touchAction: 'none' },
             )}
-            <p style={{ margin: '10px 0', fontSize: 13, fontWeight: strong, color: T.text }}>
+            <p style={{ margin: '10px 0', fontSize: smallText, fontWeight: strong, color: T.text }}>
               {points.length} point{points.length === 1 ? '' : 's'}
               {points.length > 1 ? ` · ~${Math.round(totalFeet)} linear ft` : ''}
               {closed ? ' · loop closed' : ''}
@@ -553,17 +556,17 @@ export default function TechTreatmentZoneModal({
               {statusText}
             </p>
             {saveState === 'saving' && (
-              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.muted }}>Saving to the service report…</p>
+              <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>Saving to the service report…</p>
             )}
             {saveState === 'saved' && (
-              <p style={{ margin: '0 0 10px', fontSize: 13, color: T.ok }}>
+              <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.ok }}>
                 Saved — this map now appears on the customer&apos;s service report.
               </p>
             )}
             {saveState && saveState !== 'saving' && saveState !== 'saved' && (
               <div style={{
                 background: `${T.red}22`, border: `1px solid ${T.red}`, color: T.red,
-                padding: '8px 10px', borderRadius: 6, fontSize: 13, marginBottom: 10,
+                padding: '8px 10px', borderRadius: 6, fontSize: smallText, marginBottom: 10,
               }}>
                 {saveState}
               </div>
