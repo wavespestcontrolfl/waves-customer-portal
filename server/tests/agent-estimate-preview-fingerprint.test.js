@@ -107,4 +107,22 @@ describe('agentEstimatePreviewFingerprint', () => {
     });
     expect(agentEstimatePreviewFingerprint(drifted)).not.toBe(agentEstimatePreviewFingerprint(approved));
   });
+
+  test('binds the operator price adjustment — same totals under a different discount label/flag do not match', () => {
+    const approved = previewFor(ENGINE_RESULT, {
+      operator_price_adjustment: {
+        requested: { type: 'PERCENT', value: 5, label: 'Loyalty', internal_reason: 'asked', floor_breach_acknowledged: false },
+        adjusted_monthly_total: 51.46,
+      },
+    });
+    const relabeled = previewFor(ENGINE_RESULT, {
+      operator_price_adjustment: {
+        requested: { type: 'PERCENT', value: 5, label: 'Manager special', internal_reason: 'asked', floor_breach_acknowledged: false },
+        adjusted_monthly_total: 51.46,
+      },
+    });
+    const noAdjustment = previewFor(ENGINE_RESULT);
+    expect(agentEstimatePreviewFingerprint(relabeled)).not.toBe(agentEstimatePreviewFingerprint(approved));
+    expect(agentEstimatePreviewFingerprint(noAdjustment)).not.toBe(agentEstimatePreviewFingerprint(approved));
+  });
 });

@@ -95,6 +95,25 @@ describe('pricing engine manual recurring discount', () => {
     );
   });
 
+  test('one-time slice stamps manualFinalOneTime/manualFinalMargin on the discounted lines', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { exclusion: true },
+      manualDiscount: { source: 'custom', type: 'PERCENT', value: 20, label: 'Comp' },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    const stamped = (estimate.lineItems || []).filter((li) => li.manualFinalOneTime !== undefined);
+    expect(stamped.length).toBeGreaterThan(0);
+    // The stamps reconstruct the post-discount one-time money the summary
+    // collects — line-level truth for margin graders, not a second ledger.
+    const stampedTotal = stamped.reduce((s, li) => s + li.manualFinalOneTime, 0);
+    expect(stampedTotal).toBeCloseTo(md.oneTimeDiscountableBase - md.oneTimeAmount, 1);
+    for (const li of stamped) {
+      const gross = Number(li.priceAfterDiscount ?? li.price ?? li.total ?? 0);
+      expect(li.manualFinalOneTime).toBeLessThan(gross);
+    }
+  });
+
   test('custom percentage splits across recurring and one-time work', () => {
     const noDiscount = generateEstimate(baseInput({
       services: { pest: { frequency: 'quarterly' }, exclusion: true },
@@ -324,5 +343,118 @@ describe('pricing engine manual recurring discount', () => {
     }));
     expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
     expect(estimate.summary.manualDiscount.eligibilityConfirmed).toBe(true);
+  });
+});
+
+describe('manual discount lawn floor breach (operator-acknowledged, 2026-07-23)', () => {
+  // Lawn-only input with the program-minimum leg armed far above any lawn
+  // annual (input override wins over constants), so the protected floor
+  // covers the full line and the manual slice has ZERO recurring headroom.
+  // The margin-floor leg is explicitly disarmed so only one floor is in play.
+  const lawnOnly = (manualDiscount) => baseInput({
+    services: { lawn: { track: 'st_augustine', tier: 'enhanced', useLawnCostFloor: false } },
+    lawnProgramMinimumMonthly: 999,
+    manualDiscount,
+  });
+
+  test('without acknowledgement the lawn floor blocks the recurring slice (control)', () => {
+    const estimate = generateEstimate(lawnOnly({
+      source: 'agent_operator', type: 'PERCENT', value: 10, label: 'Loyalty', eligibilityConfirmed: true,
+    }));
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount).toBe(0);
+    expect(md.capped).toBe(true);
+    expect(md.capReason).toBe('lawn_program_minimum');
+    expect(md.floorBreach).toBeNull();
+    expect(estimate.pricingMetadata.manualDiscountFloorBreach).toBeUndefined();
+  });
+
+  test('floorBreachAcknowledged applies the full discount below the floor and stamps the breach', () => {
+    const control = generateEstimate(lawnOnly({
+      source: 'agent_operator', type: 'PERCENT', value: 10, label: 'Loyalty', eligibilityConfirmed: true,
+    }));
+    const estimate = generateEstimate(lawnOnly({
+      source: 'agent_operator',
+      type: 'PERCENT',
+      value: 10,
+      label: 'Loyalty',
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: true,
+    }));
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount).toBeCloseTo(md.recurringDiscountableBase * 0.10, 2);
+    expect(md.recurringAmount).toBeGreaterThan(0);
+    expect(md.capped).toBe(false);
+    expect(md.capReason).toBeNull();
+    expect(md.floorBreach).toEqual(expect.objectContaining({
+      acknowledged: true,
+      bypassedCapReason: 'lawn_program_minimum',
+    }));
+    // Zero headroom → the whole recurring slice is a breach.
+    expect(md.floorBreach.breachedRecurringAnnual).toBeCloseTo(md.recurringAmount, 2);
+    // Stamped for the per-estimate view/accept resolvers (estimate-converter,
+    // estimate-public) to disarm their re-clamps.
+    expect(estimate.pricingMetadata.manualDiscountFloorBreach).toEqual(expect.objectContaining({
+      acknowledged: true,
+      bypassedCapReason: 'lawn_program_minimum',
+    }));
+    // The breached total really sits below the control (floor-capped) total.
+    expect(estimate.summary.recurringAnnualAfterDiscount)
+      .toBeCloseTo(control.summary.recurringAnnualAfterDiscount - md.recurringAmount, 1);
+  });
+
+  test('acknowledged discount that exactly consumes headroom stays floor-pinned (CEILed monthly)', () => {
+    // Program minimum chosen so the protected annual (630.85) does not divide
+    // evenly by 12 — nearest-cent monthly would rebuild 630.84 and quietly sit
+    // a cent under the floor without any BELOW-FLOOR disclosure (codex P2 on
+    // #2947). Exactly-on-floor must keep the pinned-CEIL contract even with
+    // the acknowledgement flag set.
+    const minMonthly = 52.5708333; // ×12 → 630.85 protected annual
+    const services = { lawn: { track: 'st_augustine', tier: 'enhanced', useLawnCostFloor: false } };
+    const base = generateEstimate(baseInput({
+      services,
+      lawnProgramMinimumMonthly: minMonthly,
+    }));
+    const lawnAnnual = base.summary.recurringAnnualAfterDiscount;
+    expect(lawnAnnual).toBeGreaterThan(630.85);
+    const headroom = Math.round((lawnAnnual - 630.85) * 100) / 100;
+    const estimate = generateEstimate(baseInput({
+      services,
+      lawnProgramMinimumMonthly: minMonthly,
+      manualDiscount: {
+        source: 'agent_operator',
+        type: 'FIXED',
+        value: headroom,
+        label: 'Loyalty',
+        eligibilityConfirmed: true,
+        floorBreachAcknowledged: true,
+      },
+    }));
+    const md = estimate.summary.manualDiscount;
+    expect(md.floorBreach).toBeNull();
+    expect(md.recurringAmount).toBeCloseTo(headroom, 2);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(630.85, 2);
+    // Pinned CEIL: 630.85 / 12 = 52.5708… → 52.58, never the 52.57 that
+    // rebuilds a 630.84 annual.
+    expect(estimate.summary.recurringMonthlyAfterDiscount).toBe(52.58);
+  });
+
+  test('acknowledgement without an actual floor collision records no breach', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { lawn: { track: 'st_augustine', tier: 'enhanced', useLawnCostFloor: false } },
+      lawnProgramMinimumMonthly: 0,
+      manualDiscount: {
+        source: 'agent_operator',
+        type: 'PERCENT',
+        value: 10,
+        label: 'Loyalty',
+        eligibilityConfirmed: true,
+        floorBreachAcknowledged: true,
+      },
+    }));
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount).toBeGreaterThan(0);
+    expect(md.floorBreach).toBeNull();
+    expect(estimate.pricingMetadata.manualDiscountFloorBreach).toBeUndefined();
   });
 });

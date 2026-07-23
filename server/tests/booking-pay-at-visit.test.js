@@ -33,6 +33,17 @@ jest.mock('../services/estimate-converter', () => ({
       .map((s) => s && s.service).filter(Boolean)));
     return keys.length === 1 && ['pest_control', 'mosquito'].includes(keys[0]);
   },
+  // Real-enough mirrors of the per-estimate stamps the fee/clamp gates read
+  // (operator setup-fee waiver + acknowledged floor breach, #2947).
+  estimateOperatorSetupFeeWaived: (estData = {}) => (
+    estData?.operatorPriceAdjustment?.waiveSetupFee === true
+  ),
+  estimateManualDiscountFloorBreachAcknowledged: (estData = {}) => (
+    (estData?.result?.pricingMetadata?.manualDiscountFloorBreach
+      ?? estData?.engineResult?.pricingMetadata?.manualDiscountFloorBreach)?.acknowledged === true
+    || (estData?.result?.manualDiscount ?? estData?.result?.summary?.manualDiscount
+      ?? estData?.summary?.manualDiscount)?.floorBreach?.acknowledged === true
+  ),
   recurringServicesFromEstimateData: (data = {}) => (
     Array.isArray(data.services) ? data.services
       : Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems
