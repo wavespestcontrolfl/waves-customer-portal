@@ -515,11 +515,44 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     v1Input.recurringCustomer = true;
   }
 
+  // Operator-stated price adjustment (agent flows): persisted OUTSIDE the
+  // replay inputs and re-injected transiently on every reprice, mirroring
+  // the public replay (extractEngineInputs in estimate-public). Without
+  // this, an admin-editor save or lapse-reconcile reprice of an adjusted
+  // agent quote silently restores the undiscounted anchor while the stored
+  // adjustment metadata still claims otherwise. A manualDiscount already in
+  // the stored inputs (admin-editor discounts) wins; internalReason is
+  // audit-only and deliberately never injected.
+  const opAdj = estimateData.operatorPriceAdjustment;
+  if (opAdj && typeof opAdj === 'object' && !v1Input.manualDiscount && Number(opAdj.value) > 0) {
+    v1Input.manualDiscount = {
+      source: 'agent_operator',
+      type: opAdj.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: Number(opAdj.value),
+      label: opAdj.label || 'Discount',
+      eligibility: null,
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
+    };
+  }
+
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
     }
     const v1 = generateEstimate(v1Input);
+    // True setup-fee waiver: the legacy mapper counts the pest line's
+    // initialFee into oneTime.total/year1, which would reintroduce the
+    // waived $99 into the stored totals on every reprice of an
+    // operator-waived agent quote. Zero it on the transient result before
+    // mapping — recurring rows/totals are untouched, and the waiver stays
+    // honored downstream (estimateOperatorSetupFeeWaived) exactly as at
+    // first send.
+    if (opAdj && typeof opAdj === 'object' && opAdj.waiveSetupFee === true && Array.isArray(v1?.lineItems)) {
+      for (const li of v1.lineItems) {
+        if (li && Number(li.initialFee) > 0) li.initialFee = 0;
+      }
+    }
     const serverResult = mapResult(v1);
     const serverTotals = deriveTotalsFromEstimateData({ result: serverResult });
     return { recomputed: true, source, serverResult, serverTotals };

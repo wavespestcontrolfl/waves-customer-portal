@@ -738,6 +738,17 @@ function recurringMixHasMembershipFeeService(recurringServices = []) {
   return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
+// Operator-stated setup-fee waiver (agent adjustment channel, owner decision
+// 2026-07-23): a per-estimate TRUE waiver — the fee is removed from the
+// customer-facing estimate AND never invoiced. Distinct from the
+// existing-member waiver (struck-through display) and the annual-prepay
+// waiver (fee shown, waived on prepay selection). Set only through the
+// confirm-gated operatorPriceAdjustment tool param.
+function estimateOperatorSetupFeeWaived(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  return data?.operatorPriceAdjustment?.waiveSetupFee === true;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -745,6 +756,8 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
+  // Operator-stated waiver: removed from display and never invoiced.
+  if (data?.operatorPriceAdjustment?.waiveSetupFee === true) return false;
   // A standalone-scheduling supplement (rodent bait scalar after the
   // pest+rodent route removal) makes the plan a multi-service bundle even
   // with one recurring LINE — and the owner rule says bundles carry no
@@ -988,15 +1001,52 @@ function estimateLawnProgramMinimumSignal(estimateData = {}) {
   return legacyLawnProgramMinimumMonthly(estimateData);
 }
 
-function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+// Operator-acknowledged manual-discount floor breach (owner decision
+// 2026-07-23). The engine only stamps this when a confirmed operator
+// adjustment actually cut below the lawn floors; every per-estimate floor
+// consumer (program-minimum resolver below, estimate-public's arm state,
+// prepay protection) must treat the breach as a per-estimate disarm, or
+// view/accept/billing would clamp the authorized sub-floor price back UP.
+// Same stamp locations as estimateLawnProgramMinimumSignal, plus the stored
+// discount summary as fallback evidence for shapes that keep summary but
+// drop pricingMetadata.
+function estimateManualDiscountFloorBreachAcknowledged(estimateData = {}) {
+  const stamped = estimateData?.result?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.engineResult?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.result?.routingMetadata?.manualDiscountFloorBreach;
+  if (stamped?.acknowledged === true) return true;
+  const summaryDiscount = estimateData?.result?.manualDiscount
+    ?? estimateData?.result?.totals?.manualDiscount
+    ?? estimateData?.result?.summary?.manualDiscount
+    ?? estimateData?.engineResult?.summary?.manualDiscount
+    ?? estimateData?.summary?.manualDiscount;
+  return summaryDiscount?.floorBreach?.acknowledged === true;
+}
+
+// Pre-breach resolution (stamp → legacy evidence → live global). The
+// breach-aware resolver below layers the per-estimate disarm on top; prepay
+// protection deliberately uses THIS one — see lawnProgramMinimumProtectedAnnual.
+function resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData = {}) {
   const signal = estimateLawnProgramMinimumSignal(estimateData);
   if (signal != null) return signal;
   const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
   return Number.isFinite(live) && live > 0 ? live : 0;
 }
 
+function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  if (estimateManualDiscountFloorBreachAcknowledged(estimateData)) return 0;
+  return resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
+}
+
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
-  const minMonthly = resolveLawnProgramMinimumMonthlyForEstimate(estimateData);
+  // Deliberately IGNORES an acknowledged floor breach (codex P2 on #2947
+  // round 4): the breach disarm exists so render/accept never clamp the
+  // authorized sub-floor price back UP — but this protection only ever CAPS
+  // the annual-prepay discount (callers Math.min against it, never raise).
+  // Dropping it on a breached estimate would let a customer-selected prepay
+  // % stack a further cut below the number the confirmation card authorized.
+  const minMonthly = resolveLawnProgramMinimumMonthlyIgnoringBreach(estimateData);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
@@ -1037,7 +1087,15 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
 // previously-computed flat "effective rate" goes stale immediately, because
 // the effective rate is itself a function of the annual.
 function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
-  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  // Solo pest/mosquito mixes normally earn NO prepay % — their incentive is
+  // the fee-waived-with-prepay. Owner ruling 2026-07-23: when the operator
+  // has already waived the setup fee outright, the mix converts to the
+  // standard 5% prepay path (the waiver replaced the fee incentive, so
+  // prepay keeps a real reward instead of disappearing).
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices)
+    && !estimateOperatorSetupFeeWaived(estimateData)
+    ? 0
+    : ANNUAL_PREPAY_DISCOUNT_PCT;
   const protectedFloor = Math.round((
     nonDiscountableRecurringAnnualFloor(estimateData)
     + lawnProgramMinimumProtectedAnnual(estimateData)
@@ -2923,7 +2981,9 @@ module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
 module.exports.resolveLawnProgramMinimumMonthlyForEstimate = resolveLawnProgramMinimumMonthlyForEstimate;
+module.exports.resolveLawnProgramMinimumMonthlyIgnoringBreach = resolveLawnProgramMinimumMonthlyIgnoringBreach;
 module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
+module.exports.estimateManualDiscountFloorBreachAcknowledged = estimateManualDiscountFloorBreachAcknowledged;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
@@ -2933,6 +2993,7 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
