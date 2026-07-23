@@ -16666,7 +16666,15 @@ async function buildPricingBundle(estimate) {
   const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
-    const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
+    // v1 shapes cannot carry an operator floor breach today (the operator
+    // adjustment channel persists engine-shaped drafts only), so this path
+    // fails CLOSED: unbreached program minimum, no breach disarm on the
+    // floor arm. A ladder-wide disarm here would bypass the floor on every
+    // cadence when the operator only authorized one. If v1 estimates ever
+    // gain operator breaches, scope the bypass per authorized cadence like
+    // lawnFrequenciesFromRows does — never ladder-wide.
+    const programMinMonthly = require('../services/estimate-converter')
+      .resolveLawnProgramMinimumMonthlyIgnoringBreach(estData);
     // Cost-floor arm resolution for this estimate — same rules as the
     // ladder (per-estimate signal beats the global; legacy enforcement
     // stamps on the stored rows arm silent pre-disarm saves). The
@@ -16674,10 +16682,9 @@ async function buildPricingBundle(estimate) {
     // combo selections carry their own tier's floor.
     const v1LawnRows = Array.isArray(estData?.result?.results?.lawn) ? estData.result.results.lawn : [];
     const perEstimateArm = estimateLawnFloorArmed(estData);
-    const lawnCostFloorArmed = !estimateManualDiscountFloorBreached(estData)
-      && (perEstimateArm != null
-        ? perEstimateArm
-        : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows)));
+    const lawnCostFloorArmed = perEstimateArm != null
+      ? perEstimateArm
+      : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows));
     const selectedLawnRow = v1LawnRows.find((r) => r?.recommended === true || r?.selected === true) || v1LawnRows[0] || null;
     const lawnFloorMonthly = selectedLawnRow ? lawnRowFloorMonthly(selectedLawnRow) : null;
     const v1FloorOptions = {
@@ -16875,7 +16882,12 @@ async function buildPricingBundle(estimate) {
     // Run the engine 3x with different pest frequencies. Each call is
     // pure JS; no external I/O beyond the engine's own DB constants
     // sync which is cached internally.
-    const savedPestFrequency = engineInputs?.services?.pest?.frequency || null;
+    // Alias-normalized comparison (codex P1 on #2947 round 8): saved inputs
+    // legitimately carry 'bi_monthly' while the ladder's engineFrequency is
+    // 'bimonthly' — a raw compare would treat the AUTHORIZED cadence as an
+    // alternate and clamp the confirmed below-floor price back up.
+    const normalizePestCadence = (value) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+    const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || null;
     for (const ladder of FREQUENCY_LADDER) {
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
@@ -16890,7 +16902,7 @@ async function buildPricingBundle(estimate) {
       // (codex P1 on #2947 round 7). Fails closed: an unidentifiable saved
       // cadence strips the flag from every replay.
       if (inputsForFrequency.manualDiscount?.floorBreachAcknowledged === true
-        && ladder.engineFrequency !== savedPestFrequency) {
+        && normalizePestCadence(ladder.engineFrequency) !== savedPestFrequency) {
         inputsForFrequency.manualDiscount = {
           ...inputsForFrequency.manualDiscount,
           floorBreachAcknowledged: false,

@@ -2110,7 +2110,16 @@ function titleWaveGuardTier(value) {
 }
 
 function compactAgentLine(line) {
-  const annual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
+  // When an operator adjustment touched this line the engine stamps
+  // manualFinalAnnual/manualFinalMargin as the post-manual-discount truth;
+  // annualAfterDiscount still holds the pre-manual (WaveGuard-only) anchor,
+  // so grading it would overstate annual and collected margin on every
+  // operator-discounted quote.
+  const manualFinalAnnual = Number(line.manualFinalAnnual);
+  const hasManualFinalAnnual = Number.isFinite(manualFinalAnnual) && manualFinalAnnual >= 0;
+  const annual = hasManualFinalAnnual
+    ? manualFinalAnnual
+    : Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
   const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
   const priceBasis = annual > 0 ? annual : oneTime;
   // Recurring lawn lines expose their annual cost as costs.total; without it
@@ -2122,11 +2131,14 @@ function compactAgentLine(line) {
     : (line.costs?.oneTimeCost ?? line.costs?.total ?? line.oneTimeCost ?? line.estimatedCost);
   const cost = Number(rawCost);
   const hasCostBasis = Number.isFinite(cost) && cost >= 0;
-  const collectedMargin = priceBasis > 0 && hasCostBasis
-    ? Math.round(((priceBasis - cost) / priceBasis) * 1000) / 1000
-    : (Number.isFinite(Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin))
-      ? Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin)
-      : null);
+  const manualFinalMargin = Number(line.manualFinalMargin);
+  const collectedMargin = Number.isFinite(manualFinalMargin)
+    ? manualFinalMargin
+    : (priceBasis > 0 && hasCostBasis
+      ? Math.round(((priceBasis - cost) / priceBasis) * 1000) / 1000
+      : (Number.isFinite(Number(line.finalMargin ?? line.margin))
+        ? Number(line.finalMargin ?? line.margin)
+        : null));
   return {
     service: line.service || line.name || 'unknown',
     monthly: Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0) || null,
@@ -3287,6 +3299,7 @@ function presentationRowArrays(estData = {}) {
     estData.result?.lineItems,
     estData.recurring?.services,
     estData.result?.recurring?.services,
+    estData.result?.results?.recurring?.services,
     estData.oneTimeServices,
     estData.result?.oneTimeServices,
     estData.oneTime?.items,
