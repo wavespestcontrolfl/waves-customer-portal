@@ -971,11 +971,16 @@ const TwilioService = {
       return classifyMiss(emailRes);
     }
 
-    // both — SMS and email; success when either lands.
+    // both — SMS and email; success when either lands. Exception: when the
+    // opt-in hold emptied a NON-empty SMS list, an email success alone must
+    // stay a retryable miss (idempotent email dedupes repeats) so a YES
+    // while the tech is on-property still gets the SMS (#2956 r10).
     if (channel === "both") {
       const smsDelivered = smsLegAvailable ? await attemptSmsLegs() : false;
       const emailRes = await sendArrivedEmail();
-      if (smsDelivered || emailRes?.ok) return { success: true, results, emailSent: !!emailRes?.ok };
+      const heldAllSms = !contacts.length && unfilteredContacts.length;
+      if (smsDelivered || (emailRes?.ok && !heldAllSms)) return { success: true, results, emailSent: !!emailRes?.ok };
+      if (heldAllSms) return { success: false, results, emailSent: !!emailRes?.ok };
       return classifyMiss(emailRes);
     }
 

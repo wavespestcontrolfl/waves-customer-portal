@@ -95,20 +95,25 @@ async function markRecipientOptin(phone, status) {
       // undispatched pending row stays pending when only A's ask went out.
       const pendingRows = await db('recipient_optin').where({ phone_key: key, status: 'pending' });
       for (const row of pendingRows) {
-        const priorAsk = await db('sms_log')
+        const priorAskRow = await db('sms_log')
           .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
           .where({ customer_id: row.customer_id })
           .where(function optinAsk() {
             this.where({ message_type: 'recipient_optin_request' })
               .orWhereRaw("metadata::text like '%recipient_optin_request%'");
           })
-          .whereNotIn('status', ['failed', 'undelivered'])
-          .first('id')
+          .orderBy('created_at', 'desc')
+          .first('id', 'twilio_sid', 'status')
           .catch(() => null);
-        if (priorAsk) {
+        const { isFailureStatus } = require('./twilio-failure-alerts');
+        if (priorAskRow && !isFailureStatus(priorAskRow.status)) {
           updated += await db('recipient_optin')
             .where({ phone_key: key, customer_id: row.customer_id, status: 'pending' })
-            .update({ ...stamp, dispatched_at: new Date() });
+            .update({
+              ...stamp,
+              dispatched_at: new Date(),
+              ...(priorAskRow.twilio_sid ? { provider_sid: String(priorAskRow.twilio_sid).slice(0, 64) } : {}),
+            });
         }
       }
     }
@@ -327,7 +332,7 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // Reconcile before re-texting: if Twilio already accepted an ask to
       // this phone (crash landed between acceptance and the marker write),
       // just stamp dispatched_at — never send a duplicate confirmation.
-      const priorSend = await db('sms_log')
+      const priorSendRow = await db('sms_log')
         .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [row.phone_key])
         // Scoped to THIS property's customer: property A's delivered ask is
         // not proof property B's ask went out.
@@ -338,13 +343,23 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
             // the catch defeats reconciliation entirely.
             .orWhereRaw("metadata::text like '%recipient_optin_request%'");
         })
-        .whereNotIn('status', ['failed', 'undelivered'])
-        .first('id')
+        .orderBy('created_at', 'desc')
+        .first('id', 'twilio_sid', 'status')
         .catch(() => null);
+      // Full failure set (mirrors the status webhook's isFailureStatus):
+      // a busy/no-answer/canceled ask is NOT proof of delivery.
+      const { isFailureStatus } = require('./twilio-failure-alerts');
+      const priorSend = priorSendRow && !isFailureStatus(priorSendRow.status) ? priorSendRow : null;
       if (priorSend) {
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
-          .update({ dispatched_at: new Date(), updated_at: new Date() }).catch(() => {});
+          .update({
+            dispatched_at: new Date(),
+            // Copy the reconciled SID so a LATER failure callback can still
+            // flip this row under the strict provider_sid match.
+            ...(priorSend.twilio_sid ? { provider_sid: String(priorSend.twilio_sid).slice(0, 64) } : {}),
+            updated_at: new Date(),
+          }).catch(() => {});
         continue;
       }
       const { renderSmsTemplate } = require('./sms-template-renderer');
