@@ -353,7 +353,14 @@ const ReviewService = {
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContactSmsRecipient } = require("./customer-contact");
     const contact = getServiceContactSmsRecipient(customer);
-    if (!contact.phone) return;
+    if (!contact.phone) {
+      // No consented SMS recipient (e.g. unstamped contact phone and no
+      // primary phone): mark the row so the scheduler's 20-row batch can't
+      // be starved by the same unsendable rows every run (#2955 r3).
+      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" }).catch(() => {});
+      logger.info(`[review] Suppressed request (requestId=${requestId} reason=no-consented-sms-recipient)`);
+      return;
+    }
 
     const domain = publicPortalUrl();
     const longReviewUrl = `${domain}/rate/${request.token}`;
@@ -1261,8 +1268,12 @@ const ReviewService = {
       return { ok: false, reason: "already_reviewed", terminal: true };
     }
 
-    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    // SMS identity is consent-gated; EMAIL identity is not (the #2948
+    // artifact covers texting only) — resolve them separately so an
+    // unstamped contact still gets the email touch as themselves.
+    const { getServiceContact, getServiceContactSmsRecipient } = require("./customer-contact");
     const contact = getServiceContactSmsRecipient(customer);
+    const emailContact = getServiceContact(customer);
 
     // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
     // the per-type review_request_channel preference ('sms' | 'email' | 'both'):
@@ -1313,7 +1324,7 @@ const ReviewService = {
     // review + email enabled (parity with SMS's NO_CONSENT_RECORD on a missing
     // row) and a clean prefs read.
     const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed;
-    const canEmail = !!contact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
+    const canEmail = !!emailContact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
 
     // A no-link private check-in (resolution_check / satisfaction_confirm) must
     // NEVER route to email — the only email template is review_request_email,
@@ -1398,7 +1409,7 @@ const ReviewService = {
     };
 
     if (actualChannel === "email") {
-      return this._sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia });
+      return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia });
     }
     return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody, manageRetryVia });
   },

@@ -1517,12 +1517,16 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // The extracted relationship (home_buyer/tenant/...) — recorded so
     // role-aware recipient selection is possible later; 'unknown' stays null.
     [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
-    // Consent artifact (#2948): stamp ONLY when the V2 extraction recorded
-    // explicit SMS consent on the call (the same v2SmsConsentExplicit rail
-    // that gates same-call fanout) — a wants-notifications contact without
-    // explicit consent evidence must not mint a stamp future reminders
-    // will trust. Distinct source from the portal attestation on purpose.
-    ...((contact.phone && smsConsentExplicit) ? {
+    // Consent artifact (#2948): stamp ONLY when (a) the V2 extraction
+    // recorded explicit SMS consent on the call (the same
+    // v2SmsConsentExplicit rail that gates same-call fanout), AND (b) the
+    // resulting stamp describes only consented people — i.e. the row had
+    // no other contact phones, or its existing contacts were already
+    // stamped. A row whose stamp an admin edit cleared must not be
+    // re-authorized by a call that only spoke for the NEW recipient.
+    ...((contact.phone && smsConsentExplicit
+      && (!SERVICE_CONTACT_SLOTS.some((s) => String(customer[s.phone] || '').trim())
+        || customer.service_contacts_consent_at)) ? {
       service_contacts_consent_at: new Date(),
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',

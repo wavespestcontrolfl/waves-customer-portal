@@ -454,6 +454,11 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         'customers.service_contact_name',
         'customers.service_contact_phone',
         'customers.service_contact_email',
+        // Consent stamp — getServiceContactSmsRecipient treats a row
+        // without it as unstamped, so omitting it would make the admin
+        // list resolve the primary while /send-request (full row) targets
+        // the stamped contact (#2955 r3).
+        'customers.service_contacts_consent_at',
         'customers.address_line1',
         'customers.city',
         'customers.zip',

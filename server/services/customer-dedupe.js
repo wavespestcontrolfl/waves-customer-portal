@@ -1176,6 +1176,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
       backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
       backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
+    } else if (movedContactSlot && winnerHadAnyContact
+      && !isEmptyValue(winner.service_contacts_consent_at)) {
+      // Mixed list: the winner's stamp described only the winner's own
+      // contacts; loser slots just joined the row, so the stamp no longer
+      // describes the stored list — clear it and require re-attestation.
+      backfills.service_contacts_consent_at = null;
+      backfills.service_contacts_consent_source = null;
+      backfills.service_contacts_consent_text_version = null;
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
