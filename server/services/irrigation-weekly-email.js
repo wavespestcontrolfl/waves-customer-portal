@@ -32,6 +32,7 @@ const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
+const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -275,25 +276,51 @@ function buildWeeklyEmailDecision({
 }
 
 /**
- * Active lawn-care customers with a portal-entered weekly irrigation schedule:
- * live customer + irrigation toggle ON + inches entered + an email and
- * coordinates to work with + lawn-care membership (mirrors
- * lawn-health.js hasCustomerLawnCare: active turf profile, or waveguard_tier /
- * lawn_type on the customer, or a lawn-flavored scheduled service). Unlike
- * hasCustomerLawnCare, the scheduled-service branch here requires a CURRENT
- * service — not cancelled, and dated within the trailing window or upcoming —
- * so an active pest-only customer with one long-dead lawn visit is not swept
- * into a weekly lawn email.
+ * RECURRING lawn-care customers with a portal-entered weekly irrigation
+ * schedule: real customer (pipeline stage, not the leads-default `active`
+ * flag) + irrigation toggle ON + inches entered + an email and coordinates
+ * to work with + REQUIRED recurring-lawn-service evidence.
+ *
+ * Owner directive 2026-07-09 (refined): the audience is customers on a
+ * recurring lawn program — the monthly / every-6-weeks / bi-monthly lawn
+ * cadences — never pest-only members or one-time lawn jobs. The earlier
+ * hasCustomerLawnCare mirror accepted a bare real waveguard_tier or a
+ * customers.lawn_type as membership, but WaveGuard tiers are SHARED across
+ * pest and lawn programs and lawn_type is free-text present on pest-only
+ * accounts: 86% of the tier-qualified audience was verified pest-only. So
+ * tier and lawn_type are NOT eligibility here, and the turf profile is
+ * grass-type corroboration only (resolveGrassType), never a qualifier.
+ *
+ * The enforceable evidence (validated against prod, without hardcoding
+ * cadence names): an UPCOMING live lawn-flavored visit, OR ≥2 lawn-flavored
+ * visits inside the trailing window — one visit is a one-time job; two or
+ * more inside 180 days is a real cadence.
+ *
  * Customers who turned email off portal-wide (notification_prefs.email_enabled
  * = false) or opted out of Seasonal Lawn Tips are excluded — this is an
  * optional nudge, not a required notice.
  */
 // A recurring lawn program visits at least quarterly; 180 days of slack keeps
-// a delayed quarterly customer in while excluding long-churned service.
+// a delayed program customer in while excluding long-churned service.
 const LAWN_SERVICE_RECENCY_DAYS = 180;
+
+// Statuses that don't evidence current service: cancelled/skipped/no_show
+// plus 'rescheduled' phantom rows (see waveguard-existing-services
+// TERMINAL_STATUSES). 'completed' DOES count in the trailing window — a
+// recent completed lawn visit is exactly the cadence evidence wanted.
+const NON_LIVE_VISIT_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
+
+// Lawn-flavored service_type match (the same set the earlier CURRENT-service
+// branch used).
+const LAWN_SERVICE_TYPE_LIKES = ['%lawn%', '%waveguard%', '%fertiliz%', '%fungicide%', '%turf%'];
 
 async function findEligibleCustomers({ now = new Date() } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
+  const todayET = etDateString(now);
+  const lawnLikeSql = LAWN_SERVICE_TYPE_LIKES
+    .map(() => 'LOWER(ss2.service_type) LIKE ?')
+    .join(' OR ');
+  const nonLivePlaceholders = NON_LIVE_VISIT_STATUSES.map(() => '?').join(', ');
   return db('customers as c')
     .join('property_preferences as pp', 'pp.customer_id', 'c.id')
     .leftJoin('customer_turf_profiles as tp', function joinActiveProfile() {
@@ -308,43 +335,42 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .whereRaw('np.seasonal_tips IS DISTINCT FROM false')
     .where('c.active', true)
     .whereNull('c.deleted_at')
+    // Real customers only (whereLiveCustomer semantics, alias-qualified —
+    // the shared helper's unqualified columns would be ambiguous against
+    // the tp join): customers.active defaults TRUE for lead rows, so
+    // pipeline_stage is what separates a customer from a lead.
+    .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
     .whereNotNull('c.email')
     .whereNotNull('c.latitude')
     .whereNotNull('c.longitude')
     .where('pp.irrigation_system', true)
     .whereNotNull('pp.irrigation_inches_per_week')
     .where('pp.irrigation_inches_per_week', '>', 0)
-    .where(function lawnMembership() {
-      this.whereNotNull('tp.id')
-        // A tier counts only when it names a real WaveGuard plan — 'One-Time',
-        // 'Commercial', 'None' etc. are non-membership markers. Key
-        // normalization + set mirror membershipTierKey / NON_MEMBERSHIP_TIER_KEYS
-        // in waveguard-existing-services.js.
-        .orWhere(function membershipTier() {
-          this.whereNotNull('c.waveguard_tier')
-            .whereRaw("LOWER(REGEXP_REPLACE(c.waveguard_tier, '[^a-zA-Z0-9]+', '', 'g')) NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial')");
-        })
-        .orWhereNotNull('c.lawn_type')
-        .orWhereExists(function lawnService() {
-          this.select(db.raw('1'))
-            .from('scheduled_services as ss')
-            .whereRaw('ss.customer_id = c.id')
-            // Current membership only: the visit must be upcoming or within
-            // the recency window, and live — cancelled/skipped/no_show visits
-            // and 'rescheduled' phantom rows (see waveguard-existing-services
-            // TERMINAL_STATUSES) don't count. 'completed' DOES count here: a
-            // recent completed lawn visit is exactly the evidence of current
-            // service this predicate wants.
-            .whereNotIn('ss.status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
-            .where('ss.scheduled_date', '>=', lawnServiceCutoff)
-            .where(function serviceTypes() {
-              this.whereRaw("LOWER(ss.service_type) LIKE ?", ['%lawn%'])
-                .orWhereRaw("LOWER(ss.service_type) LIKE ?", ['%waveguard%'])
-                .orWhereRaw("LOWER(ss.service_type) LIKE ?", ['%fertiliz%'])
-                .orWhereRaw("LOWER(ss.service_type) LIKE ?", ['%fungicide%'])
-                .orWhereRaw("LOWER(ss.service_type) LIKE ?", ['%turf%']);
-            });
-        });
+    .where(function recurringLawnService() {
+      // REQUIRED recurring-lawn evidence — tier / lawn_type / turf profile
+      // never qualify a customer on their own (see the doc block above).
+      this.whereExists(function upcomingLawnVisit() {
+        this.select(db.raw('1'))
+          .from('scheduled_services as ss')
+          .whereRaw('ss.customer_id = c.id')
+          .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+          .where('ss.scheduled_date', '>=', todayET)
+          .where(function serviceTypes() {
+            for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
+              this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
+            }
+          });
+      })
+        // …or a demonstrated cadence: ≥2 live lawn-flavored visits inside
+        // the trailing window (a single visit is a one-time job).
+        .orWhereRaw(
+          `(SELECT COUNT(*) FROM scheduled_services ss2
+             WHERE ss2.customer_id = c.id
+               AND ss2.status NOT IN (${nonLivePlaceholders})
+               AND ss2.scheduled_date >= ?
+               AND (${lawnLikeSql})) >= 2`,
+          [...NON_LIVE_VISIT_STATUSES, lawnServiceCutoff, ...LAWN_SERVICE_TYPE_LIKES],
+        );
     })
     .select(
       'c.id',

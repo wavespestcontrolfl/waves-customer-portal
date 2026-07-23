@@ -346,8 +346,8 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   function makeBuilder(cfg = {}) {
     const b = {};
     for (const m of [
-      'join', 'leftJoin', 'where', 'whereNull', 'whereNotNull', 'whereRaw',
-      'orWhereRaw', 'orWhereNotNull', 'orWhereExists', 'select', 'orderBy', 'from', 'first',
+      'join', 'leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
+      'orWhereRaw', 'orWhereNotNull', 'orWhereExists', 'whereExists', 'select', 'orderBy', 'from', 'first',
     ]) b[m] = jest.fn(() => b);
     b.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
     b.then = (resolve, reject) => Promise.resolve(cfg.rows ?? []).then(resolve, reject);
@@ -578,11 +578,21 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       expect(sql).toContain('"pp"."irrigation_system" = ?');
       expect(sql).toContain('"pp"."irrigation_inches_per_week" is not null');
       expect(sql).toContain('"pp"."irrigation_inches_per_week" > ?');
-      // Lawn-membership gate: turf profile, real WaveGuard tier (non-membership
-      // markers excluded), lawn_type, or a CURRENT lawn service.
-      expect(sql).toMatch(/NOT IN \('none', 'onetime', 'na', 'no', 'notset', 'commercial'\)/);
+      // Real customers only (owner 2026-07-09): pipeline_stage separates
+      // customers from leads — customers.active is TRUE on lead rows.
+      expect(sql).toContain('"c"."pipeline_stage" in (?, ?, ?)');
+      // REQUIRED recurring-lawn evidence (owner 2026-07-09 refined): an
+      // upcoming live lawn-flavored visit OR ≥2 in the trailing window.
       expect(sql).toContain('exists');
       expect(sql).toContain('"scheduled_services"');
+      expect(sql).toMatch(/SELECT COUNT\(\*\) FROM scheduled_services ss2[\s\S]*>= 2/);
+      // Tier and lawn_type are NOT eligibility — WaveGuard tiers are shared
+      // across pest and lawn programs (86% of the tier-qualified audience
+      // was verified pest-only), and the turf profile is grass-type
+      // corroboration only. The old membership branches must stay gone.
+      expect(sql).not.toContain('waveguard_tier');
+      expect(sql).not.toMatch(/"c"\."lawn_type" is not null/);
+      expect(sql).not.toContain('"tp"."id" is not null');
     } finally {
       db.raw = originalRaw;
     }
