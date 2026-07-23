@@ -4066,7 +4066,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
   const hasWaveGuardMembership = require('../services/estimate-converter')
     .recurringMixHasMembershipFeeService(recurring);
-  const membershipFee = hasWaveGuardMembership
+  // Operator-stated waiver removes the fee outright (no strike-through, no
+  // invoice) — zeroing it here keeps every downstream SSR figure (fee row,
+  // pay-per-application invoice copy, prepay math) consistent.
+  const operatorSetupFeeWaived = require('../services/estimate-converter')
+    .estimateOperatorSetupFeeWaived(estData);
+  const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
   // Existing customers never pay the setup again — the fee is waived outright
@@ -11482,7 +11487,8 @@ function normalizeOneTimeBreakdown(estData) {
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const membershipFeeMixApplies = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(recurringServicesForFee);
+    .recurringMixHasMembershipFeeService(recurringServicesForFee)
+    && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData);
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
   if (Number.isFinite(membershipFee) && membershipFee > 0 && membershipFeeMixApplies && !hasExplicitWaveGuardSetup) {
     addRows([{
@@ -11884,7 +11890,12 @@ function annualPrepayEligibleForEstimateData(estData) {
 function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload = {}) {
   const converter = require('../services/estimate-converter');
   const { recurringSvcList } = acceptanceServiceLists(estData || {});
-  if (converter.hasWaveGuardSetupService(recurringSvcList || [])) return true;
+  // estimateData-aware: an operator-waived (or member-waived) setup fee is
+  // no longer a prepay incentive — fall through to the %-savings math.
+  if (converter.shouldIncludeWaveGuardSetupFeeForRecurring({
+    recurringServices: recurringSvcList || [],
+    estimateData: estData || {},
+  })) return true;
   // Accept invoices from the SELECTED frequency's annual, so the incentive
   // exists if ANY offered cadence clears it — a lawn-only quote whose
   // default sits at the floor still earns a real discount on the
@@ -15841,9 +15852,13 @@ function estimateDataRecurringServices(estData = {}) {
 }
 
 function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
-  const membershipFeeMixApplies = require('../services/estimate-converter')
+  const converter = require('../services/estimate-converter');
+  const membershipFeeMixApplies = converter
     .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
-  if (membershipFeeMixApplies) return payload;
+  // Operator-stated waiver strips the fee even when the mix carries it —
+  // this finalize choke point is what removes it from snapshot/cached
+  // bundles frozen before the waiver was applied.
+  if (membershipFeeMixApplies && !converter.estimateOperatorSetupFeeWaived(estData)) return payload;
 
   let next = payload;
   const breakdown = payload.oneTimeBreakdown;

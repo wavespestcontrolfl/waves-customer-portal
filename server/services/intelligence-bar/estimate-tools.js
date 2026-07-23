@@ -39,6 +39,7 @@ const {
   normalizeProtocolKey,
 } = require('../protocol-reader');
 const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
+const { clearEstimatePricingCache } = require('../estimate-pricing-cache');
 const { executeProcurementTool } = require('./procurement-tools');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -48,15 +49,16 @@ const PROPERTY_FACT_FALLBACK_SECRET = crypto.randomBytes(32);
 // 2026-07-23). Rides as its own tool param — NEVER inside engineInputs.
 const OPERATOR_PRICE_ADJUSTMENT_SCHEMA = {
   type: 'object',
-  description: `Operator-stated price adjustment. ONLY populate this when the operator explicitly asked to change the price in this conversation ("give them 5% off", "knock it from $117 to $110") — never volunteer a discount yourself, and never guess the reason. Applied server-side through the engine's manual-discount machinery after WaveGuard: PERCENT cuts each bucket by the percentage; FIXED spreads one dollar amount proportionally across recurring-annual + one-time work (for "take monthly from X to Y" on a recurring-only quote, FIXED value = (X−Y)×12; verify the resulting totals in the response and iterate if needed). Lawn floors cap the discount unless the operator EXPLICITLY authorizes going below floor — only then set floorBreachAcknowledged and tell the operator the quote will be below the protected floor.`,
+  description: `Operator-stated price adjustment. ONLY populate this when the operator explicitly asked to change the price in this conversation ("give them 5% off", "knock it from $117 to $110", "waive the $99 setup fee") — never volunteer a discount or waiver yourself, and never guess the reason. Applied server-side through the engine's manual-discount machinery after WaveGuard: PERCENT cuts each bucket by the percentage; FIXED spreads one dollar amount proportionally across recurring-annual + one-time work (for "take monthly from X to Y" on a recurring-only quote, FIXED value = (X−Y)×12; verify the resulting totals in the response and iterate if needed). Lawn floors cap the discount unless the operator EXPLICITLY authorizes going below floor — only then set floorBreachAcknowledged and tell the operator the quote will be below the protected floor. waiveSetupFee removes the $99 WaveGuard setup fee from the estimate AND the first invoice entirely — a true waiver, usable alone or alongside a discount.`,
   properties: {
-    type: { type: 'string', enum: ['PERCENT', 'FIXED'], description: 'PERCENT of each discountable bucket, or FIXED total dollars spread across the estimate' },
-    value: { type: 'number', description: 'Percent (0-100] or dollar amount, as the operator stated it' },
-    label: { type: 'string', description: 'Customer-facing discount label shown on the estimate (≤80 chars), e.g. "Multi-service discount"' },
-    internalReason: { type: 'string', description: "The operator's stated reason, verbatim or near-verbatim (≤300 chars). Audit-only, never customer-visible." },
+    type: { type: 'string', enum: ['PERCENT', 'FIXED'], description: 'PERCENT of each discountable bucket, or FIXED total dollars spread across the estimate. Omit for a fee-waiver-only adjustment.' },
+    value: { type: 'number', description: 'Percent (0-100] or dollar amount, as the operator stated it. Omit for a fee-waiver-only adjustment.' },
+    label: { type: 'string', description: 'Customer-facing discount label shown on the estimate (≤80 chars), e.g. "Multi-service discount". Required with a discount; not used for a fee-waiver-only adjustment.' },
+    internalReason: { type: 'string', description: "The operator's stated reason, verbatim or near-verbatim (≤300 chars). Audit-only, never customer-visible. Always required." },
     floorBreachAcknowledged: { type: 'boolean', description: 'true ONLY when the operator explicitly authorized pricing below the lawn program/margin floor after being told the floor would cap the discount' },
+    waiveSetupFee: { type: 'boolean', description: 'true ONLY when the operator explicitly said to waive the WaveGuard setup fee. Removes it from the customer estimate and the first invoice.' },
   },
-  required: ['type', 'value', 'label', 'internalReason'],
+  required: ['internalReason'],
 };
 
 const ESTIMATE_TOOLS = [
@@ -978,21 +980,31 @@ function validateOperatorPriceAdjustment(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { error: 'operatorPriceAdjustment must be an object' };
   }
-  const type = raw.type === 'PERCENT' ? 'PERCENT' : (raw.type === 'FIXED' ? 'FIXED' : null);
-  if (!type) return { error: 'operatorPriceAdjustment.type must be PERCENT or FIXED' };
-  const value = Number(raw.value);
-  if (!Number.isFinite(value) || value <= 0) {
-    return { error: 'operatorPriceAdjustment.value must be a positive number' };
+  const waiveSetupFee = raw.waiveSetupFee === true;
+  const hasDiscountFields = raw.type !== undefined || raw.value !== undefined;
+  if (!hasDiscountFields && !waiveSetupFee) {
+    return { error: 'operatorPriceAdjustment requires a discount (type + value + label) and/or waiveSetupFee: true' };
   }
-  if (type === 'PERCENT' && value > 100) {
-    return { error: 'operatorPriceAdjustment.value cannot exceed 100 percent' };
-  }
-  if (type === 'FIXED' && value > OPERATOR_ADJUSTMENT_MAX_FIXED) {
-    return { error: `operatorPriceAdjustment.value cannot exceed $${OPERATOR_ADJUSTMENT_MAX_FIXED}` };
-  }
-  const label = String(raw.label || '').trim();
-  if (!label || label.length > 80) {
-    return { error: 'operatorPriceAdjustment.label (customer-facing, ≤80 chars) is required' };
+  let type = null;
+  let value = 0;
+  let label = '';
+  if (hasDiscountFields) {
+    type = raw.type === 'PERCENT' ? 'PERCENT' : (raw.type === 'FIXED' ? 'FIXED' : null);
+    if (!type) return { error: 'operatorPriceAdjustment.type must be PERCENT or FIXED' };
+    value = Number(raw.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      return { error: 'operatorPriceAdjustment.value must be a positive number' };
+    }
+    if (type === 'PERCENT' && value > 100) {
+      return { error: 'operatorPriceAdjustment.value cannot exceed 100 percent' };
+    }
+    if (type === 'FIXED' && value > OPERATOR_ADJUSTMENT_MAX_FIXED) {
+      return { error: `operatorPriceAdjustment.value cannot exceed $${OPERATOR_ADJUSTMENT_MAX_FIXED}` };
+    }
+    label = String(raw.label || '').trim();
+    if (!label || label.length > 80) {
+      return { error: 'operatorPriceAdjustment.label (customer-facing, ≤80 chars) is required with a discount' };
+    }
   }
   const internalReason = String(raw.internalReason || '').trim();
   if (!internalReason || internalReason.length > 300) {
@@ -1002,15 +1014,16 @@ function validateOperatorPriceAdjustment(raw) {
     adjustment: {
       type,
       value: Math.round(value * 100) / 100,
-      label,
+      label: label || null,
       internalReason,
       floorBreachAcknowledged: raw.floorBreachAcknowledged === true,
+      waiveSetupFee,
     },
   };
 }
 
 function operatorAdjustmentToManualDiscount(adjustment) {
-  if (!adjustment) return null;
+  if (!adjustment || !adjustment.type || !(adjustment.value > 0)) return null;
   return {
     source: 'agent_operator',
     type: adjustment.type,
@@ -1043,7 +1056,9 @@ function describeOperatorAdjustment(adjustment, summary = {}, totals = {}) {
       label: adjustment.label,
       internal_reason: adjustment.internalReason,
       floor_breach_acknowledged: adjustment.floorBreachAcknowledged === true,
+      waive_setup_fee: adjustment.waiveSetupFee === true,
     },
+    setup_fee_waived: adjustment.waiveSetupFee === true,
     applied_recurring_annual: Math.round(recurringAmount * 100) / 100,
     applied_one_time: Math.round(oneTimeAmount * 100) / 100,
     anchor_monthly_total: Math.round((monthly + recurringAmount / 12) * 100) / 100,
@@ -3235,6 +3250,40 @@ function presentationRowMatches(row, wanted) {
     .some((candidate) => candidate && normalizeServiceMatchText(candidate) === wanted);
 }
 
+// Every stored shape the public payload builders read display names from.
+// displayName wins the fallback chain at every assembly site, so setting
+// displayName + label re-labels the rendered section without touching the
+// priced service key (pricing, scheduling, and conversion stay unchanged).
+function presentationRowArrays(estData = {}) {
+  return [
+    estData.engineResult?.lineItems,
+    estData.result?.lineItems,
+    estData.recurring?.services,
+    estData.result?.recurring?.services,
+    estData.oneTimeServices,
+    estData.result?.oneTimeServices,
+  ].filter(Array.isArray);
+}
+
+function matchPresentationRows(estData, wanted) {
+  const matched = [];
+  for (const rows of presentationRowArrays(estData)) {
+    for (const row of rows) {
+      if (presentationRowMatches(row, wanted)) matched.push(row);
+    }
+  }
+  return matched;
+}
+
+function parseEstimateDataBlob(raw) {
+  try {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 // Two-step write (write-gates WRITE_TWO_STEP): the no-confirmed call is
 // mutation-free and returns the rich preview (current name → new name); only
 // the operator's Confirm (or the legacy conversational confirmed:true when
@@ -3256,36 +3305,12 @@ async function setEstimatePresentation(input, actionContext = {}) {
     return { error: `Estimate is ${status || 'in an unknown state'} — presentation can only be corrected on draft, sent, or viewed estimates.` };
   }
 
-  let estData;
-  try {
-    estData = typeof estimate.estimate_data === 'string'
-      ? JSON.parse(estimate.estimate_data)
-      : (estimate.estimate_data || {});
-  } catch {
+  const estData = parseEstimateDataBlob(estimate.estimate_data);
+  if (!estData) {
     return { error: 'Estimate data could not be parsed — correct this estimate in the editor instead.' };
   }
-  if (!estData || typeof estData !== 'object') {
-    return { error: 'This estimate has no editable presentation data.' };
-  }
 
-  // Every stored shape the public payload builders read display names from.
-  // displayName wins the fallback chain at every assembly site, so setting
-  // displayName + label re-labels the rendered section without touching the
-  // priced service key (pricing, scheduling, and conversion stay unchanged).
-  const rowArrays = [
-    estData.engineResult?.lineItems,
-    estData.result?.lineItems,
-    estData.recurring?.services,
-    estData.result?.recurring?.services,
-    estData.oneTimeServices,
-    estData.result?.oneTimeServices,
-  ].filter(Array.isArray);
-  const matchedRows = [];
-  for (const rows of rowArrays) {
-    for (const row of rows) {
-      if (presentationRowMatches(row, wanted)) matchedRows.push(row);
-    }
-  }
+  const matchedRows = matchPresentationRows(estData, wanted);
   if (!matchedRows.length) {
     return { error: `No priced service on this estimate matches "${service}". Use the engine key or the name currently displayed.` };
   }
@@ -3309,34 +3334,74 @@ async function setEstimatePresentation(input, actionContext = {}) {
     };
   }
 
-  for (const row of matchedRows) {
-    row.displayName = displayName;
-    row.label = displayName;
-  }
-  estData.presentationOverrides = [
-    ...(Array.isArray(estData.presentationOverrides) ? estData.presentationOverrides : []),
-    {
-      at: new Date().toISOString(),
-      service: String(service),
-      previous_names: previousNames,
-      display_name: displayName,
-      reason: auditReason,
-      matched_rows: matchedRows.length,
-    },
-  ].slice(-20);
-
-  await db('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(estData) });
-  logger.info(`[estimate-presentation] Relabeled "${service}" → "${displayName}" on estimate ${estimate.id} (${matchedRows.length} rows)`);
+  // Commit under a row lock (codex P2 on #2947): a customer can accept
+  // between the preview SELECT and this write, and the freeze rule must hold
+  // at COMMIT time — re-read and re-match on the FRESH blob so an accept's
+  // estimate_data stamps are never overwritten by the stale pre-accept copy,
+  // and make the UPDATE itself conditional on an editable status.
+  const commit = await db.transaction(async (trx) => {
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!locked) return { error: 'Estimate disappeared before the relabel was written.' };
+    const lockedStatus = String(locked.status || '').toLowerCase();
+    if (!PRESENTATION_EDITABLE_STATUSES.has(lockedStatus)) {
+      return { error: `Estimate is now ${lockedStatus || 'in an unknown state'} — presentation is frozen once accepted. Nothing was changed.` };
+    }
+    const lockedData = parseEstimateDataBlob(locked.estimate_data);
+    if (!lockedData) {
+      return { error: 'Estimate data could not be parsed — correct this estimate in the editor instead.' };
+    }
+    const lockedRows = matchPresentationRows(lockedData, wanted);
+    if (!lockedRows.length) {
+      return { error: `No priced service on this estimate matches "${service}" anymore — it changed after the preview. Nothing was changed.` };
+    }
+    const lockedPrevious = [...new Set(lockedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
+    for (const row of lockedRows) {
+      row.displayName = displayName;
+      row.label = displayName;
+    }
+    // Send-time frozen pricing bundles fast-path the customer payload as
+    // long as totals match — a relabel doesn't change totals, so the frozen
+    // bundle would keep serving the OLD name (codex P2 on #2947). Drop it;
+    // the payload rebuilds from the relabeled rows on next view.
+    if (lockedData.sendSnapshot && typeof lockedData.sendSnapshot === 'object'
+      && lockedData.sendSnapshot.pricingBundle) {
+      delete lockedData.sendSnapshot.pricingBundle;
+    }
+    lockedData.presentationOverrides = [
+      ...(Array.isArray(lockedData.presentationOverrides) ? lockedData.presentationOverrides : []),
+      {
+        at: new Date().toISOString(),
+        service: String(service),
+        previous_names: lockedPrevious,
+        display_name: displayName,
+        reason: auditReason,
+        matched_rows: lockedRows.length,
+      },
+    ].slice(-20);
+    const updated = await trx('estimates')
+      .where({ id: estimate.id })
+      .whereIn('status', [...PRESENTATION_EDITABLE_STATUSES])
+      .update({ estimate_data: JSON.stringify(lockedData) });
+    if (!updated) {
+      return { error: 'Estimate status changed mid-write — presentation is frozen once accepted. Nothing was changed.' };
+    }
+    return { previousNames: lockedPrevious, rowsUpdated: lockedRows.length, status: lockedStatus };
+  });
+  if (commit.error) return commit;
+  // The runtime pricing cache also serves pre-relabel names — clear it so
+  // the next customer view rebuilds from the updated rows.
+  clearEstimatePricingCache(estimate.id);
+  logger.info(`[estimate-presentation] Relabeled "${service}" → "${displayName}" on estimate ${estimate.id} (${commit.rowsUpdated} rows)`);
 
   return {
     success: true,
     estimate_id: estimate.id,
     customer_name: estimate.customer_name,
-    status,
-    previous_names: previousNames,
+    status: commit.status,
+    previous_names: commit.previousNames,
     new_display_name: displayName,
-    rows_updated: matchedRows.length,
-    note: status === 'draft'
+    rows_updated: commit.rowsUpdated,
+    note: commit.status === 'draft'
       ? 'Draft presentation updated. Preview before sending.'
       : 'Live estimate updated — the customer link now shows the corrected name.',
   };

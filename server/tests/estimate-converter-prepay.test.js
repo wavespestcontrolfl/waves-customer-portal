@@ -114,6 +114,18 @@ describe('estimate converter annual prepay amount', () => {
       recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
       estimateData: { membershipSnapshot: { isExistingCustomer: true } },
     })).toBe(false);
+    // Operator-stated waiver (agent adjustment channel, 2026-07-23): a true
+    // per-estimate removal — never invoiced even on a qualifying solo mix.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner waived' } },
+    })).toBe(false);
+    // The waiver flag must be an explicit true — a discount-only adjustment
+    // leaves the fee in place.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { operatorPriceAdjustment: { type: 'PERCENT', value: 5, label: 'Loyalty' } },
+    })).toBe(true);
   });
 
   test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {

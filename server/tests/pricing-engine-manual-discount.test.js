@@ -384,6 +384,42 @@ describe('manual discount lawn floor breach (operator-acknowledged, 2026-07-23)'
       .toBeCloseTo(control.summary.recurringAnnualAfterDiscount - md.recurringAmount, 1);
   });
 
+  test('acknowledged discount that exactly consumes headroom stays floor-pinned (CEILed monthly)', () => {
+    // Program minimum chosen so the protected annual (630.85) does not divide
+    // evenly by 12 — nearest-cent monthly would rebuild 630.84 and quietly sit
+    // a cent under the floor without any BELOW-FLOOR disclosure (codex P2 on
+    // #2947). Exactly-on-floor must keep the pinned-CEIL contract even with
+    // the acknowledgement flag set.
+    const minMonthly = 52.5708333; // ×12 → 630.85 protected annual
+    const services = { lawn: { track: 'st_augustine', tier: 'enhanced', useLawnCostFloor: false } };
+    const base = generateEstimate(baseInput({
+      services,
+      lawnProgramMinimumMonthly: minMonthly,
+    }));
+    const lawnAnnual = base.summary.recurringAnnualAfterDiscount;
+    expect(lawnAnnual).toBeGreaterThan(630.85);
+    const headroom = Math.round((lawnAnnual - 630.85) * 100) / 100;
+    const estimate = generateEstimate(baseInput({
+      services,
+      lawnProgramMinimumMonthly: minMonthly,
+      manualDiscount: {
+        source: 'agent_operator',
+        type: 'FIXED',
+        value: headroom,
+        label: 'Loyalty',
+        eligibilityConfirmed: true,
+        floorBreachAcknowledged: true,
+      },
+    }));
+    const md = estimate.summary.manualDiscount;
+    expect(md.floorBreach).toBeNull();
+    expect(md.recurringAmount).toBeCloseTo(headroom, 2);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(630.85, 2);
+    // Pinned CEIL: 630.85 / 12 = 52.5708… → 52.58, never the 52.57 that
+    // rebuilds a 630.84 annual.
+    expect(estimate.summary.recurringMonthlyAfterDiscount).toBe(52.58);
+  });
+
   test('acknowledgement without an actual floor collision records no breach', () => {
     const estimate = generateEstimate(baseInput({
       services: { lawn: { track: 'st_augustine', tier: 'enhanced', useLawnCostFloor: false } },

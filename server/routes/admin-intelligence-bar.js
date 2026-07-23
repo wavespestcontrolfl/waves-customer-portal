@@ -198,6 +198,9 @@ const PII_TOOL_NAMES = new Set([
   'find_similar_estimates',
   'match_existing_customer',
   'create_pending_estimate',
+  // Accepts a customer-phone identifier and echoes the customer name —
+  // same PII class as the other estimate tools (codex P1 on #2947).
+  'set_estimate_presentation',
   // compute_estimate carries the full service address + selected lead id —
   // same PII class as lookup_property and the draft writer.
   'compute_estimate',
@@ -446,15 +449,19 @@ function confirmationDisplayParams(toolName, params, preview) {
   // engine anchor, the adjusted price, and the breach — never just the final
   // number.
   const adj = preview?.operator_price_adjustment || null;
+  const adjHasDiscount = !!adj?.requested?.type;
   const adjustmentLine = adj
-    ? `${adj.requested.label}: ${adj.requested.type === 'PERCENT' ? `${adj.requested.value}% off` : `-$${adj.requested.value}`}`
-      + ` — engine $${adj.anchor_monthly_total}/mo → $${adj.adjusted_monthly_total}/mo`
-      + (adj.anchor_onetime_total !== adj.adjusted_onetime_total
-        ? `, one-time $${adj.anchor_onetime_total} → $${adj.adjusted_onetime_total}`
-        : '')
-      + (adj.floor_breach
-        ? ` — BELOW-FLOOR AUTHORIZED (lawn floor breached by $${adj.floor_breach.below_floor_annual}/yr)`
-        : (adj.capped ? ` — capped (${adj.cap_reason})` : ''))
+    ? (adjHasDiscount
+      ? `${adj.requested.label}: ${adj.requested.type === 'PERCENT' ? `${adj.requested.value}% off` : `-$${adj.requested.value}`}`
+        + ` — engine $${adj.anchor_monthly_total}/mo → $${adj.adjusted_monthly_total}/mo`
+        + (adj.anchor_onetime_total !== adj.adjusted_onetime_total
+          ? `, one-time $${adj.anchor_onetime_total} → $${adj.adjusted_onetime_total}`
+          : '')
+        + (adj.floor_breach
+          ? ` — BELOW-FLOOR AUTHORIZED (lawn floor breached by $${adj.floor_breach.below_floor_annual}/yr)`
+          : (adj.capped ? ` — capped (${adj.cap_reason})` : ''))
+      : '')
+      + (adj.setup_fee_waived ? `${adjHasDiscount ? ' — ' : ''}$99 WaveGuard setup fee WAIVED (removed from estimate + first invoice)` : '')
       + ` [reason: ${adj.requested.internal_reason}]`
     : null;
   return {
@@ -564,7 +571,7 @@ WORKFLOW:
 3. For lawn, price treatable turf—not the whole parcel. A neighborhood grass profile is only a weak/moderate prior; confirm the actual grass from a close photo, a verified profile, or the operator. If asked to count palms or inspect an image, report a count/range and visibility limits; never silently convert that observation into pricing.
 4. Read the complete relevant protocol and check catalog/stock for protocol-named products. Missing on-hand quantity means UNTRACKED, not available. Protocols and inventory can change scope or force review, but NEVER set a dollar amount.
 5. Call compute_estimate for every price and after every pricing-input change. On this page always pass the selected leadId. The server recognizes the linked or unambiguous customer, loads current qualifying services, and applies the combined WaveGuard tier. The engine uses the DB-authoritative configuration. Use the returned per-line margin check with the $35/hour loaded labor rate and 35% collected-margin target. Do not use rough procurement margin averages to override a client-specific engine result.
-   Operator-stated price adjustments: when the operator explicitly asks for a discount or a target price in THIS conversation, pass operatorPriceAdjustment to compute_estimate and the SAME adjustment to create_agent_estimate_draft — the server applies it through the engine's manual-discount machinery and the confirmation card shows the engine anchor vs the adjusted totals. Never initiate, choose, or carry over a discount yourself. If the lawn floor caps it, report where it stopped; only an explicit operator authorization to go below the floor sets floorBreachAcknowledged (the draft then lands in the yellow lane and the card says BELOW-FLOOR AUTHORIZED).
+   Operator-stated price adjustments: when the operator explicitly asks for a discount, a target price, or to waive the WaveGuard setup fee in THIS conversation ("waive the $99 setup fee" → waiveSetupFee: true, a true removal from the estimate and the first invoice), pass operatorPriceAdjustment to compute_estimate and the SAME adjustment to create_agent_estimate_draft — the server applies it through the engine's manual-discount machinery and the confirmation card shows the engine anchor vs the adjusted totals. Never initiate, choose, or carry over a discount yourself. If the lawn floor caps it, report where it stopped; only an explicit operator authorization to go below the floor sets floorBreachAcknowledged (the draft then lands in the yellow lane and the card says BELOW-FLOOR AUTHORIZED).
 6. Clearly separate verified facts, assumptions, unresolved questions, evidence, protocol review, inventory review, and the final engine inputs. Commercial bed bug/cockroach/rodent work without measured unit/count evidence stays review-required.
 7. For a recognized customer, list what they currently buy and spend per application, then put ONLY requested additions in engineInputs.services. Never reprice, discount, or duplicate an active service: its key establishes the starting tier, but its existing paid price stays unchanged. Apply the combined tier only to the newly quoted services.
 8. Use the specific engine service for the requested program: oneTimePest/oneTimeLawn/oneTimeMosquito for one-time work, germanRoach for the multi-visit German roach cleanout, pestInitialRoach for standalone cockroach treatment, and the named specialty key for flea, bed bug, stinging insect, rodent, termite, or other work. Never flatten these into generic pest. The server maps priced line items to approved estimate_v2 React sections; single-service, one-time, cockroach, and multi-service bundle presentations are already supported. You do not create or edit React code.
@@ -961,7 +968,7 @@ HARD CONSTRAINTS:
 1. NEVER quote a price without first calling compute_estimate. The v1 pricing engine is the source of truth for residential pricing.
 2. NEVER call create_pending_estimate without first confirming with the operator ("Draft this estimate? y/n"). Show the engine output, your reasoning, your assumptions, and your uncertainty flags BEFORE the confirm prompt.
 3. NEVER adjust the engine's price upward or downward based on your own judgment. If the engine output looks wrong, flag it as uncertainty — let the admin decide.
-   THE ONE EXCEPTION — operator-stated adjustments: when the OPERATOR explicitly asks for a discount or a lower price in this conversation ("give them 5% off", "knock it from $117 to $110"), pass operatorPriceAdjustment to compute_estimate (and the SAME adjustment to create_pending_estimate). The engine anchor is still computed first; the adjustment is applied server-side through the manual-discount machinery, and the response shows anchor vs adjusted totals plus any floor cap. Report both numbers back. Never initiate a discount yourself, never pick the value or the reason yourself, and never restate an operator adjustment from an earlier conversation without them re-confirming it. If lawn floors cap the discount, tell the operator where it stopped; ONLY if they then explicitly authorize going below the floor set floorBreachAcknowledged: true and say clearly the quote will be below the protected floor.
+   THE ONE EXCEPTION — operator-stated adjustments: when the OPERATOR explicitly asks for a discount, a lower price, or to waive the WaveGuard setup fee in this conversation ("give them 5% off", "knock it from $117 to $110", "waive the $99 setup fee" → waiveSetupFee: true, a true removal from estimate + first invoice), pass operatorPriceAdjustment to compute_estimate (and the SAME adjustment to create_pending_estimate). The engine anchor is still computed first; the adjustment is applied server-side through the manual-discount machinery, and the response shows anchor vs adjusted totals plus any floor cap. Report both numbers back. Never initiate a discount yourself, never pick the value or the reason yourself, and never restate an operator adjustment from an earlier conversation without them re-confirming it. If lawn floors cap the discount, tell the operator where it stopped; ONLY if they then explicitly authorize going below the floor set floorBreachAcknowledged: true and say clearly the quote will be below the protected floor.
 4. NEVER send. You have no access to send tools. Drafts are created with status='draft', source='ai_agent' — admin sends through EstimatePage manually.
 5. PRESENTATION FIXES: if an estimate's customer page shows the WRONG SERVICE SECTION (e.g. bed bug section but the job is a roach cleanout), the priced service key is wrong — fix it by re-pricing (a new draft here, or an Agent Estimate revision), never by relabeling. Use set_estimate_presentation ONLY for wording: the operator wants a section's customer-facing NAME changed on an existing draft/sent estimate without touching price or scheduling. It previews first and commits only on the operator's Confirm.
 

@@ -738,6 +738,17 @@ function recurringMixHasMembershipFeeService(recurringServices = []) {
   return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
+// Operator-stated setup-fee waiver (agent adjustment channel, owner decision
+// 2026-07-23): a per-estimate TRUE waiver — the fee is removed from the
+// customer-facing estimate AND never invoiced. Distinct from the
+// existing-member waiver (struck-through display) and the annual-prepay
+// waiver (fee shown, waived on prepay selection). Set only through the
+// confirm-gated operatorPriceAdjustment tool param.
+function estimateOperatorSetupFeeWaived(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  return data?.operatorPriceAdjustment?.waiveSetupFee === true;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -745,6 +756,8 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
+  // Operator-stated waiver: removed from display and never invoiced.
+  if (data?.operatorPriceAdjustment?.waiveSetupFee === true) return false;
   // A standalone-scheduling supplement (rodent bait scalar after the
   // pest+rodent route removal) makes the plan a multi-service bundle even
   // with one recurring LINE — and the owner rule says bundles carry no
@@ -2958,6 +2971,7 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;

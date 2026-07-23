@@ -1869,6 +1869,13 @@ function generateEstimate(input) {
       // (see pricingMetadata.manualDiscountFloorBreach stamp) and the margin
       // audit below reports the true breached per-line numbers.
       if (md.floorBreachAcknowledged === true) {
+        // A discount that exactly consumes the headroom leaves lawn sitting
+        // ON its floor without breaching — keep the pinned-CEIL contract so
+        // the summary monthly can never rebuild an annual a cent below the
+        // floor without a BELOW-FLOOR disclosure (codex P2 on #2947). A real
+        // breach (>) deliberately skips the pin: monthly derives from the
+        // authorized sub-floor annual with normal rounding.
+        if (manualDiscountAmount === recurringManualHeadroom) manualDiscountLawnFloorPinned = true;
         if (manualDiscountAmount > recurringManualHeadroom) {
           manualDiscountFloorBreach = {
             acknowledged: true,
