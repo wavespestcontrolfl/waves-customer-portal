@@ -238,6 +238,9 @@ describe('self-booking plan sync helpers', () => {
     expect(serviceFamilyKey('pest_control_monthly')).toBe('pest_control');
     expect(isOneTimeBookingSource('quote-wizard-onetime')).toBe(true);
     expect(isOneTimeBookingSource('estimate-accept')).toBe(true);
+    // Admin one-time booking resends (estimate_accepted_onetime SMS) must not
+    // seed a recurring series (Codex round-6 P2 on #2944).
+    expect(isOneTimeBookingSource('admin-manual-booking-resend')).toBe(true);
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control' })).toBe(false);
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true })).toBe(true);
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', recurring_parent_id: 123 })).toBe(false);

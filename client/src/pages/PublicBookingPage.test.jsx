@@ -57,14 +57,18 @@ const availabilityPayload = () => ({
   slots: [{ start_time: '09:00' }],
 });
 
-function stubFetch({ config } = {}) {
+function stubFetch({ config, confirmMode } = {}) {
   const fetchMock = vi.fn(async (url) => {
     const parsed = new URL(String(url), 'https://portal.test');
     if (parsed.pathname.endsWith('/booking/config')) {
       if (config === 'error') return jsonResponse({ error: 'nope' }, 500);
       return jsonResponse(config || { enabled: true });
     }
-    if (parsed.pathname.endsWith('/booking/confirm')) return jsonResponse({ confirmationCode: 'WPC-1234' });
+    if (parsed.pathname.endsWith('/booking/confirm')) {
+      // A 2xx whose body doesn't parse (captive portal, truncation).
+      if (confirmMode === 'non-json') return { ok: true, status: 200, json: async () => { throw new Error('unparseable'); } };
+      return jsonResponse({ confirmationCode: 'WPC-1234' });
+    }
     if (parsed.searchParams.has('date_from')) return jsonResponse({ error: 'unavailable' }, 503);
     return jsonResponse(availabilityPayload());
   });
@@ -218,6 +222,27 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     expect(await screen.findByLabelText('Service address')).toBeInTheDocument();
     expect(screen.queryByText('Book your next visit')).not.toBeInTheDocument();
+  });
+
+  it('a 2xx confirm with an unparseable body never claims "You\'re booked!"', async () => {
+    stubFetch({ confirmMode: 'non-json' });
+
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const firstName = await screen.findByLabelText('First name');
+    fireEvent.change(firstName, { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550101' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/couldn't confirm whether your booking went through/i);
+    expect(screen.queryByText(/You're booked!/)).not.toBeInTheDocument();
   });
 
   it('a signed-in customer still sends the bearer when the config fetch failed open', async () => {

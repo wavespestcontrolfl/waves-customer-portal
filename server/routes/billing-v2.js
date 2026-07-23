@@ -693,7 +693,15 @@ router.get('/balance', async (req, res, next) => {
       // rows. Those drafts are payable at /pay (only statement-accrued
       // tokens are blocked there), and they're the exact failure this CTA
       // exists to repair, so their ids ride along with the open statuses.
-      const failedDraftInvoiceIds = failedInvoiceIds.filter((id) => !balanceCarryingInvoiceIds.has(id));
+      // Historic failed-payment metadata can carry non-UUID invoice_id values;
+      // invoices.id is a uuid column, so an unfiltered orWhereIn would make
+      // Postgres throw on the cast and 500 the whole Billing tab for that
+      // customer (Codex round-6 P2). Shape-filter before querying — a
+      // malformed id simply doesn't get a pay link.
+      const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const failedDraftInvoiceIds = failedInvoiceIds
+        .filter((id) => !balanceCarryingInvoiceIds.has(id))
+        .filter((id) => UUID_SHAPE.test(id));
       const openRows = await db('invoices')
         .where({ customer_id: req.customerId })
         .where(function () {

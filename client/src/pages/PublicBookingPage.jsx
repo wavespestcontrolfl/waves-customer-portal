@@ -25,7 +25,10 @@ const SERVICES = [
   { id: 'bora_care', label: 'Bora-Care Wood Treatment', duration: 90, icon: 'shield', desc: 'Borate treatment for termites, beetles & wood-decay fungi' },
 ];
 
-const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
+// Keep in sync with the server's ONE_TIME_BOOKING_SOURCE_VALUES
+// (services/self-booking-plan-sync.js) — a source missing here posts a
+// recurring_pattern and seeds a follow-up series for a one-time booking.
+const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime', 'admin-manual-booking-resend']);
 const RECURRING_SERVICE_PATTERNS = {
   pest_control: 'quarterly',
   lawn_care: 'quarterly',
@@ -376,7 +379,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     // `source` comes from the public query string — map to a known enum so a
     // crafted /book?source=<email-or-token> can't send raw PII as a property.
-    const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz']);
+    const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz', 'admin-manual-booking-resend']);
     const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
     track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
     // Deliberately fires once on mount (funnel-top event).
@@ -553,16 +556,24 @@ export default function PublicBookingPage() {
           },
         }),
       });
-      // Same non-JSON tolerance as loadAvailability (audit S3-17).
-      const data = await res.json().catch(() => ({}));
+      // Non-JSON tolerance applies to ERROR statuses only (audit S3-17): a
+      // proxy 5xx shouldn't surface a parse error. A 2xx that doesn't parse
+      // is different — claiming "You're booked!" off a captive-portal or
+      // truncated response would be a lie (Codex round-6 P2), so that case
+      // stops with check-by-phone copy instead of advancing to step 4.
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
       // Customers-only refusal: not an error banner — a card with the
       // quote-wizard handoff (and a re-verify path), never a dead end.
-      if (res.status === 403 && data.customersOnly) {
+      if (res.status === 403 && data?.customersOnly) {
         setRefusal({ message: data.error, quoteUrl: data.quoteUrl });
         setLoading(false);
         return;
       }
-      if (!res.ok) throw new Error(data.error || "We couldn't complete your booking. Try again in a moment, or call (941) 297-5749 and we'll get you scheduled.");
+      if (!res.ok) throw new Error(data?.error || "We couldn't complete your booking. Try again in a moment, or call (941) 297-5749 and we'll get you scheduled.");
+      if (!data || typeof data !== 'object') {
+        throw new Error("We couldn't confirm whether your booking went through. Call (941) 297-5749 and we'll check — please don't rebook online until we do.");
+      }
       setConfCode(data.confirmationCode || 'WPC-????');
       // Card-on-file step (dark until the funnel's gate flips): when the
       // server minted an inline capture link, the confirmation screen shows
