@@ -258,6 +258,38 @@ describe('validation', () => {
     }
   });
 
+  test('sanitation closeouts must record performed cleanup, not just a recommendation (codex P2 on #2963)', () => {
+    // With evidence_cleaned retired, the work chips are the only proof
+    // cleanup happened — a recommendation-only submission must not publish
+    // the "cleaned and sanitized" report copy.
+    const recommendationOnly = validateTypedFindings({
+      type: 'rodent_sanitation',
+      values: { ...SANITATION_VALUES, sanitation_work_completed: 'Insulation removal recommended' },
+      expectedType: 'rodent_sanitation',
+      enforceRequired: true,
+    });
+    expect(recommendationOnly.ok).toBe(false);
+    expect(recommendationOnly.errors.join(' ')).toMatch(/records no cleanup work/);
+
+    // The recommendation beside performed work stays legal.
+    const withWork = validateTypedFindings({
+      type: 'rodent_sanitation',
+      values: { ...SANITATION_VALUES, sanitation_work_completed: 'Removed droppings, Insulation removal recommended' },
+      expectedType: 'rodent_sanitation',
+      enforceRequired: true,
+    });
+    expect(withWork.ok).toBe(true);
+
+    // Limited-access cleanup IS performed work.
+    const limited = validateTypedFindings({
+      type: 'rodent_sanitation',
+      values: { ...SANITATION_VALUES, sanitation_work_completed: 'Limited cleanup due to access' },
+      expectedType: 'rodent_sanitation',
+      enforceRequired: true,
+    });
+    expect(limited.ok).toBe(true);
+  });
+
   test('"none" chips cannot ride with the findings they negate', () => {
     const concerns = validateTypedFindings({
       type: 'rodent_exclusion',

@@ -697,7 +697,12 @@ const REQUIRED_FINDINGS_FIELDS = {
     'areas_inspected', 'activity_found', 'recommended_service', 'urgency',
   ],
   wildlife_trapping: ['target_animal'],
-  bed_bug: ['evidence_level', 'treatment_method'],
+  // rooms_treated joined the required core 2026-07-23: with the generic
+  // Areas-treated picker hidden on bed bug completions, it is the ONLY
+  // location capture — a closeout without it would leave the report and
+  // product records with no record of where the treatment occurred
+  // (codex P2 on #2963).
+  bed_bug: ['rooms_treated', 'evidence_level', 'treatment_method'],
   // FS 482.226 report content (Codex P1 on the Phase-3 fields): the two
   // compliance answers are required, not optional — a blank field is
   // silently skipped from the immutable customer report, which is exactly
@@ -1185,6 +1190,19 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       .split(',').map((s) => s.trim()).filter(Boolean);
     if (limitations.includes('No limitations') && limitations.length > 1) {
       errors.push('"No limitations" cannot be combined with other limitations');
+    }
+  }
+  // rodent_sanitation publishes "contamination was cleaned and sanitized"
+  // copy — with evidence_cleaned retired (2026-07-23), the work chips are
+  // the only proof cleanup happened. A submission whose only work chip is
+  // the recommendation entry records no performed cleanup, so the report
+  // headline would overclaim (codex P2 r3 on #2963). Every other chip —
+  // including the limited-access entry — describes work that was done.
+  if (type === 'rodent_sanitation') {
+    const work = String(values.sanitation_work_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (work.length && work.every((c) => c === 'Insulation removal recommended')) {
+      errors.push('"Insulation removal recommended" alone records no cleanup work — add the cleanup performed or clear the chip');
     }
   }
   if (type === 'rodent_inspection' && enforceRequired && String(values.activity_found) === 'Yes') {
