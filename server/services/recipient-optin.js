@@ -100,11 +100,17 @@ async function filterRecipientsByOptin(contacts = []) {
 // The pending row is the CLAIM — inserted (onConflict ignore) before the
 // Twilio dispatch so two concurrent saves can't both text the same phone;
 // a blocked/failed send releases the claim so a later save can retry.
-async function requestRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '' }) {
-  if (!isDoubleOptinEnabled()) return { requested: 0 };
+// Phase 1 — SYNCHRONOUS claim, called BEFORE the contact slots are written
+// to the customers row: renders the template and inserts the pending rows
+// (onConflict ignore = atomic one-ask-per-phone claim). Because the claim
+// lands before the contact becomes visible to any fanout, there is no
+// window where a brand-new phone reads as grandfathered (no row). Returns
+// the claims for phase 2; template dark → no claims, nothing pends.
+async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '' }) {
+  if (!isDoubleOptinEnabled()) return [];
   const accountKey = recipientPhoneKey(customer?.phone);
   const priorKeys = new Set(priorPhones.map(recipientPhoneKey).filter(Boolean));
-  let requested = 0;
+  const claims = [];
   for (const contact of contacts) {
     const key = recipientPhoneKey(contact.phone);
     if (!key || key === accountKey || priorKeys.has(key)) continue;
@@ -116,7 +122,6 @@ async function requestRecipientOptins({ customer, contacts = [], priorPhones = [
         property_address: String(propertyAddress || '').trim() || 'your service property',
       });
       if (!body) continue; // template dark — owner has not approved copy yet
-      // Atomic claim: only the insert that lands owns the ask.
       const claimed = await db('recipient_optin').insert({
         phone_key: key,
         phone_e164: String(contact.phone || '').trim(),
@@ -127,10 +132,25 @@ async function requestRecipientOptins({ customer, contacts = [], priorPhones = [
         requested_at: new Date(),
       }).onConflict('phone_key').ignore().returning('phone_key');
       if (!claimed || !claimed.length) continue; // row already exists — never re-text
+      claims.push({ key, phone: contact.phone, body });
+    } catch (err) {
+      logger.warn(`[recipient-optin] claim failed for ***${key.slice(-4)}: ${err.message}`);
+    }
+  }
+  return claims;
+}
+
+// Phase 2 — ASYNC dispatch of the claimed confirmation texts (the save
+// response never waits on Twilio). A blocked/failed send releases the
+// claim so the recipient isn't stranded pending without ever being asked.
+async function dispatchRecipientOptins(claims = [], customer = null) {
+  let requested = 0;
+  for (const claim of claims) {
+    try {
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({
-        to: contact.phone,
-        body,
+        to: claim.phone,
+        body: claim.body,
         channel: 'sms',
         audience: 'customer',
         purpose: 'appointment',
@@ -139,18 +159,23 @@ async function requestRecipientOptins({ customer, contacts = [], priorPhones = [
         metadata: { original_message_type: 'recipient_optin_request' },
       });
       if (result.blocked || result.sent === false) {
-        // Release the claim: they were never asked, so they must not sit
-        // in pending (which would hold their appointment texts forever).
-        await db('recipient_optin').where({ phone_key: key, status: 'pending' }).del().catch(() => {});
-        logger.warn(`[recipient-optin] request blocked for ***${key.slice(-4)}: ${result.code || 'unknown'}`);
+        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).del().catch(() => {});
+        logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
       requested += 1;
     } catch (err) {
-      logger.warn(`[recipient-optin] request failed for ***${key.slice(-4)}: ${err.message}`);
+      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).del().catch(() => {});
+      logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }
   return { requested };
+}
+
+// Back-compat convenience for callers that can't split phases.
+async function requestRecipientOptins(args) {
+  const claims = await claimRecipientOptins(args);
+  return dispatchRecipientOptins(claims, args.customer);
 }
 
 module.exports = {
@@ -162,5 +187,7 @@ module.exports = {
   getRecipientOptin,
   markRecipientOptin,
   filterRecipientsByOptin,
+  claimRecipientOptins,
+  dispatchRecipientOptins,
   requestRecipientOptins,
 };

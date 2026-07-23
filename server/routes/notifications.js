@@ -632,26 +632,34 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         });
       }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
+      // Recipient double opt-in (gated + dark template): CLAIM the pending
+      // rows for NEWLY ADDED phones BEFORE the slots become visible on the
+      // customers row — no window where a concurrent fanout reads the new
+      // contact as grandfathered (no row). Dispatch of the confirmation
+      // texts stays async below; failures are logged, never swallowed.
+      let optinClaims = [];
+      if (updates.serviceContactsConsent === true && contacts.length) {
+        const { claimRecipientOptins } = require('../services/recipient-optin');
+        optinClaims = await claimRecipientOptins({
+          customer: beforeRow,
+          contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
+          priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
+          propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
+        }).catch((err) => {
+          logger.error(`[notifications] recipient opt-in claim failed for customer ${req.params.customerId}: ${err.message}`);
+          return [];
+        });
+      }
       await db('customers').where({ id: req.params.customerId }).update({
         ...serviceContactSlotUpdates(contacts, beforeRow),
         ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
       savedContacts = contacts.map(serviceContactPayload);
-      // Recipient double opt-in (gated + dark template): ask each NEWLY
-      // ADDED phone recipient to confirm by reply — phones already stored
-      // before this save are grandfathered and never asked/held.
-      // Fire-and-forget (the save response never waits on Twilio) but
-      // failures are logged: a silent miss here means a recipient is never
-      // asked with no operator-visible trace.
-      if (updates.serviceContactsConsent === true && contacts.length) {
-        const { requestRecipientOptins } = require('../services/recipient-optin');
-        void requestRecipientOptins({
-          customer: beforeRow,
-          contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
-          priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
-          propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-        }).catch((err) => logger.error(`[notifications] recipient opt-in request failed for customer ${req.params.customerId}: ${err.message}`));
+      if (optinClaims.length) {
+        const { dispatchRecipientOptins } = require('../services/recipient-optin');
+        void dispatchRecipientOptins(optinClaims, beforeRow)
+          .catch((err) => logger.error(`[notifications] recipient opt-in dispatch failed for customer ${req.params.customerId}: ${err.message}`));
       }
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
@@ -692,16 +700,20 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
-      // Same opt-in ask as the list save — the legacy shape must not be a
-      // loophole that enrolls a new phone without the confirmation flow.
+      // Same claim-then-dispatch opt-in flow as the list save — the legacy
+      // shape must not be a loophole that enrolls a new phone without the
+      // confirmation flow. (Claim runs after this branch's UPDATE, which is
+      // acceptable here: the legacy shape is only sent by stale cached
+      // clients; the list save above is the live writer.)
       if (updates.serviceContactsConsent === true && contact.phone) {
-        const { requestRecipientOptins } = require('../services/recipient-optin');
-        void requestRecipientOptins({
+        const { claimRecipientOptins, dispatchRecipientOptins } = require('../services/recipient-optin');
+        void claimRecipientOptins({
           customer: beforeRow,
           contacts: [{ name: contact.name, firstName: String(contact.name || '').split(/\s+/)[0], phone: contact.phone }],
           priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
           propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-        }).catch((err) => logger.error(`[notifications] recipient opt-in request failed for customer ${req.params.customerId}: ${err.message}`));
+        }).then((claims) => dispatchRecipientOptins(claims, beforeRow))
+          .catch((err) => logger.error(`[notifications] recipient opt-in request failed for customer ${req.params.customerId}: ${err.message}`));
       }
     }
 
