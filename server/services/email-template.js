@@ -289,11 +289,14 @@ function stripeFooterLine() {
 }
 
 function glassPillHeader(T) {
+  // Logo only, no pill (owner calls 2026-07-21): the phone number and the
+  // translucent pill background are both gone — the bare logo floats at
+  // the top. The phone still lives in the fine-print footer stack, which
+  // stays the customer-visible contact path.
   return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
         <tr>
-          <td style="background:#FFFFFF;background:rgba(255,255,255,0.55);border:1px solid ${T.cardBorder};border-radius:999px;padding:9px 22px;box-shadow:0 10px 30px rgba(4,57,94,0.10),inset 0 1px 0 rgba(255,255,255,0.6);">
-            <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;vertical-align:middle;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
-            <a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="34" height="34" style="display:inline-block;width:34px;height:34px;border:0;vertical-align:middle;margin-left:14px;" /></a>
+          <td style="padding:2px 0;">
+            <a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="48" height="48" style="display:inline-block;width:48px;height:48px;border:0;vertical-align:middle;" /></a>
           </td>
         </tr>
       </table>`;
