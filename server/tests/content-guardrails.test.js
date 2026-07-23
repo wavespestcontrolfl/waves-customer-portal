@@ -1777,7 +1777,7 @@ describe('footprint gate — round-12 hardening (Codex findings + astro r12 pari
   test('compound service keywords (tree and shrub, lawn & pest) are caught', () => {
     for (const body of [
       'Need tree and shrub care in Naples?',
-      'Lawn & pest control in Cape Coral is competitive.',
+      'Lawn & pest control services in Cape Coral',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
@@ -2002,7 +2002,7 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
   test('editorial "service guide" compounds pass; "services in <city>" still flags', () => {
     const guide = guardrails.evaluate({ body: 'A pest control service guide for Naples homeowners.' }, {});
     expect(guide.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
-    const claim = guardrails.evaluate({ body: 'Pest control services in Naples are competitive.' }, {});
+    const claim = guardrails.evaluate({ body: 'Pest control services in Naples' }, {});
     expect(claim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
   });
 

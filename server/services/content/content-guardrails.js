@@ -654,7 +654,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // packaging TITLE/META ("Cape Coral pest control services") — prose
   // sentences carry terminal punctuation and never match the anchored form.
   + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|faqs?)\\b)(?:(?!\\b(?:not|no|un|isn|aren|unavailable)\\w*\\b)[^.!?]){0,25}$`
-  + `|\\b(?<!\\b(?:about|regarding|concerning|on)\\b[^.!?]{0,20})(?<!\\b(?:provid|offer|deliver)\\w*\\b[^.!?]{0,30}\\bfor\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
+  + `|\\b(?<!\\b(?:about|regarding|concerning|on)\\b[^.!?]{0,20})(?<!\\b(?:provid|offer|deliver)\\w*\\b[^.!?]{0,30}\\bfor\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b(?![^.!?]{0,30}\\b(?:is|are|was|were|has|have|costs?|varies|vary|differs?|depends?|remains?|tends?|requires?)\\b)`
   // "Our pest control services guide explains…" is editorial packaging of
   // CONTENT, not of service — the guide-compound lookahead mirrors the
   // keyword suffix's own guard.
@@ -707,7 +707,7 @@ const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|
 // refuses dashes entirely (a dash splice is a new clause, not a list).
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\sand\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\sand\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:just )?(?:outside|beyond|out of|past|(?:south|north|east|west) of)\\b`,
     'i',
   );
 }
