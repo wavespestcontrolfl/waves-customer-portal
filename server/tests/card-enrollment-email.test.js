@@ -388,7 +388,17 @@ describe('autopay setup invitation (email leg of the card-request funnel)', () =
       service_type: 'Quarterly Pest Control',
       date_line: ' on Sat, Jul 25',
       secure_link: 'https://portal.wavespestcontrol.com/secure/tok',
+      // Default lane (no billing_mode / tier on the row): per-application
+      // auto-charge copy.
+      charge_timing_line: "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.",
     });
+  });
+
+  test('monthly-membership customer gets the monthly dues timing line (Codex #2952)', async () => {
+    state.tables.customers = [{ ...CUSTOMER, billing_mode: 'monthly_membership', waveguard_tier: 'Silver', monthly_rate: '120.00' }];
+    await sendAutopaySetupInvitation(ARGS);
+    expect(mockSendTemplate.mock.calls[0][0].payload.charge_timing_line)
+      .toBe('Your card is charged your monthly plan amount on your billing day each month, and you get a receipt every time.');
   });
 
   test('sendTemplate failure is swallowed (best-effort contract)', async () => {
@@ -411,8 +421,15 @@ describe('seeded invitation template row (migration 20260721100010)', () => {
   });
 
   test('sender-passed variables are declared on the template', () => {
-    expect(invite.required).toEqual(expect.arrayContaining(['first_name', 'service_type', 'secure_link']));
+    expect(invite.required).toEqual(expect.arrayContaining(['first_name', 'service_type', 'secure_link', 'charge_timing_line']));
     expect(invite.optional).toContain('date_line');
+  });
+
+  test('no block hard-codes a charge-timing claim (Codex #2952 — timing is billing-mode-composed)', () => {
+    for (const block of invite.blocks) {
+      expect(String(block.content || '')).not.toMatch(/only charged after a completed service/i);
+    }
+    expect(invite.preview).not.toMatch(/only charged after a completed service/i);
   });
 });
 

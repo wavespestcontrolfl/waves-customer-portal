@@ -40,16 +40,21 @@ const TEMPLATES = [
     // the enrollment-confirmation authorization copy.
     stream: 'service_operational',
     description: 'Invites a customer to add a card on file via their unique /secure link: nothing charged today, Auto Pay enrolls on save. Email leg of the appointment card-request funnel — sent alongside the SMS leg (secure_appointment_card) after the text is confirmed dispatched; gated by GATE_CARD_ENROLLMENT_EMAILS.',
-    required: ['first_name', 'service_type', 'secure_link'],
+    // charge_timing_line is sender-composed from the customer's ACTUAL
+    // billing mode (chargeTimingLine — Codex #2952: a monthly-membership
+    // customer is charged monthly dues on their billing day, so a
+    // hard-coded "only charged after a completed service" would misstate
+    // when they're charged).
+    required: ['first_name', 'service_type', 'secure_link', 'charge_timing_line'],
     // date_line is clause-style like the SMS template: " on Tue, Jul 21"
     // or '' — the sender always passes it, possibly empty.
     optional: ['date_line'],
     subject: 'Set up Auto Pay for your Waves visits — nothing charged today',
-    preview: 'Add a card securely — it is only charged after a completed service.',
+    preview: 'Add your card securely — nothing is charged today.',
     blocks: [
-      { type: 'paragraph', content: 'Hi {{first_name}}, here is your secure link to add a card on file for your {{service_type}} visit{{date_line}}. Nothing is charged today — your card is only charged after a completed service.' },
+      { type: 'paragraph', content: 'Hi {{first_name}}, here is your secure link to add a card on file for your {{service_type}} visit{{date_line}}. Nothing is charged today.' },
       { type: 'heading', content: 'How it works' },
-      { type: 'paragraph', content: 'Add your card once and Auto Pay takes care of each invoice after the service is completed, with a receipt every time. You can turn Auto Pay off or remove your card anytime in the Waves app or your customer portal.' },
+      { type: 'paragraph', content: 'Add your card once and Auto Pay takes care of the rest. {{charge_timing_line}} You can turn Auto Pay off or remove your card anytime in the Waves app or your customer portal.' },
       { type: 'cta', label: 'Add my card securely', url_variable: 'secure_link' },
       { type: 'paragraph', content: 'We never take card numbers by phone. This link is unique to your account — please do not forward it.' },
       { type: 'signature', content: '— The Waves Team' },
@@ -58,6 +63,7 @@ const TEMPLATES = [
       first_name: 'Taylor',
       service_type: 'Quarterly Pest Control',
       date_line: ' on Sat, Jul 25',
+      charge_timing_line: "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.",
       secure_link: 'https://portal.wavespestcontrol.com/secure/EXAMPLE',
       customer_portal_url: 'https://portal.wavespestcontrol.com/login',
       company_email: BILLING_EMAIL,

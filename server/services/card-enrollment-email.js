@@ -238,6 +238,11 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping setup invitation`);
       return null;
     }
+    // Billing-mode-aware timing copy (Codex #2952): a monthly-membership
+    // customer who saves this card is charged monthly dues on their
+    // billing day — a hard-coded "only charged after a completed service"
+    // sentence would misstate when they're charged.
+    const timingLine = await chargeTimingLine(customerId);
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'autopay.setup_invitation',
       to: email,
@@ -246,6 +251,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
         service_type: clean(serviceType) || 'service',
         date_line: dateLine || '',
         secure_link: secureUrl,
+        charge_timing_line: timingLine,
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: BILLING_EMAIL,
