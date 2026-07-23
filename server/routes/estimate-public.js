@@ -13,23 +13,20 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
-// gate their (already-accepted) customers would be refused. This mints the
-// namespaced HMAC createSelfBooking's gate honors. The mint time is quantized
-// to the acceptance DAY so the fresh-accept link and every retry rebuild
-// produce the SAME token — the retry path dedupes short codes by exact
-// target_url and must never stack a new permanent row per retry. The fresh
-// accept builds its link before the in-memory row carries accepted_at (the
-// column is written trx-side), so "now" IS the acceptance day there; retries
-// read the committed accepted_at. Returns '' when no signing secret is
-// configured (link degrades to today's shape).
+// gate their (already-accepted) customers would be refused. The util owns the
+// token shape (namespace, year TTL, acceptance-day quantization — the latter
+// keeps fresh-accept and retry URLs byte-identical for the short-code dedup
+// contract). The fresh accept builds its link before the in-memory row
+// carries accepted_at (the column is written trx-side), so "now" IS the
+// acceptance day there; retries read the committed accepted_at. Returns ''
+// when no signing secret is configured (link degrades to today's shape).
 function acceptBookingGateToken(estimate) {
   const acceptedMs = estimate?.accepted_at ? new Date(estimate.accepted_at).getTime() : Date.now();
-  const dayEpochSec = Math.floor(acceptedMs / 1000 / 86400) * 86400;
-  const token = mintEstimateHandoffToken(`estimate-accept:${estimate.id}`, dayEpochSec);
+  const token = mintEstimateAcceptToken(estimate.id, acceptedMs);
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');

@@ -104,6 +104,11 @@ export default function PublicBookingPage() {
   // HMAC instead of the quote-wizard pricing token — same customers-only-gate
   // bypass, verified server-side at /confirm, never a pricing input.
   const acceptTokenParam = (searchParams.get('accept_token') || '').trim() || null;
+  // Token entries (estimate / accept links) carry their OWN identity — the
+  // estimate's customer. They bypass the OTP gate, never attach the ambient
+  // portal session, and never prefill from it: a signed-in household member
+  // opening someone else's link must not re-point that booking.
+  const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
   const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
@@ -327,7 +332,7 @@ export default function PublicBookingPage() {
   // verified customer it must re-apply or the contact step would demand
   // fields the account already has.
   useEffect(() => {
-    if (!customersOnly || !isAuthenticated || !authCustomer?.id) return;
+    if (!customersOnly || !isAuthenticated || !authCustomer?.id || tokenEntry) return;
     if (existingCustomerId === authCustomer.id) return;
     applyCustomer({
       id: authCustomer.id,
@@ -336,7 +341,7 @@ export default function PublicBookingPage() {
       phone: authCustomer.phone || '',
       email: authCustomer.email || '',
     });
-  }, [customersOnly, isAuthenticated, authCustomer, existingCustomerId, applyCustomer]);
+  }, [customersOnly, isAuthenticated, authCustomer, existingCustomerId, applyCustomer, tokenEntry]);
 
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
     // Always look up by the street-only line1 when we have it: formatted can
@@ -480,10 +485,13 @@ export default function PublicBookingPage() {
       // the one client path that attaches the bearer AND refreshes + retries
       // on 401, so a customer who spends >15 min picking a slot isn't
       // refused on an expired access token (the server answers that case
-      // with a refreshable TOKEN_EXPIRED 401). Gate-off (and token-entry)
-      // requests keep the plain unauthenticated fetch — byte-identical to
-      // today's.
-      const doConfirmFetch = (customersOnly && isAuthenticated)
+      // with a refreshable TOKEN_EXPIRED 401). Token entries (estimate /
+      // accept links) deliberately stay unauthenticated even when the
+      // browser holds a portal session: the server prefers bearer identity,
+      // so an ambient signed-in account would otherwise hijack — or be
+      // address-refused on — a link that belongs to the ESTIMATE's customer.
+      // Gate-off requests keep the plain fetch — byte-identical to today's.
+      const doConfirmFetch = (customersOnly && isAuthenticated && !tokenEntry)
         ? (url, opts) => api.fetchRaw(url, opts)
         : (url, opts) => fetch(url, opts);
       const res = await doConfirmFetch(`${API_BASE}/booking/confirm`, {
@@ -574,7 +582,12 @@ export default function PublicBookingPage() {
   // their existing rate limits and uniform anti-enumeration responses). A
   // successful verify flips isAuthenticated, the gate unmounts, and the
   // prefill effect binds the wizard to the verified account.
-  const gateDigits = gatePhone.replace(/\D/g, '');
+  // A pasted/autofilled E.164 number ("+1 (941) 555-1234") is 11 digits —
+  // drop the US country code so autofill doesn't dead-end the gate.
+  const gateDigitsRaw = gatePhone.replace(/\D/g, '');
+  const gateDigits = gateDigitsRaw.length === 11 && gateDigitsRaw.startsWith('1')
+    ? gateDigitsRaw.slice(1)
+    : gateDigitsRaw;
   const handleGateSendCode = async () => {
     if (gateDigits.length !== 10 || gateSending) return;
     setGateSending(true);
@@ -597,7 +610,6 @@ export default function PublicBookingPage() {
   // the wizard never flashes ahead of the gate; estimate-token entries,
   // accepted-estimate links, and already-signed-in customers skip the gate
   // entirely (the server re-verifies their tokens at /confirm either way).
-  const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
   const gateChecking = customersOnly === null && !tokenEntry;
   const gateActive = customersOnly === true && !tokenEntry && !isAuthenticated;
 

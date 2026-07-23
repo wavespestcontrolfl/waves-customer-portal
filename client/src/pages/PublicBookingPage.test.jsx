@@ -35,16 +35,23 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: () => authState,
 }));
 
+// Ambient portal session surface: token present + a fetchRaw spy, so tests
+// can prove token-entry confirms never ride the authenticated path.
+const apiMock = vi.hoisted(() => ({ token: 'ambient-token', fetchRaw: vi.fn() }));
+vi.mock('../utils/api', () => ({ api: apiMock, default: apiMock }));
+
 function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-// The availability payload the pre-gate tests drive the wizard with.
-const availabilityPayload = {
+// The availability payload the wizard walks are driven with. Days must be
+// FUTURE-dated or the funnel's staleness guard (correctly) hides them.
+const futureDay = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+const availabilityPayload = () => ({
   capture_token: 'capture-1',
-  days: [{ date: '2026-07-20', fullDate: 'Monday, July 20', nearby: true, slots: [{ start_time: '09:00', start_label: '9:00 AM' }] }],
+  days: [{ date: futureDay(3), fullDate: 'Thursday, July 30', nearby: true, slots: [{ start_time: '09:00', start_label: '9:00 AM' }] }],
   slots: [{ start_time: '09:00' }],
-};
+});
 
 function stubFetch({ config } = {}) {
   const fetchMock = vi.fn(async (url) => {
@@ -53,8 +60,9 @@ function stubFetch({ config } = {}) {
       if (config === 'error') return jsonResponse({ error: 'nope' }, 500);
       return jsonResponse(config || { enabled: true });
     }
+    if (parsed.pathname.endsWith('/booking/confirm')) return jsonResponse({ confirmationCode: 'WPC-1234' });
     if (parsed.searchParams.has('date_from')) return jsonResponse({ error: 'unavailable' }, 503);
-    return jsonResponse(availabilityPayload);
+    return jsonResponse(availabilityPayload());
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -114,7 +122,9 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
 
-    fireEvent.change(await screen.findByLabelText('Mobile number'), { target: { value: '(941) 555-0101' } });
+    // Pasted/autofilled E.164 shape — the leading US "1" must not dead-end
+    // the gate (Codex round-2 P3); the send still goes out as 10 digits.
+    fireEvent.change(await screen.findByLabelText('Mobile number'), { target: { value: '+1 (941) 555-0101' } });
     fireEvent.click(screen.getByRole('button', { name: 'Text me a sign-in code' }));
     await waitFor(() => expect(authState.sendCode).toHaveBeenCalledWith('+19415550101'));
 
@@ -156,6 +166,44 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     expect(await screen.findByLabelText('Service address')).toBeInTheDocument();
     expect(screen.queryByText('Book your next visit')).not.toBeInTheDocument();
+  });
+
+  it('token entries never ride the ambient portal session — no bearer, no prefill, no body customer_id', async () => {
+    // A household member's signed-in session must not re-point a booking
+    // link that belongs to the ESTIMATE's customer (Codex round-2 P2).
+    authState.isAuthenticated = true;
+    authState.customer = { id: 'cust-ambient', first_name: 'Alex', last_name: 'Ambient', phone: '9415559999', email: 'alex@example.com' };
+    const fetchMock = stubFetch({ config: { enabled: true, customers_only: true } });
+
+    render(
+      <MemoryRouter initialEntries={['/book?service=lawn_care&source=estimate-accept&estimate_id=est-1&accept_token=tok']}>
+        <PublicBookingPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    // Contact step is EMPTY — the ambient customer was not prefilled in.
+    const firstName = await screen.findByLabelText('First name');
+    expect(firstName).toHaveValue('');
+    fireEvent.change(firstName, { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550101' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+
+    await waitFor(() => {
+      const confirmCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/booking/confirm'));
+      expect(confirmCall).toBeTruthy();
+      expect(confirmCall[1].headers.Authorization).toBeUndefined();
+      const body = JSON.parse(confirmCall[1].body);
+      expect(body.customer_id).toBeNull();
+      expect(body.accept_token).toBe('tok');
+    });
+    expect(apiMock.fetchRaw).not.toHaveBeenCalled();
   });
 
   it('a config outage fails OPEN client-side (server still enforces at /confirm)', async () => {

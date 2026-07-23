@@ -57,7 +57,7 @@ const jwt = require('jsonwebtoken');
 const bookingRouter = require('../routes/booking');
 const { createSelfBooking } = require('../routes/booking')._internals;
 const { generateToken, generateRefreshToken } = require('../middleware/auth');
-const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+const { mintEstimateHandoffToken, mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
 
 const CUST_ID = '5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d';
@@ -194,12 +194,26 @@ describe('createSelfBooking — customers-only gate', () => {
   });
 
   test('accepted-estimate links (source_estimate_id + namespaced accept_token) pass the gate', async () => {
-    const acceptToken = mintEstimateHandoffToken('estimate-accept:est-9');
+    const acceptToken = mintEstimateAcceptToken('est-9');
     const result = await createSelfBooking({
       ...strangerBody(),
       customersOnly: true,
       source_estimate_id: 'est-9',
       accept_token: acceptToken,
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('accept tokens outlive the 14-day quote window — a month-old acceptance still books', async () => {
+    // The retry SMS chases accepted-but-never-booked customers well past the
+    // quote handoff's TTL; an expired token would bounce an already-accepted
+    // customer off the gate (Codex round-2 P2).
+    const monthOld = mintEstimateAcceptToken('est-9', Date.now() - 30 * 86400000);
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: monthOld,
     });
     expect(result).toEqual(BEYOND_WINDOW);
   });
@@ -210,10 +224,10 @@ describe('createSelfBooking — customers-only gate', () => {
       ...strangerBody(), customersOnly: true,
       source_estimate_id: 'est-9', accept_token: mintEstimateHandoffToken('est-9'),
     })).toEqual(REFUSAL);
-    // …and a namespaced accept token presented as the pricing handoff.
+    // …and a real accept token presented as the pricing handoff.
     expect(await createSelfBooking({
       ...strangerBody(), customersOnly: true,
-      pricing_estimate_id: 'est-9', estimate_token: mintEstimateHandoffToken('estimate-accept:est-9'),
+      pricing_estimate_id: 'est-9', estimate_token: mintEstimateAcceptToken('est-9'),
     })).toEqual(REFUSAL);
   });
 

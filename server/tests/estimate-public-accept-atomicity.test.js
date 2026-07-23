@@ -862,9 +862,8 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
     // mint is quantized to the acceptance day — this fixture carries no
     // accepted_at, so route and test both derive it from today — which is
     // precisely what keeps fresh-accept and retry URLs identical for dedupe.
-    const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-    const dayEpochSec = Math.floor(Date.now() / 1000 / 86400) * 86400;
-    const acceptToken = mintEstimateHandoffToken('estimate-accept:est-shortlink-2', dayEpochSec);
+    const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+    const acceptToken = mintEstimateAcceptToken('est-shortlink-2');
     db.__state.tables.short_codes = [{
       id: 'sc-accept-1',
       code: 'acc99',
