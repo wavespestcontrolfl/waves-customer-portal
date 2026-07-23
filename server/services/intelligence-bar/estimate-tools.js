@@ -915,6 +915,11 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'manageroverride',
   'manualdiscount',
   'margindivisor',
+  // The sanctioned adjustment is a dedicated TOOL param — nested inside
+  // engineInputs it would ride the echoed/stored inputs (or, on the pending
+  // path, be silently promoted by the reprice spread) and desync the
+  // persisted estimate from what was priced (codex P2 on #2947).
+  'operatorpriceadjustment',
   'priceoverride',
   'pricingconfig',
   'priorqualifyingservices',
@@ -1757,6 +1762,13 @@ async function createPendingEstimate(input) {
   const adjustmentCheck = validateOperatorPriceAdjustment(input.operatorPriceAdjustment);
   if (adjustmentCheck.error) return { error: adjustmentCheck.error };
   const operatorAdjustment = adjustmentCheck.adjustment;
+  // Nested placement would be PROMOTED to a real adjustment by the reprice
+  // spread below while persistence records none — the customer link would
+  // then recompute without the discount/waiver the confirmed draft used
+  // (codex P2 on #2947). Reject it outright.
+  if (engineInputs.operatorPriceAdjustment !== undefined) {
+    return { error: 'operatorPriceAdjustment must be its own parameter, never a key inside engineInputs. Move it to the top level and retry.' };
+  }
 
   // Bind the draft identity to the selected lead. leadId selects another
   // account's services and membership tier for pricing, so the contact this

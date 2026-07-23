@@ -1727,6 +1727,25 @@ function pestFloorMonthlyLift(estData, tierName, discountResolver = tierDiscount
   return Math.max(0, floorMoExact - pestMo * (1 - disc));
 }
 
+// Operator/admin audit metadata rides engine manualDiscount objects
+// (internalReason, eligibility override notes, floor-breach internals) and
+// those objects reach the public /:token/data payload through TWO doors: the
+// stored-summary normalizer below, and fresh engine replays whose
+// summary.manualDiscount is spread into pricing.frequencies[] by
+// shapeFrequencyEntry. Strip at BOTH (codex P1s on #2947, rounds 2-3) — the
+// customer-facing fields (label, type, value, amounts, cap state) pass
+// through untouched.
+function stripManualDiscountAuditFields(manual) {
+  if (!manual || typeof manual !== 'object') return manual;
+  const {
+    internalReason: _internalReason,
+    eligibilityOverrideReason: _eligibilityOverrideReason,
+    floorBreach: _floorBreach,
+    ...customerSafe
+  } = manual;
+  return customerSafe;
+}
+
 function normalizeManualDiscountSummary(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
@@ -1740,21 +1759,8 @@ function normalizeManualDiscountSummary(estData = {}) {
   const manual = candidates.find((item) => item && Number(item.amount) > 0);
   if (!manual) return null;
   const amount = Math.round(Number(manual.amount) * 100) / 100;
-  // Operator/admin audit metadata rides the stored engine summary
-  // (internalReason, eligibility override notes, floor-breach internals) and
-  // this normalized object is spread into the public /:token/data pricing
-  // payload — strip it HERE, the single boundary every public serialization
-  // passes through, so an internal reason can never reach a customer link
-  // (codex P1 on #2947). The customer-facing fields (label, type, value,
-  // amounts, cap state) pass through untouched.
-  const {
-    internalReason: _internalReason,
-    eligibilityOverrideReason: _eligibilityOverrideReason,
-    floorBreach: _floorBreach,
-    ...customerSafe
-  } = manual;
   return {
-    ...customerSafe,
+    ...stripManualDiscountAuditFields(manual),
     amount,
     label: manual.label || manual.catalogName || (manual.type === 'PERCENT' ? `Discount (${manual.value}%)` : 'Discount'),
     scope: manual.scope || 'recurring_annual_after_waveguard',
@@ -10811,7 +10817,10 @@ function extractEngineInputs(estData) {
       type: opAdj.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
       value: Number(opAdj.value),
       label: opAdj.label || 'Discount',
-      internalReason: opAdj.internalReason || null,
+      // internalReason is deliberately NOT injected: it is audit-only text
+      // with zero pricing effect, and a replayed engine summary is spread
+      // into public frequency entries — the reason must never be able to
+      // ride a replay into the tokenized payload (codex P1 on #2947).
       eligibility: null,
       eligibilityConfirmed: true,
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
@@ -10934,7 +10943,10 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const onetime = summary.oneTimeTotal ?? null;
   const manualDiscount = summary.manualDiscount && Number(summary.manualDiscount.amount) > 0
     ? {
-        ...summary.manualDiscount,
+        // Replayed engine summaries carry audit-only fields — strip before
+        // this object rides pricing.frequencies[] to the customer (codex P1
+        // on #2947 round 3).
+        ...stripManualDiscountAuditFields(summary.manualDiscount),
         // monthlyAmount is the per-month recurring figure, so it tracks only the
         // recurring slice; the one-time slice is reflected in the one-time total.
         monthlyAmount: Math.round(
@@ -15965,10 +15977,7 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
 }
 
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
-  const alignedPayload = applyPresentationOverridesToBundle(
-    alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData),
-    estData,
-  );
+  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
@@ -15980,7 +15989,13 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
-  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData);
+  // Presentation relabels apply LAST — attachPublicPricingContract rebuilds
+  // the section list via buildPricingServices, so an earlier rename pass
+  // would be overwritten for recomputed bundles (codex P2 on #2947 round 3).
+  const withContract = applyPresentationOverridesToBundle(
+    hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData),
+    estData,
+  );
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
