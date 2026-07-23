@@ -13838,18 +13838,35 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   // same state: the estimate's own explicit signal wins in BOTH directions;
   // a silent estimate falls back to the global live switch, or to legacy
   // enforcement stamps on the stored rows (pre-disarm snapshots keep their
-  // floor re-clamp even though they never persisted the flag). An
-  // operator-acknowledged floor breach disarms the clamp outright — the
-  // program minimum leg is disarmed the same way inside
-  // lawnProgramMinimumMonthlyFor (resolver returns 0 on breach).
+  // floor re-clamp even though they never persisted the flag).
   const perEstimateFloorArmed = estimateLawnFloorArmed(estData);
-  const marginFloorArmed = !estimateManualDiscountFloorBreached(estData)
-    && (perEstimateFloorArmed != null
-      ? perEstimateFloorArmed
-      : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows)));
-  // Program minimum resolved once per estimate for the same reason: every
-  // cadence row clamps at the minimum THIS quote was priced with.
-  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
+  const marginFloorArmedBase = perEstimateFloorArmed != null
+    ? perEstimateFloorArmed
+    : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
+  // Operator-acknowledged floor breach bypasses the clamps for THE ROW THE
+  // OPERATOR AUTHORIZED ONLY (codex P2 on #2947 round 5): the confirmation
+  // card showed one cadence at one number — alternate ladder rows the
+  // operator never reviewed keep the full floor clamps (UNBREACHED program
+  // minimum + armed margin floor). Fail closed: if the authorized tier
+  // can't be identified, nothing bypasses.
+  const breachAuthorizedTierKey = (() => {
+    if (!estimateManualDiscountFloorBreached(estData)) return null;
+    const marked = (Array.isArray(rows) ? rows : [])
+      .find((r) => r?.selected === true || r?.isSelected === true || r?.recommended === true || r?.isRecommended === true);
+    if (marked) return lawnTierKey(marked);
+    for (const li of [
+      ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+      ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
+    ]) {
+      if ((li?.service || '') === 'lawn_care') return lawnTierKey(li);
+    }
+    return null;
+  })();
+  // Program minimum resolved once per estimate: every cadence row clamps at
+  // the minimum THIS quote was priced with. Alternates on a breached
+  // estimate deliberately use the UNBREACHED resolution.
+  const programMinMonthly = require('../services/estimate-converter')
+    .resolveLawnProgramMinimumMonthlyIgnoringBreach(estData);
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -13886,6 +13903,8 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         ?? row.prov?.costFloorAnnual
         ?? row.costFloorAnnual,
       );
+      const rowBreachAuthorized = breachAuthorizedTierKey != null && tierKey === breachAuthorizedTierKey;
+      const rowMarginFloorArmed = rowBreachAuthorized ? false : marginFloorArmedBase;
       const {
         monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed, flooredAtMinimum,
       } = clampLawnLadderEntry({
@@ -13896,8 +13915,8 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         visits,
         manualDiscount: rawManualDiscountForTier,
         marginFloorAnnual: rowMarginFloorAnnual,
-        marginFloorArmed,
-        programMinMonthly,
+        marginFloorArmed: rowMarginFloorArmed,
+        programMinMonthly: rowBreachAuthorized ? 0 : programMinMonthly,
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -13924,7 +13943,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         // combo/accept path collects (codex P2 round 11 on #2827). CEILED
         // to the cent, matching clampLawnLadderEntry's own rule, so
         // 12 × monthly never lands under the annual floor (round 12).
-        ...(marginFloorArmed && rowMarginFloorAnnual > 0
+        ...(rowMarginFloorArmed && rowMarginFloorAnnual > 0
           ? { marginFloorMonthly: Math.ceil((rowMarginFloorAnnual / 12) * 100) / 100 }
           : {}),
         flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
@@ -15962,20 +15981,59 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
     }
     return hit;
   };
-  const renameSection = (section) => {
-    if (!section || typeof section !== 'object') return section;
-    const hit = renameFor([section.key, section.serviceKey, section.service, section.serviceCategory, section.label, section.name, section.displayName]);
-    if (!hit) return section;
-    return { ...section, label: hit, ...(section.name !== undefined ? { name: hit } : {}), ...(section.displayName !== undefined ? { displayName: hit } : {}) };
-  };
   const renameItemRow = (row) => {
     if (!row || typeof row !== 'object') return row;
     const hit = renameFor([row.service, row.serviceKey, row.key, row.name, row.label, row.displayName]);
     if (!hit) return row;
     return { ...row, ...(row.name !== undefined ? { name: hit } : { name: hit }), ...(row.label !== undefined ? { label: hit } : {}), ...(row.displayName !== undefined ? { displayName: hit } : {}) };
   };
+  // The React price card renders service names from NESTED frequency rows
+  // too (perServiceTreatments[].label, included[].label), and recomputed
+  // bundles rebuild those from engine defaults — rename them or the card
+  // shows the new section label with the old name inside it (codex P2 on
+  // #2947 round 5). Cadence labels (freq.label, e.g. "Quarterly") are
+  // deliberately untouched: only rows matched by SERVICE identity rename.
+  const renameFrequencyEntry = (freq) => {
+    if (!freq || typeof freq !== 'object') return freq;
+    let next = freq;
+    if (Array.isArray(freq.perServiceTreatments)) {
+      next = {
+        ...next,
+        perServiceTreatments: freq.perServiceTreatments.map((row) => {
+          const hit = renameFor([row?.service, row?.serviceKey, row?.key, row?.label, row?.name]);
+          return hit ? { ...row, label: hit } : row;
+        }),
+      };
+    }
+    if (Array.isArray(freq.included)) {
+      next = {
+        ...next,
+        included: freq.included.map((row) => {
+          const hit = renameFor([row?.key, row?.service, row?.serviceKey, row?.label]);
+          return hit ? { ...row, label: hit } : row;
+        }),
+      };
+    }
+    return next;
+  };
+  const renameSection = (section) => {
+    if (!section || typeof section !== 'object') return section;
+    const withFrequencies = Array.isArray(section.frequencies)
+      ? { ...section, frequencies: section.frequencies.map(renameFrequencyEntry) }
+      : section;
+    const hit = renameFor([section.key, section.serviceKey, section.service, section.serviceCategory, section.label, section.name, section.displayName]);
+    if (!hit) return withFrequencies;
+    return {
+      ...withFrequencies,
+      label: hit,
+      ...(section.name !== undefined ? { name: hit } : {}),
+      ...(section.displayName !== undefined ? { displayName: hit } : {}),
+    };
+  };
   const next = { ...payload };
   if (Array.isArray(next.services)) next.services = next.services.map(renameSection);
+  if (Array.isArray(next.frequencies)) next.frequencies = next.frequencies.map(renameFrequencyEntry);
+  if (Array.isArray(next.serviceCadenceCombos)) next.serviceCadenceCombos = next.serviceCadenceCombos.map(renameFrequencyEntry);
   if (next.oneTimeBreakdown && Array.isArray(next.oneTimeBreakdown.items)) {
     next.oneTimeBreakdown = { ...next.oneTimeBreakdown, items: next.oneTimeBreakdown.items.map(renameItemRow) };
   }

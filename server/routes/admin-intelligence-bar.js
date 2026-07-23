@@ -563,6 +563,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   }
+  // Phone identifiers are MUTABLE — a newer estimate for the same phone can
+  // appear between preview and Confirm, and the confirmed re-resolve would
+  // then relabel a different estimate than the card showed (codex P2 on
+  // #2947). Pin the stored action to the exact estimate the preview
+  // resolved; the confirmed execution then resolves by immutable UUID.
+  if (toolUse.name === 'set_estimate_presentation' && preview?.estimate_id) {
+    params.estimate_identifier = String(preview.estimate_id);
+  }
 
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
