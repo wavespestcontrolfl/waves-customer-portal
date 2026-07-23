@@ -632,28 +632,29 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         });
       }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
-      // Recipient double opt-in (gated + dark template): CLAIM the pending
-      // rows for NEWLY ADDED phones BEFORE the slots become visible on the
-      // customers row — no window where a concurrent fanout reads the new
-      // contact as grandfathered (no row). Dispatch of the confirmation
-      // texts stays async below; failures are logged, never swallowed.
+      // Recipient double opt-in (gated + dark template): the pending-row
+      // CLAIMS and the contact UPDATE commit in ONE transaction — the claim
+      // lands before the slots become visible (no grandfather window), and
+      // a failed UPDATE rolls the claims back (no stranded pending rows).
+      // A claim failure fails the whole save. Twilio dispatch runs only
+      // after commit, async, with failures logged.
       let optinClaims = [];
-      if (updates.serviceContactsConsent === true && contacts.length) {
-        const { claimRecipientOptins } = require('../services/recipient-optin');
-        // A claim failure fails the whole save (throws to the route's error
-        // handler) — proceeding would store a phone with no row, silently
-        // disabling the double-opt-in boundary for that recipient.
-        optinClaims = await claimRecipientOptins({
-          customer: beforeRow,
-          contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
-          priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
-          propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
+      const optinArgs = updates.serviceContactsConsent === true && contacts.length ? {
+        customer: beforeRow,
+        contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
+        priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
+        propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
+      } : null;
+      await db.transaction(async (trx) => {
+        if (optinArgs) {
+          const { claimRecipientOptins } = require('../services/recipient-optin');
+          optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
+        }
+        await trx('customers').where({ id: req.params.customerId }).update({
+          ...serviceContactSlotUpdates(contacts, beforeRow),
+          ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
+          updated_at: new Date(),
         });
-      }
-      await db('customers').where({ id: req.params.customerId }).update({
-        ...serviceContactSlotUpdates(contacts, beforeRow),
-        ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
-        updated_at: new Date(),
       });
       savedContacts = contacts.map(serviceContactPayload);
       if (optinClaims.length) {
@@ -689,31 +690,34 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         });
       }
       const slot1 = serviceContactSlotUpdates([contact], beforeRow);
-      // Same artifact rule as the list save: a consented save stamps for the
-      // post-save list; an edit without a fresh attestation clears the stale
-      // stamp — it described a list this save just changed.
-      await db('customers').where({ id: req.params.customerId }).update({
-        service_contact_name: slot1.service_contact_name,
-        service_contact_phone: slot1.service_contact_phone,
-        service_contact_email: slot1.service_contact_email,
-        service_contact_role: slot1.service_contact_role,
-        ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
-        updated_at: new Date(),
+      // Same artifact rule AND same claim-in-transaction opt-in flow as the
+      // list save — the legacy shape must not be a loophole that enrolls a
+      // new phone without the confirmation flow or its rollback semantics.
+      let legacyClaims = [];
+      const legacyOptinArgs = updates.serviceContactsConsent === true && contact.phone ? {
+        customer: beforeRow,
+        contacts: [{ name: contact.name, firstName: String(contact.name || '').split(/\s+/)[0], phone: contact.phone }],
+        priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
+        propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
+      } : null;
+      await db.transaction(async (trx) => {
+        if (legacyOptinArgs) {
+          const { claimRecipientOptins } = require('../services/recipient-optin');
+          legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
+        }
+        await trx('customers').where({ id: req.params.customerId }).update({
+          service_contact_name: slot1.service_contact_name,
+          service_contact_phone: slot1.service_contact_phone,
+          service_contact_email: slot1.service_contact_email,
+          service_contact_role: slot1.service_contact_role,
+          ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
+          updated_at: new Date(),
+        });
       });
-      // Same claim-then-dispatch opt-in flow as the list save — the legacy
-      // shape must not be a loophole that enrolls a new phone without the
-      // confirmation flow. (Claim runs after this branch's UPDATE, which is
-      // acceptable here: the legacy shape is only sent by stale cached
-      // clients; the list save above is the live writer.)
-      if (updates.serviceContactsConsent === true && contact.phone) {
-        const { claimRecipientOptins, dispatchRecipientOptins } = require('../services/recipient-optin');
-        void claimRecipientOptins({
-          customer: beforeRow,
-          contacts: [{ name: contact.name, firstName: String(contact.name || '').split(/\s+/)[0], phone: contact.phone }],
-          priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
-          propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-        }).then((claims) => dispatchRecipientOptins(claims, beforeRow))
-          .catch((err) => logger.error(`[notifications] recipient opt-in request failed for customer ${req.params.customerId}: ${err.message}`));
+      if (legacyClaims.length) {
+        const { dispatchRecipientOptins } = require('../services/recipient-optin');
+        void dispatchRecipientOptins(legacyClaims, beforeRow)
+          .catch((err) => logger.error(`[notifications] recipient opt-in dispatch failed for customer ${req.params.customerId}: ${err.message}`));
       }
     }
 

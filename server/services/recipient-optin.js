@@ -108,41 +108,50 @@ async function filterRecipientsByOptin(contacts = []) {
 // lands before the contact becomes visible to any fanout, there is no
 // window where a brand-new phone reads as grandfathered (no row). Returns
 // the claims for phase 2; template dark → no claims, nothing pends.
-async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '' }) {
+async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '', trx = null }) {
   if (!isDoubleOptinEnabled()) return [];
+  const dbc = trx || db;
   const accountKey = recipientPhoneKey(customer?.phone);
   const priorKeys = new Set(priorPhones.map(recipientPhoneKey).filter(Boolean));
+
+  // Dark-vs-broken distinction (fail closed on broken): a missing or
+  // deactivated template row is the INTENTIONAL dark state — skip quietly.
+  // An ACTIVE row that then fails to render is infrastructure failure and
+  // must throw (the save fails) rather than silently grandfather phones.
+  let templateRow = null;
+  try {
+    templateRow = await dbc('sms_templates').where({ template_key: OPTIN_TEMPLATE_KEY }).first();
+  } catch (err) {
+    logger.error(`[recipient-optin] template lookup failed: ${err.message}`);
+    throw err;
+  }
+  const templateDark = !templateRow || templateRow.is_active === false;
+
   const claims = [];
   for (const contact of contacts) {
     const key = recipientPhoneKey(contact.phone);
     if (!key || key === accountKey) continue;
-    // Save-triggered retry: a ask_failed phone (ask never delivered)
-    // re-claims on the next consented save even though the phone is
-    // already stored — priorPhones only grandfathers phones that were
-    // never routed through the ask flow.
-    let retryClaim = false;
     try {
-      const reclaimed = await db('recipient_optin')
+      // Save-triggered retry: an ask_failed phone (ask never delivered)
+      // re-claims on the next consented save even though the phone is
+      // already stored — priorPhones only grandfathers phones that were
+      // never routed through the ask flow.
+      const reclaimed = templateDark ? 0 : await dbc('recipient_optin')
         .where({ phone_key: key, status: 'ask_failed' })
         .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
-      retryClaim = reclaimed > 0;
-    } catch { /* fall through to the normal path */ }
-    if (!retryClaim && priorKeys.has(key)) continue;
-    try {
+      const retryClaim = reclaimed > 0;
+      if (templateDark) continue;
+      if (!retryClaim && priorKeys.has(key)) continue;
       const { renderSmsTemplate } = require('./sms-template-renderer');
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
         recipient_first_name: String(contact.firstName || contact.name || '').trim().split(/\s+/)[0] || 'there',
         account_first_name: String(customer?.first_name || '').trim() || 'Your account holder',
         property_address: String(propertyAddress || '').trim() || 'your service property',
       });
-      if (!body) {
-        // Template dark: release a retry re-claim back to ask_failed so
-        // it stays blocking and retryable rather than pending-unasked.
-        if (retryClaim) await db('recipient_optin').where({ phone_key: key, status: 'pending' }).update({ status: 'ask_failed' }).catch(() => {});
-        continue;
-      }
+      // Active template that fails to render = infrastructure failure.
+      if (!body) throw new Error('active recipient_optin_request template failed to render');
       if (!retryClaim) {
-        const claimed = await db('recipient_optin').insert({
+        const claimed = await dbc('recipient_optin').insert({
           phone_key: key,
           phone_e164: String(contact.phone || '').trim(),
           status: 'pending',
@@ -155,9 +164,9 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
       }
       claims.push({ key, phone: contact.phone, body });
     } catch (err) {
-      // Fail CLOSED: a claim error (render infra, insert failure) must fail
-      // the contact save — silently proceeding would store a phone with no
-      // row, i.e. grandfathered, and quietly disable the consent boundary.
+      // Fail CLOSED: a claim error must fail the contact save — silently
+      // proceeding would store a phone with no row (grandfathered) and
+      // quietly disable the consent boundary.
       logger.error(`[recipient-optin] claim failed for ***${key.slice(-4)}: ${err.message}`);
       throw err;
     }
