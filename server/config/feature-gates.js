@@ -291,6 +291,13 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Portal "Pay now" — authenticated /billing/balance includes the
+  // customer's open-invoice pay links (`openInvoices`) so the Billing tab
+  // can offer the existing tokenized /pay checkout in-app instead of the
+  // audit's pay-a-balance dead end (S2-1). Read-only surface over invoices
+  // that already exist; gate off = payload byte-identical to today.
+  portalPayNow: isProd ? process.env.GATE_PORTAL_PAY_NOW === 'true' : true,
+
   // Estimate accept — widen existing-appointment detection to ANY upcoming
   // pending/confirmed appointment belonging to the estimate's customer (not
   // just rows already linked to the estimate). A match swaps the accept

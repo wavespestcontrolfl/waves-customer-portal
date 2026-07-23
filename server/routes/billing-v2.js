@@ -10,6 +10,8 @@ const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
+const { isEnabled } = require('../config/feature-gates');
 
 router.use(authenticate);
 
@@ -675,6 +677,33 @@ router.get('/balance', async (req, res, next) => {
       }
     }
 
+    // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): the customer's own
+    // open invoices with their existing tokenized /pay links, oldest first,
+    // so the Billing tab can offer a real payment path instead of
+    // "enable Auto Pay and wait". Same open/non-payer filter as the balance
+    // sum above, plus payer-statement-accrued rows excluded (the /pay page
+    // 404s those tokens by design) and fully-credited rows skipped. Gate
+    // off → field absent → payload byte-identical to today.
+    let openInvoices;
+    if (isEnabled('portalPayNow')) {
+      const openRows = await db('invoices')
+        .where({ customer_id: req.customerId })
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .whereNull('payer_id')
+        .whereNull('payer_statement_id')
+        .orderBy('created_at', 'asc')
+        .limit(5)
+        .select('token', 'invoice_number', 'due_date', 'total', 'credit_applied');
+      openInvoices = openRows
+        .map((row) => ({
+          payUrl: `/pay/${row.token}`,
+          amountDue: invoiceAmountDue(row),
+          invoiceNumber: row.invoice_number,
+          dueDate: row.due_date,
+        }))
+        .filter((row) => row.amountDue > 0);
+    }
+
     res.json({
       currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
       upcomingCharges: upcomingTotal,
@@ -687,6 +716,7 @@ router.get('/balance', async (req, res, next) => {
         description: nextPayment.description,
       } : null,
       lastPaymentFailed: mostRecentAttempt?.status === 'failed',
+      ...(openInvoices ? { openInvoices } : {}),
     });
   } catch (err) {
     next(err);
