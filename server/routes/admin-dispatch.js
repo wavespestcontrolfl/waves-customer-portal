@@ -3757,21 +3757,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           products: products || [],
           productRows: typedProductRows,
         });
-        // Support-only visits derive EMPTY treatments (no claim) — that is a
-        // no-treatment state, so an application detail like "Pre-emergent
-        // applied: Yes" contradicts it exactly like 'Inspection only' would
-        // (codex P2 r14): the snapshot must not publish an application no
-        // derived treatment or product backs.
-        if (!treeShrubComplianceValues.treatments_completed
-          && String(treeShrubComplianceValues.pre_emergent_applied) === 'Yes') {
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('tree_shrub_derived_contradiction'));
-          return res.status(400).json({
-            error: 'The recorded products contradict the visit detail fields',
-            code: 'typed_findings_invalid',
-            details: ['"Pre-emergent applied: Yes" requires a matching herbicide product — record the product or clear the bed module field'],
-            missing: [],
-          });
-        }
+        // (The pre_emergent_applied contradiction check retired with the bed
+        // module fields — owner directive 2026-07-23. Detail application
+        // fields no longer exist on the T&S form, so derivation is the only
+        // source of treatment claims on the primary path.)
       }
       // The cross-field contradiction rules ran on the pre-derivation values —
       // re-run them so a derived 'Inspection only' can't sit beside an
