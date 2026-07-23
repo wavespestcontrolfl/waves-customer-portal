@@ -2152,3 +2152,46 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('round 8: availability claims, temporal while, audience fragments, third-party customer calls', () => {
+    for (const body of [
+      'Mosquito control in Cape Coral is available from Waves.',
+      'Termite inspection in Naples is available from our team.',
+      'Naples homeowners can relax while we treat the lawn.',
+      'In Tampa while our techs are onsite, we inspect attics.',
+      'We serve Sarasota; Naples homeowners and Tampa residents.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Customers in Tampa call a local company every week.',
+      'Pest control in Naples is regulated by the state.',
+      'We treat Sarasota lawns while Tampa faces different rules.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('astro r18 parity: our-team gerunds, standalone exterminator, brand proud-to-serve, we visit/spray, modal comparisons', () => {
+    for (const body of [
+      'Our techs are treating homes in Naples.',
+      'Our team is servicing Tampa properties.',
+      'Need an exterminator in Naples?',
+      'Waves Pest Control is proud to serve Naples.',
+      'We visit Naples homes every quarter.',
+      'We spray Tampa yards each month.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Pest control in Miami may be different from Sarasota.',
+      'Our team serves up a Naples-vs-Sarasota comparison.',
+      'Exterminators use a range of methods for German roaches.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
