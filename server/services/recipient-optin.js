@@ -197,7 +197,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
                 .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000));
             });
         })
-        .update({ status: 'pending', requested_at: new Date(), dispatched_at: null, updated_at: new Date() });
+        .update({ status: 'pending', requested_at: new Date(), dispatched_at: null, provider_sid: null, updated_at: new Date() });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
       if (!retryClaim && priorKeys.has(key)) continue;

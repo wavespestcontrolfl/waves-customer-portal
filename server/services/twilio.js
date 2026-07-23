@@ -691,7 +691,16 @@ const TwilioService = {
     // appointment-reminder fanout: unconfirmed third-party recipients
     // (pending/declined recipient_optin row) don't get en-route texts.
     const { filterRecipientsByOptin } = require("./recipient-optin");
-    const contacts = await filterRecipientsByOptin(getAppointmentContacts(customer, prefs), customer.id);
+    const { getPrimaryContact } = require("./customer-contact");
+    const enRouteUnfiltered = getAppointmentContacts(customer, prefs);
+    let contacts = await filterRecipientsByOptin(enRouteUnfiltered, customer.id);
+    // Hold emptied a NON-empty list: fall back to the primary account
+    // holder (their own consent is validated at send time) — an email-less
+    // customer must still get the en-route notice somewhere (#2956 r9).
+    if (!contacts.length && enRouteUnfiltered.length) {
+      const primary = getPrimaryContact(customer);
+      if (primary.phone) contacts = [{ ...primary, role: "primary" }];
+    }
     // No early return on an empty contact list: a customer with an email but no
     // appointment phone contacts should still get the en-route notice by email
     // (handled by the fallback below).
@@ -976,12 +985,12 @@ const TwilioService = {
     // same no-op forever (#2956 codex r6).
     if (channel === "sms" && !contacts.length && unfilteredContacts.length) {
       const emailRes = await sendArrivedEmail();
-      if (emailRes?.ok) return { success: true, results, emailSent: true };
-      // Opt-in hold is a TRANSIENT condition (the recipient may still reply
-      // YES) — return a retryable miss so the arrival guard is released and
-      // a later same-job signal can deliver once confirmed, instead of
-      // burning the guard as suppressed (#2956 codex r8).
-      return { success: false, results };
+      // Opt-in hold is TRANSIENT (the recipient may still reply YES): even
+      // after a successful email, return a retryable miss so the arrival
+      // guard is released and a later same-job signal can text the newly
+      // confirmed recipient — the email's idempotencyKey dedupes repeats
+      // (#2956 codex r8/r9).
+      return { success: false, results, emailSent: !!emailRes?.ok };
     }
     if (await attemptSmsLegs()) return { success: true, results };
 

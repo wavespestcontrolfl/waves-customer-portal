@@ -929,20 +929,17 @@ router.post('/status', async (req, res) => {
                 const isOptinAsk = logRow
                   && (logRow.message_type === 'recipient_optin_request'
                     || meta.includes('recipient_optin_request'));
-                if (isOptinAsk) {
-                  // Scope to the logged customer's row when known, AND to the
-                  // ask this callback is about: a delayed failure for an OLD
-                  // SID must not flip a freshly re-dispatched pending ask.
-                  const flip = db('recipient_optin')
-                    .where({ phone_key: failedKey, status: 'pending' })
-                    .where(function sidMatches() {
-                      this.whereNull('provider_sid').orWhere({ provider_sid: MessageSid });
-                    });
-                  if (logRow.customer_id) flip.where({ customer_id: logRow.customer_id });
-                  return flip.update({ status: 'ask_failed', updated_at: new Date() });
+                // Strict SID match in BOTH paths: only the row whose CURRENT
+                // dispatch is this MessageSid flips — a delayed/duplicated
+                // callback for an old SID can't hit a reclaimed in-flight
+                // ask. A row whose marker/SID write failed entirely stays
+                // pending and is reconciled by the recovery sweep (its
+                // sms_log status is failed → the sweep re-dispatches).
+                if (isOptinAsk && logRow.customer_id) {
+                  return db('recipient_optin')
+                    .where({ phone_key: failedKey, customer_id: logRow.customer_id, status: 'pending', provider_sid: MessageSid })
+                    .update({ status: 'ask_failed', updated_at: new Date() });
                 }
-                // No/mismatched sms_log row (its insert can fail after Twilio
-                // accepted): the ask row itself carries the provider SID.
                 return db('recipient_optin')
                   .where({ provider_sid: MessageSid, status: 'pending' })
                   .update({ status: 'ask_failed', updated_at: new Date() });
