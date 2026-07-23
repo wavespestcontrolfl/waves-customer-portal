@@ -2120,7 +2120,14 @@ function compactAgentLine(line) {
   const annual = hasManualFinalAnnual
     ? manualFinalAnnual
     : Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
-  const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
+  // Same rule for the one-time slice: the engine stamps manualFinalOneTime
+  // on discounted one-time/specialty lines (summary-level pooling leaves the
+  // line's gross price untouched).
+  const manualFinalOneTime = Number(line.manualFinalOneTime);
+  const hasManualFinalOneTime = Number.isFinite(manualFinalOneTime) && manualFinalOneTime >= 0;
+  const oneTime = hasManualFinalOneTime
+    ? manualFinalOneTime
+    : Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
   const priceBasis = annual > 0 ? annual : oneTime;
   // Recurring lawn lines expose their annual cost as costs.total; without it
   // the margin falls back to line.margin, which was computed from the PRE-

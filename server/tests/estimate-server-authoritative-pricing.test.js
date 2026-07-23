@@ -184,6 +184,39 @@ describe('serverRecomputeFromEstimateData', () => {
     );
     expect(generateEstimate.mock.calls[1][0].manualDiscount).toBeUndefined();
   });
+
+  it('zeroes the pest initialFee before mapping when the operator waived the setup fee', async () => {
+    const generateEstimate = jest.fn(() => ({
+      lineItems: [
+        { service: 'pest_control', initialFee: 99, annual: 650 },
+        { service: 'mosquito', annual: 500 },
+      ],
+    }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    const res = await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { pest: { frequency: 'quarterly' } } }),
+        operatorPriceAdjustment: { waiveSetupFee: true },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(res.recomputed).toBe(true);
+    // The mapper counts pestLI.initialFee into oneTime.total/year1 — a
+    // waived fee must not re-enter the stored totals on reprice.
+    const mapped = mapV1ToLegacyShape.mock.calls[0][0];
+    expect(mapped.lineItems.find((li) => li.service === 'pest_control').initialFee).toBe(0);
+
+    // Without the waiver the fee passes through untouched.
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { pest: { frequency: 'quarterly' } } }),
+        operatorPriceAdjustment: { type: 'FIXED', value: 25, label: 'Discount only' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    const mappedUnwaived = mapV1ToLegacyShape.mock.calls[1][0];
+    expect(mappedUnwaived.lineItems.find((li) => li.service === 'pest_control').initialFee).toBe(99);
+  });
 });
 
 describe('resolveServerAuthoritativePricing', () => {

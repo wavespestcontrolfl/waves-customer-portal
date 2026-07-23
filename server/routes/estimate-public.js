@@ -16034,13 +16034,30 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
   };
   const renameSection = (section) => {
     if (!section || typeof section !== 'object') return section;
-    const withFrequencies = Array.isArray(section.frequencies)
+    let next = Array.isArray(section.frequencies)
       ? { ...section, frequencies: section.frequencies.map(renameFrequencyEntry) }
       : section;
+    // Embedded one-time rows render inside the service card AND key the
+    // standalone breakdown's exclusion list by label-based identity
+    // (oneTimeRowIdentityKey = service|label|amount). They must rename in
+    // the same pass as the top-level oneTimeBreakdown items, or the
+    // identities diverge — the card shows the old wording and the renamed
+    // top-level row escapes the exclusion and renders the charge twice
+    // (codex P2 on #2947 round 11).
+    if (next.oneTimeContribution && typeof next.oneTimeContribution === 'object'
+      && Array.isArray(next.oneTimeContribution.items)) {
+      next = {
+        ...next,
+        oneTimeContribution: {
+          ...next.oneTimeContribution,
+          items: next.oneTimeContribution.items.map(renameItemRow),
+        },
+      };
+    }
     const hit = renameFor([section.key, section.serviceKey, section.service, section.serviceCategory, section.label, section.name, section.displayName]);
-    if (!hit) return withFrequencies;
+    if (!hit) return next;
     return {
-      ...withFrequencies,
+      ...next,
       label: hit,
       ...(section.name !== undefined ? { name: hit } : {}),
       ...(section.displayName !== undefined ? { displayName: hit } : {}),

@@ -2073,6 +2073,30 @@ function generateEstimate(input) {
     }
   }
 
+  // Per-line audit stamps for the one-time/specialty slices — mirror of the
+  // recurring attribution above. The summary subtracts these slices but the
+  // line items keep their gross priceAfterDiscount/total, so a margin grader
+  // reading lines alone would report a discounted cleanout/bed-bug quote at
+  // its anchor margin. Proportional to each line's discountable price (no
+  // floor system exists for one-time work; stamps are report-only).
+  const stampOneTimeManualFinal = (items, poolBase, sliceAmount) => {
+    if (!(sliceAmount > 0) || !(poolBase > 0)) return;
+    for (const item of items) {
+      const gross = manualOneTimeLinePrice(item);
+      if (gross <= 0) continue;
+      const lineFinal = Math.round((gross - sliceAmount * (gross / poolBase)) * 100) / 100;
+      item.manualFinalOneTime = lineFinal;
+      const cost = Number(item.costs?.oneTimeCost ?? item.costs?.total ?? item.oneTimeCost ?? item.estimatedCost);
+      if (Number.isFinite(cost) && cost >= 0) {
+        item.manualFinalMargin = lineFinal > 0
+          ? Math.round(((lineFinal - cost) / lineFinal) * 1000) / 1000
+          : -1;
+      }
+    }
+  };
+  stampOneTimeManualFinal(manualOneTimeEligibleItems, manualDiscountableOneTime, manualDiscountOneTimeAmount);
+  stampOneTimeManualFinal(manualSpecialtyEligibleItems, manualDiscountableSpecialty, manualDiscountSpecialtyAmount);
+
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
   // Summary monthly mirrors the per-line rule: CEIL whenever a lawn floor is
   // pinned (WaveGuard-capped line, or the manual slice consumed all recurring

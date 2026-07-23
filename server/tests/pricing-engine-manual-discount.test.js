@@ -95,6 +95,25 @@ describe('pricing engine manual recurring discount', () => {
     );
   });
 
+  test('one-time slice stamps manualFinalOneTime/manualFinalMargin on the discounted lines', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { exclusion: true },
+      manualDiscount: { source: 'custom', type: 'PERCENT', value: 20, label: 'Comp' },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    const stamped = (estimate.lineItems || []).filter((li) => li.manualFinalOneTime !== undefined);
+    expect(stamped.length).toBeGreaterThan(0);
+    // The stamps reconstruct the post-discount one-time money the summary
+    // collects — line-level truth for margin graders, not a second ledger.
+    const stampedTotal = stamped.reduce((s, li) => s + li.manualFinalOneTime, 0);
+    expect(stampedTotal).toBeCloseTo(md.oneTimeDiscountableBase - md.oneTimeAmount, 1);
+    for (const li of stamped) {
+      const gross = Number(li.priceAfterDiscount ?? li.price ?? li.total ?? 0);
+      expect(li.manualFinalOneTime).toBeLessThan(gross);
+    }
+  });
+
   test('custom percentage splits across recurring and one-time work', () => {
     const noDiscount = generateEstimate(baseInput({
       services: { pest: { frequency: 'quarterly' }, exclusion: true },
