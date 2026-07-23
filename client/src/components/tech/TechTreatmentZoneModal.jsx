@@ -61,7 +61,7 @@ const btnStyle = (kind, disabled) => ({
 });
 
 export default function TechTreatmentZoneModal({
-  serviceId, customerName, address, lat, lng, onClose,
+  serviceId, customerName, address, lat, lng, onClose, onSaved,
 }) {
   const [mapState, setMapState] = useState({ status: 'loading' });
   const [existing, setExisting] = useState(null);
@@ -252,10 +252,13 @@ export default function TechTreatmentZoneModal({
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSaveState('saved');
       setExisting(data.treatmentZone || null);
+      // Let the host prefill from the trace (e.g. perimeter-spray Linear ft
+      // on the completion card) without refetching the row it just saved.
+      onSaved?.(data.treatmentZone || null);
     } catch (err) {
       setSaveState(err.message || 'Save failed');
     }
-  }, [mapState, points, closed, totalFeet, address, serviceId]);
+  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved]);
 
   useEffect(() => {
     if (step !== 'play' || mapState.status !== 'ready') return undefined;

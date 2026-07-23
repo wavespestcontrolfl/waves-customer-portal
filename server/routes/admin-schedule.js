@@ -7795,6 +7795,7 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
+- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted.
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
