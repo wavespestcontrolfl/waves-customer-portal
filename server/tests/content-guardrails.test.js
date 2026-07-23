@@ -2116,3 +2116,21 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('round 6: services denials, directory-of, typographic possessives, now-available, conjoined work', () => {
+    for (const body of [
+      'We serve Sarasota; Naples’ homes.',
+      'Cape Coral pest control services now available',
+      'We do not provide service in Sarasota and now work throughout Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Pest control services in Naples are not available from us.',
+      'We provide a directory of pest control services in Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
