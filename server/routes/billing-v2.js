@@ -691,6 +691,11 @@ router.get('/balance', async (req, res, next) => {
         .whereIn('status', ['sent', 'viewed', 'overdue'])
         .whereNull('payer_id')
         .whereNull('payer_statement_id')
+        // Positive balance in SQL, BEFORE the cap — otherwise five old
+        // fully-credited invoices would crowd a payable sixth out of the
+        // list entirely (Codex P2). Same GREATEST expression as the
+        // balance SUM above.
+        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
         .orderBy('created_at', 'asc')
         .limit(5)
         .select('token', 'invoice_number', 'due_date', 'total', 'credit_applied');

@@ -1245,9 +1245,10 @@ async function createSelfBooking(payload = {}) {
       referrer_url,
       attribution,
       new_customer,
+      accept_token,
       payAtVisit,
       customersOnly,
-      authedCustomerId,
+      authedCustomer,
     } = payload;
 
     if (!slot_date || !slot_start) {
@@ -1301,12 +1302,50 @@ async function createSelfBooking(payload = {}) {
     let custId = null;
     let estimate = null;
     // Verified portal bearer wins identity outright (customers-only gate):
-    // the id came from a JWT the route resolved server-side, so client-sent
+    // the row came from a JWT the route resolved server-side, so client-sent
     // customer_id / phone-match / estimate identity paths below are all
     // skipped via their existing `!custId` guards — a crafted body can't
     // re-point a verified customer's booking at someone else.
-    if (authedCustomerId) {
-      custId = authedCustomerId;
+    //
+    // But the bearer proves the ACCOUNT, not the typed address — and the
+    // committed booking dispatches to the bound customer row's address while
+    // capacity/slot-sig were checked against the SUBMITTED one (Codex P1).
+    // So when an address was submitted, bind the booking to whichever of the
+    // account's property rows it matches (same addressMatchesCustomer rule as
+    // the customer_id path below); no match → refuse with a fix-it path
+    // instead of silently dispatching to the wrong door.
+    if (authedCustomer) {
+      const submittedLine1 = new_customer?.address_line1;
+      if (submittedLine1) {
+        let matched = addressMatchesCustomer(authedCustomer, submittedLine1, new_customer?.zip, new_customer?.address_line2)
+          ? authedCustomer : null;
+        if (!matched) {
+          const accountId = authedCustomer.account_id || authedCustomer.id;
+          const accountRows = await db('customers')
+            .where(function () {
+              this.where('account_id', accountId).orWhere('id', accountId);
+            })
+            .whereNot('id', authedCustomer.id)
+            .whereNull('deleted_at')
+            .andWhere(function () {
+              this.whereNull('active').orWhere('active', true);
+            })
+            .limit(25);
+          matched = (accountRows || []).find(
+            (row) => addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2),
+          ) || null;
+        }
+        if (!matched) {
+          return {
+            ok: false,
+            status: 400,
+            error: "That address doesn't match what we have on file for your account. Double-check the street address, or call (941) 297-5749 and we'll get it updated.",
+          };
+        }
+        custId = matched.id;
+      } else {
+        custId = authedCustomer.id;
+      }
     }
     // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
     // share token the caller possesses) may write a submitted unit onto an
@@ -1361,8 +1400,17 @@ async function createSelfBooking(payload = {}) {
     // dead end.
     if (customersOnly && !custId) {
       const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-      const gateHandoffValid = !!pricing_estimate_id
-        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
+      // Two token-proven entries pass: the quote-wizard pricing handoff
+      // (pricing_estimate_id + its HMAC), and the accepted-estimate booking
+      // link (source_estimate_id + a namespaced HMAC minted by
+      // estimate-public's accept/retry SMS — those links carry only the
+      // correlation id, and their customers already accepted; Codex P1).
+      // The namespace keeps the two token kinds from substituting for each
+      // other.
+      const gateHandoffValid = (!!pricing_estimate_id
+        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token))
+        || (!!source_estimate_id && !!accept_token
+          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token));
       if (!gateHandoffValid) {
         const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
         return {
@@ -2421,13 +2469,25 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     // decides what that means.
     const { resolveBearerCustomer } = require('../middleware/auth');
     const authedCustomer = isEnabled('bookingCustomersOnly') ? await resolveBearerCustomer(req) : null;
+    // A PRESENTED-but-expired access token gets authenticateCore's
+    // refreshable 401 instead of the customers-only refusal: 15-minute
+    // tokens routinely expire while a customer picks a slot, and the api
+    // client's fetchRaw path refreshes + retries on exactly this shape.
+    // Only the resolver stamps bearerTokenExpired, so absent/garbage
+    // headers still fall through to the gate refusal below.
+    if (!authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     const result = await createSelfBooking({
       ...req.body,
       referrer_url: req.body?.referrer_url || req.get('referer') || null,
       // Server-resolved gates — set AFTER the spread so a client can't forge them.
       payAtVisit: isEnabled('bookingPayAtVisit'),
       customersOnly: isEnabled('bookingCustomersOnly'),
-      authedCustomerId: authedCustomer?.id || null,
+      // The resolved ROW (not just the id): createSelfBooking verifies the
+      // submitted service address against the account's properties before
+      // binding the booking, so it needs the bearer's customer record.
+      authedCustomer: authedCustomer || null,
     });
     if (!result.ok) {
       return res.status(result.status).json({

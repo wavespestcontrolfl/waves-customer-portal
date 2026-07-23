@@ -100,6 +100,10 @@ export default function PublicBookingPage() {
   // pricing the visit from that exact estimate (pay-at-visit).
   const estimateIdParam = (searchParams.get('estimate_id') || '').trim() || null;
   const estimateTokenParam = (searchParams.get('estimate_token') || '').trim() || null;
+  // Accepted-estimate booking links (estimate-accept SMS) carry a namespaced
+  // HMAC instead of the quote-wizard pricing token — same customers-only-gate
+  // bypass, verified server-side at /confirm, never a pricing input.
+  const acceptTokenParam = (searchParams.get('accept_token') || '').trim() || null;
   const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
@@ -471,21 +475,29 @@ export default function PublicBookingPage() {
     setError('');
     setRefusal(null);
     try {
-      const res = await fetch(`${API_BASE}/booking/confirm`, {
+      // Customers-only mode: prove "current customer" with the portal bearer
+      // minted by the OTP gate. Verified sessions go through api.fetchRaw —
+      // the one client path that attaches the bearer AND refreshes + retries
+      // on 401, so a customer who spends >15 min picking a slot isn't
+      // refused on an expired access token (the server answers that case
+      // with a refreshable TOKEN_EXPIRED 401). Gate-off (and token-entry)
+      // requests keep the plain unauthenticated fetch — byte-identical to
+      // today's.
+      const doConfirmFetch = (customersOnly && isAuthenticated)
+        ? (url, opts) => api.fetchRaw(url, opts)
+        : (url, opts) => fetch(url, opts);
+      const res = await doConfirmFetch(`${API_BASE}/booking/confirm`, {
         method: 'POST',
-        // Customers-only mode: prove "current customer" with the portal
-        // bearer minted by the OTP gate. Attached only under the gate so a
-        // gate-off request stays byte-identical to today's.
-        headers: {
-          'Content-Type': 'application/json',
-          ...(customersOnly && api.token ? { Authorization: `Bearer ${api.token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           customer_id: existingCustomerId || null,
           // Quote→book handoff — priced from this exact estimate (token-verified),
           // as pricing_estimate_id so it never influences identity resolution.
           pricing_estimate_id: estimateIdParam || undefined,
           estimate_token: estimateTokenParam || undefined,
+          // Accepted-estimate gate pass — pure passthrough of the URL's
+          // accept_token; only the customers-only gate reads it.
+          accept_token: acceptTokenParam || undefined,
           // Accept-retry correlation — pure passthrough of the URL's
           // estimate_id; the server validates it (uuid shape + existence)
           // and stamps scheduled_services.source_estimate_id. Never used
@@ -582,10 +594,12 @@ export default function PublicBookingPage() {
     if (!ok) setGateFailedVerifies((n) => n + 1);
   };
   // Bare entries hold on a quiet loading block while the config resolves so
-  // the wizard never flashes ahead of the gate; estimate-token entries and
-  // already-signed-in customers skip the gate entirely.
-  const gateChecking = customersOnly === null && !estimateTokenParam;
-  const gateActive = customersOnly === true && !estimateTokenParam && !isAuthenticated;
+  // the wizard never flashes ahead of the gate; estimate-token entries,
+  // accepted-estimate links, and already-signed-in customers skip the gate
+  // entirely (the server re-verifies their tokens at /confirm either way).
+  const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
+  const gateChecking = customersOnly === null && !tokenEntry;
+  const gateActive = customersOnly === true && !tokenEntry && !isAuthenticated;
 
   // ── shared styles ──
   // CTAs use <Button variant="primary"|"tertiary"> (see usages below).

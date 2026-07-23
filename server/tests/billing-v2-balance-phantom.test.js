@@ -45,7 +45,7 @@ const tableResults = {
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) q[m] = (...args) => { q._calls = q._calls || []; q._calls.push([m, args]); return q; };
     q.select = (...args) => { q._selected = args; return q; };
     q.first = async () => resolveFn(q, true);

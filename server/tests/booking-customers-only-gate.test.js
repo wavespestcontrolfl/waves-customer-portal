@@ -27,10 +27,12 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 // Universal query-chain mock: every chain method returns the chain; list
-// terminals resolve []; .first() resolves the per-table value below. The gate
-// paths under test touch at most booking_config (config defaults on null) and
-// customers (bearer resolution / phone match).
+// terminals resolve the per-table listResults (default []); .first() resolves
+// the per-table firstResults value. The gate paths under test touch at most
+// booking_config (config defaults on null) and customers (bearer resolution /
+// account property rows / phone match).
 const firstResults = { booking_config: null, customers: null };
+const listResults = { customers: [] };
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
@@ -41,8 +43,8 @@ jest.mock('../models/db', () => {
     ];
     for (const m of passthrough) q[m] = () => q;
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
-    q.then = (onOk, onErr) => Promise.resolve([]).then(onOk, onErr);
-    q.catch = (fn) => Promise.resolve([]).catch(fn);
+    q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
+    q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(table));
@@ -51,6 +53,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
+const jwt = require('jsonwebtoken');
 const bookingRouter = require('../routes/booking');
 const { createSelfBooking } = require('../routes/booking')._internals;
 const { generateToken, generateRefreshToken } = require('../middleware/auth');
@@ -58,6 +61,12 @@ const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
 const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
 
 const CUST_ID = '5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d';
+// A bearer row whose on-file address matches strangerBody's submission — the
+// happy signed-in path. Address-verification tests vary it.
+const BEARER_ROW = () => ({
+  id: CUST_ID, active: true, account_id: null, deleted_at: null,
+  address_line1: '123 Palm Ave', zip: '34231',
+});
 
 // A stranger's complete new-customer payload: everything the funnel collects,
 // so the ONLY thing standing between it and a booking is the gate.
@@ -92,6 +101,7 @@ beforeEach(() => {
   gateState.bookingCustomersOnly = true;
   firstResults.booking_config = null;
   firstResults.customers = null;
+  listResults.customers = [];
 });
 
 describe('createSelfBooking — customers-only gate', () => {
@@ -109,15 +119,55 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(REFUSAL);
   });
 
-  test('verified bearer identity (authedCustomerId) passes the gate; crafted body customer_id is ignored', async () => {
+  test('verified bearer identity (authedCustomer) passes the gate; crafted body customer_id is ignored', async () => {
     const result = await createSelfBooking({
       ...strangerBody(),
       customersOnly: true,
-      authedCustomerId: CUST_ID,
+      authedCustomer: BEARER_ROW(),
       // If body identity were consulted, this mismatched id would trip the
       // 'Customer lookup mismatch' path — reaching the window check instead
-      // proves the token id won and the body paths were skipped.
+      // proves the token identity won and the body paths were skipped.
       customer_id: '99999999-9999-4999-8999-999999999999',
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('bearer + a submitted address that matches NO account property → refused with a fix-it path', async () => {
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      authedCustomer: { ...BEARER_ROW(), address_line1: '999 Other Rd', zip: '34220' },
+    });
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      error: expect.stringMatching(/doesn't match what we have on file/i),
+    });
+    expect(result.customersOnly).toBeUndefined();
+  });
+
+  test('bearer whose OTHER account property matches the submitted address binds the booking there', async () => {
+    // Primary row mismatches; a sibling property row on the same account
+    // matches the typed address — the booking proceeds (bound to that row)
+    // instead of refusing or silently dispatching to the wrong door.
+    listResults.customers = [{
+      id: 'cust-2', account_id: CUST_ID, active: true, deleted_at: null,
+      address_line1: '123 Palm Ave', zip: '34231',
+    }];
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      authedCustomer: { ...BEARER_ROW(), address_line1: '999 Other Rd', zip: '34220' },
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('bearer with no submitted address books against their own record (no address check to run)', async () => {
+    const { new_customer, ...body } = strangerBody();
+    const result = await createSelfBooking({
+      ...body,
+      customersOnly: true,
+      authedCustomer: BEARER_ROW(),
     });
     expect(result).toEqual(BEYOND_WINDOW);
   });
@@ -140,6 +190,30 @@ describe('createSelfBooking — customers-only gate', () => {
     })).toEqual(REFUSAL);
     expect(await createSelfBooking({
       ...strangerBody(), customersOnly: true, pricing_estimate_id: 'pe-123', estimate_token: `${token}x`,
+    })).toEqual(REFUSAL);
+  });
+
+  test('accepted-estimate links (source_estimate_id + namespaced accept_token) pass the gate', async () => {
+    const acceptToken = mintEstimateHandoffToken('estimate-accept:est-9');
+    const result = await createSelfBooking({
+      ...strangerBody(),
+      customersOnly: true,
+      source_estimate_id: 'est-9',
+      accept_token: acceptToken,
+    });
+    expect(result).toEqual(BEYOND_WINDOW);
+  });
+
+  test('accept tokens are namespace-bound — a pricing handoff token cannot stand in, nor vice versa', async () => {
+    // A bare-id token (the pricing-handoff shape) presented as accept_token…
+    expect(await createSelfBooking({
+      ...strangerBody(), customersOnly: true,
+      source_estimate_id: 'est-9', accept_token: mintEstimateHandoffToken('est-9'),
+    })).toEqual(REFUSAL);
+    // …and a namespaced accept token presented as the pricing handoff.
+    expect(await createSelfBooking({
+      ...strangerBody(), customersOnly: true,
+      pricing_estimate_id: 'est-9', estimate_token: mintEstimateHandoffToken('estimate-accept:est-9'),
     })).toEqual(REFUSAL);
   });
 
@@ -201,7 +275,7 @@ describe('POST /booking/confirm — gate wiring', () => {
   });
 
   test('valid customer bearer passes the gate; identity comes from the token', async () => {
-    firstResults.customers = { id: CUST_ID, active: true, account_id: null, deleted_at: null };
+    firstResults.customers = BEARER_ROW();
     const res = await postConfirm(strangerBody(), {
       authorization: `Bearer ${generateToken(CUST_ID)}`,
     });
@@ -210,10 +284,18 @@ describe('POST /booking/confirm — gate wiring', () => {
     expect(res.body.customersOnly).toBeUndefined();
   });
 
+  test('an EXPIRED bearer gets the refreshable TOKEN_EXPIRED 401, not the customers-only refusal', async () => {
+    firstResults.customers = BEARER_ROW();
+    const expired = jwt.sign({ customerId: CUST_ID }, process.env.JWT_SECRET, { expiresIn: '-1s' });
+    const res = await postConfirm(strangerBody(), { authorization: `Bearer ${expired}` });
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toEqual({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+  });
+
   test('refresh tokens and garbage bearers do not count as verified customers', async () => {
     // Even with a matching customer row on file, a refresh token must not
     // authenticate — resolveBearerCustomer rejects type: 'refresh' outright.
-    firstResults.customers = { id: CUST_ID, active: true, account_id: null, deleted_at: null };
+    firstResults.customers = BEARER_ROW();
     const refreshRes = await postConfirm(strangerBody(), {
       authorization: `Bearer ${generateRefreshToken(CUST_ID)}`,
     });

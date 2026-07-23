@@ -61,6 +61,24 @@ describe('resolveBearerCustomer', () => {
     expect(await resolveBearerCustomer(reqWith(`Bearer ${expired}`))).toBeNull();
   });
 
+  test('ONLY expiry stamps req.bearerTokenExpired — the caller-side refreshable-401 hint', async () => {
+    const expiredReq = reqWith(`Bearer ${jwt.sign({ customerId: CUST_ID }, process.env.JWT_SECRET, { expiresIn: '-1s' })}`);
+    expect(await resolveBearerCustomer(expiredReq)).toBeNull();
+    expect(expiredReq.bearerTokenExpired).toBe(true);
+
+    // Garbage, refresh-type, and absent headers carry no refresh hint —
+    // strangers must land on the terminal refusal, not a refresh loop.
+    const garbageReq = reqWith('Bearer not-a-jwt');
+    expect(await resolveBearerCustomer(garbageReq)).toBeNull();
+    expect(garbageReq.bearerTokenExpired).toBeUndefined();
+    const refreshReq = reqWith(`Bearer ${generateRefreshToken(CUST_ID)}`);
+    expect(await resolveBearerCustomer(refreshReq)).toBeNull();
+    expect(refreshReq.bearerTokenExpired).toBeUndefined();
+    const absentReq = reqWith(null);
+    expect(await resolveBearerCustomer(absentReq)).toBeNull();
+    expect(absentReq.bearerTokenExpired).toBeUndefined();
+  });
+
   test('refresh tokens are rejected outright — even with a customer on file', async () => {
     state.customerRow = { id: CUST_ID, active: true };
     expect(await resolveBearerCustomer(reqWith(`Bearer ${generateRefreshToken(CUST_ID)}`))).toBeNull();

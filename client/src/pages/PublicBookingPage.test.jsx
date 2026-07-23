@@ -134,6 +134,19 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
     expect(screen.getByRole('link', { name: /Get your free quote/ })).toBeInTheDocument();
   });
 
+  it('accepted-estimate links (?accept_token=) skip the gate — the server re-verifies at confirm', async () => {
+    stubFetch({ config: { enabled: true, customers_only: true } });
+
+    render(
+      <MemoryRouter initialEntries={['/book?service=lawn_care&source=estimate-accept&estimate_id=est-1&accept_token=tok']}>
+        <PublicBookingPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByLabelText('Service address')).toBeInTheDocument();
+    expect(screen.queryByText('Book your next visit')).not.toBeInTheDocument();
+  });
+
   it('a signed-in customer skips the gate and lands on the wizard', async () => {
     authState.isAuthenticated = true;
     authState.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: 'pat@example.com' };

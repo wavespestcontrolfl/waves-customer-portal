@@ -468,6 +468,13 @@ function generateRefreshToken(customerId, accountId = null, options = {}) {
 // returns the customer row (or null) instead of writing 401 responses, so an
 // absent/expired/garbage header simply resolves to "not a verified customer"
 // and the caller decides what that means.
+//
+// One side-channel: an EXPIRED (but otherwise well-formed) access token stamps
+// req.bearerTokenExpired = true. Access tokens live 15 minutes and a customer
+// can easily spend longer picking a slot, so callers gating on the resolver
+// should answer that case with authenticateCore's refreshable
+// 401 { code: 'TOKEN_EXPIRED' } — the api client refreshes and retries —
+// instead of a terminal refusal. Garbage/forged headers get no such hint.
 async function resolveBearerCustomer(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -482,7 +489,8 @@ async function resolveBearerCustomer(req) {
     const customerAccountId = customer.account_id || customer.id;
     if (decoded.accountId && String(decoded.accountId) !== String(customerAccountId)) return null;
     return customer;
-  } catch {
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') req.bearerTokenExpired = true;
     return null;
   }
 }

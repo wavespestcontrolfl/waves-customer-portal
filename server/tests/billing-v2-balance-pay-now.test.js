@@ -49,7 +49,7 @@ const tableResults = {
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) q[m] = (...args) => { q._calls = q._calls || []; q._calls.push([m, args]); return q; };
     q.select = (...args) => { q._selected = args; return q; };
     q.first = async () => resolveFn(q, true);
@@ -135,14 +135,17 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
       ['orderBy', ['created_at', 'asc']],
       ['limit', [5]],
     ]));
-    // Statement-accrued rows are excluded (their /pay tokens 404 by design).
+    // Statement-accrued rows are excluded (their /pay tokens 404 by design),
+    // and the positive-balance predicate runs in SQL BEFORE the cap, so
+    // fully-credited old invoices can't crowd payable ones out of the five.
     expect(tableResults.lastOpenInvoicesCalls).toEqual(expect.arrayContaining([
       ['whereNull', ['payer_id']],
       ['whereNull', ['payer_statement_id']],
+      ['whereRaw', ['GREATEST(total - COALESCE(credit_applied, 0), 0) > 0']],
     ]));
   });
 
-  test('gate on: fully-credited invoices are dropped — never a $0 pay button', async () => {
+  test('gate on: a fully-credited row that slips past the SQL predicate is still dropped in JS', async () => {
     tableResults.openInvoiceRows = [
       { token: 'tok-credited', invoice_number: 'INV-103', due_date: '2026-08-01', total: '49.00', credit_applied: '49.00' },
     ];
