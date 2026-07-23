@@ -114,9 +114,9 @@ export default function PublicBookingPage() {
   const tokenEntry = !!(estimateTokenParam || acceptTokenParam);
   // ?service= may be a composite id from a multi-service recovery link
   // (a+b+c) — parse every valid component; unknown parts drop.
-  const initialServiceIds = serviceParam.split('+')
+  const initialServiceIds = [...new Set(serviceParam.split('+')
     .map((id) => id.trim())
-    .filter((id) => SERVICES.some((s) => s.id === id));
+    .filter((id) => SERVICES.some((s) => s.id === id)))];
   const initialService = SERVICES.find(s => s.id === initialServiceIds[0]) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
