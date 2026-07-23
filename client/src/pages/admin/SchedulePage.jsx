@@ -8577,12 +8577,17 @@ export function CompletionPanel({
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
   // Areas-treated chips are structural-pest rooms/zones. They describe
   // neither plant work (T&S — the Treatment Zone trace records where the
-  // visit treated; owner 2026-07-23) nor rodent visits (the typed forms
+  // visit treated; owner 2026-07-23), nor rodent visits (the typed forms
   // carry their own location semantics — trap activity locations, entry
-  // points, sanitation areas, the station map; owner 2026-07-23). Hidden
-  // for both lines, and the stale-draft clearing effect below keys off the
-  // same flag so hidden state can't ride a restored draft into the submit.
-  const areasTreatedHidden = treeShrubCloseoutOn || serviceLineForCloseout === "rodent";
+  // points, sanitation areas, the station map; owner 2026-07-23), nor bed
+  // bug treatments (an interior service whose typed form records the rooms
+  // treated directly — the chip list doesn't even offer a bedroom; owner
+  // 2026-07-23). Hidden for these lines, and the stale-draft clearing
+  // effect below keys off the same flag so hidden state can't ride a
+  // restored draft into the submit.
+  const areasTreatedHidden = treeShrubCloseoutOn
+    || serviceLineForCloseout === "rodent"
+    || service.completionProfile?.findingsType === "bed_bug";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the

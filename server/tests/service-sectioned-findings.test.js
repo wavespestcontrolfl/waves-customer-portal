@@ -216,7 +216,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
       serviceLabel: 'Bed Bug Treatment',
       values: {
         rooms_treated: 'Primary bedroom',
-        areas_inspected: 'Mattress seams, Headboard, Baseboards',
         evidence_level: 'Low (few bugs)',
         evidence_observed: 'Fecal spotting, Live bed bugs',
         treatment_method: 'Chemical only',

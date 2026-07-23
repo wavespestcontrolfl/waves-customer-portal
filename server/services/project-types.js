@@ -917,13 +917,14 @@ const PROJECT_TYPES = {
     description: 'Bed-bug inspection + initial treatment. Supports an optional 14-day follow-up.',
     requiresFollowup: true,
     photoCategories: ['bedroom', 'evidence', 'equipment', 'room_treated', 'furniture', 'other'],
+    // areas_inspected retired 2026-07-23 (owner simplification, same lane as
+    // the rodent/T&S closeouts): its 13 chips re-listed what the work chips
+    // already name (mattress/box spring/bed frame/baseboards/furniture/
+    // adjacent rooms) and it fed no narrative — the report composes from
+    // work_completed + evidence + rooms_treated. Copy-map label stays for
+    // stored snapshots.
     findingsFields: [
       { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Inspection', placeholder: 'Primary bedroom, guest bedroom…' },
-      { key: 'areas_inspected', label: 'Areas inspected', type: 'chips', section: 'Inspection', options: [
-        'Mattress seams', 'Box spring', 'Bed frame', 'Headboard', 'Nightstands', 'Baseboards',
-        'Couch / seating', 'Recliners', 'Curtains', 'Closet edges', 'Luggage areas',
-        'Wall hangings', 'Adjacent rooms',
-      ] },
       { key: 'evidence_level', label: 'Evidence level', type: 'select', section: 'Evidence', options: ['No active signs observed', 'Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
       { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
         'Live bed bugs', 'Dead bed bugs', 'Eggs', 'Cast skins', 'Fecal spotting',
