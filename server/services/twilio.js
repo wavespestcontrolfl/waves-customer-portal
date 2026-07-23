@@ -977,7 +977,11 @@ const TwilioService = {
     if (channel === "sms" && !contacts.length && unfilteredContacts.length) {
       const emailRes = await sendArrivedEmail();
       if (emailRes?.ok) return { success: true, results, emailSent: true };
-      return classifyMiss(emailRes);
+      // Opt-in hold is a TRANSIENT condition (the recipient may still reply
+      // YES) — return a retryable miss so the arrival guard is released and
+      // a later same-job signal can deliver once confirmed, instead of
+      // burning the guard as suppressed (#2956 codex r8).
+      return { success: false, results };
     }
     if (await attemptSmsLegs()) return { success: true, results };
 

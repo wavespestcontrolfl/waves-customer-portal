@@ -90,19 +90,26 @@ async function markRecipientOptin(phone, status) {
     // reconciled. If sms_log shows an accepted ask to this phone, honor
     // the YES for the still-pending rows (ask_failed stays excluded).
     if (!updated && status === 'confirmed') {
-      const priorAsk = await db('sms_log')
-        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
-        .where(function optinAsk() {
-          this.where({ message_type: 'recipient_optin_request' })
-            .orWhereRaw("metadata::text like '%recipient_optin_request%'");
-        })
-        .whereNotIn('status', ['failed', 'undelivered'])
-        .first('id')
-        .catch(() => null);
-      if (priorAsk) {
-        updated = await db('recipient_optin')
-          .where({ phone_key: key, status: 'pending' })
-          .update({ ...stamp, dispatched_at: new Date() });
+      // Per-row reconciliation: only a row whose OWN property's ask was
+      // accepted (customer-scoped sms_log) confirms — property B's
+      // undispatched pending row stays pending when only A's ask went out.
+      const pendingRows = await db('recipient_optin').where({ phone_key: key, status: 'pending' });
+      for (const row of pendingRows) {
+        const priorAsk = await db('sms_log')
+          .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
+          .where({ customer_id: row.customer_id })
+          .where(function optinAsk() {
+            this.where({ message_type: 'recipient_optin_request' })
+              .orWhereRaw("metadata::text like '%recipient_optin_request%'");
+          })
+          .whereNotIn('status', ['failed', 'undelivered'])
+          .first('id')
+          .catch(() => null);
+        if (priorAsk) {
+          updated += await db('recipient_optin')
+            .where({ phone_key: key, customer_id: row.customer_id, status: 'pending' })
+            .update({ ...stamp, dispatched_at: new Date() });
+        }
       }
     }
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
