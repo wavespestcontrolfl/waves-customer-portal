@@ -116,14 +116,14 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
   for (const contact of contacts) {
     const key = recipientPhoneKey(contact.phone);
     if (!key || key === accountKey) continue;
-    // Save-triggered retry: a request_failed phone (ask never delivered)
+    // Save-triggered retry: a ask_failed phone (ask never delivered)
     // re-claims on the next consented save even though the phone is
     // already stored — priorPhones only grandfathers phones that were
     // never routed through the ask flow.
     let retryClaim = false;
     try {
       const reclaimed = await db('recipient_optin')
-        .where({ phone_key: key, status: 'request_failed' })
+        .where({ phone_key: key, status: 'ask_failed' })
         .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
       retryClaim = reclaimed > 0;
     } catch { /* fall through to the normal path */ }
@@ -136,9 +136,9 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
         property_address: String(propertyAddress || '').trim() || 'your service property',
       });
       if (!body) {
-        // Template dark: release a retry re-claim back to request_failed so
+        // Template dark: release a retry re-claim back to ask_failed so
         // it stays blocking and retryable rather than pending-unasked.
-        if (retryClaim) await db('recipient_optin').where({ phone_key: key, status: 'pending' }).update({ status: 'request_failed' }).catch(() => {});
+        if (retryClaim) await db('recipient_optin').where({ phone_key: key, status: 'pending' }).update({ status: 'ask_failed' }).catch(() => {});
         continue;
       }
       if (!retryClaim) {
@@ -155,7 +155,11 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
       }
       claims.push({ key, phone: contact.phone, body });
     } catch (err) {
-      logger.warn(`[recipient-optin] claim failed for ***${key.slice(-4)}: ${err.message}`);
+      // Fail CLOSED: a claim error (render infra, insert failure) must fail
+      // the contact save — silently proceeding would store a phone with no
+      // row, i.e. grandfathered, and quietly disable the consent boundary.
+      logger.error(`[recipient-optin] claim failed for ***${key.slice(-4)}: ${err.message}`);
+      throw err;
     }
   }
   return claims;
@@ -180,16 +184,16 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         metadata: { original_message_type: 'recipient_optin_request' },
       });
       if (result.blocked || result.sent === false) {
-        // They were never asked: keep a BLOCKING request_failed row (texts
+        // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
         // deleting it would grandfather a phone that never got the ask.
-        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'request_failed', updated_at: new Date() }).catch(() => {});
+        await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
       requested += 1;
     } catch (err) {
-      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'request_failed', updated_at: new Date() }).catch(() => {});
+      await db('recipient_optin').where({ phone_key: claim.key, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }

@@ -640,14 +640,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       let optinClaims = [];
       if (updates.serviceContactsConsent === true && contacts.length) {
         const { claimRecipientOptins } = require('../services/recipient-optin');
+        // A claim failure fails the whole save (throws to the route's error
+        // handler) — proceeding would store a phone with no row, silently
+        // disabling the double-opt-in boundary for that recipient.
         optinClaims = await claimRecipientOptins({
           customer: beforeRow,
           contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
           priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
           propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-        }).catch((err) => {
-          logger.error(`[notifications] recipient opt-in claim failed for customer ${req.params.customerId}: ${err.message}`);
-          return [];
         });
       }
       await db('customers').where({ id: req.params.customerId }).update({

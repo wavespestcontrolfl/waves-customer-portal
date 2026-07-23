@@ -9,7 +9,8 @@ exports.up = async function up(knex) {
       // Last-10-digit key, matching the webhook's phone lookup convention.
       t.string('phone_key', 10).primary();
       t.string('phone_e164', 20);
-      t.string('status', 12).notNullable().defaultTo('pending');
+      // 16 chars fits every state: pending / confirmed / declined / ask_failed.
+      t.string('status', 16).notNullable().defaultTo('pending');
       t.uuid('customer_id').nullable();
       t.string('requested_by', 40).notNullable().defaultTo('portal_contact_save');
       t.string('template_version', 40);
