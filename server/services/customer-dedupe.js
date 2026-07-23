@@ -1151,12 +1151,27 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
       ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
     ];
+    let movedContactSlot = false;
     for (const slot of CONTACT_SLOTS) {
       const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
       if (!winnerSlotEmpty) continue;
       for (const f of slot) {
-        if (!isEmptyValue(loser[f])) backfills[f] = loser[f];
+        if (!isEmptyValue(loser[f])) {
+          backfills[f] = loser[f];
+          movedContactSlot = true;
+        }
       }
+    }
+    // Consent artifact travels WITH the contacts it describes (#2948): when
+    // slots move from the loser and the winner has no stamp of its own,
+    // carry the loser's — otherwise the consent-gated SMS fanout would mute
+    // recipients the merge just preserved.
+    if (movedContactSlot
+      && isEmptyValue(winner.service_contacts_consent_at)
+      && !isEmptyValue(loser.service_contacts_consent_at)) {
+      backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
+      backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
+      backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });

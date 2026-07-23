@@ -333,6 +333,13 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
 // ─── service-contact slot persistence ──────────────────────────────────────
 
 describe('persistCallSecondaryContact', () => {
+  // Every phone-bearing slot write stamps the row-level consent artifact
+  // (#2955): the account holder requested the contact on a recorded call.
+  const CALL_CONSENT_STAMP = {
+    service_contacts_consent_at: expect.any(Date),
+    service_contacts_consent_source: 'call_pipeline_request',
+    service_contacts_consent_text_version: 'call-2026-07-23',
+  };
   const buyer = {
     first_name: 'Joseph', last_name: 'Haught', phone: '+19542901693',
     email: 'joseph.haught89431@gmail.com', role: 'home_buyer',
@@ -401,6 +408,9 @@ describe('persistCallSecondaryContact', () => {
       service_contact_phone: '+19542901693',
       service_contact_email: 'joseph.haught89431@gmail.com',
       service_contact_role: 'home_buyer',
+      // Phone contact requested on a recorded call → consent artifact
+      // stamps in the same atomic write (#2955).
+      ...CALL_CONSENT_STAMP,
     }]);
     // Emptiness re-asserted in the UPDATE's WHERE (race guard) — one
     // predicate per slot column.
@@ -429,6 +439,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_phone: '+19542901693',
       service_contact_email: null,
       service_contact_role: 'home_buyer',
+      ...CALL_CONSENT_STAMP,
     }]);
   });
 
@@ -533,6 +544,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact2_phone: '+19542901693',
       service_contact2_email: 'joseph.haught89431@gmail.com',
       service_contact2_role: 'home_buyer',
+      ...CALL_CONSENT_STAMP,
     }]);
     // Slot phones already existed → the admin's appointment notify-primary
     // choice stands. No slot EMAIL existed → report emails flip now.

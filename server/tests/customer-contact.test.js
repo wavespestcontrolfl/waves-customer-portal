@@ -210,6 +210,19 @@ describe('customer contact recipient routing', () => {
     ]);
   });
 
+  test('getServiceContact falls back to the primary PHONE when unstamped; email/name stay (#2955 P1)', () => {
+    const { getServiceContact } = require('../services/customer-contact');
+    const unstamped = { ...customer, service_contacts_consent_at: null };
+    expect(getServiceContact(unstamped)).toEqual(expect.objectContaining({
+      phone: '+15551110000',
+      email: 'terry@example.com',
+      name: 'Terry Tenant',
+    }));
+    expect(getServiceContact(customer)).toEqual(expect.objectContaining({
+      phone: '+15552220000',
+    }));
+  });
+
   test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';

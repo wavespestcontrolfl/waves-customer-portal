@@ -99,6 +99,10 @@ async function loadCustomer(customerId) {
       // Service-contact slots so the email fallback can reach the same recipients
       // the appointment SMS targets (getAppointmentContacts reads these).
       ...SERVICE_CONTACT_COLUMNS,
+      // Consent stamp — getAppointmentContacts treats a row without it as
+      // unconsented, so a projection that omits it would mis-resolve the
+      // SMS recipient set this email mirrors (#2955 codex P2).
+      'service_contacts_consent_at',
     )
     .first();
 }

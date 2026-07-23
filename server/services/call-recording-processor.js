@@ -1517,6 +1517,15 @@ async function persistCallSecondaryContact(customerId, contact) {
     // The extracted relationship (home_buyer/tenant/...) — recorded so
     // role-aware recipient selection is possible later; 'unknown' stays null.
     [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
+    // Consent artifact (#2948): the account holder requested this contact
+    // on a recorded call — stamp with the call-pipeline source so the
+    // consent-gated SMS fanout doesn't mute the contact they just asked
+    // for. Distinct source from the portal attestation on purpose.
+    ...(contact.phone ? {
+      service_contacts_consent_at: new Date(),
+      service_contacts_consent_source: 'call_pipeline_request',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+    } : {}),
   });
   if (!updated) return 'skipped_slot_race';
   return 'written';

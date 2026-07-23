@@ -80,6 +80,14 @@ function getServiceContactSlots(customer) {
   }));
 }
 
+// SMS to a service contact requires the row-level consent artifact
+// (#2948). Shared by every phone-resolving path in this module. Kill
+// switch: DISABLE_CONTACT_CONSENT_GATE=1.
+function serviceContactsConsented(customer = {}) {
+  return !!customer.service_contacts_consent_at
+    || process.env.DISABLE_CONTACT_CONSENT_GATE === '1';
+}
+
 function getServiceContact(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
@@ -87,7 +95,10 @@ function getServiceContact(customer) {
   const svcName = clean(customer.service_contact_name);
   const primary = getPrimaryContact(customer);
   return {
-    phone: svcPhone || primary.phone,
+    // Texting target — consent-gated (review asks/follow-ups send to this
+    // phone). Falls back to the primary when the stamp is absent. Email and
+    // name are not texting targets and stay ungated.
+    phone: (svcPhone && serviceContactsConsented(customer)) ? svcPhone : primary.phone,
     email: svcEmail || primary.email,
     name: svcName || primary.name,
     role: 'service_contact',
@@ -126,10 +137,7 @@ function getAppointmentContacts(customer, prefs = {}) {
   // Rows without a stamp fall back to texting the primary account holder
   // only. Kill switch: DISABLE_CONTACT_CONSENT_GATE=1 restores the old
   // ungated fanout.
-  const contactsConsented = !!customer.service_contacts_consent_at
-    || process.env.DISABLE_CONTACT_CONSENT_GATE === '1';
-
-  if (contactsConsented) {
+  if (serviceContactsConsented(customer)) {
     for (const slot of getServiceContactSlots(customer)) {
       const distinct = !!slot.phone
         && !samePhone(slot.phone, primary.phone)
