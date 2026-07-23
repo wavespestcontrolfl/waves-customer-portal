@@ -2096,3 +2096,23 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
     }
   });
+
+  test('round 5: denial titles, or-coordinated denials, CTA for, progressive work, open qualifiers', () => {
+    for (const body of [
+      'Apply for mosquito control in Cape Coral today.',
+      "We're working throughout Naples this month.",
+      'We serve Sarasota; Naples during mosquito season.',
+      'We serve Sarasota; Naples every other week.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Naples pest control services are not available',
+      'We cannot treat Sarasota or provide pest control in Naples.',
+      'We serve Sarasota; Tampa is dangerous.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });

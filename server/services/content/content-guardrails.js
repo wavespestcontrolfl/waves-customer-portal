@@ -638,7 +638,7 @@ const SERVICE_KEYWORD_SOURCE = `${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\\+)
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv(?:e|es|ed|ing)\\b(?!\\s+up\\b)|servic\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|manag(?:e|es|ed|ing)\\b(?!\\s+to\\b))"
   + "|we(?:'re| are)? proud to (?:serve|service|treat|cover|protect)\\b"
-  + "|we(?: also| now| currently| proudly| still)? (?:work(?:s|ed|ing)?|operat(?:e|es|ed|ing)) (?:in|throughout|across|around)\\b"
+  + "|we(?:'re| are|'ll| will|'ve| have)?(?: been)?(?: also| now| currently| proudly| still)? (?:work(?:s|ed|ing)?|operat(?:e|es|ed|ing)) (?:in|throughout|across|around)\\b"
   + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
   + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treats?|serves?|services?|covers?|visits?|inspects?|handles?|sprays?|runs?|protects?|works? (?:in|throughout|across|around)|operates? (?:in|throughout|across|around))'
@@ -653,8 +653,8 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // A short punctuation-free segment built around the keyword is a bare
   // packaging TITLE/META ("Cape Coral pest control services") — prose
   // sentences carry terminal punctuation and never match the anchored form.
-  + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|faqs?)\\b)[^.!?]{0,25}$`
-  + `|\\b(?<!\\b(?:about|regarding|concerning|on|for)\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
+  + `|^[^.!?]{0,25}${SERVICE_KEYWORD_SOURCE}(?!(?:\\s+(?:service|plan|program)s?)?\\s+(?:guides?|research|information|info|advice|tips|insights?|education|resources?|articles?|content|news|myths?|history|faqs?)\\b)(?:(?!\\b(?:not|no|un|isn|aren|unavailable)\\w*\\b)[^.!?]){0,25}$`
+  + `|\\b(?<!\\b(?:about|regarding|concerning|on)\\b[^.!?]{0,20})(?<!\\b(?:provid|offer|deliver)\\w*\\b[^.!?]{0,30}\\bfor\\b[^.!?]{0,20})${SERVICE_KEYWORD_SOURCE}\\s+(?:in|near|for|guide|quotes?|plans?|company|companies|available)\\b`
   // "Our pest control services guide explains…" is editorial packaging of
   // CONTENT, not of service — the guide-compound lookahead mirrors the
   // keyword suffix's own guard.
@@ -707,7 +707,7 @@ const FOOTPRINT_DISCLAIMER_RE = /\b(outside (?:of )?(?:our|the) service (?:area|
 // refuses dashes entirely (a dash splice is a new clause, not a list).
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\s(?:and|or)\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|offer|provide|deliver)|excludes?|stops? (?:short of|before|at))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\sand\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:outside|beyond|out of)\\b`,
     'i',
   );
 }
@@ -768,7 +768,7 @@ const FOOTPRINT_CLAUSE_SPLIT_RE = /;\s*|,\s*(?:but|yet|however|though|although|w
 // separator (a short trailing qualifier like "year-round" is tolerated); a
 // fragment with real lowercase prose is a clause and stays split — "We serve Sarasota; Tampa mosquito season starts earlier" must
 // NOT glue Tampa onto the claim.
-const LIST_FRAGMENT_RE = /^\s*(?!(?:We|Our|Waves|WaveGuard)\b)(?:(?:and|or|nor)\s+|[&/+]\s*|(?!(?:We|Our|Waves|WaveGuard)\b)[A-Z][A-Za-z'.&-]*[\s,–—-]*(?:(?:homes?|properties|lawns?|yards?|businesses?|neighborhoods?)[\s,]*)?)+(?:(?:year-round|year\s+round|weekly|monthly|quarterly|seasonally|daily|too|as well|and more|every\s+(?:week|month|day|year|season|visit)|each\s+(?:week|month|visit))[\s,]*)?\.?\s*$/;
+const LIST_FRAGMENT_RE = /^\s*(?!(?:We|Our|Waves|WaveGuard)\b)(?:(?:and|or|nor)\s+|[&/+]\s*|(?!(?:We|Our|Waves|WaveGuard)\b)[A-Z][A-Za-z'.&-]*[\s,–—-]*(?:(?:homes?|properties|lawns?|yards?|businesses?|neighborhoods?)[\s,]*)?)+(?:(?!(?:is|are|was|were|has|have|had|starts?|gets?|feels?|looks?|seems?|remains?|differs?|makes?|takes?|comes?|goes?|and|or)\b)[a-z-]+[\s,]*){0,4}\.?\s*$/;
 
 function rejoinListSemicolons(sentence) {
   const out = [];
