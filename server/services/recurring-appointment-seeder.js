@@ -286,7 +286,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       technician_id: opts.technicianId ?? parent.technician_id ?? null,
       scheduled_date: nextDateStr,
       window_start: parent.window_start || null,
-      window_end: parent.window_end || null,
+      window_end: opts.windowEnd ?? (parent.window_end || null),
       service_type: opts.serviceType || parent.service_type || 'Service',
       status: opts.childStatus || 'pending',
       notes: opts.childNotes || parent.notes || null,

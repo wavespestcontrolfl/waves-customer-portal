@@ -2362,20 +2362,34 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Composite parents (Pest + add-ons) guard and seed as the PEST
+          // family: serviceKeyFor on the joined label would classify the
+          // series as mosquito/lawn and (a) miss an existing pest series
+          // (duplicate seeding) and (b) mint children that look like full
+          // combined visits at the pest cadence (#2957 codex r2).
+          const compositePest = signedKeyComponents.length > 1 && signedKeyComponents.includes('pest_control');
           const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
             customerId: custId,
             serviceId: serviceRow.service_id || null,
-            serviceType: serviceRow.service_type || resolvedServiceType,
+            serviceType: compositePest ? 'Pest Control' : (serviceRow.service_type || resolvedServiceType),
             excludeParentId: serviceRow.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
           if (matches.length > 0) return { kept: matches[0] };
+          const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
+          const pestEndMin = timeToMin(slot_start) + pestDuration;
+          const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, serviceRow, {
             pattern: 'quarterly',
             plannedCount: 4,
             skipWeekends: true,
             weekendShift: 'forward',
-            durationMinutes: duration,
+            // Children of a composite parent are PEST-ONLY visits: pest
+            // label, pest duration, pest window — the add-on services were
+            // a first-visit bundle; their cadences are set up by the office
+            // from the owner alert (v1 constraint, PR body).
+            durationMinutes: compositePest ? pestDuration : duration,
+            ...(compositePest ? { serviceType: 'Pest Control', windowEnd: pestWindowEnd } : {}),
             source: source || 'self_booked',
             // Follow-ups bill the even quotient — the parent already absorbed
             // the remainder cents — instead of inheriting the parent's price

@@ -206,12 +206,17 @@ export default function PublicBookingPage() {
       }
       return prev.length >= 3 ? prev : [...prev, id];
     });
-    // A different service set voids any previously fetched offers — the
-    // old slot_sig was minted for the old scope and /confirm would reject
-    // it (#2957 codex P2). Clear so step 2 refetches for the new scope.
+    // A different service set voids EVERY previously fetched offer — the
+    // old slot_sigs were minted for the old scope and /confirm would
+    // reject them (#2957 codex P2). Clear the main availability AND the
+    // AI-search/browse/open-day slot sources so step 2 refetches for the
+    // new scope.
     setAvailability([]);
     setSelectedDate(null);
     setSelectedSlot(null);
+    setSearchResult(null);
+    setBrowseDays(null);
+    setOpenDay(null);
   };
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
