@@ -31,6 +31,26 @@ function mintEstimateHandoffToken(estimateId, nowSec = Math.floor(Date.now() / 1
   return `${exp}.${sign(estimateId, exp)}`;
 }
 
+// Accepted-estimate /book links (customers-only gate pass). Differs from the
+// quote handoff twice over, so it gets its own mint:
+//  - the id is NAMESPACED (`estimate-accept:<id>`) so accept tokens and
+//    pricing-handoff tokens can never substitute for each other;
+//  - the TTL is a year, not 14 days — the accept-retry SMS chases
+//    accepted-but-never-booked customers well past the quote window, and an
+//    expired token would bounce an ALREADY-ACCEPTED customer off the gate.
+// The mint time is quantized to the acceptance DAY so the fresh-accept link
+// and every retry rebuild produce byte-identical URLs (the retry path dedupes
+// short codes by exact target_url). Verify with
+// verifyEstimateHandoffToken(`estimate-accept:<id>`, token) — the exp is
+// embedded, so the verifier needs no TTL knowledge.
+const ACCEPT_TTL_SECONDS = 60 * 60 * 24 * 365;
+function mintEstimateAcceptToken(estimateId, acceptedAtMs = Date.now()) {
+  if (!estimateId || !secret()) return null;
+  const dayEpochSec = Math.floor(acceptedAtMs / 1000 / 86400) * 86400;
+  const exp = dayEpochSec + ACCEPT_TTL_SECONDS;
+  return `${exp}.${sign(`estimate-accept:${estimateId}`, exp)}`;
+}
+
 // Verify a token matches the estimate id and hasn't expired. Constant-time
 // signature compare. Returns false on any malformed/expired/mismatched token.
 function verifyEstimateHandoffToken(estimateId, token, nowSec = Math.floor(Date.now() / 1000)) {
@@ -49,4 +69,6 @@ function verifyEstimateHandoffToken(estimateId, token, nowSec = Math.floor(Date.
   }
 }
 
-module.exports = { mintEstimateHandoffToken, verifyEstimateHandoffToken, TTL_SECONDS };
+module.exports = {
+  mintEstimateHandoffToken, mintEstimateAcceptToken, verifyEstimateHandoffToken, TTL_SECONDS,
+};

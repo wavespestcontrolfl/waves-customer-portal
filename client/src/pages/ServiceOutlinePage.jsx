@@ -4,6 +4,7 @@ import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } f
 import BrandFooter from "../components/BrandFooter";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
+import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from "../constants/business";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -17,12 +18,37 @@ function LoadingState() {
   );
 }
 
-function ErrorState({ message }) {
+// Every terminal state keeps a forward action (audit S2-2): the phone number
+// is rendered as visible digits (desktop readers can't tap tel: links), and
+// transient failures get a Try again. `gone` (404/410) skips the retry — a
+// dead token can't recover, so the copy points at a resend instead.
+function ErrorState({ kind, message, onRetry }) {
   return (
     <div data-glass-clear="" className="min-h-screen bg-waves-page px-4 py-10">
       <div className="mx-auto max-w-3xl rounded-md border border-red-200 bg-white p-6">
-        <h1 className="text-xl font-semibold text-waves-blue-deeper">Service Outline Unavailable</h1>
-        <p className="mt-2 text-sm leading-6 text-slate-600">{message}</p>
+        <h1 className="text-xl font-semibold text-waves-blue-deeper">
+          {kind === "gone" ? "This outline link has expired" : "We couldn't load your program overview"}
+        </h1>
+        <p className="mt-2 text-base leading-7 text-slate-600">{message}</p>
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          {kind !== "gone" && onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              style={{ minHeight: 44 }}
+              className="rounded-md bg-waves-blue-deeper px-5 text-base font-semibold text-white"
+            >
+              Try again
+            </button>
+          )}
+          <a
+            href={WAVES_SUPPORT_PHONE_TEL}
+            style={{ minHeight: 44 }}
+            className="inline-flex items-center rounded-md border border-zinc-200 px-5 text-base font-semibold text-waves-blue-deeper"
+          >
+            Call {WAVES_SUPPORT_PHONE_DISPLAY}
+          </a>
+        </div>
       </div>
     </div>
   );
@@ -52,7 +78,9 @@ export default function ServiceOutlinePage() {
   useGlassSurface(true, "full");
   const [packet, setPacket] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // { kind: 'gone' | 'transient', message } — never a raw HTTP status.
+  const [error, setError] = useState(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,11 +90,18 @@ export default function ServiceOutlinePage() {
     meta.setAttribute("content", "noindex,nofollow,noarchive");
     if (!meta.parentNode) document.head.appendChild(meta);
 
+    setLoading(true);
+    setError(null);
     fetch(`${API_BASE}/service-outlines/${encodeURIComponent(token)}`)
       .then(async (response) => {
         if (!response.ok) {
-          const body = await response.json().catch(() => ({}));
-          throw new Error(body.error || `HTTP ${response.status}`);
+          // 404/410 = dead token (the server 410s expired links); anything
+          // else is treated as transient. A non-JSON error body (proxy 5xx)
+          // must never surface as "HTTP 500" — that read as a dead end.
+          const gone = response.status === 404 || response.status === 410;
+          const err = new Error(gone ? "gone" : "transient");
+          err.kind = gone ? "gone" : "transient";
+          throw err;
         }
         return response.json();
       })
@@ -74,7 +109,14 @@ export default function ServiceOutlinePage() {
         if (!cancelled) setPacket(data.packet);
       })
       .catch((err) => {
-        if (!cancelled) setError(err.message || "This link is unavailable.");
+        if (cancelled) return;
+        const kind = err.kind === "gone" ? "gone" : "transient";
+        setError({
+          kind,
+          message: kind === "gone"
+            ? `This link may have expired or isn't valid. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} and we'll resend it — or check your texts for a newer link.`
+            : "This is usually a brief connection hiccup. Try again in a moment, or give us a call and we'll walk you through your program.",
+        });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -82,10 +124,18 @@ export default function ServiceOutlinePage() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, retryNonce]);
 
   if (loading) return <LoadingState />;
-  if (error) return <ErrorState message={error} />;
+  if (error) {
+    return (
+      <ErrorState
+        kind={error.kind}
+        message={error.message}
+        onRetry={() => setRetryNonce((n) => n + 1)}
+      />
+    );
+  }
 
   const content = packet?.content || {};
   const estimatePath = content.cta?.estimatePath;

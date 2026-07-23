@@ -22,7 +22,13 @@ const MONTH_RECURRENCE_INTERVALS = {
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
-const ONE_TIME_BOOKING_SOURCE_VALUES = ['estimate-accept', 'quote-wizard-onetime'];
+// admin-manual-booking-resend: the admin "resend booking link" for a ONE-TIME
+// accepted estimate (admin-estimates.js — it sends the estimate_accepted_onetime
+// SMS template). It must carry one-time semantics like estimate-accept, or a
+// pest resend seeds a quarterly follow-up series the customer never bought
+// (Codex round-6 P2 on #2944). Keep in sync with the client's
+// ONE_TIME_BOOKING_SOURCES (PublicBookingPage.jsx).
+const ONE_TIME_BOOKING_SOURCE_VALUES = ['estimate-accept', 'quote-wizard-onetime', 'admin-manual-booking-resend'];
 const ONE_TIME_BOOKING_SOURCES = new Set(ONE_TIME_BOOKING_SOURCE_VALUES);
 
 function isOneTimeBookingSource(source) {

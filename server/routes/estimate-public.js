@@ -13,6 +13,22 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+
+// Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
+// the links carry only the correlation estimate_id, so under the customers-only
+// gate their (already-accepted) customers would be refused. The util owns the
+// token shape (namespace, year TTL, acceptance-day quantization — the latter
+// keeps fresh-accept and retry URLs byte-identical for the short-code dedup
+// contract). The fresh accept builds its link before the in-memory row
+// carries accepted_at (the column is written trx-side), so "now" IS the
+// acceptance day there; retries read the committed accepted_at. Returns ''
+// when no signing secret is configured (link degrades to today's shape).
+function acceptBookingGateToken(estimate) {
+  const acceptedMs = estimate?.accepted_at ? new Date(estimate.accepted_at).getTime() : Date.now();
+  const token = mintEstimateAcceptToken(estimate.id, acceptedMs);
+  return token ? `&accept_token=${encodeURIComponent(token)}` : '';
+}
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -9529,7 +9545,7 @@ router.put('/:token/accept', async (req, res, next) => {
       // book_one_time and enable duplicate appointments. Identity/pricing are
       // unaffected: /book treats a bare estimate_id (no estimate_token HMAC)
       // as correlation only.
-      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}${acceptBookingGateToken(estimate)}`;
       bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
         entityType: 'estimates',
@@ -12461,7 +12477,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     // exact field the committedAppointment probe above keys on. Without it a
     // booking completed through THIS link is invisible to later retries,
     // which keep answering book_one_time and enable duplicate appointments.
-    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}${acceptBookingGateToken(estimate)}`;
     // Read-only retry contract: never stack another permanent short_codes row
     // per retry. Reuse the code already minted for exactly this target URL
     // (the fresh accept's, or the first retry's); mint at most once otherwise.
