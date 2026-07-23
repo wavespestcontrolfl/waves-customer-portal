@@ -8588,12 +8588,19 @@ export function CompletionPanel({
   // points, sanitation areas, the station map; owner 2026-07-23), nor bed
   // bug treatments (an interior service whose typed form records the rooms
   // treated directly — the chip list doesn't even offer a bedroom; owner
-  // 2026-07-23). Hidden for these lines, and the stale-draft clearing
-  // effect below keys off the same flag so hidden state can't ride a
-  // restored draft into the submit.
+  // 2026-07-23). Keyed on the completion profile's TYPED FINDINGS TYPE,
+  // not the name-derived service line: a pest-primary bundle like
+  // "Pest & Rodent Control" classifies as the rodent LINE by name while
+  // its completion is a generic pest form (rodent work is a companion),
+  // and hiding areas there would lose where the pest treatment went
+  // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
+  // off the same flag so hidden state can't ride a restored draft into
+  // the submit.
   const areasTreatedHidden = treeShrubCloseoutOn
-    || serviceLineForCloseout === "rodent"
-    || service.completionProfile?.findingsType === "bed_bug";
+    || [
+      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
+      "rodent_inspection", "rodent_bait_station", "bed_bug",
+    ].includes(service.completionProfile?.findingsType);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
