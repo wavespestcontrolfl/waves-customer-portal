@@ -749,6 +749,15 @@ const gates = {
   // Kill switch: unset GATE_BOOK_AI_SEARCH.
   bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
 
+  // Multi-service public booking (owner-authorized 2026-07-23): /book can
+  // select 2-3 services in one visit — composite service key through the
+  // same signed-offer path, summed duration, joined label. Exposed to the
+  // client via GET /api/booking/config as `multi_service` (fail-closed:
+  // the selector only renders when the portal affirms; the server also
+  // refuses composite keys while the gate is off). Kill switch: unset
+  // GATE_MULTI_SERVICE_BOOKING.
+  multiServiceBooking: isProd ? process.env.GATE_MULTI_SERVICE_BOOKING === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in

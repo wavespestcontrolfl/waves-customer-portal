@@ -138,6 +138,10 @@ export default function PublicBookingPage() {
   // its refusal carries the quote link, so nothing insecure leaks through.
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
   const [customersOnly, setCustomersOnly] = useState(null);
+  // Multi-service selector (GATE_MULTI_SERVICE_BOOKING) — fail-closed:
+  // renders only when /booking/config affirms; the server also refuses
+  // composite service keys while the gate is off.
+  const [multiServiceEnabled, setMultiServiceEnabled] = useState(false);
   const [gatePhone, setGatePhone] = useState('');
   const [gateCode, setGateCode] = useState('');
   const [gateStep, setGateStep] = useState('phone');
@@ -153,13 +157,42 @@ export default function PublicBookingPage() {
     let cancelled = false;
     fetch(`${API_BASE}/booking/config`)
       .then((r) => (r.ok ? r.json() : {}))
-      .then((cfg) => { if (!cancelled) setCustomersOnly(cfg?.customers_only === true); })
+      .then((cfg) => {
+        if (cancelled) return;
+        setCustomersOnly(cfg?.customers_only === true);
+        setMultiServiceEnabled(cfg?.multi_service === true);
+      })
       .catch(() => { if (!cancelled) setCustomersOnly(false); });
     return () => { cancelled = true; };
   }, []);
 
   const [step, setStep] = useState(1);
-  const [service, setService] = useState(initialService);
+  // Selected service ids, anchor first (the query-param service). The
+  // rendered `service` object is derived: single selection = the catalog
+  // entry unchanged; multi = composite id (sorted, '+'-joined — mirrors
+  // the server's canonical key), joined label, summed duration.
+  const [selectedServiceIds, setSelectedServiceIds] = useState([initialService.id]);
+  const selectedServices = selectedServiceIds
+    .map((id) => SERVICES.find((s) => s.id === id))
+    .filter(Boolean);
+  const service = selectedServices.length > 1
+    ? {
+      id: [...selectedServiceIds].sort().join('+'),
+      label: selectedServices.map((s) => s.label).join(' + '),
+      duration: selectedServices.reduce((sum, s) => sum + s.duration, 0),
+      icon: selectedServices[0].icon,
+    }
+    : (selectedServices[0] || initialService);
+  const toggleService = (id) => {
+    setSelectedServiceIds((prev) => {
+      if (prev.includes(id)) {
+        // The anchor (first selection) can't be removed below one service.
+        const next = prev.filter((x) => x !== id);
+        return next.length ? next : prev;
+      }
+      return prev.length >= 3 ? prev : [...prev, id];
+    });
+  };
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
@@ -474,9 +507,12 @@ export default function PublicBookingPage() {
     // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
+  // Cadence follows the ANCHOR service (first selected) — a composite id
+  // has no pattern entry. v1 books the combined FIRST visit; the office
+  // sets up any additional cadences from the owner alert (flagged there).
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
-    : RECURRING_SERVICE_PATTERNS[service.id] || null;
+    : RECURRING_SERVICE_PATTERNS[selectedServiceIds[0]] || null;
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -947,6 +983,46 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
+            {multiServiceEnabled && !quotedServiceLabel && !tokenEntry && (
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8 }}>
+                  What can we help with? <span style={{ fontWeight: 400, color: '#6B7280' }}>Pick up to 3 — one visit, one arrival window.</span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {SERVICES.map((s) => {
+                    const selected = selectedServiceIds.includes(s.id);
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => toggleService(s.id)}
+                        aria-pressed={selected}
+                        className="waves-focus-ring"
+                        style={{
+                          padding: '11px 14px',
+                          minHeight: 44,
+                          borderRadius: 999,
+                          fontSize: 14,
+                          fontWeight: 600,
+                          border: `1.5px solid ${selected ? COLORS.glassNavy : '#D1D5DB'}`,
+                          background: selected ? COLORS.glassNavy : '#fff',
+                          color: selected ? '#fff' : COLORS.glassNavy,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {selected && <Icon name="check" size={14} strokeWidth={2.5} style={{ marginRight: 5, verticalAlign: -2 }} />}
+                        {s.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedServices.length > 1 && (
+                  <div style={{ marginTop: 8, fontSize: 14, color: '#6B7280' }}>
+                    {service.label} — about {Math.round(service.duration / 60 * 10) / 10} hours in one visit.
+                  </div>
+                )}
+              </div>
+            )}
             <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
               <div>
                 <AddressAutocomplete

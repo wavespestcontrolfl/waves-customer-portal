@@ -495,6 +495,9 @@ router.get('/config', async (req, res, next) => {
       // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
       // flag; the portal's own booking surfaces don't read this.
       ai_search: isEnabled('bookAiSearch'),
+      // Multi-service selector on /book — fail-closed dark-ship flag; the
+      // server independently refuses composite service keys while off.
+      multi_service: isEnabled('multiServiceBooking'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -703,17 +706,44 @@ const BOOKING_FUNNEL_SERVICE_LABELS = {
 // "constructor" pass normalization and hand back inherited objects instead
 // of catalog values.
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-function normalizeBookingServiceKey(value) {
+
+// Multi-service bookings (GATE_MULTI_SERVICE_BOOKING, owner-authorized
+// 2026-07-23): a composite key is 2-3 funnel keys joined by '+', sorted
+// (canonical form) — it flows through the SAME signed-offer path as a
+// single key, so slot_sig covers the combined scope and summed duration.
+// Gate off ⇒ composites normalize to '' (the existing unknown-service
+// path: clamped duration, server-owned fallback label, and /confirm's
+// empty-serviceKey slot_sig rejection) — fail closed with zero new code
+// paths for crafted posts.
+const MAX_MULTI_BOOKING_SERVICES = 3;
+function normalizeBookingServiceKeys(value) {
   const text = String(value || '').trim().toLowerCase();
-  if (!text) return '';
-  if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, text)) return text;
-  return hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, text) ? BOOKING_FUNNEL_SERVICE_ALIASES[text] : '';
+  if (!text) return [];
+  const parts = text.split('+').map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('multiServiceBooking')) return [];
+    if (parts.length > MAX_MULTI_BOOKING_SERVICES) return [];
+  }
+  const keys = [];
+  for (const part of parts) {
+    let key = '';
+    if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, part)) key = part;
+    else if (hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, part)) key = BOOKING_FUNNEL_SERVICE_ALIASES[part];
+    if (!key) return []; // one unknown part invalidates the whole value
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys.sort();
+}
+function normalizeBookingServiceKey(value) {
+  return normalizeBookingServiceKeys(value).join('+');
 }
 // Allowlisted display label for a client-supplied service value ('' when the
-// value names no funnel service).
+// value names no funnel service). Composites join per-service labels.
 function canonicalBookingServiceLabel(value) {
-  const key = normalizeBookingServiceKey(value);
-  return key && hasOwn(BOOKING_FUNNEL_SERVICE_LABELS, key) ? BOOKING_FUNNEL_SERVICE_LABELS[key] : '';
+  const keys = normalizeBookingServiceKeys(value);
+  if (!keys.length) return '';
+  return keys.map((key) => BOOKING_FUNNEL_SERVICE_LABELS[key]).join(' + ');
 }
 
 // Stable location scope for signed offers: the server-resolved coordinates
@@ -737,7 +767,10 @@ function bookingOfferLocationKey(lat, lng) {
 const MIN_BOOKING_DURATION_MINUTES = 45;
 const MAX_BOOKING_DURATION_MINUTES = 90;
 function resolveBookingDuration(requested, config = {}, serviceKey = '') {
-  const catalog = BOOKING_FUNNEL_SERVICE_DURATIONS[serviceKey];
+  const keys = String(serviceKey || '').split('+').filter(Boolean);
+  const catalog = keys.length && keys.every((k) => hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, k))
+    ? keys.reduce((sum, k) => sum + BOOKING_FUNNEL_SERVICE_DURATIONS[k], 0)
+    : 0;
   if (catalog) return catalog;
   const n = parseInt(requested, 10);
   if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
@@ -1853,7 +1886,7 @@ async function createSelfBooking(payload = {}) {
     // posted values, then from the server-side estimate row. A crafted
     // ?service_label= string ("FREE Termite Treatment call 941-…") must never
     // land on the confirmation page, owner SMS, or dispatch surfaces.
-    const resolvedServiceType = BOOKING_FUNNEL_SERVICE_LABELS[serviceKey]
+    const resolvedServiceType = canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
       || cleanBookingServiceLabel(estimate?.services?.[0])
