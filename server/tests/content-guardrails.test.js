@@ -1600,13 +1600,20 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
   test('service-keyword city framing flags; bare pest-word mentions pass (Codex round 7)', () => {
     for (const body of [
       'Need mosquito control in Cape Coral? Start with source reduction.',
-      'Your Naples pest control guide for new homeowners.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
     }
-    const factual = guardrails.evaluate({ body: 'Our team reviewed Miami termite research before writing this guide.' }, {});
-    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    // Guide compounds are editorial throughout the gate — Codex round 32
+    // (astro) superseded the earlier round-7 expectation that guide titles
+    // flag ("Our Naples pest control guide explains local options" passes).
+    for (const body of [
+      'Your Naples pest control guide for new homeowners.',
+      'Our team reviewed Miami termite research before writing this guide.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
   });
 
   test('nearby island/town claims are covered; spoke-host absolute URLs and specialty city routes are policed (Codex round 7)', () => {
