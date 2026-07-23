@@ -388,10 +388,20 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               )}
               {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
                 <div key={n.id}
+                  role={n.link ? 'link' : undefined}
+                  tabIndex={n.link ? 0 : undefined}
+                  className={n.link ? 'waves-focus-ring' : undefined}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
                     if (n.link) { setOpen(false); window.location.href = n.link; }
                   }}
+                  onKeyDown={n.link ? async (e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
+                    if (!n.read_at) await markRead(n.id);
+                    setOpen(false);
+                    window.location.href = n.link;
+                  } : undefined}
                   style={{
                     padding: '14px 20px', cursor: n.link ? 'pointer' : 'default',
                     borderBottom: `1px solid ${isDark ? '#F4F4F5' : 'rgba(27,44,91,0.08)'}`,
@@ -504,10 +514,20 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   }}>{group}</div>
                   {items.map(n => (
                     <div key={n.id}
+                      role={n.link ? 'link' : undefined}
+                      tabIndex={n.link ? 0 : undefined}
+                      className={n.link ? 'waves-focus-ring' : undefined}
                       onClick={async () => {
                         if (!n.read_at) await markRead(n.id);
                         if (n.link) { setOpen(false); window.location.href = n.link; }
                       }}
+                      onKeyDown={n.link ? async (e) => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
+                        e.preventDefault();
+                        if (!n.read_at) await markRead(n.id);
+                        setOpen(false);
+                        window.location.href = n.link;
+                      } : undefined}
                       style={{
                         padding: '12px 20px', cursor: n.link ? 'pointer' : 'default',
                         borderBottom: `1px solid ${colors.border}`,
@@ -518,13 +538,13 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     >
                       <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon || '\u{1F514}'}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{
-                          fontSize: 13, fontWeight: n.read_at ? 400 : 700, color: colors.text,
+                        <div title={n.title} style={{
+                          fontSize: 15, fontWeight: n.read_at ? 400 : 700, color: colors.text,
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                         }}>{n.title}</div>
                         {n.body && (
-                          <div style={{
-                            fontSize: 12, color: colors.muted, marginTop: 2, lineHeight: 1.4,
+                          <div title={n.body} style={{
+                            fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,
                             overflow: 'hidden', textOverflow: 'ellipsis',
                             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                           }}>{n.body}</div>

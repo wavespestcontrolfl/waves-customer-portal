@@ -12,6 +12,38 @@ router.use(authenticate);
 // Max on-location contacts per property (slots on the customers row).
 const MAX_SERVICE_CONTACTS = 3;
 
+// Version tag for the recipient-consent disclosure shown in the portal
+// property editor. Bump when the disclosure wording changes so the stored
+// artifact says exactly which text the account holder attested to.
+const SERVICE_CONTACT_CONSENT_VERSION = 'portal-2026-07-22';
+
+// A contacts save that would store a texting target (any phone slot) is
+// only allowed when the account holder attested on THIS save. Fail closed:
+// legacy/cached clients and direct API calls that omit the flag get a 400
+// instead of silently enrolling a third-party number (codex #2948 P1).
+function serviceContactsRequireConsent(contacts = [], consentGiven) {
+  return contacts.some((c) => c.phone) && consentGiven !== true;
+}
+
+// Consent artifact columns for a contacts save. Stamped only when the
+// account holder attested on THIS save and the saved list is non-empty;
+// any other save clears the stamp — a prior attestation doesn't cover a
+// list it never described.
+function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
+  if (contacts.length && consentGiven === true) {
+    return {
+      service_contacts_consent_at: new Date(),
+      service_contacts_consent_source: 'portal_account_holder',
+      service_contacts_consent_text_version: SERVICE_CONTACT_CONSENT_VERSION,
+    };
+  }
+  return {
+    service_contacts_consent_at: null,
+    service_contacts_consent_source: null,
+    service_contacts_consent_text_version: null,
+  };
+}
+
 function serviceContactPayload(slot = {}) {
   const name = String(slot.name || '').trim();
   return {
@@ -571,6 +603,9 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         phone: Joi.string().trim().max(20).allow('', null),
         email: Joi.string().trim().email().max(150).allow('', null),
       })),
+      // Account-holder attestation that every listed person agreed to
+      // receive service texts (see SERVICE_CONTACT_CONSENT_VERSION).
+      serviceContactsConsent: Joi.boolean(),
     }).min(1);
     const updates = await schema.validateAsync(req.body);
     const targetCustomer = await db('customers')
@@ -591,9 +626,15 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         .map(normalizeContactInput)
         .filter((c) => c.name || c.phone || c.email)
         .slice(0, MAX_SERVICE_CONTACTS);
+      if (serviceContactsRequireConsent(contacts, updates.serviceContactsConsent)) {
+        return res.status(400).json({
+          error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
+        });
+      }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       await db('customers').where({ id: req.params.customerId }).update({
         ...serviceContactSlotUpdates(contacts, beforeRow),
+        ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
       savedContacts = contacts.map(serviceContactPayload);
@@ -604,12 +645,36 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // genuinely new person never inherits the old one.
       const contact = normalizeContactInput(updates.serviceContact);
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
+      // Consent decisions must describe what will actually be STORED after
+      // this save — the new slot 1 plus the untouched slot 2/3 people — not
+      // just the payload (codex #2948 r5): a slot-1-only edit neither
+      // bypasses the guard while other phone recipients remain, nor strips
+      // their stamp semantics by looking at slot 1 alone.
+      const survivors = [2, 3]
+        .map((n) => ({
+          name: String(beforeRow[`service_contact${n}_name`] || '').trim(),
+          phone: String(beforeRow[`service_contact${n}_phone`] || '').trim(),
+          email: String(beforeRow[`service_contact${n}_email`] || '').trim(),
+        }))
+        .filter((c) => c.name || c.phone || c.email);
+      const postSave = [contact, ...survivors].filter((c) => c.name || c.phone || c.email);
+      // Same consent rail as the list save — the legacy shape must not be
+      // a loophole for storing an unattested texting target.
+      if (serviceContactsRequireConsent(postSave, updates.serviceContactsConsent)) {
+        return res.status(400).json({
+          error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
+        });
+      }
       const slot1 = serviceContactSlotUpdates([contact], beforeRow);
+      // Same artifact rule as the list save: a consented save stamps for the
+      // post-save list; an edit without a fresh attestation clears the stale
+      // stamp — it described a list this save just changed.
       await db('customers').where({ id: req.params.customerId }).update({
         service_contact_name: slot1.service_contact_name,
         service_contact_phone: slot1.service_contact_phone,
         service_contact_email: slot1.service_contact_email,
         service_contact_role: slot1.service_contact_role,
+        ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
         updated_at: new Date(),
       });
     }
@@ -648,9 +713,12 @@ router._private = {
   serviceContactPayload,
   serviceContactsPayload,
   serviceContactSlotUpdates,
+  serviceContactConsentUpdates,
+  serviceContactsRequireConsent,
   normalizeContactInput,
   resolvePrimaryProfileId,
   CHANNEL_DB_COLUMNS,
+  SERVICE_CONTACT_CONSENT_VERSION,
 };
 
 module.exports = router;
