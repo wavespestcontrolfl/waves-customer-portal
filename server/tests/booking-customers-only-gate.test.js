@@ -199,7 +199,9 @@ describe('createSelfBooking — customers-only gate', () => {
   test('quote-wizard handoff books its OWN quoter (contact-phone bound), never a generic pass', async () => {
     // The wizard's draft estimate carries the quoter's contact; the handoff
     // pass mints THAT person's record. Same body phone as the estimate.
-    firstResults.estimates = { id: 'pe-123', customer_id: null, customer_phone: '941-555-0101' };
+    // source/status make the row a LIVE wizard draft — the gate re-checks the
+    // current shape before honoring the token (stale-shape drift, Codex r2).
+    firstResults.estimates = { id: 'pe-123', source: 'quote_wizard', status: 'draft', customer_id: null, customer_phone: '941-555-0101' };
     const token = mintEstimateHandoffToken('pe-123');
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -217,7 +219,7 @@ describe('createSelfBooking — customers-only gate', () => {
     // invited them into. The wizard's draft is bound to the customer row it
     // minted (pipeline_stage new_lead — lead stages only refuse the BEARER
     // path, never the token path).
-    firstResults.estimates = { id: 'pe-lawn', customer_id: CUST_ID };
+    firstResults.estimates = { id: 'pe-lawn', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID };
     firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'new_lead' };
     const result = await createSelfBooking({
       ...strangerBody(),
@@ -229,10 +231,41 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
+  test('a stale handoff is refused once the draft is no longer self-bookable (shape drift, Codex r2)', async () => {
+    // The wizard refreshes drafts in place: a token minted for a
+    // self-bookable shape must stop gate-passing when the SAME estimate has
+    // since become promoted / manual / commercial / mixed-billing.
+    const token = mintEstimateHandoffToken('pe-drift');
+    firstResults.customers = BEARER_ROW();
+    const driftShapes = [
+      // Promoted by staff — the live links are the estimate's own share/accept links.
+      { id: 'pe-drift', source: 'quote_wizard', status: 'sent', customer_id: CUST_ID },
+      // Recalculated into a manual-review quote.
+      { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { quoteRequired: true } },
+      // Recalculated into commercial estimated pricing.
+      { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { commercialEstimatedPricing: true } },
+      // Gained a one-time add-on (mixed billing — office schedules + bills).
+      { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { annual: 480, oneTimeTotal: 150 } },
+      // Recalculated into a bed-bug quote (no right-sized bookable slot).
+      { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] } } },
+    ];
+    for (const shape of driftShapes) {
+      firstResults.estimates = shape;
+      expect(await createSelfBooking({
+        ...strangerBody(),
+        customersOnly: true,
+        pricing_estimate_id: 'pe-drift',
+        estimate_token: token,
+      })).toEqual(REFUSAL);
+    }
+  });
+
   test('a handoff token cannot re-point the booking at an unrelated contact (Codex round-5 P1)', async () => {
     // Valid HMAC, but the typed phone is NOT the handoff estimate's contact —
     // a self-minted quote token must not unlock the legacy identity paths.
-    firstResults.estimates = { id: 'pe-123', customer_id: null, customer_phone: '(941) 555-9999' };
+    // Live-draft shape so the refusal under test is the CONTACT mismatch,
+    // not the stale-shape gate.
+    firstResults.estimates = { id: 'pe-123', source: 'quote_wizard', status: 'draft', customer_id: null, customer_phone: '(941) 555-9999' };
     const token = mintEstimateHandoffToken('pe-123');
     expect(await createSelfBooking({
       ...strangerBody(),

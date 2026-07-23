@@ -149,4 +149,32 @@ function resolveBookingVisitPrice({ estimate = null, serviceKey = null, bookingV
   return null;
 }
 
-module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice };
+// Whether a STORED wizard estimate row is, in its CURRENT shape, one the
+// quote→book handoff may act on. The wizard refreshes drafts in place, so a
+// handoff token minted while the quote was a self-bookable shape can outlive
+// that shape (recalculated into commercial / manual-review / mixed-billing /
+// bed-bug — all office-scheduled). /booking/confirm therefore re-checks the
+// row TWICE with this one predicate: before accepting the token as the
+// customers-only GATE PASS, and again before pay-at-visit pricing (Codex
+// #2964 r2: pricing-only re-checks left the gate honoring stale links).
+// Row-shape mirror of public-quote's mint conditions (!quoteRequired &&
+// !commercialDetected && !estimateBlocksSelfBookLink) — keep the two in sync.
+//  - status must still be 'draft': once staff promote the estimate
+//    (sent/accepted/declined) the customer's live links are the estimate's
+//    own share/accept links, not the old quote handoff.
+//  - mixed recurring + one-time and bed-bug shapes are office-scheduled;
+//    their pricing would also drop one-time add-ons from billing.
+function wizardDraftSelfServeBookable(row) {
+  if (!row || row.source !== 'quote_wizard' || row.status !== 'draft') return false;
+  const data = row.estimate_data || {};
+  if (data.commercialEstimatedPricing || data.quoteRequired) return false;
+  const summary = data.engineResult?.summary || {};
+  const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
+  const oneTimeTotal = Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0);
+  if (recurringAnnual > 0 && oneTimeTotal > 0) return false;
+  const lineItems = data.engineResult?.lineItems || [];
+  if (lineItems.some((l) => l && l.service === 'bed_bug')) return false;
+  return true;
+}
+
+module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, wizardDraftSelfServeBookable };

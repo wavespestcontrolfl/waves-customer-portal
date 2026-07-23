@@ -1278,6 +1278,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const wantsTreeShrub = pricedServiceKeys.has('tree_shrub')
             || pricedServiceKeys.has('commercial_tree_shrub')
             || pricedServiceKeys.has('palm_injection');
+          // Recurring programs beyond pest/lawn/tree map to their own funnel
+          // services — previously they fell through to the Lawn Care link, so
+          // a mosquito/termite/rodent quote invited the customer into the
+          // wrong booking flow (Codex #2964 r2).
+          const wantsMosquito = pricedServiceKeys.has('mosquito');
+          const wantsTermite = pricedServiceKeys.has('termite_bait') || pricedServiceKeys.has('termite_bond');
+          const wantsRodent = pricedServiceKeys.has('rodent_bait');
           if (wantsPest) {
             bookingServiceId = 'pest_control';
             bookingServiceLabel = wantsLawn ? 'Pest Control & Lawn Care' : 'Pest Control';
@@ -1297,15 +1304,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               bookingServiceLabel = 'Palm Injections';
               recurringServiceLabelParam = bookingServiceLabel;
             }
+          } else if (wantsMosquito) {
+            bookingServiceId = 'mosquito';
+            bookingServiceLabel = 'Mosquito Control';
+          } else if (wantsTermite) {
+            bookingServiceId = 'termite';
+            bookingServiceLabel = 'Termite Inspection';
+          } else if (wantsRodent) {
+            bookingServiceId = 'rodent';
+            bookingServiceLabel = 'Rodent Control';
           } else {
-            bookingServiceId = 'lawn_care';
-            bookingServiceLabel = 'Lawn Care';
+            // No funnel service matches this recurring shape (e.g. recurring
+            // foam, guarantee-only programs). A misrouted link is worse than
+            // no link — withhold the self-book URL (bookingUrl stays null;
+            // email/SMS/astro all render their team-will-reach-out copy).
+            bookingServiceId = null;
           }
         }
+        if (bookingServiceId) {
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
         else if (recurringServiceLabelParam) bookingParams.set('service_label', recurringServiceLabelParam);
+        // Lead correlation: /booking/confirm converts the quote's lead to won
+        // only when the booking seeds a quarterly pest series OR carries
+        // lead_id (booking.js `followUpRows.length > 0 || lead_id`). The
+        // newly enabled non-pest/one-time handoffs seed no series, so without
+        // this param their bookings stranded the lead in new_lead (Codex
+        // #2964 r2). Not an identity input — booking.js treats lead_id as a
+        // conversion signal only.
+        bookingParams.set('lead', lead.id);
         // Quote→book handoff on EVERY self-book link (this builder already runs
         // only for self-bookable shapes — see the estimateBlocksSelfBookLink
         // gate above). The token is the customers-only gate pass
@@ -1328,6 +1356,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         bookingUrl = await shortenOrPassthrough(longBookingUrl, {
           kind: 'booking', entityType: 'leads', entityId: lead.id,
         });
+        }
       } catch (e) {
         logger.error(`[public-quote] Booking URL failed: ${e.message}`);
       }
@@ -1525,18 +1554,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.disclaimer = commercialDisclaimer;
     }
     // Quote→book handoff: expose the draft estimate id + a server-trusted token
-    // whenever the quote is a self-bookable shape — the SAME predicate the
-    // bookingUrl builder above uses, so every surface that offers "book online"
-    // carries the handoff. The token is both the pricing correlation AND the
-    // customers-only gate pass (GATE_BOOKING_CUSTOMERS_ONLY): estimator leads
-    // must reach /booking/confirm with it or the gate walls them out of the
-    // funnel they were just quoted in (owner directive 2026-07-23 — the gate
-    // locks BARE /book entries, never the estimator handoff). Shapes the
-    // office schedules (commercial, manual-review, mixed recurring+one-time,
-    // bed bug) get no token AND no booking_url — the client renders a
-    // we'll-reach-out CTA instead of a book link. Pricing stays confirm-side:
-    // unpriceable shapes book price-less.
-    if (draftEstimateId && !quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
+    // exactly when a self-book link was BUILT — bookingUrl is non-null only
+    // for self-bookable shapes (!quoteRequired && !commercialDetected &&
+    // !estimateBlocksSelfBookLink, plus a funnel-mappable service), so every
+    // surface that offers "book online" carries the handoff and no surface
+    // gets a token without a sanctioned link (the astro CTA's deploy-skew
+    // fallback hand-builds a URL from id+token, so a token minted for a
+    // withheld shape would resurrect the misrouted link). The token is both
+    // the pricing correlation AND the customers-only gate pass
+    // (GATE_BOOKING_CUSTOMERS_ONLY): estimator leads must reach
+    // /booking/confirm with it or the gate walls them out of the funnel they
+    // were just quoted in (owner directive 2026-07-23 — the gate locks BARE
+    // /book entries, never the estimator handoff). Office-scheduled shapes
+    // (commercial, manual-review, mixed recurring+one-time, bed bug, unmapped
+    // recurring programs) get no token AND no booking_url — the client
+    // renders a we'll-reach-out CTA instead of a book link. Pricing stays
+    // confirm-side: unpriceable shapes book price-less.
+    if (draftEstimateId && bookingUrl) {
       const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
       response.estimate_id = draftEstimateId;
       const estimateToken = mintEstimateHandoffToken(draftEstimateId);

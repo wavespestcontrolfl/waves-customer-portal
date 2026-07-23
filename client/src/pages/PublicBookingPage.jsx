@@ -103,6 +103,11 @@ export default function PublicBookingPage() {
   // pricing the visit from that exact estimate (pay-at-visit).
   const estimateIdParam = (searchParams.get('estimate_id') || '').trim() || null;
   const estimateTokenParam = (searchParams.get('estimate_token') || '').trim() || null;
+  // Lead correlation from the quote-wizard links (?lead=<lead_id>) — pure
+  // passthrough to /confirm, where it triggers lead→won conversion for
+  // bookings that seed no quarterly series (non-pest/one-time handoffs).
+  // Never an identity input server-side.
+  const leadIdParam = (searchParams.get('lead') || '').trim().slice(0, 64) || null;
   // Accepted-estimate booking links (estimate-accept SMS) carry a namespaced
   // HMAC instead of the quote-wizard pricing token — same customers-only-gate
   // bypass, verified server-side at /confirm, never a pricing input.
@@ -598,6 +603,9 @@ export default function PublicBookingPage() {
           // and stamps scheduled_services.source_estimate_id. Never used
           // for identity resolution.
           source_estimate_id: estimateIdParam || undefined,
+          // Lead conversion trigger for bookings that seed no quarterly
+          // series — see leadIdParam above.
+          lead_id: leadIdParam || undefined,
           slot_date: selectedDate,
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,

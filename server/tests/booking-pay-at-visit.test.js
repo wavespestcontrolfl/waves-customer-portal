@@ -52,7 +52,7 @@ jest.mock('../services/estimate-converter', () => ({
   ),
 }));
 
-const { derivePerApplicationAmount, resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+const { derivePerApplicationAmount, resolveBookingVisitPrice, wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
 
 const Q = 4; // quarterly visits/yr
 const est = (annual_total, services, extra = {}) => ({ annual_total, estimate_data: { services }, ...extra });
@@ -185,5 +185,50 @@ describe('confirm-side pricing predicate — wizard-mirror shape priceability', 
 
   test('monthly pest quote → books price-less (cadence ≠ the quarterly series confirm seeds)', () => {
     expect(confirmPrices(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
+  });
+});
+
+// The wizard refreshes drafts in place, so /booking/confirm re-checks the
+// stored row's CURRENT shape with this one predicate before honoring a
+// handoff token — as the customers-only gate pass AND before pay-at-visit
+// pricing. Row-shape mirror of public-quote's mint conditions.
+describe('wizardDraftSelfServeBookable — current-shape re-check for stored handoff drafts', () => {
+  const draft = (overrides = {}, data = {}) => ({
+    id: 'pe-1', source: 'quote_wizard', status: 'draft', estimate_data: data, ...overrides,
+  });
+
+  test('live self-bookable wizard draft → eligible', () => {
+    expect(wizardDraftSelfServeBookable(draft())).toBe(true);
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 480,
+      engineResult: { summary: { recurringAnnualAfterDiscount: 480, oneTimeTotal: 0 }, lineItems: [{ service: 'lawn_care', annual: 480 }] },
+    }))).toBe(true);
+  });
+
+  test('missing row / wrong source / promoted status → not eligible', () => {
+    expect(wizardDraftSelfServeBookable(null)).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ source: 'admin' }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ status: 'sent' }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ status: 'accepted' }))).toBe(false);
+  });
+
+  test('commercial / manual-review shapes → not eligible', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, { commercialEstimatedPricing: true }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, { quoteRequired: true }))).toBe(false);
+  });
+
+  test('mixed recurring + one-time → not eligible (summary first, top-level fallback)', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      engineResult: { summary: { recurringAnnualAfterDiscount: 388, oneTimeTotal: 150 } },
+    }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 388, oneTimeTotal: 150 }))).toBe(false);
+    // One-time-ONLY stays eligible (no recurring side of the mix).
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 0, oneTimeTotal: 150 }))).toBe(true);
+  });
+
+  test('bed-bug line → not eligible (no right-sized bookable slot)', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] },
+    }))).toBe(false);
   });
 });

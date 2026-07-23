@@ -413,28 +413,38 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(estimateBlocksSelfBookLink(palm)).toBe(false);
   });
 
-  test('mint matches the self-book-link predicate; confirm-side guard owns mixed billing', () => {
+  test('mint rides the built link; confirm re-checks the stored shape at gate AND pricing', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
-    // The handoff token mints for EVERY self-bookable shape (it is the
+    // The handoff token mints for every self-bookable shape (it is the
     // customers-only gate pass — estimator leads must carry it into
     // /booking/confirm or the gate walls them out of their own funnel).
-    // Response mint mirrors the bookingUrl predicate exactly; the invite
-    // link inside the builder mints unconditionally (the builder already
-    // runs only for self-bookable shapes).
-    expect(source).toMatch(/if \(draftEstimateId && !quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)\) \{/);
+    // The response exposes id+token exactly when the self-book link was
+    // BUILT — a token without a sanctioned link would let the astro CTA's
+    // deploy-skew fallback resurrect a misrouted hand-built URL.
+    expect(source).toMatch(/!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)/);
+    expect(source).toMatch(/if \(draftEstimateId && bookingUrl\) \{/);
     expect(source).toMatch(/if \(draftEstimateId\) \{\s*\n\s*const \{ mintEstimateHandoffToken \}/);
-    // The astro estimator CTA consumes the server-built link, so the response
-    // must expose it whenever it was built.
     expect(source).toMatch(/response\.booking_url = bookingUrl/);
-    // Mint-time no longer runs the priceability predicate — the mixed-billing
-    // undercharge block lives at the CONFIRM pricing site instead (a wizard
-    // draft refreshes in place, so confirm must re-check the CURRENT shape).
+    // Every self-book link carries the lead trigger: non-pest/one-time
+    // bookings seed no quarterly series, so /confirm's lead→won conversion
+    // (`followUpRows.length > 0 || lead_id`) needs the param (Codex r2).
+    expect(source).toMatch(/bookingParams\.set\('lead', lead\.id\)/);
+    // Recurring programs beyond pest/lawn/tree route to their own funnel
+    // services; unmapped recurring shapes withhold the link instead of
+    // falling through to Lawn Care (Codex r2).
+    expect(source).toMatch(/wantsMosquito/);
+    expect(source).toMatch(/wantsTermite/);
+    expect(source).toMatch(/wantsRodent/);
+    expect(source).toMatch(/bookingServiceId = null/);
+    // Mint-time no longer runs the priceability predicate — the stored
+    // draft's CURRENT shape is re-checked confirm-side (the wizard refreshes
+    // drafts in place) by ONE shared predicate at BOTH the customers-only
+    // gate pass and the pay-at-visit pricing site.
     expect(source).not.toMatch(/handoffPriceable/);
     const bookingSource = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
-    expect(bookingSource).toMatch(/pricingMixedBilling/);
-    expect(bookingSource).toMatch(/&& !pricingMixedBilling/);
+    expect((bookingSource.match(/wizardDraftSelfServeBookable/g) || []).length).toBeGreaterThanOrEqual(2);
     // Palm-only recurring bookings carry their quoted label into /book.
     expect(source).toMatch(/recurringServiceLabelParam = bookingServiceLabel/);
     expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);

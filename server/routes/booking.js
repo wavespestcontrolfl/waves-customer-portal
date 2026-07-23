@@ -1525,7 +1525,21 @@ async function createSelfBooking(payload = {}) {
       };
       let gatePass = { valid: false };
       if (pricing_estimate_id && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-        gatePass = await bindGateEstimate(pricing_estimate_id);
+        // A valid HMAC proves the token was minted for THIS estimate id — but
+        // the wizard refreshes drafts in place, so the estimate's CURRENT
+        // shape may no longer be self-bookable (recalculated into commercial /
+        // manual / mixed-billing / bed-bug, or promoted by staff). Re-check
+        // the live row before honoring the token as a gate pass (Codex #2964
+        // r2) — a stale link falls to the standing refusal, whose quote CTA
+        // re-runs the wizard and mints a fresh, current link. The accept-token
+        // arm below is deliberately NOT shape-checked: accepted estimates are
+        // past 'draft' by definition and their booking link is the sanctioned
+        // post-accept path.
+        const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+        const handoffRow = await db('estimates').where('id', pricing_estimate_id).first().catch(() => null);
+        if (wizardDraftSelfServeBookable(handoffRow)) {
+          gatePass = await bindGateEstimate(pricing_estimate_id);
+        }
       }
       if (!gatePass.valid && source_estimate_id && accept_token
           && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
@@ -1953,28 +1967,17 @@ async function createSelfBooking(payload = {}) {
         // wizard drafts, so once staff promote the same estimate (sent/accepted/
         // declined) a not-yet-expired token must not stamp pricing from a quote
         // that is no longer the live self-serve draft.
-        const pricingEstData = pricingEstimate?.estimate_data || {};
-        // Mixed recurring + one-time drafts must never stamp pay-at-visit
-        // pricing: the resolver prices the recurring line's annual÷cadence
-        // while every one-time add-on (roach chip, lawn-pest knockdown)
-        // silently vanishes from the booked series' billing — an undercharge.
-        // Row-shape mirror of public-quote's estimateBlocksBookingHandoff
-        // (which reads the LIVE engine summary; keep the two predicates in
-        // sync). Checked HERE, not only at mint time, because the handoff
-        // token is minted for every self-bookable shape (it doubles as the
-        // customers-only gate pass) and a wizard draft is refreshed IN PLACE —
-        // a token minted while the quote was pure-recurring must not price a
-        // snapshot that has since gained a one-time add-on.
-        const pricingSummary = pricingEstData.engineResult?.summary || {};
-        const pricingMixedBilling =
-          Number(pricingSummary.recurringAnnualAfterDiscount ?? pricingSummary.recurringAnnual ?? pricingEstData.annual ?? 0) > 0
-          && Number(pricingSummary.oneTimeTotal ?? pricingEstData.oneTimeTotal ?? 0) > 0;
-        const pricingEstimateEligible = !!pricingEstimate
-          && pricingEstimate.source === 'quote_wizard'
-          && pricingEstimate.status === 'draft'
-          && !pricingEstData.commercialEstimatedPricing
-          && !pricingEstData.quoteRequired
-          && !pricingMixedBilling;
+        // Shape eligibility of the CURRENT stored draft — shared predicate
+        // with the customers-only gate pass above (wizardDraftSelfServeBookable:
+        // wizard source, still 'draft', not commercial/manual, not mixed
+        // recurring+one-time, no bed-bug line). The wizard refreshes drafts in
+        // place, so a token minted while the quote was residential/recurring
+        // must not price a snapshot that has since changed shape — mixed
+        // billing in particular would stamp the recurring per-visit price
+        // while every one-time add-on silently vanishes from the series'
+        // billing (an undercharge).
+        const { wizardDraftSelfServeBookable: pricingShapeEligible } = require('../services/booking-pay-at-visit');
+        const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
