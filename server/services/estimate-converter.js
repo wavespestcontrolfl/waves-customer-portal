@@ -1087,7 +1087,15 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
 // previously-computed flat "effective rate" goes stale immediately, because
 // the effective rate is itself a function of the annual.
 function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
-  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  // Solo pest/mosquito mixes normally earn NO prepay % — their incentive is
+  // the fee-waived-with-prepay. Owner ruling 2026-07-23: when the operator
+  // has already waived the setup fee outright, the mix converts to the
+  // standard 5% prepay path (the waiver replaced the fee incentive, so
+  // prepay keeps a real reward instead of disappearing).
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices)
+    && !estimateOperatorSetupFeeWaived(estimateData)
+    ? 0
+    : ANNUAL_PREPAY_DISCOUNT_PCT;
   const protectedFloor = Math.round((
     nonDiscountableRecurringAnnualFloor(estimateData)
     + lawnProgramMinimumProtectedAnnual(estimateData)

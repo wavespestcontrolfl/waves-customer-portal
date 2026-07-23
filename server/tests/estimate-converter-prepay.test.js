@@ -128,6 +128,22 @@ describe('estimate converter annual prepay amount', () => {
     })).toBe(true);
   });
 
+  test('operator-waived setup fee converts a solo mix to the 5% prepay path (owner ruling 2026-07-23)', () => {
+    const { annualPrepayDiscountComponents } = require('../services/estimate-converter');
+    const soloPest = [{ service: 'pest_control', name: 'Pest Control' }];
+    // Unwaived solo pest: fee-waiver-with-prepay is the incentive — no %.
+    expect(annualPrepayDiscountComponents({
+      recurringServices: soloPest,
+      estimateData: {},
+    }).discountRate).toBe(0);
+    // Operator waived the fee outright: prepay keeps a real reward — the
+    // standard 5% applies instead of the option disappearing.
+    expect(annualPrepayDiscountComponents({
+      recurringServices: soloPest,
+      estimateData: { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner waived' } },
+    }).discountRate).toBeCloseTo(0.05, 5);
+  });
+
   test('acknowledged floor breach disarms render clamps but KEEPS the prepay protected floor', () => {
     const { resolveLawnProgramMinimumMonthlyForEstimate, annualPrepayDiscountComponents } = require('../services/estimate-converter');
     const breached = {
