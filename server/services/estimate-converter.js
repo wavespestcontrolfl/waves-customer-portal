@@ -988,7 +988,31 @@ function estimateLawnProgramMinimumSignal(estimateData = {}) {
   return legacyLawnProgramMinimumMonthly(estimateData);
 }
 
+// Operator-acknowledged manual-discount floor breach (owner decision
+// 2026-07-23). The engine only stamps this when a confirmed operator
+// adjustment actually cut below the lawn floors; every per-estimate floor
+// consumer (program-minimum resolver below, estimate-public's arm state,
+// prepay protection) must treat the breach as a per-estimate disarm, or
+// view/accept/billing would clamp the authorized sub-floor price back UP.
+// Same stamp locations as estimateLawnProgramMinimumSignal, plus the stored
+// discount summary as fallback evidence for shapes that keep summary but
+// drop pricingMetadata.
+function estimateManualDiscountFloorBreachAcknowledged(estimateData = {}) {
+  const stamped = estimateData?.result?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.engineResult?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.pricingMetadata?.manualDiscountFloorBreach
+    ?? estimateData?.result?.routingMetadata?.manualDiscountFloorBreach;
+  if (stamped?.acknowledged === true) return true;
+  const summaryDiscount = estimateData?.result?.manualDiscount
+    ?? estimateData?.result?.totals?.manualDiscount
+    ?? estimateData?.result?.summary?.manualDiscount
+    ?? estimateData?.engineResult?.summary?.manualDiscount
+    ?? estimateData?.summary?.manualDiscount;
+  return summaryDiscount?.floorBreach?.acknowledged === true;
+}
+
 function resolveLawnProgramMinimumMonthlyForEstimate(estimateData = {}) {
+  if (estimateManualDiscountFloorBreachAcknowledged(estimateData)) return 0;
   const signal = estimateLawnProgramMinimumSignal(estimateData);
   if (signal != null) return signal;
   const live = Number(LAWN_PRICING_V2.programMinimumMonthly);
@@ -2924,6 +2948,7 @@ module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
 module.exports.resolveLawnProgramMinimumMonthlyForEstimate = resolveLawnProgramMinimumMonthlyForEstimate;
 module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
+module.exports.estimateManualDiscountFloorBreachAcknowledged = estimateManualDiscountFloorBreachAcknowledged;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;

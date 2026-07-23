@@ -10781,6 +10781,24 @@ function extractEngineInputs(estData) {
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
     out.priorQualifyingServices = estData.priorQualifyingServices;
   }
+  // Operator-stated price adjustment (agent flows, owner decision 2026-07-23):
+  // persisted OUTSIDE engineInputs (same round-trip rule as
+  // priorQualifyingServices) and re-injected as the engine's manualDiscount on
+  // every public recompute so view/accept keep the adjusted — possibly
+  // acknowledged-below-floor — totals the operator confirmed.
+  const opAdj = estData.operatorPriceAdjustment;
+  if (opAdj && typeof opAdj === 'object' && !out.manualDiscount && Number(opAdj.value) > 0) {
+    out.manualDiscount = {
+      source: 'agent_operator',
+      type: opAdj.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: Number(opAdj.value),
+      label: opAdj.label || 'Discount',
+      internalReason: opAdj.internalReason || null,
+      eligibility: null,
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
+    };
+  }
   return out;
 }
 
@@ -13471,6 +13489,18 @@ function isRetiredLawnTierKey(tierKey) {
 // later global re-arm must not re-clamp it); null when the estimate is
 // silent and the caller falls back to the global switch / legacy evidence
 // (codex P2s, rounds 5-7 on the #2827 main-merge).
+// Operator-acknowledged manual-discount floor breach: a per-estimate CLAMP
+// disarm that outranks the arm signals below (owner decision 2026-07-23).
+// The operator explicitly authorized a sub-floor price for THIS estimate
+// (confirm-card acknowledgement), so view/accept clamps must not lift it
+// back up. Deliberately NOT folded into estimateLawnFloorArmed: the replay
+// path (savedFloorReplayOverrides) threads the TRUTHFUL arm state so base
+// lawn pricing reprices exactly as saved — the breach only ever bypassed the
+// manual-discount cap, never base pricing.
+function estimateManualDiscountFloorBreached(estData = {}) {
+  return require('../services/estimate-converter').estimateManualDiscountFloorBreachAcknowledged(estData);
+}
+
 function estimateLawnFloorArmed(estData = {}) {
   // Highest priority: the engine stamps its RESOLVED arm state into
   // pricingMetadata on every post-#2827 pricing run — the authoritative
@@ -13772,11 +13802,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   // same state: the estimate's own explicit signal wins in BOTH directions;
   // a silent estimate falls back to the global live switch, or to legacy
   // enforcement stamps on the stored rows (pre-disarm snapshots keep their
-  // floor re-clamp even though they never persisted the flag).
+  // floor re-clamp even though they never persisted the flag). An
+  // operator-acknowledged floor breach disarms the clamp outright — the
+  // program minimum leg is disarmed the same way inside
+  // lawnProgramMinimumMonthlyFor (resolver returns 0 on breach).
   const perEstimateFloorArmed = estimateLawnFloorArmed(estData);
-  const marginFloorArmed = perEstimateFloorArmed != null
-    ? perEstimateFloorArmed
-    : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
+  const marginFloorArmed = !estimateManualDiscountFloorBreached(estData)
+    && (perEstimateFloorArmed != null
+      ? perEstimateFloorArmed
+      : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows)));
   // Program minimum resolved once per estimate for the same reason: every
   // cadence row clamps at the minimum THIS quote was priced with.
   const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
@@ -16459,9 +16493,10 @@ async function buildPricingBundle(estimate) {
     // combo selections carry their own tier's floor.
     const v1LawnRows = Array.isArray(estData?.result?.results?.lawn) ? estData.result.results.lawn : [];
     const perEstimateArm = estimateLawnFloorArmed(estData);
-    const lawnCostFloorArmed = perEstimateArm != null
-      ? perEstimateArm
-      : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows));
+    const lawnCostFloorArmed = !estimateManualDiscountFloorBreached(estData)
+      && (perEstimateArm != null
+        ? perEstimateArm
+        : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(v1LawnRows)));
     const selectedLawnRow = v1LawnRows.find((r) => r?.recommended === true || r?.selected === true) || v1LawnRows[0] || null;
     const lawnFloorMonthly = selectedLawnRow ? lawnRowFloorMonthly(selectedLawnRow) : null;
     const v1FloorOptions = {

@@ -1803,6 +1803,7 @@ function generateEstimate(input) {
   let manualDiscountSpecialtyAmount = 0; // specialty slice
   let manualDiscountLawnCapReason = null; // recurring slice capped at lawn program/margin floor
   let manualDiscountLawnFloorPinned = false; // recurring slice left lawn sitting exactly on its floor
+  let manualDiscountFloorBreach = null;  // operator-acknowledged bypass of the lawn floor caps
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
@@ -1860,33 +1861,53 @@ function generateEstimate(input) {
       // protected floor — the summary monthly must then CEIL (same rule as
       // the WaveGuard floor guard above), or a floor like $630.85 rounds to
       // a monthly that rebuilds the annual a cent short.
-      if (manualDiscountAmount >= recurringManualHeadroom) manualDiscountLawnFloorPinned = true;
-      if (manualDiscountAmount > recurringManualHeadroom) {
-        const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
-        manualDiscountAmount = recurringManualHeadroom;
-        // FIXED discounts are one admin-entered dollar amount for the whole
-        // estimate — dollars the lawn floor blocks from the recurring slice
-        // move to the one-time/specialty buckets while they have room, so
-        // the customer still receives the intended total wherever possible.
-        // (PERCENT stays per-bucket by definition.) Only dollars that no
-        // bucket can absorb count as capped.
-        let stillBlocked = blockedRecurring;
-        if (md.type !== 'PERCENT' && stillBlocked > 0) {
-          const oneTimeRoom = Math.max(0, roundMoney(manualDiscountableOneTime - manualDiscountOneTimeAmount));
-          const toOneTime = Math.min(stillBlocked, oneTimeRoom);
-          manualDiscountOneTimeAmount = roundMoney(manualDiscountOneTimeAmount + toOneTime);
-          stillBlocked = roundMoney(stillBlocked - toOneTime);
-          if (stillBlocked > 0) {
-            const specialtyRoom = Math.max(0, roundMoney(manualDiscountableSpecialty - manualDiscountSpecialtyAmount));
-            const toSpecialty = Math.min(stillBlocked, specialtyRoom);
-            manualDiscountSpecialtyAmount = roundMoney(manualDiscountSpecialtyAmount + toSpecialty);
-            stillBlocked = roundMoney(stillBlocked - toSpecialty);
-          }
+      // Operator-acknowledged floor breach (owner decision 2026-07-23): the
+      // caps below are skipped and the sub-floor result is recorded instead.
+      // The acknowledgement is only ever set server-side from an operator's
+      // explicit confirmation — the engine records what was authorized so the
+      // public ladder / converter disarm their re-clamps for THIS estimate
+      // (see pricingMetadata.manualDiscountFloorBreach stamp) and the margin
+      // audit below reports the true breached per-line numbers.
+      if (md.floorBreachAcknowledged === true) {
+        if (manualDiscountAmount > recurringManualHeadroom) {
+          manualDiscountFloorBreach = {
+            acknowledged: true,
+            bypassedCapReason: lawnMarginFloorBinding ? 'lawn_margin_floor' : 'lawn_program_minimum',
+            breachedRecurringAnnual: roundMoney(manualDiscountAmount - recurringManualHeadroom),
+            lawnFloorProtectedAnnual,
+            lawnProgramMinimumMonthly: lawnProgramMinimumMonthlyResolved,
+            lawnMarginFloorArmed: lawnCostFloorArmed,
+          };
         }
-        if (stillBlocked > 0) {
-          manualDiscountLawnCapReason = lawnMarginFloorBinding
-            ? 'lawn_margin_floor'
-            : 'lawn_program_minimum';
+      } else {
+        if (manualDiscountAmount >= recurringManualHeadroom) manualDiscountLawnFloorPinned = true;
+        if (manualDiscountAmount > recurringManualHeadroom) {
+          const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
+          manualDiscountAmount = recurringManualHeadroom;
+          // FIXED discounts are one admin-entered dollar amount for the whole
+          // estimate — dollars the lawn floor blocks from the recurring slice
+          // move to the one-time/specialty buckets while they have room, so
+          // the customer still receives the intended total wherever possible.
+          // (PERCENT stays per-bucket by definition.) Only dollars that no
+          // bucket can absorb count as capped.
+          let stillBlocked = blockedRecurring;
+          if (md.type !== 'PERCENT' && stillBlocked > 0) {
+            const oneTimeRoom = Math.max(0, roundMoney(manualDiscountableOneTime - manualDiscountOneTimeAmount));
+            const toOneTime = Math.min(stillBlocked, oneTimeRoom);
+            manualDiscountOneTimeAmount = roundMoney(manualDiscountOneTimeAmount + toOneTime);
+            stillBlocked = roundMoney(stillBlocked - toOneTime);
+            if (stillBlocked > 0) {
+              const specialtyRoom = Math.max(0, roundMoney(manualDiscountableSpecialty - manualDiscountSpecialtyAmount));
+              const toSpecialty = Math.min(stillBlocked, specialtyRoom);
+              manualDiscountSpecialtyAmount = roundMoney(manualDiscountSpecialtyAmount + toSpecialty);
+              stillBlocked = roundMoney(stillBlocked - toSpecialty);
+            }
+          }
+          if (stillBlocked > 0) {
+            manualDiscountLawnCapReason = lawnMarginFloorBinding
+              ? 'lawn_margin_floor'
+              : 'lawn_program_minimum';
+          }
         }
       }
     }
@@ -1918,6 +1939,7 @@ function generateEstimate(input) {
       capped: requestedAmount > appliedTotal || !!manualDiscountLawnCapReason,
       capReason: manualDiscountLawnCapReason
         || (requestedAmount > appliedTotal ? 'discountable_base' : null),
+      floorBreach: manualDiscountFloorBreach,
       scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
       eligibleServices: [
@@ -1929,6 +1951,11 @@ function generateEstimate(input) {
       warnings: manualWarnings,
     };
   }
+  // Stamp the acknowledged breach so the per-estimate floor resolvers
+  // (estimate-converter / estimate-public) disarm their view/accept re-clamps
+  // for this estimate only — without it the public ladder would silently
+  // clamp the authorized sub-floor price back UP at render time.
+  if (manualDiscountFloorBreach) pricingMetadata.manualDiscountFloorBreach = manualDiscountFloorBreach;
 
   // Warn-only margin check on the manual discount stack for services other
   // than lawn. Lawn's collected-margin floor is enforced above so stored/email
@@ -1957,19 +1984,34 @@ function generateEstimate(input) {
     const lawnSpill = Math.max(0, manualDiscountAmount - nonLawnCut);
     if (lawnSpill > 0) {
       const lawnEligible = manualEligibleItems.filter((i) => i.service === 'lawn_care');
-      const lawnHeadrooms = lawnEligible.map((i) => {
-        const { lineAnnual, protectedAnnual } = lawnLineProtectedAnnual(i, { marginFloorArmed: lawnCostFloorArmed, programMinimumMonthly: lawnProgramMinimumMonthlyResolved });
-        return Math.max(0, lineAnnual - protectedAnnual);
-      });
-      const totalLawnHeadroom = lawnHeadrooms.reduce((sum, h) => sum + h, 0);
-      if (totalLawnHeadroom > 0) {
-        // The hard guard already capped the slice at non-lawn + lawn
-        // headroom; min() is defense in depth so no lawn line is ever
-        // attributed a cut below its floor.
-        const lawnCut = Math.min(lawnSpill, totalLawnHeadroom);
-        lawnEligible.forEach((item, idx) => {
-          manualCutByItem.set(item, lawnCut * (lawnHeadrooms[idx] / totalLawnHeadroom));
+      if (manualDiscountFloorBreach) {
+        // Acknowledged breach: the floor no longer bounds attribution, so
+        // lawn absorbs its full spill proportionally to line size — the
+        // manualFinalAnnual/manualFinalMargin audit fields and the margin
+        // warnings below must report the real sub-floor numbers the
+        // operator authorized, not a floor-capped fiction.
+        const lawnAnnuals = lawnEligible.map((i) => i.annualAfterDiscount || i.annual || 0);
+        const totalLawnAnnual = lawnAnnuals.reduce((sum, a) => sum + a, 0);
+        if (totalLawnAnnual > 0) {
+          lawnEligible.forEach((item, idx) => {
+            manualCutByItem.set(item, lawnSpill * (lawnAnnuals[idx] / totalLawnAnnual));
+          });
+        }
+      } else {
+        const lawnHeadrooms = lawnEligible.map((i) => {
+          const { lineAnnual, protectedAnnual } = lawnLineProtectedAnnual(i, { marginFloorArmed: lawnCostFloorArmed, programMinimumMonthly: lawnProgramMinimumMonthlyResolved });
+          return Math.max(0, lineAnnual - protectedAnnual);
         });
+        const totalLawnHeadroom = lawnHeadrooms.reduce((sum, h) => sum + h, 0);
+        if (totalLawnHeadroom > 0) {
+          // The hard guard already capped the slice at non-lawn + lawn
+          // headroom; min() is defense in depth so no lawn line is ever
+          // attributed a cut below its floor.
+          const lawnCut = Math.min(lawnSpill, totalLawnHeadroom);
+          lawnEligible.forEach((item, idx) => {
+            manualCutByItem.set(item, lawnCut * (lawnHeadrooms[idx] / totalLawnHeadroom));
+          });
+        }
       }
     }
     for (const item of manualEligibleItems) {
