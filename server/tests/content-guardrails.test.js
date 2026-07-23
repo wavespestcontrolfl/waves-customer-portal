@@ -2365,6 +2365,37 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 12 + astro r24 parity: city-subject areas, audience fragments, contracted denials, comments, questions, availability prepositions, routes', () => {
+    for (const body of [
+      'Naples is now a service area.',
+      'Naples and Tampa are service areas.',
+      'Naples is included in our service area.',
+      'We serve Sarasota; Naples condos.',
+      'We serve Sarasota; Naples restaurants.',
+      'The calls we get from Ft. Myers are common.',
+      'We added Tampa to our service area.',
+      'We expanded our service area to Tampa.',
+      'Do we serve Naples? Yes, call today.',
+      'WaveGuard is available to Naples homeowners.',
+      'We run routes in Naples.',
+      'We have a Naples pest control route.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      "We aren't currently serving Naples.",
+      "Waves isn't currently serving Tampa.",
+      '{/* We serve Naples homes. */}\n\nReal content here.',
+      '<!-- We serve Naples homes. -->\n\nReal content here.',
+      'Do we serve Naples? No.',
+      'Can Waves treat Tampa homes? No, we stay within our footprint.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
