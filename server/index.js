@@ -1066,6 +1066,20 @@ httpServer.listen(PORT, () => {
       if (config.nodeEnv !== 'test' && isEnabled('cronJobs')) {
         const cron = require('node-cron');
         const { runExclusive } = require('./utils/cron-lock');
+        // Recipient double opt-in recovery sweep (gated inside the service;
+        // no-op while GATE_RECIPIENT_DOUBLE_OPTIN is off): re-dispatches
+        // pending asks whose fire-and-forget dispatch died before sending.
+        cron.schedule('*/15 * * * *', async () => {
+          try {
+            await runExclusive('recipient-optin-sweep', async () => {
+              const { sweepUndispatchedOptins } = require('./services/recipient-optin');
+              await sweepUndispatchedOptins();
+            });
+          } catch (err) {
+            logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {

@@ -225,7 +225,7 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // the recipient — no Twilio status callback will ever flip the row,
       // so treat them as failed asks and release to ask_failed for the
       // save-triggered retry (#2956 r4).
-      const sentinelSid = /^(gate|template|internal)-/.test(String(result?.sid || result?.providerMessageId || ''));
+      const sentinelSid = /^(gate|template|internal|owner)-/.test(String(result?.sid || result?.providerMessageId || ''));
       if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
@@ -253,6 +253,51 @@ async function requestRecipientOptins(args) {
   return dispatchRecipientOptins(claims, args.customer);
 }
 
+// Automatic recovery (cron): pending claims whose dispatch never happened
+// (dispatched_at NULL, >10 min old — deploy/crash between claim commit and
+// the fire-and-forget dispatch) get their ask sent now. Renders per row's
+// customer; a dark template or send failure releases the row to ask_failed
+// via the normal dispatch path. Bounded batch; no-op when the gate is off.
+async function sweepUndispatchedOptins({ limit = 25 } = {}) {
+  if (!isDoubleOptinEnabled()) return { swept: 0 };
+  let rows = [];
+  try {
+    rows = await db('recipient_optin')
+      .where({ status: 'pending' })
+      .whereNull('dispatched_at')
+      .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000))
+      .limit(limit);
+  } catch { return { swept: 0 }; }
+  let swept = 0;
+  for (const row of rows) {
+    try {
+      const customer = row.customer_id
+        ? await db('customers').where({ id: row.customer_id }).first()
+        : null;
+      if (!customer) continue;
+      const slots = [customer.service_contact_name, customer.service_contact2_name, customer.service_contact3_name];
+      const phones = [customer.service_contact_phone, customer.service_contact2_phone, customer.service_contact3_phone];
+      const idx = phones.findIndex((ph) => recipientPhoneKey(ph) === row.phone_key);
+      const { renderSmsTemplate } = require('./sms-template-renderer');
+      const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
+        recipient_first_name: String(idx >= 0 ? slots[idx] || '' : '').trim().split(/\s+/)[0] || 'there',
+        account_first_name: String(customer.first_name || '').trim() || 'Your account holder',
+        property_address: [customer.address_line1, customer.city].filter(Boolean).join(', ') || 'your service property',
+      });
+      if (!body) continue; // template dark — leave pending-undispatched (held either way)
+      const { requested } = await dispatchRecipientOptins(
+        [{ key: row.phone_key, customerId: row.customer_id, phone: row.phone_e164 || row.phone_key, body }],
+        customer
+      );
+      swept += requested;
+    } catch (err) {
+      logger.warn(`[recipient-optin] sweep failed for ***${String(row.phone_key || '').slice(-4)}: ${err.message}`);
+    }
+  }
+  if (swept) logger.info(`[recipient-optin] sweep dispatched ${swept} stale ask(s)`);
+  return { swept };
+}
+
 module.exports = {
   OPTIN_TEMPLATE_KEY,
   OPTIN_TEMPLATE_VERSION,
@@ -265,4 +310,5 @@ module.exports = {
   claimRecipientOptins,
   dispatchRecipientOptins,
   requestRecipientOptins,
+  sweepUndispatchedOptins,
 };
