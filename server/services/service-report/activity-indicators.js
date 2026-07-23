@@ -1047,7 +1047,12 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
 
   const fields = PROJECT_TYPES[type].findingsFields || [];
-  const knownKeys = new Set(fields.map((f) => f.key));
+  // companionOnly fields are legal ONLY on companion submissions — a primary
+  // submission carrying one (stale client / pre-cutover draft) fails as
+  // unknown, keeping the 2026-07-23 primary cutover total.
+  const knownKeys = new Set(
+    fields.filter((f) => companion || !f.companionOnly).map((f) => f.key),
+  );
   for (const key of Object.keys(values)) {
     if (!knownKeys.has(key)) errors.push(`Unknown findings field: ${key}`);
   }
@@ -1119,9 +1124,11 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
 
   // Cross-field consistency (Tree & Shrub): the report tells one coherent
   // plant-health story — a "no major issues" claim can't sit beside recorded
-  // issues, "Inspection only" can't sit beside applied treatments, and the
-  // palm module core is required whenever palms were among the serviced
-  // groups (owner spec §6: "use when palms are present").
+  // issues, "Inspection only" can't sit beside applied treatments, and palm
+  // findings need Palms in the service scope. On the PRIMARY path the
+  // condition/detail fields no longer exist (owner 2026-07-23 — the AI photo
+  // review carries condition detail), so these checks are value-driven and
+  // effectively guard COMPANION sections, the one place the fields survive.
   if (type === 'tree_shrub') {
     const observed = String(values.observed_conditions || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
@@ -1161,10 +1168,6 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
       errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
     }
-    // Palm-module fields (incl. palm_condition/ganoderma) are OPTIONAL detail
-    // even when Palms were serviced — owner directive 2026-07-21 (closeout
-    // simplification): the detail modules live behind an optional expander and
-    // must not force the module open on every palm visit.
   }
 
   // Cross-field consistency (rodent family, owner spec §§1–4): "none" chips
@@ -1811,7 +1814,11 @@ function buildTodaysResult({
 
   // Tree & Shrub has no pest gauge — the owner template (§6) leads with the
   // overall landscape condition and tells the plant-health story: scope,
-  // treatments, palm notes (Ganoderma reassurance/flag), next step.
+  // treatments, palm notes (Ganoderma reassurance/flag), next step. PRIMARY
+  // completions no longer collect the Ganoderma/trunk fields (owner
+  // 2026-07-23 — the AI photo review carries palm detail on the V2 report),
+  // so the palm note only composes for COMPANION sections, where the
+  // companionOnly fields still capture it.
   if (projectType === 'tree_shrub' && values.landscape_condition) {
     const condition = String(values.landscape_condition);
     const conditionHeadlines = {
@@ -2270,6 +2277,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
     copyMapVersion: COPY_MAP_VERSION,
     fields: (config.findingsFields || [])
       .filter((f) => {
+        // companionOnly fields exist for COMPANION sections only (combined
+        // visits run no per-line AI assessment, so hand capture stays the
+        // condition source there) — the primary slice never serves them.
+        if (f.companionOnly && !companion) return false;
         const rule = moduleRules && f.section ? moduleRules[f.section] : null;
         if (!rule) return true;
         if (!serviceKey) return true;
