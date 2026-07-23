@@ -24,6 +24,10 @@ exports.up = async function up(knex) {
       // Durable ask marker: set when Twilio actually accepted the ask.
       // NULL + stale requested_at = claim whose dispatch died → re-claimable.
       t.timestamp('dispatched_at', { useTz: true }).nullable();
+      // Twilio SID of the dispatched ask — /status failure fallback when the
+      // sms_log insert itself failed.
+      t.string('provider_sid', 64).nullable();
+      t.index('provider_sid');
       t.timestamp('confirmed_at', { useTz: true }).nullable();
       t.timestamp('declined_at', { useTz: true }).nullable();
       t.timestamps(true, true);

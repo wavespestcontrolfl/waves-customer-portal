@@ -929,14 +929,20 @@ router.post('/status', async (req, res) => {
                 const isOptinAsk = logRow
                   && (logRow.message_type === 'recipient_optin_request'
                     || meta.includes('recipient_optin_request'));
-                if (!isOptinAsk) return null;
-                // Scope to the logged customer's row when known — a failed
-                // ask for one property must not flip another property's
-                // possibly-delivered ask.
-                const flip = db('recipient_optin')
-                  .where({ phone_key: failedKey, status: 'pending' });
-                if (logRow.customer_id) flip.where({ customer_id: logRow.customer_id });
-                return flip.update({ status: 'ask_failed', updated_at: new Date() });
+                if (isOptinAsk) {
+                  // Scope to the logged customer's row when known — a failed
+                  // ask for one property must not flip another property's
+                  // possibly-delivered ask.
+                  const flip = db('recipient_optin')
+                    .where({ phone_key: failedKey, status: 'pending' });
+                  if (logRow.customer_id) flip.where({ customer_id: logRow.customer_id });
+                  return flip.update({ status: 'ask_failed', updated_at: new Date() });
+                }
+                // No/mismatched sms_log row (its insert can fail after Twilio
+                // accepted): the ask row itself carries the provider SID.
+                return db('recipient_optin')
+                  .where({ provider_sid: MessageSid, status: 'pending' })
+                  .update({ status: 'ask_failed', updated_at: new Date() });
               })
               .catch(() => {});
           }

@@ -705,7 +705,19 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // they reply YES. No row = grandfathered. Shared with the twilio.js
   // en-route/arrived loops; fail-open on lookup errors.
   const { filterRecipientsByOptin } = require('./recipient-optin');
-  const allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  // Hold emptied a NON-empty list: fall back to the primary account holder
+  // (always a legitimate recipient of their own appointment changes; their
+  // own consent is validated at send time) so reschedule/cancel/no-show
+  // notices from DIRECT callers never silently vanish (#2956 codex r7).
+  if (!allowedContacts.length && contacts.length) {
+    const { getPrimaryContact } = require('./customer-contact');
+    const primary = getPrimaryContact(customer);
+    if (primary.phone) {
+      logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
+      allowedContacts = [{ ...primary, role: 'primary' }];
+    }
+  }
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)

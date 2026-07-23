@@ -84,7 +84,27 @@ async function markRecipientOptin(phone, status) {
     // dispatch not yet run/crashed) are excluded — the recovery sweep or
     // next save re-asks them. STOP still declines everything.
     if (status === 'confirmed') q.whereNot({ status: 'ask_failed' }).whereNotNull('dispatched_at');
-    const updated = await q.update(stamp);
+    let updated = await q.update(stamp);
+    // Marker-recovery window: Twilio accepted the ask but the dispatched_at
+    // write crashed, and the person replied YES before the sweep
+    // reconciled. If sms_log shows an accepted ask to this phone, honor
+    // the YES for the still-pending rows (ask_failed stays excluded).
+    if (!updated && status === 'confirmed') {
+      const priorAsk = await db('sms_log')
+        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [key])
+        .where(function optinAsk() {
+          this.where({ message_type: 'recipient_optin_request' })
+            .orWhereRaw("metadata::text like '%recipient_optin_request%'");
+        })
+        .whereNotIn('status', ['failed', 'undelivered'])
+        .first('id')
+        .catch(() => null);
+      if (priorAsk) {
+        updated = await db('recipient_optin')
+          .where({ phone_key: key, status: 'pending' })
+          .update({ ...stamp, dispatched_at: new Date() });
+      }
+    }
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     return updated > 0;
   } catch (err) {
@@ -240,7 +260,13 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       }
       await db('recipient_optin')
         .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
-        .update({ dispatched_at: new Date(), updated_at: new Date() })
+        .update({
+          dispatched_at: new Date(),
+          // Provider context ON the row: the /status failure hook can flip
+          // this ask to ask_failed even when the sms_log insert failed.
+          provider_sid: String(result?.sid || result?.providerMessageId || '').slice(0, 64) || null,
+          updated_at: new Date(),
+        })
         .catch(() => {});
       requested += 1;
     } catch (err) {
