@@ -210,16 +210,26 @@ describe('customer contact recipient routing', () => {
     ]);
   });
 
-  test('getServiceContact falls back to the primary PHONE when unstamped; email/name stay (#2955 P1)', () => {
-    const { getServiceContact } = require('../services/customer-contact');
+  test('getServiceContactSmsRecipient resolves a COHERENT identity per consent state (#2955 P1)', () => {
+    const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
     const unstamped = { ...customer, service_contacts_consent_at: null };
-    expect(getServiceContact(unstamped)).toEqual(expect.objectContaining({
+    // Unstamped → the primary as a whole person (phone AND name together —
+    // never the primary's phone addressed with the contact's name).
+    expect(getServiceContactSmsRecipient(unstamped)).toEqual(expect.objectContaining({
       phone: '+15551110000',
-      email: 'terry@example.com',
-      name: 'Terry Tenant',
+      name: 'Lana',
+      role: 'primary',
     }));
-    expect(getServiceContact(customer)).toEqual(expect.objectContaining({
+    // Stamped → the service contact as themselves.
+    expect(getServiceContactSmsRecipient(customer)).toEqual(expect.objectContaining({
       phone: '+15552220000',
+      name: 'Terry Tenant',
+      role: 'service_contact',
+    }));
+    // getServiceContact itself stays ungated (email/display callers).
+    expect(getServiceContact(unstamped)).toEqual(expect.objectContaining({
+      phone: '+15552220000',
+      email: 'terry@example.com',
     }));
   });
 

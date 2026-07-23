@@ -351,8 +351,8 @@ const ReviewService = {
     }
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
-    const { getServiceContact } = require("./customer-contact");
-    const contact = getServiceContact(customer);
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
     if (!contact.phone) return;
 
     const domain = publicPortalUrl();
@@ -1104,7 +1104,7 @@ const ReviewService = {
     let sent = 0;
     let suppressed = 0;
     const sentThisRun = new Set();
-    const { getServiceContact } = require("./customer-contact");
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
     for (const request of eligible) {
       // Dedup #1: another row in this same batch already triggered a followup
       if (sentThisRun.has(request.customer_id)) {
@@ -1142,7 +1142,7 @@ const ReviewService = {
         suppressed++;
         continue;
       }
-      const contact = getServiceContact(customer);
+      const contact = getServiceContactSmsRecipient(customer);
       if (!contact.phone) continue;
 
       // Followup points straight at the GBP review form — they ignored the
@@ -1261,8 +1261,8 @@ const ReviewService = {
       return { ok: false, reason: "already_reviewed", terminal: true };
     }
 
-    const { getServiceContact } = require("./customer-contact");
-    const contact = getServiceContact(customer);
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
 
     // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
     // the per-type review_request_channel preference ('sms' | 'email' | 'both'):

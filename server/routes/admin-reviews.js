@@ -10,7 +10,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
-const { getServiceContact } = require('../services/customer-contact');
+const { getServiceContactSmsRecipient } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
@@ -503,7 +503,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
     prefsRows.forEach(p => { prefsMap[p.customer_id] = p; });
 
     const phones = customers
-      .map(c => getServiceContact(c).phone || c.phone)
+      .map(c => getServiceContactSmsRecipient(c).phone || c.phone)
       .filter(Boolean)
       // messaging_suppression.phone is E.164 — normalize before matching.
       .map(p => toE164(p) || p);
@@ -530,7 +530,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
 
     res.json({
       customers: customers.map(c => {
-        const contact = getServiceContact(c);
+        const contact = getServiceContactSmsRecipient(c);
         const phone = contact.phone || c.phone || null;
         const email = contact.email || c.email || null;
         const ls = lastSvcMap[c.id];
@@ -621,7 +621,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
       return res.status(409).json({ error: 'Customer is marked as already having left a Google review' });
     }
 
-    const contact = getServiceContact(customer);
+    const contact = getServiceContactSmsRecipient(customer);
     if (!contact.phone) return res.status(400).json({ error: 'No SMS-capable phone on file' });
 
     // Serialize concurrent sends to the same customer so a double-click / retry

@@ -95,14 +95,25 @@ function getServiceContact(customer) {
   const svcName = clean(customer.service_contact_name);
   const primary = getPrimaryContact(customer);
   return {
-    // Texting target — consent-gated (review asks/follow-ups send to this
-    // phone). Falls back to the primary when the stamp is absent. Email and
-    // name are not texting targets and stay ungated.
-    phone: (svcPhone && serviceContactsConsented(customer)) ? svcPhone : primary.phone,
+    phone: svcPhone || primary.phone,
     email: svcEmail || primary.email,
     name: svcName || primary.name,
     role: 'service_contact',
   };
+}
+
+// SMS-channel resolver for the single review/ask recipient: the slot-1
+// service contact WHEN the row carries the consent artifact, else the
+// primary account holder as a coherent identity (phone AND name together —
+// never the primary's phone addressed with the contact's name). Email
+// callers keep getServiceContact, which stays ungated.
+function getServiceContactSmsRecipient(customer) {
+  if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
+  const svcPhone = clean(customer.service_contact_phone);
+  if (svcPhone && !serviceContactsConsented(customer)) {
+    return { ...getPrimaryContact(customer), role: 'primary' };
+  }
+  return getServiceContact(customer);
 }
 
 function getBillingContact(customer, prefs = {}) {
@@ -244,6 +255,7 @@ module.exports = {
   firstNameFrom,
   getPrimaryContact,
   getServiceContact,
+  getServiceContactSmsRecipient,
   getServiceContactSlots,
   isServiceContactRole,
   getBillingContact,

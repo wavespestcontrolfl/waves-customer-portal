@@ -401,7 +401,7 @@ describe('persistCallSecondaryContact', () => {
 
   test('writes the first empty slot and keeps the primary on appointment texts AND service reports', async () => {
     const writes = makeDb({ customer: bareCustomer });
-    const result = await persistCallSecondaryContact('cust-1', buyer);
+    const result = await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true });
     expect(result).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact_name: 'Joseph Haught',
@@ -433,13 +433,24 @@ describe('persistCallSecondaryContact', () => {
 
   test('new phone but an email already on the record: phone is kept, duplicate email is dropped', async () => {
     const writes = makeDb({ customer: { ...bareCustomer, email: 'joseph.haught89431@gmail.com' } });
-    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: null,
       service_contact_role: 'home_buyer',
       ...CALL_CONSENT_STAMP,
+    }]);
+  });
+
+  test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact_name: 'Joseph Haught',
+      service_contact_phone: '+19542901693',
+      service_contact_email: 'joseph.haught89431@gmail.com',
+      service_contact_role: 'home_buyer',
     }]);
   });
 
@@ -538,7 +549,7 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({
       customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777' },
     });
-    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', buyer, { smsConsentExplicit: true })).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact2_name: 'Joseph Haught',
       service_contact2_phone: '+19542901693',

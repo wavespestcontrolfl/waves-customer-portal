@@ -1395,7 +1395,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -1517,11 +1517,12 @@ async function persistCallSecondaryContact(customerId, contact) {
     // The extracted relationship (home_buyer/tenant/...) — recorded so
     // role-aware recipient selection is possible later; 'unknown' stays null.
     [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
-    // Consent artifact (#2948): the account holder requested this contact
-    // on a recorded call — stamp with the call-pipeline source so the
-    // consent-gated SMS fanout doesn't mute the contact they just asked
-    // for. Distinct source from the portal attestation on purpose.
-    ...(contact.phone ? {
+    // Consent artifact (#2948): stamp ONLY when the V2 extraction recorded
+    // explicit SMS consent on the call (the same v2SmsConsentExplicit rail
+    // that gates same-call fanout) — a wants-notifications contact without
+    // explicit consent evidence must not mint a stamp future reminders
+    // will trust. Distinct source from the portal attestation on purpose.
+    ...((contact.phone && smsConsentExplicit) ? {
       service_contacts_consent_at: new Date(),
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
@@ -5869,7 +5870,7 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). Stop early when slots run out.
       for (const secondaryEntry of callSecondaryContacts) {
       try {
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry);
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another

@@ -1152,6 +1152,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
     ];
     let movedContactSlot = false;
+    const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
     for (const slot of CONTACT_SLOTS) {
       const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
       if (!winnerSlotEmpty) continue;
@@ -1162,11 +1163,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         }
       }
     }
-    // Consent artifact travels WITH the contacts it describes (#2948): when
-    // slots move from the loser and the winner has no stamp of its own,
-    // carry the loser's — otherwise the consent-gated SMS fanout would mute
-    // recipients the merge just preserved.
+    // Consent artifact travels WITH the contacts it describes (#2948) — but
+    // ONLY when the resulting contact list is exactly the loser's (winner
+    // had no contacts at all and no stamp). If the winner already held any
+    // contact — including one whose stamp an admin edit cleared — carrying
+    // the loser's stamp would re-authorize texting people it never
+    // described; leave it cleared and require re-attestation instead.
     if (movedContactSlot
+      && !winnerHadAnyContact
       && isEmptyValue(winner.service_contacts_consent_at)
       && !isEmptyValue(loser.service_contacts_consent_at)) {
       backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
