@@ -136,6 +136,25 @@ describe('trackAdminPageView', () => {
     });
   });
 
+  it('drops a pending redirect hop when the chain lands on an already-counted view', () => {
+    // Arrive at dispatch?tab=schedule normally; the view is counted.
+    trackAdminPageView({ pathname: '/admin/dispatch', search: '?tab=schedule' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockClear();
+    // Re-tap the active Schedule nav item 10s later: the legacy
+    // /admin/schedule hop queues, then the redirect returns to the
+    // already-counted view inside the dedupe window. Nothing new may send —
+    // especially not the phantom /admin/schedule row.
+    vi.advanceTimersByTime(10000);
+    markUsageSource('sidebar');
+    trackAdminPageView({ pathname: '/admin/schedule', search: '' });
+    vi.advanceTimersByTime(50);
+    trackAdminPageView({ pathname: '/admin/dispatch', search: '?tab=schedule' });
+    settle();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('flushes the pending beacon on pagehide so the last view is not lost', () => {
     trackAdminPageView({ pathname: '/admin/invoices', search: '' });
     expect(fetchMock).not.toHaveBeenCalled();

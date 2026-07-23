@@ -269,6 +269,43 @@ describe('admin usage: GET /summary', () => {
   });
 });
 
+describe('admin usage: migration DDL', () => {
+  // Codex #2961 P2 claimed created_at is a naive `timestamp`, which would
+  // make the ET-day expression read UTC wall-clock as ET. Compile the
+  // migration's OWN createTable callback on the real pg client: knex's
+  // t.timestamp() defaults to timestamptz on PostgreSQL (the same idiom as
+  // audit_log and the rest of this schema), so `created_at AT TIME ZONE
+  // 'America/New_York'` converts the stored UTC instant to ET correctly.
+  test('created_at compiles to timestamptz on the pg client', async () => {
+    const realKnex = require('knex')({ client: 'pg' });
+    const migration = require('../models/migrations/20260723000001_admin_usage_events');
+    let statements = null;
+    const fakeKnex = {
+      // Real Raw instances so defaultTo(raw) compiles identically, but with
+      // execution neutered: the migration top-level-awaits the CREATE
+      // EXTENSION raw, and the real .then would try to open a connection.
+      raw: (...args) => {
+        const raw = realKnex.raw(...args);
+        raw.then = (resolve) => Promise.resolve(undefined).then(resolve);
+        return raw;
+      },
+      fn: realKnex.fn,
+      schema: {
+        hasTable: async () => false,
+        createTable: async (name, cb) => {
+          statements = realKnex.schema.createTable(name, cb).toSQL();
+        },
+      },
+    };
+    await migration.up(fakeKnex);
+    const ddl = statements.map((s) => s.sql).join(';\n');
+    expect(ddl).toContain('create table "admin_usage_events"');
+    expect(ddl).toContain('"created_at" timestamptz not null');
+    expect(ddl).not.toMatch(/"created_at" timestamp[^t]/);
+    realKnex.destroy();
+  });
+});
+
 describe('admin usage: SQL compiles', () => {
   // The summary aggregates use knex's object-alias forms with a raw ET-day
   // expression. Prove the exact chain compiles on the pg client — a mocked

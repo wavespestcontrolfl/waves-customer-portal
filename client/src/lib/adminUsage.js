@@ -133,7 +133,18 @@ export function trackAdminPageView({ pathname, search } = {}) {
   const tab = safeTab(search);
   const key = `${norm.pageKey}|${norm.path}|${tab || ''}`;
   const now = Date.now();
-  if (lastLogged && lastLogged.key === key && now - lastLogged.ts < DEDUPE_MS) return;
+  if (lastLogged && lastLogged.key === key && now - lastLogged.ts < DEDUPE_MS) {
+    // The navigation chain landed on an already-counted view — drop any
+    // intermediate hop still settling, or it flushes as a phantom row.
+    // (Re-tapping the active Schedule item queues /admin/schedule, the
+    // redirect returns here via dedupe, and the legacy hop would otherwise
+    // survive the collapse. Codex #2961 P2.)
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = null;
+    pendingBeacon = null;
+    pendingSource = null;
+    return;
+  }
 
   let source;
   if (pendingSource && now - pendingSource.ts < SOURCE_TTL_MS) {
