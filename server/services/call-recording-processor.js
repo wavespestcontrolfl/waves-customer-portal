@@ -5874,6 +5874,10 @@ const CallRecordingProcessor = {
     // BEFORE the appointment step so a booking made on this same call already
     // fans its confirmation out to the new contact. Kill switch = unset the gate;
     // the triage item + lead extracted_data still carry the contact either way.
+    // Phones whose opt-in CLAIM failed (render/insert error): the same-call
+    // fan-out must exclude them — no row means grandfathered, and a claim
+    // failure must fail CLOSED for that phone, not text it (#2956 r13).
+    const optinClaimFailedPhones = new Set();
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
@@ -5913,6 +5917,7 @@ const CallRecordingProcessor = {
               }
             }
           } catch (optErr) {
+            optinClaimFailedPhones.add(String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10));
             logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
           }
         }
@@ -8015,7 +8020,9 @@ const CallRecordingProcessor = {
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
-                      )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
+                      )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
+                        // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
+                        && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
                         const contactBody = await renderSmsTemplate('appointment_confirmation', {
                           first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
