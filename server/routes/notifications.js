@@ -17,6 +17,14 @@ const MAX_SERVICE_CONTACTS = 3;
 // artifact says exactly which text the account holder attested to.
 const SERVICE_CONTACT_CONSENT_VERSION = 'portal-2026-07-22';
 
+// A contacts save that would store a texting target (any phone slot) is
+// only allowed when the account holder attested on THIS save. Fail closed:
+// legacy/cached clients and direct API calls that omit the flag get a 400
+// instead of silently enrolling a third-party number (codex #2948 P1).
+function serviceContactsRequireConsent(contacts = [], consentGiven) {
+  return contacts.some((c) => c.phone) && consentGiven !== true;
+}
+
 // Consent artifact columns for a contacts save. Stamped only when the
 // account holder attested on THIS save and the saved list is non-empty;
 // any other save clears the stamp — a prior attestation doesn't cover a
@@ -618,6 +626,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         .map(normalizeContactInput)
         .filter((c) => c.name || c.phone || c.email)
         .slice(0, MAX_SERVICE_CONTACTS);
+      if (serviceContactsRequireConsent(contacts, updates.serviceContactsConsent)) {
+        return res.status(400).json({
+          error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
+        });
+      }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       await db('customers').where({ id: req.params.customerId }).update({
         ...serviceContactSlotUpdates(contacts, beforeRow),
@@ -631,6 +644,13 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // against any previous slot) keeps their pipeline-recorded role; a
       // genuinely new person never inherits the old one.
       const contact = normalizeContactInput(updates.serviceContact);
+      // Same consent rail as the list save — the legacy shape must not be
+      // a loophole for storing an unattested texting target.
+      if (serviceContactsRequireConsent([contact], updates.serviceContactsConsent)) {
+        return res.status(400).json({
+          error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
+        });
+      }
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       const slot1 = serviceContactSlotUpdates([contact], beforeRow);
       await db('customers').where({ id: req.params.customerId }).update({
@@ -677,6 +697,7 @@ router._private = {
   serviceContactsPayload,
   serviceContactSlotUpdates,
   serviceContactConsentUpdates,
+  serviceContactsRequireConsent,
   normalizeContactInput,
   resolvePrimaryProfileId,
   CHANNEL_DB_COLUMNS,

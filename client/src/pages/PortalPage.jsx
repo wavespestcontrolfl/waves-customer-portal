@@ -3234,6 +3234,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         ? { ...p, serviceContacts: updater(displayContacts(p)) }
         : p
     )));
+    // Any edit (change/add/remove) voids a previously checked attestation —
+    // the stored consent must describe the list the account holder actually
+    // saw when they checked the box (codex #2948 P2).
+    setContactConsent(prev => (prev[propertyId] ? { ...prev, [propertyId]: false } : prev));
   };
 
   const handlePropertyContactChange = (propertyId, index, key, value) => {
@@ -3968,7 +3972,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
                               disabled={!!prefsLocked[contactLockKey]}
                               autoCapitalize="words"
-                              autoComplete={`section-recipient${idx + 1} given-name`}
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} given-name`}
                               className="waves-focus-ring"
                               style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
                             />
@@ -3981,7 +3985,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
                               disabled={!!prefsLocked[contactLockKey]}
                               autoCapitalize="words"
-                              autoComplete={`section-recipient${idx + 1} family-name`}
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} family-name`}
                               className="waves-focus-ring"
                               style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
                             />
@@ -3997,7 +4001,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               disabled={!!prefsLocked[contactLockKey]}
                               type="tel"
                               inputMode="tel"
-                              autoComplete={`section-recipient${idx + 1} tel`}
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} tel`}
                               className="waves-focus-ring"
                               style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
                             />
@@ -4012,7 +4016,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               type="email"
                               inputMode="email"
                               autoCapitalize="none"
-                              autoComplete={`section-recipient${idx + 1} email`}
+                              autoComplete={`section-recipient-${property.id}-${idx + 1} email`}
                               className="waves-focus-ring"
                               style={{ padding: '12px 14px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 16, color: B.glassNavy, fontFamily: FONTS.body }}
                             />

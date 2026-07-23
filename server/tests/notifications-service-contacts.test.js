@@ -10,6 +10,7 @@ const {
   serviceContactsPayload,
   serviceContactSlotUpdates,
   serviceContactConsentUpdates,
+  serviceContactsRequireConsent,
   normalizeContactInput,
   preferenceChangeItems,
   SERVICE_CONTACT_CONSENT_VERSION,
@@ -141,5 +142,17 @@ describe('service contact consent artifact', () => {
 
   test('clears the artifact when the recipient list is emptied, even if attested', () => {
     expect(serviceContactConsentUpdates([], true).service_contacts_consent_at).toBeNull();
+  });
+
+  test('phone-bearing saves REQUIRE the attestation — fail closed for legacy/direct callers', () => {
+    // Phone present, flag missing / false / truthy-but-not-true → rejected.
+    expect(serviceContactsRequireConsent([contact], undefined)).toBe(true);
+    expect(serviceContactsRequireConsent([contact], false)).toBe(true);
+    expect(serviceContactsRequireConsent([contact], 'yes')).toBe(true);
+    // Phone present + explicit attestation → allowed.
+    expect(serviceContactsRequireConsent([contact], true)).toBe(false);
+    // No texting target (email-only or empty list) → no attestation needed.
+    expect(serviceContactsRequireConsent([{ name: 'Pat', phone: '', email: 'p@e.com' }], undefined)).toBe(false);
+    expect(serviceContactsRequireConsent([], undefined)).toBe(false);
   });
 });
