@@ -8309,7 +8309,13 @@ export function CompletionPanel({
     const counts = stationProgram === "trapping"
       ? { traps_checked: String(activeKeys.length - inaccessible) }
       : {
-        total_stations: String(activeKeys.length),
+        // total_stations is termite-only since 2026-07-23: the rodent
+        // schema retired it (the map's pins ARE the roster), and writing it
+        // there would trip the unknown-field rejection at submit
+        // (codex P1 on #2963).
+        ...(stationProgram === "termite"
+          ? { total_stations: String(activeKeys.length) }
+          : {}),
         stations_checked: String(activeKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
