@@ -2225,6 +2225,32 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 9: negation span bounds, trailing whether, list date qualifiers, editorial heads, request/reserve, demand city binding, denial titles', () => {
+    for (const body of [
+      'You cannot book pest control in Sarasota and can book pest control in Naples through Waves.',
+      'Waves can treat your home whether you live in Naples or Tampa.',
+      'We serve Sarasota; Naples in March.',
+      'We serve Sarasota; Naples from March to May.',
+      'Pest control in Tampa can be requested online.',
+      'Pest control in Tampa can be reserved online.',
+      'Our Tampa customers ask about WaveGuard.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'We provide pest control overview for Naples homeowners.',
+      'We provide a pest control checklist for Naples homeowners.',
+      'Our customers ask about Naples termite research.',
+      'Our customers ask if Naples termites behave differently.',
+      'No Naples pest control services',
+      'Our customers in Sarasota ask whether Naples termites behave differently.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
