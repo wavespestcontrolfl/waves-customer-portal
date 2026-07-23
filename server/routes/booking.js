@@ -487,6 +487,11 @@ router.get('/config', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {};
     res.json({
       enabled: isEnabled('selfBooking') && config.enabled !== false,
+      // Customers-only mode (GATE_BOOKING_CUSTOMERS_ONLY): the funnel must
+      // verify a current customer (portal OTP) before booking unless the
+      // entry carries an estimate token. /confirm enforces this server-side
+      // regardless — this flag just lets the client show the gate up front.
+      customers_only: isEnabled('bookingCustomersOnly'),
       // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
       // flag; the portal's own booking surfaces don't read this.
       ai_search: isEnabled('bookAiSearch'),
@@ -1241,6 +1246,8 @@ async function createSelfBooking(payload = {}) {
       attribution,
       new_customer,
       payAtVisit,
+      customersOnly,
+      authedCustomerId,
     } = payload;
 
     if (!slot_date || !slot_start) {
@@ -1293,6 +1300,14 @@ async function createSelfBooking(payload = {}) {
     // Resolve customer
     let custId = null;
     let estimate = null;
+    // Verified portal bearer wins identity outright (customers-only gate):
+    // the id came from a JWT the route resolved server-side, so client-sent
+    // customer_id / phone-match / estimate identity paths below are all
+    // skipped via their existing `!custId` guards — a crafted body can't
+    // re-point a verified customer's booking at someone else.
+    if (authedCustomerId) {
+      custId = authedCustomerId;
+    }
     // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
     // share token the caller possesses) may write a submitted unit onto an
     // existing record. Phone-on-file and the public address lookup are
@@ -1331,6 +1346,34 @@ async function createSelfBooking(payload = {}) {
     // the customer would bypass the phone-on-file guard. It is used only as a
     // "this booking came from an estimate deep link" signal for the
     // customer-derived lead conversion after the booking commits (see below).
+
+    // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
+    // 2026-07-23): with no verified customer (portal bearer) and no
+    // estimate-bound identity, refuse BEFORE the typed-phone match and the
+    // new-customer mint below. Placement matters twice over: it stops
+    // strangers creating customer records, and it stops "I typed a phone
+    // number I know" from impersonating an existing customer without OTP.
+    // Estimate entries stay allowed two ways: identity resolved from a
+    // verified/share-token estimate above (custId set), or a valid HMAC
+    // pricing handoff (the one-time estimate-accept booking link, which
+    // legitimately creates the customer it prices for). The refusal carries
+    // the quote-wizard URL so the client renders a forward action, never a
+    // dead end.
+    if (customersOnly && !custId) {
+      const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+      const gateHandoffValid = !!pricing_estimate_id
+        && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
+      if (!gateHandoffValid) {
+        const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
+        return {
+          ok: false,
+          status: 403,
+          customersOnly: true,
+          quoteUrl: ESTIMATE_MARKETING_REDIRECTS['/quote'],
+          error: "Online self-scheduling is for current Waves customers. New to Waves? Get your free quote and we'll take care of the rest.",
+        };
+      }
+    }
 
     const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
     if (!custId && phoneDigits) {
@@ -2371,13 +2414,29 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     if (!isEnabled('selfBooking')) {
       return res.status(503).json({ error: 'Self-scheduling coming soon' });
     }
+    // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY): an optional portal
+    // bearer proves "current customer". Resolved server-side and passed
+    // AFTER the spread so the body can never forge it; absent/invalid
+    // headers just resolve to null and the gate inside createSelfBooking
+    // decides what that means.
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = isEnabled('bookingCustomersOnly') ? await resolveBearerCustomer(req) : null;
     const result = await createSelfBooking({
       ...req.body,
       referrer_url: req.body?.referrer_url || req.get('referer') || null,
-      // Server-resolved gate — set AFTER the spread so a client can't forge it.
+      // Server-resolved gates — set AFTER the spread so a client can't forge them.
       payAtVisit: isEnabled('bookingPayAtVisit'),
+      customersOnly: isEnabled('bookingCustomersOnly'),
+      authedCustomerId: authedCustomer?.id || null,
     });
-    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    if (!result.ok) {
+      return res.status(result.status).json({
+        error: result.error,
+        // Customers-only refusal carries its forward action (the quote
+        // wizard) so the client never renders a dead end.
+        ...(result.customersOnly ? { customersOnly: true, quoteUrl: result.quoteUrl } : {}),
+      });
+    }
     // Sanitize HERE, not inside createSelfBooking — the service returns the
     // full row for internal callers; the public response gets the safe shape
     // (covers BOTH the fresh-booking body and the double-submit replay body).

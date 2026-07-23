@@ -9,6 +9,9 @@ import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
+import { useAuth } from '../hooks/useAuth';
+import { api } from '../utils/api';
+import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -112,6 +115,36 @@ export default function PublicBookingPage() {
     ro.observe(document.body);
     return () => ro.disconnect();
   }, [isEmbedded]);
+
+  // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
+  // 2026-07-23): self-scheduling is for current customers. Bare entries
+  // (no estimate token) must verify with the portal OTP before the wizard;
+  // estimate-token entries bypass (they're already estimate-bound and the
+  // server verifies the token at confirm). The mode comes from
+  // /booking/config; `null` = still loading. A config failure fails OPEN
+  // client-side — the server enforces the gate at /confirm regardless, and
+  // its refusal carries the quote link, so nothing insecure leaks through.
+  const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
+  const [customersOnly, setCustomersOnly] = useState(null);
+  const [gatePhone, setGatePhone] = useState('');
+  const [gateCode, setGateCode] = useState('');
+  const [gateStep, setGateStep] = useState('phone');
+  const [gateSending, setGateSending] = useState(false);
+  // Failed-verify counter → "may not be on file" hint after 2 (mirrors the
+  // login page; shown regardless of cause, so no account enumeration).
+  const [gateFailedVerifies, setGateFailedVerifies] = useState(0);
+  // Server customers-only refusal from /confirm — rendered as a card with
+  // the quote-wizard handoff, never a dead end.
+  const [refusal, setRefusal] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/booking/config`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((cfg) => { if (!cancelled) setCustomersOnly(cfg?.customers_only === true); })
+      .catch(() => { if (!cancelled) setCustomersOnly(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   const [step, setStep] = useState(1);
   const [service, setService] = useState(initialService);
@@ -282,6 +315,25 @@ export default function PublicBookingPage() {
     }));
   }, []);
 
+  // Verified current customer (OTP gate passed, or already signed in to the
+  // portal): bind the booking to their account and prefill contact. Identity
+  // is re-derived server-side from the bearer at /confirm either way — these
+  // fields are UX only. existingCustomerId is in the deps on purpose: an
+  // address edit clears it (updateAddress's household reset), and for a
+  // verified customer it must re-apply or the contact step would demand
+  // fields the account already has.
+  useEffect(() => {
+    if (!customersOnly || !isAuthenticated || !authCustomer?.id) return;
+    if (existingCustomerId === authCustomer.id) return;
+    applyCustomer({
+      id: authCustomer.id,
+      first_name: authCustomer.first_name || authCustomer.firstName || '',
+      last_name: authCustomer.last_name || authCustomer.lastName || '',
+      phone: authCustomer.phone || '',
+      email: authCustomer.email || '',
+    });
+  }, [customersOnly, isAuthenticated, authCustomer, existingCustomerId, applyCustomer]);
+
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
     // Always look up by the street-only line1 when we have it: formatted can
     // still carry a subpremise inline AFTER the visitor clears the unit box,
@@ -417,10 +469,17 @@ export default function PublicBookingPage() {
   const handleConfirm = async () => {
     setLoading(true);
     setError('');
+    setRefusal(null);
     try {
       const res = await fetch(`${API_BASE}/booking/confirm`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Customers-only mode: prove "current customer" with the portal
+        // bearer minted by the OTP gate. Attached only under the gate so a
+        // gate-off request stays byte-identical to today's.
+        headers: {
+          'Content-Type': 'application/json',
+          ...(customersOnly && api.token ? { Authorization: `Bearer ${api.token}` } : {}),
+        },
         body: JSON.stringify({
           customer_id: existingCustomerId || null,
           // Quote→book handoff — priced from this exact estimate (token-verified),
@@ -471,6 +530,13 @@ export default function PublicBookingPage() {
       });
       // Same non-JSON tolerance as loadAvailability (audit S3-17).
       const data = await res.json().catch(() => ({}));
+      // Customers-only refusal: not an error banner — a card with the
+      // quote-wizard handoff (and a re-verify path), never a dead end.
+      if (res.status === 403 && data.customersOnly) {
+        setRefusal({ message: data.error, quoteUrl: data.quoteUrl });
+        setLoading(false);
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "We couldn't complete your booking. Try again in a moment, or call (941) 297-5749 and we'll get you scheduled.");
       setConfCode(data.confirmationCode || 'WPC-????');
       // Card-on-file step (dark until the funnel's gate flips): when the
@@ -490,6 +556,36 @@ export default function PublicBookingPage() {
     }
     setLoading(false);
   };
+
+  // ── customers-only gate handlers ──
+  // Reuses the portal OTP endpoints via useAuth (send-code/verify-code keep
+  // their existing rate limits and uniform anti-enumeration responses). A
+  // successful verify flips isAuthenticated, the gate unmounts, and the
+  // prefill effect binds the wizard to the verified account.
+  const gateDigits = gatePhone.replace(/\D/g, '');
+  const handleGateSendCode = async () => {
+    if (gateDigits.length !== 10 || gateSending) return;
+    setGateSending(true);
+    const ok = await sendCode(`+1${gateDigits}`);
+    setGateSending(false);
+    if (ok) {
+      setGateCode('');
+      setGateStep('code');
+      setGateFailedVerifies(0);
+    }
+  };
+  const handleGateVerify = async () => {
+    if (gateCode.length !== 6 || gateSending) return;
+    setGateSending(true);
+    const ok = await verifyCode(`+1${gateDigits}`, gateCode);
+    setGateSending(false);
+    if (!ok) setGateFailedVerifies((n) => n + 1);
+  };
+  // Bare entries hold on a quiet loading block while the config resolves so
+  // the wizard never flashes ahead of the gate; estimate-token entries and
+  // already-signed-in customers skip the gate entirely.
+  const gateChecking = customersOnly === null && !estimateTokenParam;
+  const gateActive = customersOnly === true && !estimateTokenParam && !isAuthenticated;
 
   // ── shared styles ──
   // CTAs use <Button variant="primary"|"tertiary"> (see usages below).
@@ -657,7 +753,7 @@ export default function PublicBookingPage() {
       `}</style>
 
       {/* Progress bar — steps 1 (address) → 2 (time) → 3 (contact) → 4 (done) */}
-      {step < 4 && (
+      {step < 4 && !gateActive && !gateChecking && (
         <div style={{ background: COLORS.slate200, height: 3 }}>
           <div style={{
             height: 3, background: COLORS.wavesBlue,
@@ -668,6 +764,140 @@ export default function PublicBookingPage() {
       )}
 
       <div style={{ maxWidth: 480, margin: '0 auto', padding: '24px 20px 60px' }}>
+
+        {gateChecking && (
+          <div style={{ textAlign: 'center', padding: 40, color: COLORS.slate600, fontSize: 14 }}>
+            Loading…
+          </div>
+        )}
+
+        {/* Customers-only verification gate (GATE_BOOKING_CUSTOMERS_ONLY) */}
+        {gateActive && (
+          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+              Book your next visit
+            </h2>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
+              Online self-scheduling is for current Waves customers. Verify your
+              mobile number and we&rsquo;ll pull up your account — it takes one text.
+            </p>
+
+            {gateStep === 'phone' ? (
+              <>
+                <label htmlFor="gate-phone" style={labelStyle}>Mobile number</label>
+                <input
+                  id="gate-phone"
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  autoFocus
+                  placeholder="(941) 555-1234"
+                  value={gatePhone}
+                  onChange={e => { clearAuthError?.(); setGatePhone(e.target.value); }}
+                  className="waves-focus-ring"
+                  style={inputStyle}
+                />
+                <div style={{ marginTop: 14 }}>
+                  <Button
+                    variant="primary"
+                    onClick={handleGateSendCode}
+                    disabled={gateDigits.length !== 10 || gateSending}
+                    data-glass-accent=""
+                    style={{ width: '100%', color: COLORS.glassNavy }}
+                  >
+                    {gateSending ? 'Sending code…' : 'Text me a sign-in code'}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label htmlFor="gate-code" style={labelStyle}>
+                  Enter the 6-digit code we texted {gatePhone || 'you'}
+                </label>
+                <input
+                  id="gate-code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  autoFocus
+                  value={gateCode}
+                  onChange={e => { clearAuthError?.(); setGateCode(e.target.value.replace(/\D/g, '').slice(0, 6)); }}
+                  className="waves-focus-ring"
+                  style={inputStyle}
+                />
+                <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                  <Button
+                    variant="primary"
+                    onClick={handleGateVerify}
+                    disabled={gateCode.length !== 6 || gateSending}
+                    data-glass-accent=""
+                    style={{ width: '100%', color: COLORS.glassNavy }}
+                  >
+                    {gateSending ? 'Verifying…' : 'Verify & continue'}
+                  </Button>
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <Button variant="tertiary" onClick={handleGateSendCode} disabled={gateSending} style={{ flex: 1 }}>
+                      Resend code
+                    </Button>
+                    <Button
+                      variant="tertiary"
+                      onClick={() => { clearAuthError?.(); setGateStep('phone'); setGateCode(''); setGateFailedVerifies(0); }}
+                      style={{ flex: 1 }}
+                    >
+                      Different number
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {authError && (
+              <div role="alert" style={{
+                marginTop: 14, background: '#FEF2F2', border: '1px solid #FECACA',
+                borderRadius: 10, padding: 12, fontSize: 14, color: '#991B1B', lineHeight: 1.45,
+              }}>{authError}</div>
+            )}
+
+            {gateFailedVerifies >= 2 && (
+              <div style={{
+                marginTop: 10, padding: '12px 14px', borderRadius: 10,
+                background: '#FFF7ED', border: '1px solid #FED7AA',
+                fontSize: 14, lineHeight: 1.5, color: COLORS.slate600,
+              }}>
+                Still not working? That number may not be on file — call{' '}
+                <a href="tel:+19412975749" style={{ color: COLORS.glassNavy, fontWeight: 700, whiteSpace: 'nowrap' }}>(941) 297-5749</a>
+                {' '}and we&rsquo;ll get it corrected.
+              </div>
+            )}
+
+            {/* Standing new-customer path — always visible (never keyed to
+                whether a number matched, so it leaks nothing) per the owner:
+                refusals hand people the quote wizard, not a dead end. */}
+            <div data-glass="soft" style={{
+              position: 'relative', marginTop: 20, background: COLORS.white,
+              border: `1px solid ${COLORS.slate200}`, borderRadius: 12,
+              padding: 16, textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 15, color: COLORS.slate600, marginBottom: 10 }}>
+                Not a Waves customer yet?
+              </div>
+              <a
+                href={ESTIMATE_QUOTE_URL}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  minHeight: 44, padding: '0 20px', background: COLORS.glassNavy,
+                  color: '#fff', borderRadius: 8, fontWeight: 800, fontSize: 15,
+                  textDecoration: 'none',
+                }}
+                data-glass-accent=""
+              >
+                Get your free quote →
+              </a>
+            </div>
+          </div>
+        )}
+
+        {!gateActive && !gateChecking && (<>
 
         {/* STEP 1 — Address */}
         {step === 1 && (
@@ -1132,6 +1362,48 @@ export default function PublicBookingPage() {
               </div>
             </div>
 
+            {/* Customers-only refusal from /confirm — quote handoff, never a
+                dead end (owner directive 2026-07-23). */}
+            {refusal && (
+              <div data-glass="card" style={{
+                position: 'relative', background: COLORS.white,
+                border: `1px solid ${COLORS.slate200}`, borderRadius: 12,
+                padding: 18, marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 6 }}>
+                  Self-scheduling is for current customers
+                </div>
+                <div style={{ fontSize: 15, color: COLORS.slate600, lineHeight: 1.5 }}>
+                  {refusal.message || "New to Waves? Get your free quote and we'll take care of the rest."}
+                </div>
+                <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+                  <a
+                    href={refusal.quoteUrl || ESTIMATE_QUOTE_URL}
+                    data-glass-accent=""
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      minHeight: 44, padding: '0 18px', background: COLORS.glassNavy,
+                      color: '#fff', borderRadius: 8, fontWeight: 800, fontSize: 15,
+                      textDecoration: 'none',
+                    }}
+                  >
+                    Get a free quote
+                  </a>
+                  <a
+                    href="tel:+19412975749"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      minHeight: 44, padding: '0 18px', background: '#fff',
+                      color: COLORS.glassNavy, border: `1px solid ${COLORS.slate200}`,
+                      borderRadius: 8, fontWeight: 800, fontSize: 15, textDecoration: 'none',
+                    }}
+                  >
+                    Call (941) 297-5749
+                  </a>
+                </div>
+              </div>
+            )}
+
             {error && (
               <div role="alert" style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
@@ -1236,6 +1508,8 @@ export default function PublicBookingPage() {
             </p>
           </div>
         )}
+
+        </>)}
 
         <BrandFooter />
       </div>

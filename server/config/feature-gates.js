@@ -291,6 +291,15 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Self-Booking customers-only mode — /book requires a verified current
+  // customer (portal OTP bearer) or an estimate-token entry; bookings that
+  // would mint a NEW customer are refused with a get-a-quote handoff (owner
+  // directive 2026-07-23: new people quote first, they don't self-schedule).
+  // The client learns the mode via GET /booking/config `customers_only`;
+  // /booking/confirm enforces it server-side regardless of what the client
+  // shows. Dark until Adam flips it in prod.
+  bookingCustomersOnly: isProd ? process.env.GATE_BOOKING_CUSTOMERS_ONLY === 'true' : true,
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the
