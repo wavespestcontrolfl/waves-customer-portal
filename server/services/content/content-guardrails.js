@@ -645,7 +645,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + "|we(?:'re| are|'ll| will|'ve| have)?(?: been)?(?: also| now| currently| proudly| still)? (?:work(?:s|ed|ing)?|operat(?:e|es|ed|ing)) (?:in|throughout|across|around)\\b|\\b(?:and|or)\\s+(?:now\\s+|currently\\s+|\\w+ly\\s+)?(?:work(?:s|ing)?|operat(?:e|es|ing)) (?:in|throughout|across|around)\\b"
   + '|(?:^|,)\\s*(?:now\\s+|currently\\s+|still\\s+|proudly\\s+|also\\s+)?serving\\b(?!\\s+up\\b)|(?:now|currently|still|also) serving\\b(?!\\s+up\\b)|proudly serv\\w*\\b(?!\\s+up\\b)|service areas?|your (?:\\w+\\s+){0,2}(?:home|house|lawn|yard|property)'
   + '|call (?:us\\b|waves\\b|now\\b|today\\b|ahead\\b|for (?:a |your )?(?:free )?(?:quote|estimate|inspection))|give us a call|schedule|book(?:ing)?'
-  + '|our (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treat(?:s|ing|ed)?\\b|serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|cover(?:s|ing|ed)?\\b|visit(?:s|ing|ed)?\\b|inspect(?:s|ing|ed)?\\b|handl(?:e|es|ing|ed)\\b|spray(?:s|ing|ed)?\\b|run(?:s|ning)?\\b|protect(?:s|ing|ed)?\\b|work(?:s|ing|ed)? (?:in|throughout|across|around)|operat(?:es|ing|ed)? (?:in|throughout|across|around))'
+  + "|(?:our|waves(?: pest control)?(?:'s)?) (?:technicians?|techs?|team)(?:\\s+\\w+){0,2}\\s+(?:treat(?:s|ing|ed)?\\b|serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|cover(?:s|ing|ed)?\\b|visit(?:s|ing|ed)?\\b|inspect(?:s|ing|ed)?\\b|handl(?:e|es|ing|ed)\\b|spray(?:s|ing|ed)?\\b|run(?:s|ning)?\\b|protect(?:s|ing|ed)?\\b|work(?:s|ing|ed)? (?:in|throughout|across|around)|operat(?:es|ing|ed)? (?:in|throughout|across|around))"
   + '|same.day|we offer|free (?:quote|estimate|inspection)|customers?\\s+(?:\\w+\\s+){0,3}?(?:call|text|contact|ask)s?\\s+(?:us\\b|waves\\w*\\b|our\\s+(?:team|office|techs?|technicians?)\\b)|our\\s+(?:\\w+\\s+){0,2}?customers\\b|^\\s*(?:and |but |yet )?(?:also |now |still )?(?:includes?|covers?|extends? (?:to|into)|reaches?)\\b'
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\s+(?:(?!(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|about|on|regarding|of|for|to)\\b)[a-z-]+\\s+){0,2}?(?:(?:pest|mosquito|termite|rodent|lawn|tree|shrub|bed.?bugs?|wdo)\\s+)?(?:control|care|treatment|service|plan|program|inspection|removal|exterminat)\\w*\\b(?!\\s+(?:(?!(?:and|or|nor|plus|as)\\b)[a-z-]+\\s+){0,2}?(?:research|information|info|advice|guidance|tips|insights?|education|educational|resources?|articles?|guides?|content|news|myths?|history)\\b)"
   // Editorial-FIRST mixed objects ("we provide pest control advice and
@@ -653,7 +653,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   // a first-person/brand offer verb is an operating claim no matter what
   // editorial noun sits between.
   + "|(?:we|waves(?: pest control)?|waveguard)(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still)? (?:offer|provid|deliver)\\w*\\b(?:(?!\\b(?:about|regarding|concerning|on|for|director(?:y|ies)|lists?|overview|roundup|comparison|index|map)\\b)[^.!?;]){0,40}?\\bservices?\\s+(?:in|near|throughout|across)\\b"
-  + `|(?<!\\b(?:can't|cannot|can not|won't|will not|don't|do not|doesn't|does not|couldn't|could not|shouldn't|should not|never|unable to|no way to)\\s+)(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
+  + `|(?<!\\b(?:can't|cannot|can not|won't|will not|don't|do not|doesn't|does not|couldn't|could not|shouldn't|should not|never|unable to|no way to|no)\\s+)(?:need|get|find|book|schedule|looking for|searching for)\\b[^.!?]{0,30}?\\b${SERVICE_KEYWORD_SOURCE}\\b`
   // A short punctuation-free segment built around the keyword is a bare
   // packaging TITLE/META ("Cape Coral pest control services") — prose
   // sentences carry terminal punctuation and never match the anchored form.
@@ -719,7 +719,7 @@ function blankDisclaimers(text, ranges) {
 
 function cityNegationRe(citySource) {
   return new RegExp(
-    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|book|schedule|offer|provide|deliver)|excludes?|stops? (?:short of|before|at)|(?:is|are|was|were)?\\s*(?:not|never|no longer)\\s+(?:currently\\s+)?(?:available|offered|provided)\\s+(?:in|to|for|near|throughout|across)|unavailable\\s+(?:in|to|for|near|throughout|across))(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\sand\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:just )?(?:outside|beyond|out of|past|(?:south|north|east|west) of)\\b`,
+    `(?:(?:do not|don'?t|does not|doesn'?t|no longer|won'?t|will not|cannot|can'?t) (?:currently |yet )?(?:include|cover|serve|service|extend(?: to| into)?|reach|treat|visit|book|schedule|offer|provide|deliver)|excludes?|stops? (?:short of|before|at)|(?:is|are|was|were)?\\s*(?:not|never|no longer)\\s+(?:currently\\s+)?(?:available|offered|provided)\\s+(?:in|to|for|near|throughout|across)|unavailable\\s+(?:in|to|for|near|throughout|across)|no (?:need|reason) (?:for|to)\\b)(?:(?!,\\s*(?:we|our|waves|waveguard)\\b|\\sand\\s+(?:now\\s+|still\\s+|also\\s+|\\w+ly\\s+)?(?:offer|provid|deliver|serv|treat|cover|exterminat|remov|eliminat|manag|work|operat))[^.!?;–—]){0,60}?\\b${citySource}|${citySource}[^.!?]{0,40}\\b(?:is|sits|falls|lies) (?:just )?(?:outside|beyond|out of|past|(?:south|north|east|west) of)\\b`,
     'i',
   );
 }
@@ -887,12 +887,14 @@ function offFootprintCityFinding(text) {
           const cityStart = cityMatch.index;
           const cityEnd = cityStart + cityMatch[0].length;
           if (negationRanges.some(([ns, ne]) => cityStart >= ns && cityEnd <= ne)) continue;
-          // "toward Tampa Bay" names the water body, not the city — a
-          // geographic preposition before "<city> Bay" is a landmark
-          // reference. "We treat Tampa Bay" (claim verb, no preposition)
-          // still flags: that IS an operating claim on the Tampa Bay area.
+          // "drains toward Tampa Bay" names the water body, not the city —
+          // exempt only "toward(s)" or a motion/orientation verb governing
+          // the preposition. Coverage phrasings keep flagging: "treat homes
+          // around Tampa Bay" and "From Tampa Bay to Sarasota, our techs
+          // treat…" are operating claims on the Tampa Bay area, and so is
+          // bare "We treat Tampa Bay".
           if (/^\s+bay\b/i.test(normalized.slice(cityEnd))
-            && /\b(?:toward|towards|near|along|into|around|across|off|beside|overlooking|facing|from|of|on)\s*$/i.test(normalized.slice(0, cityStart))) {
+            && /(?:\b(?:toward|towards)\s*$|\b(?:drains?|draining|flows?|flowing|runs?|running|slopes?|sloping|leads?|leading|empties|emptying|points?|pointing|looks?|looking|faces?|facing|overlooks?|overlooking)\s+(?:toward|towards|into|to|at|over|across|near|along|around|off|on|from|of)\s*$)/i.test(normalized.slice(0, cityStart))) {
             continue;
           }
           // City BEFORE a disclaimer: exempt within the close window, or
@@ -916,6 +918,11 @@ function offFootprintCityFinding(text) {
               // claim context ("Naples is outside our service area, and
               // Naples remains outside our service area." stays honest).
               if (SERVICE_CLAIM_CONTEXT_RE.test(blankDisclaimers(normalized, disclaimerRanges).slice(0, cityStart))) return false;
+              // The stretch BETWEEN the city and the disclaimer must also
+              // be claim-free — "Naples customers use our quarterly pest
+              // control, an area outside our service area" carries the
+              // claim in that gap and the distance alone must not exempt.
+              if (SERVICE_CLAIM_CONTEXT_RE.test(normalized.slice(cityEnd, dStart))) return false;
               return dStart - cityEnd <= 60
                 || PRE_DISCLAIMER_GLUE_RE.test(normalized.slice(cityEnd, dStart));
             }
