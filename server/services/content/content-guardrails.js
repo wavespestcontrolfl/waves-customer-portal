@@ -647,7 +647,7 @@ const SERVICE_KEYWORD_SOURCE = `(?:${SERVICE_NOUN_SOURCE}(?:\\s*(?:,|and|&|\\/|\
 // inside the demand span itself. Kept as a named source so the loop can
 // match spans with the same pattern the claim regex embeds.
 const DEMAND_CONTEXT_SOURCE =
-  "(?:calls?|questions?|requests?)\\b[^.!?]{0,40}\\bwe (?:get|see)\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|we (?:get|see)\\b[^.!?]{0,40}\\b(?:calls?|questions?|requests?|customers?)\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|our calls?\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|(?:[\\w.-]+\\s+){0,2}?customers?\\s+(?:\\w+\\s+){0,3}?(?:call|text|contact|ask)s?\\s+(?:us\\b|waves\\w*\\b|our\\s+(?:team|office|techs?|technicians?)\\b)(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|our\\s+(?:\\w+\\s+){0,2}?customers\\b(?:\\s+(?:in|from|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?";
+  "(?:calls?|questions?|requests?)\\b[^.!?]{0,40}\\bwe (?:get|see)\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|we (?:get|see)\\b[^.!?]{0,40}\\b(?:calls?|questions?|requests?|customers?)\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|our calls?\\b(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|(?:[\\w.'-]+\\s+){0,3}?customers?\\s+(?:\\w+\\s+){0,3}?(?:call|text|contact|ask)s?\\s+(?:us\\b|waves\\w*\\b|our\\s+(?:team|office|techs?|technicians?)\\b)(?:\\s+(?:from|in|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?|our\\s+(?:[\\w.']+\\s+){0,3}?customers\\b(?:\\s+(?:in|from|across|throughout)\\s+(?:(?!about\\b|regarding\\b|concerning\\b|whether\\b|if\\b)[\\w.']+\\s*){1,3})?";
 
 const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   "\\b(we(?:'re| are|'ll| will| can| could| do| does|'ve| have| has| had)?(?: been)?(?: currently| now| proudly| also| still| \\w+ly)? (?:serv(?:e|es|ed|ing)\\b(?!\\s+up\\b)|servic\\w+|treat\\w*|cover\\w*|inspect\\w*|handl\\w+|protect\\w*|visit\\w*|spray\\w*|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|get(?:s|ting)? rid of\\b|manag(?:e|es|ed|ing)\\b(?!\\s+to\\b))"
@@ -679,7 +679,7 @@ const SERVICE_CLAIM_CONTEXT_RE = new RegExp(
   + "|(?:waves(?: pest control)?|waveguard)\\s+(?:is |are |can |could |will |do |does |has |have |had )?(?:been )?(?:now |proudly |also |currently |still )?(?:serv(?:e|es|ed)\\b(?!\\s+up\\b)|serving\\b(?!\\s+up\\b)|servic\\w+|treat(?:s|ed|ing)?|cover(?:s|ed|ing)?|exterminat\\w+|remov(?:e|es|ed|ing)\\b|eliminat\\w+|visit(?:s|ed|ing)?\\b|spray(?:s|ed|ing)?\\b|inspect\\w*|handl\\w+|protect\\w*|get(?:s|ting)? rid of\\b|manag(?:e|es|ed|ing)\\b(?!\\s+to\\b)|proud to (?:serve|service|treat|cover|protect)\\b|work(?:s|ed|ing)? (?:in|throughout|across|around)|operat(?:es|ed|ing)? (?:in|throughout|across|around))"
   + "|(?:is|are|has been|have been) (?:proudly |now |regularly )?(?:covered|served|serviced|treated|protected|inspected|sprayed|visited) by (?:our (?:team|techs?|technicians?|crews?)|waves(?: pest control)?(?:'s|')?)"
   + "|we(?:'re| are) (?:now |also |still |currently )?available (?:in|throughout|across|to|for|near)\\b"
-  + `|${SERVICE_KEYWORD_SOURCE}\\s+(?:is|are|can be|may be)\\s+(?:now\\s+)?(?:available|offered|provided|booked|bookable|scheduled|requested|reserved)\\s*(?:to|for|in|near|throughout|across)\\b)\\b`,
+  + `|(?<!\\bno\\s)(?<!\\bnot\\s)${SERVICE_KEYWORD_SOURCE}\\s+(?:is|are|can be|may be)\\s+(?:now\\s+)?(?:available|offered|provided|booked|bookable|scheduled|requested|reserved)\\s*(?:to|for|in|near|throughout|across)\\b(?![^.!?]{0,40}\\bby\\s+(?:the\\s+county|the\\s+city|the\\s+state|counties|municipalit\\w+|other\\s+(?:compan|provider|firm)\\w*|competitors?|national\\s+chains?|local\\s+(?:compan|provider|firm)\\w*)\\b))\\b`,
   'i',
 );
 
@@ -890,7 +890,7 @@ function offFootprintCityFinding(text) {
     // The "No" must be a standalone denial answer ("No." / "No, we…") —
     // affirmative no-prefixed CTAs ("No problem—call today", "No
     // appointment needed") are not denials.
-    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|did|can|could|will|would|should|is|are|was|were)\b[^.!?]*\?\**\s*$/i.test(sentence)
+    if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+|\*\*)?(?:do|does|did|can|could|will|would|should|is|are|was|were)\b(?:\b(?:St|Ft|Mt)\.|[^.!?])*\?\**\s*$/i.test(sentence)
       && /^\s*(?:no\s*[.,!;:—–-]|no\s+(?:we|unfortunately|sorry|not)\b|not\b|nope\b|unfortunately\b|sadly\b|we (?:do not|don'?t|cannot|can'?t))/i.test((sentences[sentenceIndex + 1] || '').replace(/[‘’]/g, "'"))) {
       continue;
     }
@@ -903,7 +903,14 @@ function offFootprintCityFinding(text) {
       // claim regex opens with \b, which can never sit before "#", so a
       // heading like "## Naples pest control services" would otherwise
       // bypass the bare-title arm entirely.
-      const normalized = clause.replace(/[‘’]/g, "'").replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+)+/, '');
+      // Inline wrappers (bold/italics/link syntax) render as plain text —
+      // unwrap them so "## **Naples pest control services**" and linked
+      // titles hit the claim arms like their bare forms.
+      const normalized = clause.replace(/[‘’]/g, "'")
+        .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+)+/, '')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
       if (!SERVICE_CLAIM_CONTEXT_RE.test(normalized)) continue;
       // Footprint disclaimers exempt PER CITY, not per clause: in "Naples is
       // outside our service area, Waves serves Tampa" only Naples (the

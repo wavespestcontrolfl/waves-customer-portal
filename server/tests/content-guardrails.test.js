@@ -2412,6 +2412,10 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
       'Our technicians are proud to serve Naples.',
       '## Naples pest control services',
       '- Naples pest control services',
+      'Our St. Petersburg customers ask about WaveGuard.',
+      'Our Port St. Lucie customers ask about WaveGuard.',
+      '## **Naples pest control services**',
+      '[Naples pest control services](/contact/)',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
@@ -2419,6 +2423,9 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     for (const body of [
       'The calls we get from Sarasota about Naples termites are common.',
       '## No Naples pest control services',
+      'No pest control is available to Naples homeowners through Waves.',
+      'Mosquito control is offered to Cape Coral properties by the county.',
+      'Can Waves treat St. Petersburg homes? No.',
       'Naples is not included in our service areas.',
       'Naples has different pest pressure, so we treat Sarasota homes differently.',
       '### Do we serve Naples?\n\nNo, we stay within our footprint.',
