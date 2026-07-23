@@ -47,7 +47,8 @@ function mockTables() {
   db.mockImplementation((table) => {
     // Blackout redemption re-check (PR #2733): nothing blocked in these
     // scenarios — resolve empty so the fail-open warn never fires.
-    if (table === 'schedule_blackout_dates') {
+    // system_settings backs the weekly days-off layer — same empty resolve.
+    if (table === 'schedule_blackout_dates' || table === 'system_settings') {
       const bb = { where: () => bb, whereBetween: () => bb, first: async () => undefined, select: async () => [] };
       return bb;
     }
@@ -347,7 +348,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     db.mockImplementation((table) => {
     // Blackout redemption re-check (PR #2733): nothing blocked in these
     // scenarios — resolve empty so the fail-open warn never fires.
-    if (table === 'schedule_blackout_dates') {
+    // system_settings backs the weekly days-off layer — same empty resolve.
+    if (table === 'schedule_blackout_dates' || table === 'system_settings') {
       const bb = { where: () => bb, whereBetween: () => bb, first: async () => undefined, select: async () => [] };
       return bb;
     }

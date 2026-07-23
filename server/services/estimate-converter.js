@@ -83,10 +83,20 @@ async function pickFirstServiceDate(customer, estimateId) {
     logger.error(`[estimate-converter] Availability lookup failed, falling back: ${e.message}`);
   }
 
-  // Fallback — today + 7, snap off Sunday
+  // Fallback — today + 7, nudged off closed days (weekly days off + one-off
+  // blackouts) via the shared helper; was a Sunday-only snap before the
+  // weekly-days-off setting existed. Bounded walk, fail-open like the helper.
   const fallback = new Date(Date.now() + 7 * 86400000);
-  while (fallback.getDay() === 0) fallback.setDate(fallback.getDate() + 1);
-  const dateStr = fallback.toISOString().split('T')[0];
+  let dateStr = fallback.toISOString().split('T')[0];
+  try {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    for (let i = 0; i < 14 && (await isBlackoutDate(dateStr)); i++) {
+      fallback.setDate(fallback.getDate() + 1);
+      dateStr = fallback.toISOString().split('T')[0];
+    }
+  } catch (e) {
+    logger.warn(`[estimate-converter] closed-day nudge failed (failing open): ${e.message}`);
+  }
   logger.info(`[estimate-converter] No route-day match for city "${customer.city || '(empty)'}", using fallback ${dateStr}`);
   return dateStr;
 }
