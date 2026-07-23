@@ -1281,7 +1281,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // Recurring programs beyond pest/lawn/tree map to their own funnel
           // services — previously they fell through to the Lawn Care link, so
           // a mosquito/termite/rodent quote invited the customer into the
-          // wrong booking flow (Codex #2964 r2).
+          // wrong booking flow (Codex #2964 r2). Keep these branches in sync
+          // with RECURRING_FUNNEL_MAPPABLE_SERVICES in booking-pay-at-visit.js
+          // — confirm re-checks the same mappability before honoring a stale
+          // handoff token (drafts refresh in place).
           const wantsMosquito = pricedServiceKeys.has('mosquito');
           const wantsTermite = pricedServiceKeys.has('termite_bait') || pricedServiceKeys.has('termite_bond');
           const wantsRodent = pricedServiceKeys.has('rodent_bait');

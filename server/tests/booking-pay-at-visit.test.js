@@ -231,4 +231,24 @@ describe('wizardDraftSelfServeBookable — current-shape re-check for stored han
       engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] },
     }))).toBe(false);
   });
+
+  test('recurring draft with no funnel-mappable line → not eligible (unmapped programs withhold links)', () => {
+    // foam_recurring has no /book funnel service — the mint withholds the
+    // link, so a stale token must not gate-pass either (Codex r3).
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 600,
+      engineResult: { summary: { recurringAnnualAfterDiscount: 600, oneTimeTotal: 0 }, lineItems: [{ service: 'foam_recurring', annual: 600 }] },
+    }))).toBe(false);
+    // Recurring billing with NO line items at all fails closed too.
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 600 }))).toBe(false);
+    // Mapped recurring programs stay eligible (mosquito/termite/rodent).
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 780,
+      engineResult: { lineItems: [{ service: 'mosquito', annual: 780 }] },
+    }))).toBe(true);
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 1200,
+      engineResult: { lineItems: [{ service: 'termite_bond', annual: 1200 }] },
+    }))).toBe(true);
+  });
 });

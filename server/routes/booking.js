@@ -2510,7 +2510,29 @@ async function createSelfBooking(payload = {}) {
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
     let leadConversion = null;
-    if (followUpRows.length > 0 || lead_id) {
+    // Handoff-derived trigger (Codex #2964 r3): recovery-rebuilt /book links
+    // and older quote links carry the estimate handoff but no ?lead= param,
+    // so a non-pest/one-time booking (which seeds no series) would strand the
+    // quote's lead in new_lead. A VERIFIED handoff names its wizard estimate,
+    // and the wizard stamps estimate_data.lead_id — derive the trigger from
+    // that when the client sent none. Trigger only, like lead_id itself: the
+    // conversion below stays keyed off the VERIFIED customer with
+    // enforceOriginating, so neither a forged lead_id nor a derived one can
+    // convert a lead the booker doesn't own. Best-effort — the booking is
+    // already committed.
+    let leadTrigger = !!lead_id;
+    if (!leadTrigger && followUpRows.length === 0 && pricing_estimate_id) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
+          leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
+        }
+      } catch (err) {
+        logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
+      }
+    }
+    if (followUpRows.length > 0 || leadTrigger) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         leadConversion = await convertLeadFromEvent({

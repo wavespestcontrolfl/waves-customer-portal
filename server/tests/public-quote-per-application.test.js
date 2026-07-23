@@ -445,6 +445,16 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(source).not.toMatch(/handoffPriceable/);
     const bookingSource = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
     expect((bookingSource.match(/wizardDraftSelfServeBookable/g) || []).length).toBeGreaterThanOrEqual(2);
+    // Recovery-rebuilt / older handoff links carry no ?lead= — /confirm
+    // derives the conversion trigger from the VERIFIED handoff estimate's
+    // stored lead_id, so non-pest/one-time bookings still convert the quote
+    // lead (trigger only; conversion stays customer-keyed, Codex r3).
+    expect(bookingSource).toMatch(/handoffEstimate\?\.source === 'quote_wizard' && handoffEstimate\?\.estimate_data\?\.lead_id/);
+    // The confirm-side predicate mirrors the funnel mappability of this
+    // file's bookingServiceId branches (stale unmapped-recurring tokens must
+    // not gate-pass a link the mint would withhold).
+    const payAtVisitSource = fs.readFileSync(path.join(__dirname, '../services/booking-pay-at-visit.js'), 'utf8');
+    expect(payAtVisitSource).toMatch(/RECURRING_FUNNEL_MAPPABLE_SERVICES/);
     // Palm-only recurring bookings carry their quoted label into /book.
     expect(source).toMatch(/recurringServiceLabelParam = bookingServiceLabel/);
     expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);

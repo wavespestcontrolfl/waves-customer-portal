@@ -248,6 +248,9 @@ describe('createSelfBooking — customers-only gate', () => {
       { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { annual: 480, oneTimeTotal: 150 } },
       // Recalculated into a bed-bug quote (no right-sized bookable slot).
       { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] } } },
+      // Recalculated into an unmapped recurring program (no funnel service —
+      // the mint withholds these links, so stale tokens must refuse too).
+      { id: 'pe-drift', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, estimate_data: { annual: 600, engineResult: { lineItems: [{ service: 'foam_recurring', annual: 600 }] } } },
     ];
     for (const shape of driftShapes) {
       firstResults.estimates = shape;
