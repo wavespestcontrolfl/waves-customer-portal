@@ -3297,9 +3297,10 @@ function presentationRowMatches(row, wanted) {
 // shapes v1/admin estimates persist (result.oneTime.items / specItems and
 // their results.* nesting), which the public accept/view path reads
 // (codex P2 on #2947). displayName wins the fallback chain at every
-// assembly site, so setting displayName + label re-labels the rendered
-// section without touching the priced service key (pricing, scheduling,
-// and conversion stay unchanged).
+// assembly site, so setting displayName alone re-labels the rendered
+// section without touching the priced service key OR the label some legacy
+// rows are classified by (pricing, scheduling, and conversion stay
+// unchanged).
 function presentationRowArrays(estData = {}) {
   return [
     estData.engineResult?.lineItems,
@@ -3411,8 +3412,14 @@ async function setEstimatePresentation(input, actionContext = {}) {
     }
     const lockedPrevious = [...new Set(lockedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
     for (const row of lockedRows) {
+      // displayName ONLY — never label: legacy rows without a stable
+      // service/key are CLASSIFIED by label (recurringServiceKey and
+      // serviceCategoryForOneTimeItem fall back to it), so writing operator
+      // wording into label could re-categorize the row at accept/convert
+      // time. displayName wins every render fallback chain, and
+      // applyPresentationOverridesToBundle renames anything still derived
+      // from the untouched label.
       row.displayName = displayName;
-      row.label = displayName;
     }
     // Send-time frozen pricing bundles fast-path the customer payload as
     // long as totals match — a relabel doesn't change totals, so the frozen
@@ -3449,7 +3456,10 @@ async function setEstimatePresentation(input, actionContext = {}) {
   // The runtime pricing cache also serves pre-relabel names — clear it so
   // the next customer view rebuilds from the updated rows.
   clearEstimatePricingCache(estimate.id);
-  logger.info(`[estimate-presentation] Relabeled "${service}" → "${displayName}" on estimate ${estimate.id} (${commit.rowsUpdated} rows)`);
+  // Operator-typed relabel text can carry customer names/addresses — log
+  // IDs and counts only (AGENTS.md: PII in logs). The full wording is
+  // already audited in estimate_data.presentationOverrides.
+  logger.info(`[estimate-presentation] Relabeled ${commit.rowsUpdated} row(s) on estimate ${estimate.id}`);
 
   return {
     success: true,

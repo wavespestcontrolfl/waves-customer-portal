@@ -127,6 +127,63 @@ describe('serverRecomputeFromEstimateData', () => {
     expect(res.reason).toBe('ENGINE_ERROR');
     expect(res.error.message).toBe('boom');
   });
+
+  it('re-injects the stored operator price adjustment as the engine manualDiscount', async () => {
+    const generateEstimate = jest.fn(() => ({ lineItems: [] }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    const res = await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { lawn: { track: 'st_augustine', lawnFreq: 9 } } }),
+        operatorPriceAdjustment: {
+          type: 'FIXED',
+          value: 84,
+          label: 'Neighbor match',
+          internalReason: 'matching next door',
+          floorBreachAcknowledged: true,
+          waiveSetupFee: false,
+        },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(res.recomputed).toBe(true);
+    const injected = generateEstimate.mock.calls[0][0].manualDiscount;
+    expect(injected).toMatchObject({
+      source: 'agent_operator',
+      type: 'FIXED',
+      value: 84,
+      label: 'Neighbor match',
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: true,
+    });
+    // Audit-only text never enters the engine input — replayed summaries echo it.
+    expect(injected.internalReason).toBeUndefined();
+  });
+
+  it('keeps a manualDiscount already stored in the inputs and skips waiver-only adjustments', async () => {
+    const generateEstimate = jest.fn(() => ({ lineItems: [] }));
+    const mapV1ToLegacyShape = jest.fn(() => serverResultMonthly(60, 720));
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({
+          manualDiscount: { type: 'PERCENT', value: 10, label: 'Admin editor' },
+          services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+        }),
+        operatorPriceAdjustment: { type: 'FIXED', value: 84, label: 'Operator' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(generateEstimate.mock.calls[0][0].manualDiscount)
+      .toMatchObject({ type: 'PERCENT', value: 10, label: 'Admin editor' });
+
+    await serverRecomputeFromEstimateData(
+      {
+        engineInputs: baseInput({ services: { lawn: { track: 'st_augustine', lawnFreq: 9 } } }),
+        operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'fee comp' },
+      },
+      { generateEstimate, mapV1ToLegacyShape, needsSync: () => false },
+    );
+    expect(generateEstimate.mock.calls[1][0].manualDiscount).toBeUndefined();
+  });
 });
 
 describe('resolveServerAuthoritativePricing', () => {

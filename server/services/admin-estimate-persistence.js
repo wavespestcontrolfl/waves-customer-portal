@@ -515,6 +515,27 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     v1Input.recurringCustomer = true;
   }
 
+  // Operator-stated price adjustment (agent flows): persisted OUTSIDE the
+  // replay inputs and re-injected transiently on every reprice, mirroring
+  // the public replay (extractEngineInputs in estimate-public). Without
+  // this, an admin-editor save or lapse-reconcile reprice of an adjusted
+  // agent quote silently restores the undiscounted anchor while the stored
+  // adjustment metadata still claims otherwise. A manualDiscount already in
+  // the stored inputs (admin-editor discounts) wins; internalReason is
+  // audit-only and deliberately never injected.
+  const opAdj = estimateData.operatorPriceAdjustment;
+  if (opAdj && typeof opAdj === 'object' && !v1Input.manualDiscount && Number(opAdj.value) > 0) {
+    v1Input.manualDiscount = {
+      source: 'agent_operator',
+      type: opAdj.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: Number(opAdj.value),
+      label: opAdj.label || 'Discount',
+      eligibility: null,
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
+    };
+  }
+
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
