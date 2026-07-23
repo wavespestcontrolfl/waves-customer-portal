@@ -2343,6 +2343,28 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('astro r23 parity: negated serving, plural service areas, Oxford counties, trailing demand cities, possessives, boundary-clause claims', () => {
+    for (const body of [
+      'Our service areas include Naples.',
+      'Naples is one of our service areas.',
+      'We serve Lee, Collier, and Sarasota counties.',
+      'The most common call we get in Naples is about ants.',
+      'Our calls from Naples doubled this summer.',
+      "Waves' techs treat Naples homes.",
+      'Naples, which we serve, is outside our service area.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'We are not currently serving Tampa.',
+      'Naples, however, is outside our service area.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r20 parity: Tampa Bay coverage, claim-in-gap disclaimers, brand-tech subjects, no-need denials', () => {
     for (const body of [
       'We treat homes around Tampa Bay.',
