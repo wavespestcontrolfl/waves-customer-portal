@@ -152,6 +152,14 @@ finding and warns on P1. Reviewers must return JSON matching
   ET-wall-clock fields (schedule slots, business hours, appointment
   reminders, billing cron), or `node-cron` business-hour schedules
   without an explicit `timezone: 'America/New_York'` option.
+- **Hardcoded near-today calendar dates in tests.** A test that sends a
+  date literal through a not-in-the-past validator (e.g. Joi
+  `.min(todayStartEt)`) goes red the night the ET calendar passes it —
+  `schedule-confirm-race.test.js` broke exactly this way at the 2026-07-23
+  ET rollover with no code change on the branch. Tests must compute
+  relative dates (`Date.now() + N days`) for any value a freshness/past
+  check validates; date literals are fine only for stored/historical
+  fixture fields no validator inspects.
 - **PII in logs (non-card).** Phone, email, street address, full Twilio
   inbound SMS bodies, full customer names interpolated into log lines.
   Prefer ID-only logging

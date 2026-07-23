@@ -137,11 +137,17 @@ describe('customer appointment reschedule race guard', () => {
   test('persists the request atomically and alerts the scheduling team', async () => {
     db.mockReturnValueOnce(readChain(service)).mockReturnValueOnce(updateChain(1)).mockReturnValueOnce(insertChain());
 
+    // The route rejects preferredDate before today's ET start (Joi
+    // .min(todayStartEt)) — a hardcoded calendar date here goes stale the
+    // night the ET calendar passes it (this exact test broke at the
+    // 2026-07-23 ET rollover). Always send a date safely in the future.
+    const preferredDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/schedule/svc-1/reschedule`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ preferredDate: '2026-07-22', notes: 'Afternoon please' }),
+        body: JSON.stringify({ preferredDate, notes: 'Afternoon please' }),
       });
       expect(response.status).toBe(200);
       expect((await response.json()).success).toBe(true);
