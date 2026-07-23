@@ -92,7 +92,14 @@ async function hasTextReachableApptRecipient(customer) {
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
 
-  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+  // Same opt-in hold as the send path: a held (unconfirmed) recipient can't
+  // count as text-reachable, or the no-reachable-channel human alert gets
+  // suppressed by a phone we deliberately are not texting (#2956 r4).
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  const reachableContacts = await filterRecipientsByOptin(
+    getAppointmentContacts(customer, prefs || {}), customer.id
+  ).catch(() => getAppointmentContacts(customer, prefs || {}));
+  for (const contact of reachableContacts) {
     const digits = lastTenDigits(contact.phone);
     if (!digits) continue;
     const delivered = await db('sms_log')
@@ -693,7 +700,25 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   }
 
   let sentAny = false;
-  for (const contact of contacts) {
+  // Recipient double opt-in hold (gated): third-party contacts the portal
+  // flow has asked to confirm (pending/declined row) don't get texts until
+  // they reply YES. No row = grandfathered. Shared with the twilio.js
+  // en-route/arrived loops; fail-open on lookup errors.
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  // Hold emptied a NON-empty list: fall back to the primary account holder
+  // (always a legitimate recipient of their own appointment changes; their
+  // own consent is validated at send time) so reschedule/cancel/no-show
+  // notices from DIRECT callers never silently vanish (#2956 codex r7).
+  if (!allowedContacts.length && contacts.length) {
+    const { getPrimaryContact } = require('./customer-contact');
+    const primary = getPrimaryContact(customer);
+    if (primary.phone) {
+      logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
+      allowedContacts = [{ ...primary, role: 'primary' }];
+    }
+  }
+  for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'

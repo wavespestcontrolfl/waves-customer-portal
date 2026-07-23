@@ -749,6 +749,15 @@ const gates = {
   // Kill switch: unset GATE_BOOK_AI_SEARCH.
   bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
 
+  // Recipient double opt-in (#2948 follow-up): newly added on-location
+  // contacts get a "Reply YES" confirmation text, and appointment texts to
+  // them hold until confirmed. Double-dark: this gate AND the
+  // recipient_optin_request sms_templates row (seeded inactive) must both
+  // be on before anything sends. Pre-existing contacts are grandfathered
+  // (no recipient_optin row = allowed). Kill switch: unset
+  // GATE_RECIPIENT_DOUBLE_OPTIN.
+  recipientDoubleOptin: isProd ? process.env.GATE_RECIPIENT_DOUBLE_OPTIN === 'true' : true,
+
   // Multi-service public booking (owner-authorized 2026-07-23): /book can
   // select 2-3 services in one visit — composite service key through the
   // same signed-offer path, summed duration, joined label. Exposed to the

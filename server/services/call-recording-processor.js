@@ -5874,6 +5874,10 @@ const CallRecordingProcessor = {
     // BEFORE the appointment step so a booking made on this same call already
     // fans its confirmation out to the new contact. Kill switch = unset the gate;
     // the triage item + lead extracted_data still carry the contact either way.
+    // Phones whose opt-in CLAIM failed (render/insert error): the same-call
+    // fan-out must exclude them — no row means grandfathered, and a claim
+    // failure must fail CLOSED for that phone, not text it (#2956 r13).
+    const optinClaimFailedPhones = new Set();
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
@@ -5882,6 +5886,55 @@ const CallRecordingProcessor = {
       try {
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        // Recipient double opt-in parity with the portal flow (#2956): a
+        // call-created phone recipient gets the same claim + confirmation
+        // ask (dark template = nothing pends; gate off = no-op). The CLAIM
+        // is awaited so the same-call fan-out below can never race a
+        // rowless (grandfathered-looking) new phone; the Twilio dispatch
+        // stays async.
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
+          try {
+            const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
+            const custRow = await db('customers').where({ id: customerId }).first();
+            if (custRow) {
+              const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+              const claims = await claimRecipientOptins({
+                customer: custRow,
+                contacts: [{
+                  name: [secondaryEntry.first_name, secondaryEntry.last_name].filter(Boolean).join(' '),
+                  firstName: secondaryEntry.first_name || '',
+                  phone: secondaryEntry.phone,
+                }],
+                // The just-written slot must be ASKED — prior phones are the
+                // OTHER slots only.
+                priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                  .filter((ph) => optLast10(ph) !== optLast10(secondaryEntry.phone)),
+                propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+              });
+              if (claims.length) {
+                void dispatchRecipientOptins(claims, custRow)
+                  .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
+              }
+            }
+          } catch (optErr) {
+            const failedKey = String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10);
+            optinClaimFailedPhones.add(failedKey);
+            // Durable fail-closed: the slot is already committed, so leave a
+            // BLOCKING ask_failed row (save-retryable) — the in-memory set
+            // only protects this processing run.
+            if (failedKey) {
+              await db('recipient_optin').insert({
+                phone_key: failedKey,
+                phone_e164: String(secondaryEntry.phone || '').trim(),
+                status: 'ask_failed',
+                customer_id: customerId,
+                requested_by: 'call_pipeline',
+                requested_at: new Date(),
+              }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+            }
+            logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
+          }
+        }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -7978,8 +8031,12 @@ const CallRecordingProcessor = {
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
                       const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                      const extraContacts = !v2SmsConsentExplicit ? [] : getAppointmentContacts(freshCustomer || {}, prefsRow)
-                        .filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
+                      const { filterRecipientsByOptin } = require('./recipient-optin');
+                      const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
+                        getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
+                      )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
+                        // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
+                        && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
                         const contactBody = await renderSmsTemplate('appointment_confirmation', {
                           first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
