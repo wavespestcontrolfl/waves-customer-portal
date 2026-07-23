@@ -262,6 +262,17 @@ router.post('/sms', async (req, res) => {
       );
     }
 
+    // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
+    // (carrier compliance) instead of letting it fall into normal routing.
+    const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
+    if (detectHelp(Body)) {
+      await db('sms_log').insert({
+        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
+      }).catch(() => {});
+      return res.type('text/xml').send(`<Response><Message>${HELP_RESPONSE_TEMPLATE}</Message></Response>`);
+    }
+
     if (optCommand.action === 'opt_in') {
       const normalizedFrom = normalizeE164(From);
       await clearSuppression({
@@ -918,9 +929,13 @@ router.post('/status', async (req, res) => {
                   && (logRow.message_type === 'recipient_optin_request'
                     || meta.includes('recipient_optin_request'));
                 if (!isOptinAsk) return null;
-                return db('recipient_optin')
-                  .where({ phone_key: failedKey, status: 'pending' })
-                  .update({ status: 'ask_failed', updated_at: new Date() });
+                // Scope to the logged customer's row when known — a failed
+                // ask for one property must not flip another property's
+                // possibly-delivered ask.
+                const flip = db('recipient_optin')
+                  .where({ phone_key: failedKey, status: 'pending' });
+                if (logRow.customer_id) flip.where({ customer_id: logRow.customer_id });
+                return flip.update({ status: 'ask_failed', updated_at: new Date() });
               })
               .catch(() => {});
           }

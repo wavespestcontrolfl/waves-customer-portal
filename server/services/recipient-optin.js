@@ -47,13 +47,14 @@ async function getRecipientOptin(phone, customerId = null) {
     if (customerId) q.where({ customer_id: customerId });
     return await q.first() || null;
   } catch (err) {
-    // Fail CLOSED while the gate is on: a transient lookup failure must
-    // hold the send rather than treat a possibly-pending/declined phone as
-    // grandfathered. Callers see a row-like sentinel whose status is never
-    // 'confirmed'. (Migrations run pre-deploy, so a missing table only
-    // occurs on an un-migrated dev DB.)
-    logger.warn(`[recipient-optin] lookup failed (${err.message}) — failing closed`);
-    return { status: 'lookup_error' };
+    // Fail OPEN on lookup infrastructure errors: a brief DB blip must not
+    // silently drop appointment notices while the reminder row is marked
+    // sent. Safe because the row-level consent gate (#2955,
+    // getAppointmentContacts) independently blocks unconsented service
+    // contacts — this per-phone hold is the second layer, and outage
+    // behavior degrades to the documented pre-opt-in state.
+    logger.warn(`[recipient-optin] lookup failed (${err.message}) — failing open to row-level consent`);
+    return null;
   }
 }
 
@@ -146,8 +147,21 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
       // re-claims on the next consented save even though the phone is
       // already stored — priorPhones only grandfathers phones that were
       // never routed through the ask flow.
+      // Retryable states: ask_failed (delivery failed) and STALE pending
+      // with no dispatch marker (claim committed but the process died or a
+      // later step failed before the ask went out). dispatched_at is the
+      // durable marker — an asked-but-unanswered recipient is never
+      // re-texted.
       const reclaimed = templateDark ? 0 : await dbc('recipient_optin')
-        .where({ phone_key: key, customer_id: customer?.id || null, status: 'ask_failed' })
+        .where({ phone_key: key, customer_id: customer?.id || null })
+        .where(function retryable() {
+          this.where({ status: 'ask_failed' })
+            .orWhere(function stalePending() {
+              this.where({ status: 'pending' })
+                .whereNull('dispatched_at')
+                .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000));
+            });
+        })
         .update({ status: 'pending', requested_at: new Date(), updated_at: new Date() });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
@@ -207,7 +221,7 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // the recipient — no Twilio status callback will ever flip the row,
       // so treat them as failed asks and release to ask_failed for the
       // save-triggered retry (#2956 r4).
-      const sentinelSid = /^(gate|template|internal)-/.test(String(result?.sid || ''));
+      const sentinelSid = /^(gate|template|internal)-/.test(String(result?.sid || result?.providerMessageId || ''));
       if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
@@ -216,6 +230,10 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
+      await db('recipient_optin')
+        .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+        .update({ dispatched_at: new Date(), updated_at: new Date() })
+        .catch(() => {});
       requested += 1;
     } catch (err) {
       await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});

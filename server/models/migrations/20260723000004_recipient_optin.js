@@ -21,6 +21,9 @@ exports.up = async function up(knex) {
       t.string('requested_by', 40).notNullable().defaultTo('portal_contact_save');
       t.string('template_version', 40);
       t.timestamp('requested_at', { useTz: true });
+      // Durable ask marker: set when Twilio actually accepted the ask.
+      // NULL + stale requested_at = claim whose dispatch died → re-claimable.
+      t.timestamp('dispatched_at', { useTz: true }).nullable();
       t.timestamp('confirmed_at', { useTz: true }).nullable();
       t.timestamp('declined_at', { useTz: true }).nullable();
       t.timestamps(true, true);
