@@ -2278,6 +2278,33 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('astro r26 parity: FAQ yes-answers, Tampa Bay subjects, availability, third-party scheduling, tables, dash denials, advisory refs, program verbs', () => {
+    for (const body of [
+      '### Do you serve Naples?\n\nYes.',
+      'We treat Tampa Bay homes.',
+      'From Tampa Bay to Sarasota, our techs treat lanais.',
+      'Our techs are available in Naples.',
+      '| Areas we serve |\n| --- |\n| Naples |',
+      'Our quarterly program covers Naples homes.',
+      'Our recurring plan treats Naples homes.',
+      'Schedule pest control in Naples today.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      '### Do you serve Naples?\n\nNo, we stay in our footprint.',
+      'Tampa Bay humidity changes how we treat Sarasota homes.',
+      'If you schedule pest control in Tampa with another company, ask for labels.',
+      '| Pest | Season |\n| --- | --- |\n| Ants | Summer |',
+      'We serve Sarasota — Naples is not in our service area.',
+      'Your termite treatment in Naples depends on the construction type.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',
