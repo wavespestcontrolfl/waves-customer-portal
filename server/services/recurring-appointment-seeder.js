@@ -82,6 +82,15 @@ function serviceKeyFor(value = {}) {
     value.service || value.service_key || value.key || value.kind
     || value.name || value.label || value.displayName || value.service_type || ''
   ).toLowerCase();
+  // Multi-service composite bookings ('mosquito+pest_control' keys or
+  // 'Pest Control + Mosquito Control' labels, #2957): a bundle that
+  // includes pest is a PEST-family series — the quarterly pest cadence
+  // anchors the follow-ups (children are seeded pest-only; add-on
+  // cadences are office-managed). Must run before the mosquito/lawn
+  // checks, or the add-on token wins on regex order and the series
+  // mis-files (duplicate guards + maintenance would look in the wrong
+  // family).
+  if (/\+/.test(raw) && /pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   if (/lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw)) return 'lawn_care';
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';

@@ -217,6 +217,11 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setBrowseDays(null);
     setOpenDay(null);
+    // Bump the same sequence the address edit uses: any IN-FLIGHT
+    // find-slots/browse/availability response for the old service scope
+    // fails its seq guard instead of repopulating stale-scope slot_sigs
+    // (#2957 codex r3).
+    addressLookupSeqRef.current += 1;
   };
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
@@ -532,12 +537,17 @@ export default function PublicBookingPage() {
     // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
-  // Cadence follows the ANCHOR service (first selected) — a composite id
-  // has no pattern entry. v1 books the combined FIRST visit; the office
-  // sets up any additional cadences from the owner alert (flagged there).
+  // Cadence: a bundle that includes Pest Control is a PEST-family series
+  // regardless of chip order (mosquito-first + pest must still seed the
+  // quarterly pest series — #2957 codex r3); otherwise the anchor (first
+  // selected) service's pattern. v1 books the combined FIRST visit; the
+  // office sets up add-on cadences from the owner alert.
+  const cadenceServiceId = selectedServiceIds.includes('pest_control')
+    ? 'pest_control'
+    : selectedServiceIds[0];
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
-    : RECURRING_SERVICE_PATTERNS[selectedServiceIds[0]] || null;
+    : RECURRING_SERVICE_PATTERNS[cadenceServiceId] || null;
 
   const handleConfirm = async () => {
     setLoading(true);
