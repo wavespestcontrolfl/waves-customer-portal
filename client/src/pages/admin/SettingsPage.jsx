@@ -21,6 +21,7 @@ import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
+import PortalUsageTab from "../../components/admin/PortalUsageTab";
 import {
   DEFAULT_KPI_TARGETS,
   KPI_METRIC_LABELS,
@@ -145,6 +146,7 @@ const VALID_TABS = [
   "kpi-targets",
   "operating-costs",
   "system",
+  "usage",
 ];
 
 // Nav-only consolidation: the six leaf tabs collapse into four parent groups.
@@ -156,7 +158,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
   { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
   { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
-  { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
+  { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system", "usage"] },
 ];
 
 // Per-leaf nav metadata for the sub-tab pill row.
@@ -170,6 +172,7 @@ const SETTINGS_LEAF_META = {
   "operating-costs": { label: "Operating Costs", Icon: DollarSign },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
+  usage: { label: "Portal Usage", Icon: Activity },
 };
 
 export default function SettingsPage() {
@@ -768,6 +771,7 @@ export default function SettingsPage() {
           </Card>{" "}
         </div>
       )}
+      {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
     </div>
   );
 }
