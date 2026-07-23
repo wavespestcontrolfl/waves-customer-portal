@@ -165,7 +165,15 @@ export default function PublicBookingPage() {
       .then((cfg) => {
         if (cancelled) return;
         setCustomersOnly(cfg?.customers_only === true);
-        setMultiServiceEnabled(cfg?.multi_service === true);
+        const multiOn = cfg?.multi_service === true;
+        setMultiServiceEnabled(multiOn);
+        // Kill-switch fail-closed for deep/recovery links: a composite
+        // ?service= selection must collapse to its first service when the
+        // gate is off — otherwise the server normalizes the composite key
+        // to '' and /confirm rejects every slot (#2957 codex r4).
+        if (!multiOn) {
+          setSelectedServiceIds((prev) => (prev.length > 1 ? [prev[0]] : prev));
+        }
       })
       .catch(() => { if (!cancelled) setCustomersOnly(false); });
     return () => { cancelled = true; };
