@@ -21,8 +21,10 @@ const {
 } = require('../services/service-report/activity-indicators');
 const { PROJECT_TYPES } = require('../services/project-types');
 
+// Post-simplification shapes (owner 2026-07-23): exclusion_areas /
+// evidence_cleaned / the three inspection Assessment selects retired — the
+// remaining fields carry the full report story.
 const EXCLUSION_VALUES = {
-  exclusion_areas: 'Garage, Exterior perimeter',
   entry_points_addressed: 'AC line penetration, Garage door gaps',
   exclusion_work_completed: 'Sealed entry point, Installed hardware cloth / mesh',
   exclusion_materials: 'Rodent-resistant mesh, Sealant',
@@ -32,7 +34,6 @@ const EXCLUSION_VALUES = {
 const SANITATION_VALUES = {
   sanitation_areas: 'Attic, Garage',
   contamination_level: 'Moderate',
-  evidence_cleaned: 'Droppings, Nesting material',
   sanitation_work_completed: 'Removed droppings, Removed nesting material, Disinfected / sanitized affected areas, Deodorized affected areas',
   sanitation_limitations: 'Insulation contamination remains, Electrical / HVAC obstruction',
 };
@@ -43,9 +44,6 @@ const INSPECTION_VALUES = {
   evidence_observed: 'Droppings, Gnaw marks',
   species: 'Rat',
   entry_points_found: 'AC line gap right side',
-  interior_concern: 'Yes',
-  exterior_pressure: 'Yes',
-  photos_taken: 'Yes',
   recommended_service: 'Rodent trapping program',
   urgency: 'Soon',
 };
@@ -105,7 +103,9 @@ describe('exclusion report (owner template §1)', () => {
       visitSequence: 1,
     });
     expect(result.headline).toBe('Exclusion repairs were completed to reduce rodent access and help prevent re-entry.');
-    expect(result.body).toContain('Completed rodent exclusion work today around the garage and exterior perimeter.');
+    // exclusion_areas retired 2026-07-23 — the generic opener + the
+    // entry-points sentence carry the location story.
+    expect(result.body).toContain('Completed rodent exclusion work today.');
     expect(result.body).toContain('Entry points addressed included the ac line penetration and garage door gaps.');
     expect(result.body).toContain('Materials used included rodent-resistant mesh and sealant.');
     expect(result.body).toContain('Remaining concerns: tree limbs touching roof and trapping still active.');
@@ -139,7 +139,9 @@ describe('sanitation report (owner template §2)', () => {
     expect(result.headline).toBe('Moderate rodent contamination was cleaned and sanitized today.');
     expect(result.body).toContain('Completed rodent sanitation service in the attic and garage.');
     expect(result.body).toContain('Contamination level was moderate.');
-    expect(result.body).toContain('We removed and treated droppings and nesting material.');
+    // evidence_cleaned retired 2026-07-23 — the work-chip verb phrases carry
+    // the removal story instead of a second "we removed and treated" line.
+    expect(result.body).toContain('We removed droppings, removed nesting material, disinfected and sanitized the affected areas and deodorized the service areas today.');
     expect(result.body).toContain('Some areas had limitations: insulation contamination remains and electrical / hvac obstruction.');
     expect(result.body).toContain('Completing the exclusion repairs is the key next step.');
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
@@ -248,7 +250,8 @@ describe('validation', () => {
     ]) {
       const empty = validateTypedFindings({ type, values: {}, expectedType: type, enforceRequired: true });
       expect(empty.ok).toBe(false);
-      expect(empty.missing.length).toBeGreaterThanOrEqual(5);
+      // Simplified 2026-07-23: each core is back inside the ≤4 budget.
+      expect(empty.missing.length).toBeGreaterThanOrEqual(4);
       const full = validateTypedFindings({ type, values, expectedType: type, enforceRequired: true });
       expect({ type, ok: full.ok, errors: full.errors, missing: full.missing })
         .toEqual({ type, ok: true, errors: [], missing: [] });
@@ -292,9 +295,6 @@ describe('validation', () => {
         areas_inspected: 'Garage',
         activity_found: 'No',
         evidence_observed: 'Droppings',
-        interior_concern: 'No',
-        exterior_pressure: 'No',
-        photos_taken: 'Yes',
         recommended_service: 'Bait station monitoring',
         urgency: 'Routine',
       },

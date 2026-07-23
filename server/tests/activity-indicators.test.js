@@ -537,21 +537,19 @@ describe('banned customer copy', () => {
 });
 
 describe('rodent trapping sectioned checklist (schema v2)', () => {
+  // Post-simplification shape (owner 2026-07-23): work_completed /
+  // conducive_conditions / quiet locations / exclusion notes / the two
+  // customer-communication rows retired; 'Exterior inspection completed'
+  // now lives on trap_actions.
   const V2_VALUES = {
     species: 'Roof rat',
     evidence_observed: 'Droppings, Gnaw marks, Noises reported by customer',
     traps_checked: '8',
     captures: '2',
-    trap_actions: 'Traps reset, Bait/lure refreshed',
+    trap_actions: 'Traps reset, Bait/lure refreshed, Exterior inspection completed',
     trap_activity_locations: 'Attic near A/C plenum',
-    trap_quiet_locations: 'Garage, crawlspace',
-    conducive_conditions: 'A/C line penetrations, Garage door seal gaps, Pet food / bird seed accessible',
-    work_completed: 'Traps checked, Captures removed, Exterior inspection completed',
     sanitation_recommendations: 'Remove pet food overnight, Reduce garage clutter',
     exclusion_recommendation: 'Recommended after activity stops',
-    exclusion_notes: 'A/C line gap, garage door corner',
-    customer_reported: 'Heard noises in attic',
-    customer_discussed: 'Informed of capture(s), Reviewed exclusion recommendation',
   };
 
   test('chips fields validate each element against options', () => {
@@ -664,10 +662,11 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     const schema = findingsSchemaForType('rodent_trapping');
     expect(schema.nextStepRequired).toBe(true);
     expect(nextStepRequiredForType('one_time_pest_treatment')).toBe(false);
+    // Simplified 2026-07-23: the base checklist is three sections; the §3
+    // combo modules stay serviceKey-scoped.
     const sections = [...new Set(schema.fields.map((f) => f.section))];
     expect(sections).toEqual([
-      'Evidence observed', 'Trap activity', 'Conducive conditions',
-      'Work completed', 'Recommendations', 'Customer communication',
+      'Evidence observed', 'Trap activity', 'Recommendations',
       'Exclusion module', 'Sanitation module',
     ]);
     const plainSections = [...new Set(
@@ -675,8 +674,7 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
         .fields.map((f) => f.section),
     )];
     expect(plainSections).toEqual([
-      'Evidence observed', 'Trap activity', 'Conducive conditions',
-      'Work completed', 'Recommendations', 'Customer communication',
+      'Evidence observed', 'Trap activity', 'Recommendations',
     ]);
     expect(schema.nextStepChips).toContain('Continue trapping');
     expect(schema.nextStepChips).toContain('Remove traps after inactivity');

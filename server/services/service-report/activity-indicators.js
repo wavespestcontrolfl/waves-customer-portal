@@ -680,21 +680,21 @@ const REQUIRED_FINDINGS_FIELDS = {
   // observed') — a truthful cleared visit has no activity area to name.
   flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
   rodent_trapping: ['species'],
-  // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
-  // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
-  // requirements (evidence + suspected type when activity was found) in
-  // validateTypedFindings.
+  // Owner spec §1/§2/§4 marked the full checklists required; the 2026-07-23
+  // simplification (same lane as the T&S closeout) retired the duplicate /
+  // label-only fields, so each list is back inside the ≤4 budget. Inspection
+  // adds conditional requirements (evidence + suspected type when activity
+  // was found) in validateTypedFindings.
   rodent_exclusion: [
-    'exclusion_areas', 'entry_points_addressed', 'exclusion_work_completed',
+    'entry_points_addressed', 'exclusion_work_completed',
     'exclusion_materials', 'remaining_concerns',
   ],
   rodent_sanitation: [
-    'sanitation_areas', 'contamination_level', 'evidence_cleaned',
+    'sanitation_areas', 'contamination_level',
     'sanitation_work_completed', 'sanitation_limitations',
   ],
   rodent_inspection: [
-    'areas_inspected', 'activity_found', 'interior_concern', 'exterior_pressure',
-    'recommended_service', 'urgency',
+    'areas_inspected', 'activity_found', 'recommended_service', 'urgency',
   ],
   wildlife_trapping: ['target_animal'],
   bed_bug: ['evidence_level', 'treatment_method'],
@@ -1500,8 +1500,12 @@ function trapActivitySentence(values = {}) {
   if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
   if (actions.includes('trap removed')) parts.push('removed traps');
+  // 'Exterior inspection completed' lives on trap_actions since 2026-07-23
+  // (rodent work_completed retired as a duplicate of the action chips); the
+  // work_completed read stays for completions replayed from older payloads.
+  if (actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const work = String(values.work_completed || '').toLowerCase();
-  if (work.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
+  if (work.includes('exterior inspection completed') && !actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const joined = joinPhrases(parts);
   return joined ? `We ${joined} today.` : null;
 }
