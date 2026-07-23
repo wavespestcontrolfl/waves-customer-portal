@@ -2139,9 +2139,16 @@ function compactAgentLine(line) {
       : (Number.isFinite(Number(line.finalMargin ?? line.margin))
         ? Number(line.finalMargin ?? line.margin)
         : null));
+  // Recurring monthly is annual / 12 cent-rounded everywhere in the engine
+  // (pricePestControl et al) — derive the manual-final monthly the same way
+  // so a discounted line never shows the anchor monthly beside its
+  // discounted annual.
+  const monthly = hasManualFinalAnnual
+    ? (annual > 0 ? Math.round((annual / 12) * 100) / 100 : 0)
+    : Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0);
   return {
     service: line.service || line.name || 'unknown',
-    monthly: Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0) || null,
+    monthly: monthly || null,
     annual: annual || null,
     one_time: oneTime || null,
     estimated_cost: hasCostBasis ? cost : null,

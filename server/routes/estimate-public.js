@@ -16887,7 +16887,12 @@ async function buildPricingBundle(estimate) {
     // 'bimonthly' — a raw compare would treat the AUTHORIZED cadence as an
     // alternate and clamp the confirmed below-floor price back up.
     const normalizePestCadence = (value) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
-    const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || null;
+    // A missing saved pest frequency is NOT unidentifiable: the engine prices
+    // it as quarterly (pricePestControl defaults `frequency || 'quarterly'`),
+    // so a breach acknowledged on such a quote authorized the QUARTERLY
+    // price. Defaulting the same way here keeps the flag on that cadence
+    // instead of stripping it everywhere and re-clamping the confirmed price.
+    const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || 'quarterly';
     for (const ladder of FREQUENCY_LADDER) {
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
