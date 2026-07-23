@@ -1150,7 +1150,14 @@ const ReviewService = {
         continue;
       }
       const contact = getServiceContactSmsRecipient(customer);
-      if (!contact.phone) continue;
+      if (!contact.phone) {
+        // No consented SMS recipient — mark handled so this row can't sit
+        // in the 20-row follow-up batch every run and starve later
+        // customers (#2955 r4). Mirrors the scheduled-send suppression.
+        await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
+        suppressed++;
+        continue;
+      }
 
       // Followup points straight at the GBP review form — they ignored the
       // tokenized rate page once, so reduce friction the second time.

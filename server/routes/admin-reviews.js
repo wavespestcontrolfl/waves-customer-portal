@@ -10,7 +10,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
-const { getServiceContactSmsRecipient } = require('../services/customer-contact');
+const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
@@ -535,9 +535,12 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
 
     res.json({
       customers: customers.map(c => {
+        // SMS eligibility is consent-gated; EMAIL eligibility is not (the
+        // #2948 artifact covers texting only) — resolve separately so an
+        // unstamped contact's email still counts as cadenceable.
         const contact = getServiceContactSmsRecipient(c);
         const phone = contact.phone || c.phone || null;
-        const email = contact.email || c.email || null;
+        const email = getServiceContact(c).email || c.email || null;
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         const prefs = prefsMap[c.id];

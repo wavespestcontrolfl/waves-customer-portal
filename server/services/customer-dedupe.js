@@ -1152,6 +1152,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
     ];
     let movedContactSlot = false;
+    let movedContactPhone = false;
     const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
     for (const slot of CONTACT_SLOTS) {
       const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
@@ -1160,6 +1161,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         if (!isEmptyValue(loser[f])) {
           backfills[f] = loser[f];
           movedContactSlot = true;
+          // slot[1] is the phone column — only a moved TEXTING target can
+          // invalidate the winner's SMS-consent stamp below.
+          if (f === slot[1]) movedContactPhone = true;
         }
       }
     }
@@ -1176,7 +1180,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
       backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
       backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
-    } else if (movedContactSlot && winnerHadAnyContact
+    } else if (movedContactPhone && winnerHadAnyContact
       && !isEmptyValue(winner.service_contacts_consent_at)) {
       // Mixed list: the winner's stamp described only the winner's own
       // contacts; loser slots just joined the row, so the stamp no longer
