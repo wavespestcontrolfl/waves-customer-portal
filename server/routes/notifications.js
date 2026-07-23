@@ -620,6 +620,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
 
     let savedContacts;
+    // Claimed opt-in asks dispatch AFTER ensurePrefs below — the consent
+    // validator needs the notification_prefs row to exist, or a first-save
+    // race fails the ask with NO_CONSENT_RECORD and strands it ask_failed.
+    let pendingOptinDispatch = null;
     if (updates.serviceContacts !== undefined) {
       // Full-list save: compact out empty entries and rewrite all three slots.
       const contacts = updates.serviceContacts
@@ -657,11 +661,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         });
       });
       savedContacts = contacts.map(serviceContactPayload);
-      if (optinClaims.length) {
-        const { dispatchRecipientOptins } = require('../services/recipient-optin');
-        void dispatchRecipientOptins(optinClaims, beforeRow)
-          .catch((err) => logger.error(`[notifications] recipient opt-in dispatch failed for customer ${req.params.customerId}: ${err.message}`));
-      }
+      if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
       // mirrors the list save: the same person (matched by phone/email/name
@@ -714,11 +714,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           updated_at: new Date(),
         });
       });
-      if (legacyClaims.length) {
-        const { dispatchRecipientOptins } = require('../services/recipient-optin');
-        void dispatchRecipientOptins(legacyClaims, beforeRow)
-          .catch((err) => logger.error(`[notifications] recipient opt-in dispatch failed for customer ${req.params.customerId}: ${err.message}`));
-      }
+      if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
     }
 
     const existing = await ensurePrefs(req.params.customerId);
@@ -726,6 +722,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
     } else {
       await db('notification_prefs').insert({ customer_id: req.params.customerId, ...dbUpdates });
+    }
+    if (pendingOptinDispatch) {
+      const { dispatchRecipientOptins } = require('../services/recipient-optin');
+      void dispatchRecipientOptins(pendingOptinDispatch.claims, pendingOptinDispatch.customer)
+        .catch((err) => logger.error(`[notifications] recipient opt-in dispatch failed for customer ${req.params.customerId}: ${err.message}`));
     }
 
     const prefs = await ensurePrefs(req.params.customerId);

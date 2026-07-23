@@ -906,9 +906,22 @@ router.post('/status', async (req, res) => {
           const { recipientPhoneKey } = require('../services/recipient-optin');
           const failedKey = recipientPhoneKey(To);
           if (failedKey) {
-            void db('recipient_optin')
-              .where({ phone_key: failedKey, status: 'pending' })
-              .update({ status: 'ask_failed', updated_at: new Date() })
+            // Only when THIS undelivered message was the opt-in ask itself —
+            // an unrelated failed text to the same number must not flip a
+            // possibly-delivered ask to ask_failed.
+            void db('sms_log').where({ twilio_sid: MessageSid }).first()
+              .then((logRow) => {
+                const meta = typeof logRow?.metadata === 'string'
+                  ? logRow.metadata
+                  : JSON.stringify(logRow?.metadata || {});
+                const isOptinAsk = logRow
+                  && (logRow.message_type === 'recipient_optin_request'
+                    || meta.includes('recipient_optin_request'));
+                if (!isOptinAsk) return null;
+                return db('recipient_optin')
+                  .where({ phone_key: failedKey, status: 'pending' })
+                  .update({ status: 'ask_failed', updated_at: new Date() });
+              })
               .catch(() => {});
           }
         } catch { /* best-effort */ }

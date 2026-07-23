@@ -69,8 +69,13 @@ async function markRecipientOptin(phone, status) {
       : { status, declined_at: new Date(), updated_at: new Date() };
     // Phone-wide by design: the reply comes from the person, and rows only
     // exist for properties that actually sent them an ask — a YES confirms
-    // every outstanding ask to that person; a STOP declines them all.
-    const updated = await db('recipient_optin').where({ phone_key: key }).update(stamp);
+    // every DELIVERED ask to that person; a STOP declines them all.
+    // ask_failed rows are excluded from confirmation (that property's ask
+    // never reached them — the save-triggered retry must still run) but ARE
+    // declined on STOP (they said stop; never re-ask).
+    const q = db('recipient_optin').where({ phone_key: key });
+    if (status === 'confirmed') q.whereNot({ status: 'ask_failed' });
+    const updated = await q.update(stamp);
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     return updated > 0;
   } catch (err) {
