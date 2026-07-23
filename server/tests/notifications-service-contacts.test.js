@@ -9,8 +9,10 @@ const {
   serviceContactPayload,
   serviceContactsPayload,
   serviceContactSlotUpdates,
+  serviceContactConsentUpdates,
   normalizeContactInput,
   preferenceChangeItems,
+  SERVICE_CONTACT_CONSENT_VERSION,
 } = router._private;
 
 describe('on-location contact slot helpers', () => {
@@ -114,5 +116,30 @@ describe('on-location contact slot helpers', () => {
     expect(items).toEqual([
       expect.objectContaining({ key: 'serviceContact', label: 'On-location Contacts', scope: 'Property' }),
     ]);
+  });
+});
+
+describe('service contact consent artifact', () => {
+  const contact = { name: 'Sam Spouse', phone: '+15553330000', email: '' };
+
+  test('stamps timestamp, source, and disclosure version on an attested save', () => {
+    const updates = serviceContactConsentUpdates([contact], true);
+    expect(updates.service_contacts_consent_at).toBeInstanceOf(Date);
+    expect(updates.service_contacts_consent_source).toBe('portal_account_holder');
+    expect(updates.service_contacts_consent_text_version).toBe(SERVICE_CONTACT_CONSENT_VERSION);
+  });
+
+  test('clears the artifact when the save is not attested', () => {
+    expect(serviceContactConsentUpdates([contact], false)).toEqual({
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
+    });
+    // Missing flag (legacy caller) behaves like not attested.
+    expect(serviceContactConsentUpdates([contact], undefined).service_contacts_consent_at).toBeNull();
+  });
+
+  test('clears the artifact when the recipient list is emptied, even if attested', () => {
+    expect(serviceContactConsentUpdates([], true).service_contacts_consent_at).toBeNull();
   });
 });
