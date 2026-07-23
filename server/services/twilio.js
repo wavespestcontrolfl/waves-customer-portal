@@ -867,10 +867,17 @@ const TwilioService = {
     if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
-    // Same recipient double opt-in hold as the en-route path above.
+    // Same recipient double opt-in hold as the en-route path above. When
+    // the hold empties a NON-empty recipient list, do NOT early-return —
+    // fall through so the email fallback / no-channel handling below still
+    // runs (a held recipient must not permanently silence the arrival
+    // notice; #2956 codex r5).
     const { filterRecipientsByOptin } = require("./recipient-optin");
-    const contacts = await filterRecipientsByOptin(getAppointmentContacts(customer, prefs), customer.id);
-    if (channel === "sms" && !contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
+    const unfilteredContacts = getAppointmentContacts(customer, prefs);
+    const contacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
+    if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
+      return { success: false, suppressed: true, reason: "no_contacts" };
+    }
 
     const results = [];
     const {

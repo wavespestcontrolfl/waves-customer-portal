@@ -270,7 +270,8 @@ router.post('/sms', async (req, res) => {
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
       }).catch(() => {});
-      return res.type('text/xml').send(`<Response><Message>${HELP_RESPONSE_TEMPLATE}</Message></Response>`);
+      const xmlEscape = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return res.type('text/xml').send(`<Response><Message>${xmlEscape(HELP_RESPONSE_TEMPLATE)}</Message></Response>`);
     }
 
     if (optCommand.action === 'opt_in') {

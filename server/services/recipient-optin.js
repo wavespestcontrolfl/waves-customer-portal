@@ -79,7 +79,11 @@ async function markRecipientOptin(phone, status) {
     // never reached them — the save-triggered retry must still run) but ARE
     // declined on STOP (they said stop; never re-ask).
     const q = db('recipient_optin').where({ phone_key: key });
-    if (status === 'confirmed') q.whereNot({ status: 'ask_failed' });
+    // A YES can only confirm rows whose ask actually went out: ask_failed
+    // (delivery failed) and undispatched pending rows (claim committed,
+    // dispatch not yet run/crashed) are excluded — the recovery sweep or
+    // next save re-asks them. STOP still declines everything.
+    if (status === 'confirmed') q.whereNot({ status: 'ask_failed' }).whereNotNull('dispatched_at');
     const updated = await q.update(stamp);
     if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     return updated > 0;
@@ -278,6 +282,33 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       const slots = [customer.service_contact_name, customer.service_contact2_name, customer.service_contact3_name];
       const phones = [customer.service_contact_phone, customer.service_contact2_phone, customer.service_contact3_phone];
       const idx = phones.findIndex((ph) => recipientPhoneKey(ph) === row.phone_key);
+      // Contact removed/replaced since the claim: they are no longer an
+      // appointment recipient for this property — release to ask_failed
+      // (re-adding them re-claims and asks) instead of texting a stranger.
+      if (idx < 0) {
+        await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        continue;
+      }
+      // Reconcile before re-texting: if Twilio already accepted an ask to
+      // this phone (crash landed between acceptance and the marker write),
+      // just stamp dispatched_at — never send a duplicate confirmation.
+      const priorSend = await db('sms_log')
+        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [row.phone_key])
+        .where(function optinAsk() {
+          this.where({ message_type: 'recipient_optin_request' })
+            .orWhere('metadata', 'like', '%recipient_optin_request%');
+        })
+        .whereNotIn('status', ['failed', 'undelivered'])
+        .first('id')
+        .catch(() => null);
+      if (priorSend) {
+        await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .update({ dispatched_at: new Date(), updated_at: new Date() }).catch(() => {});
+        continue;
+      }
       const { renderSmsTemplate } = require('./sms-template-renderer');
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
         recipient_first_name: String(idx >= 0 ? slots[idx] || '' : '').trim().split(/\s+/)[0] || 'there',
