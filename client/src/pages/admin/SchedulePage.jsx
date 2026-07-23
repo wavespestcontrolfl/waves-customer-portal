@@ -12880,11 +12880,16 @@ export function CompletionPanel({
                         ×
                       </button>{" "}
                       {(() => {
-                        const catalogRow = (products || []).find(
+                        // Fall back to the selected row's serialized category
+                        // when the catalog row is absent (protocol- or
+                        // substitution-added products), so fertilizer rows keep
+                        // the nutrition suggestions and excluded helper
+                        // categories stay hidden.
+                        const pickerProduct = (products || []).find(
                           (p) => String(p.id) === String(sp.productId),
-                        );
-                        if (!productControlsTargets(catalogRow)) return null;
-                        const picker = targetPickerConfig(catalogRow, {
+                        ) || sp;
+                        if (!productControlsTargets(pickerProduct)) return null;
+                        const picker = targetPickerConfig(pickerProduct, {
                           isLawn,
                           isTreeShrub,
                         });
@@ -14959,11 +14964,15 @@ export function CompletionPanel({
                     &times;
                   </button>{" "}
                   {(() => {
-                    const catalogRow = (products || []).find(
+                    // Fall back to the selected row's serialized category when
+                    // the catalog row is absent (protocol- or substitution-
+                    // added products), so fertilizer rows keep the nutrition
+                    // suggestions and excluded helper categories stay hidden.
+                    const pickerProduct = (products || []).find(
                       (p) => String(p.id) === String(sp.productId),
-                    );
-                    if (!productControlsTargets(catalogRow)) return null;
-                    const picker = targetPickerConfig(catalogRow, {
+                    ) || sp;
+                    if (!productControlsTargets(pickerProduct)) return null;
+                    const picker = targetPickerConfig(pickerProduct, {
                       isLawn,
                       isTreeShrub,
                     });
