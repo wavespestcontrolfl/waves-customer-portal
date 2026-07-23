@@ -2305,6 +2305,38 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 
+  test('round 15 + astro r27 parity: Bay region claims, table resets, list fragments, FAQ verbs, inherited subjects, source phrases, modified denials, but-also, referrals', () => {
+    for (const body of [
+      'We treat Tampa Bay region homes.',
+      'We serve Sarasota; Naples area homes.',
+      'We serve Sarasota; Naples for quarterly service.',
+      'Do you work in Naples? Yes.',
+      'Are your techs available in Naples? Yes.',
+      'We do not provide service in Sarasota and now visit Naples homes.',
+      'We serve not only Sarasota but also Naples.',
+      'Our routes include Naples.',
+      'Our service footprint includes Naples.',
+      'Do you serve Naples? **Yes.**',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      '| Areas we serve |\n| --- |\n| Venice |\n\n| Pest | Season |\n| --- | --- |\n| Naples ants | Summer |',
+      '| Areas we serve |\n| --- |\n| Naples | No |',
+      'From Naples records, our calls from Sarasota doubled.',
+      'No Waves pest control is available to Naples homeowners.',
+      'No quarterly pest control is available to Naples homeowners.',
+      'Miami termite treatment research informs how we service Sarasota homes.',
+      'If you need pest control in Naples, contact a local provider instead.',
+      'Does Waves serve Naples? **No.**',
+      'We do not serve Sarasota or treat Naples.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
   test('astro r21 parity: city-modified personnel, get-rid-of, city-first disclaimers after claims', () => {
     for (const body of [
       'Our Tampa technicians treat ants.',
