@@ -680,24 +680,29 @@ const REQUIRED_FINDINGS_FIELDS = {
   // observed') — a truthful cleared visit has no activity area to name.
   flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
   rodent_trapping: ['species'],
-  // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
-  // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
-  // requirements (evidence + suspected type when activity was found) in
-  // validateTypedFindings.
+  // Owner spec §1/§2/§4 marked the full checklists required; the 2026-07-23
+  // simplification (same lane as the T&S closeout) retired the duplicate /
+  // label-only fields, so each list is back inside the ≤4 budget. Inspection
+  // adds conditional requirements (evidence + suspected type when activity
+  // was found) in validateTypedFindings.
   rodent_exclusion: [
-    'exclusion_areas', 'entry_points_addressed', 'exclusion_work_completed',
+    'entry_points_addressed', 'exclusion_work_completed',
     'exclusion_materials', 'remaining_concerns',
   ],
   rodent_sanitation: [
-    'sanitation_areas', 'contamination_level', 'evidence_cleaned',
+    'sanitation_areas', 'contamination_level',
     'sanitation_work_completed', 'sanitation_limitations',
   ],
   rodent_inspection: [
-    'areas_inspected', 'activity_found', 'interior_concern', 'exterior_pressure',
-    'recommended_service', 'urgency',
+    'areas_inspected', 'activity_found', 'recommended_service', 'urgency',
   ],
   wildlife_trapping: ['target_animal'],
-  bed_bug: ['evidence_level', 'treatment_method'],
+  // rooms_treated joined the required core 2026-07-23: with the generic
+  // Areas-treated picker hidden on bed bug completions, it is the ONLY
+  // location capture — a closeout without it would leave the report and
+  // product records with no record of where the treatment occurred
+  // (codex P2 on #2963).
+  bed_bug: ['rooms_treated', 'evidence_level', 'treatment_method'],
   // FS 482.226 report content (Codex P1 on the Phase-3 fields): the two
   // compliance answers are required, not optional — a blank field is
   // silently skipped from the immutable customer report, which is exactly
@@ -1047,7 +1052,12 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   }
 
   const fields = PROJECT_TYPES[type].findingsFields || [];
-  const knownKeys = new Set(fields.map((f) => f.key));
+  // companionOnly fields are legal ONLY on companion submissions — a primary
+  // submission carrying one (stale client / pre-cutover draft) fails as
+  // unknown, keeping the 2026-07-23 primary cutover total.
+  const knownKeys = new Set(
+    fields.filter((f) => companion || !f.companionOnly).map((f) => f.key),
+  );
   for (const key of Object.keys(values)) {
     if (!knownKeys.has(key)) errors.push(`Unknown findings field: ${key}`);
   }
@@ -1119,9 +1129,11 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
 
   // Cross-field consistency (Tree & Shrub): the report tells one coherent
   // plant-health story — a "no major issues" claim can't sit beside recorded
-  // issues, "Inspection only" can't sit beside applied treatments, and the
-  // palm module core is required whenever palms were among the serviced
-  // groups (owner spec §6: "use when palms are present").
+  // issues, "Inspection only" can't sit beside applied treatments, and palm
+  // findings need Palms in the service scope. On the PRIMARY path the
+  // condition/detail fields no longer exist (owner 2026-07-23 — the AI photo
+  // review carries condition detail), so these checks are value-driven and
+  // effectively guard COMPANION sections, the one place the fields survive.
   if (type === 'tree_shrub') {
     const observed = String(values.observed_conditions || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
@@ -1161,10 +1173,6 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (palmModuleFilled.length && groups.length && !groups.includes('Palms')) {
       errors.push('Palm module findings were recorded but Palms is not among the serviced plant groups — add Palms or clear the palm fields');
     }
-    // Palm-module fields (incl. palm_condition/ganoderma) are OPTIONAL detail
-    // even when Palms were serviced — owner directive 2026-07-21 (closeout
-    // simplification): the detail modules live behind an optional expander and
-    // must not force the module open on every palm visit.
   }
 
   // Cross-field consistency (rodent family, owner spec §§1–4): "none" chips
@@ -1182,6 +1190,19 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       .split(',').map((s) => s.trim()).filter(Boolean);
     if (limitations.includes('No limitations') && limitations.length > 1) {
       errors.push('"No limitations" cannot be combined with other limitations');
+    }
+  }
+  // rodent_sanitation publishes "contamination was cleaned and sanitized"
+  // copy — with evidence_cleaned retired (2026-07-23), the work chips are
+  // the only proof cleanup happened. A submission whose only work chip is
+  // the recommendation entry records no performed cleanup, so the report
+  // headline would overclaim (codex P2 r3 on #2963). Every other chip —
+  // including the limited-access entry — describes work that was done.
+  if (type === 'rodent_sanitation') {
+    const work = String(values.sanitation_work_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (work.length && work.every((c) => c === 'Insulation removal recommended')) {
+      errors.push('"Insulation removal recommended" alone records no cleanup work — add the cleanup performed or clear the chip');
     }
   }
   if (type === 'rodent_inspection' && enforceRequired && String(values.activity_found) === 'Yes') {
@@ -1497,8 +1518,12 @@ function trapActivitySentence(values = {}) {
   if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
   if (actions.includes('trap removed')) parts.push('removed traps');
+  // 'Exterior inspection completed' lives on trap_actions since 2026-07-23
+  // (rodent work_completed retired as a duplicate of the action chips); the
+  // work_completed read stays for completions replayed from older payloads.
+  if (actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const work = String(values.work_completed || '').toLowerCase();
-  if (work.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
+  if (work.includes('exterior inspection completed') && !actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const joined = joinPhrases(parts);
   return joined ? `We ${joined} today.` : null;
 }
@@ -1811,7 +1836,11 @@ function buildTodaysResult({
 
   // Tree & Shrub has no pest gauge — the owner template (§6) leads with the
   // overall landscape condition and tells the plant-health story: scope,
-  // treatments, palm notes (Ganoderma reassurance/flag), next step.
+  // treatments, palm notes (Ganoderma reassurance/flag), next step. PRIMARY
+  // completions no longer collect the Ganoderma/trunk fields (owner
+  // 2026-07-23 — the AI photo review carries palm detail on the V2 report),
+  // so the palm note only composes for COMPANION sections, where the
+  // companionOnly fields still capture it.
   if (projectType === 'tree_shrub' && values.landscape_condition) {
     const condition = String(values.landscape_condition);
     const conditionHeadlines = {
@@ -2270,6 +2299,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
     copyMapVersion: COPY_MAP_VERSION,
     fields: (config.findingsFields || [])
       .filter((f) => {
+        // companionOnly fields exist for COMPANION sections only (combined
+        // visits run no per-line AI assessment, so hand capture stays the
+        // condition source there) — the primary slice never serves them.
+        if (f.companionOnly && !companion) return false;
         const rule = moduleRules && f.section ? moduleRules[f.section] : null;
         if (!rule) return true;
         if (!serviceKey) return true;

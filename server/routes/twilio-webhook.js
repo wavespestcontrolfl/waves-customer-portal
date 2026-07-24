@@ -215,6 +215,11 @@ router.post('/sms', async (req, res) => {
         source: `twilio_webhook_${optCommand.detectionMethod}`,
         capturedBody: Body,
       });
+      // Recipient double opt-in: a pending third-party recipient who replies
+      // STOP is recorded as declined (no-op when no recipient row exists).
+      try {
+        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'declined');
+      } catch { /* never block the STOP path */ }
       try {
         if (customer) {
           await db('notification_prefs')
@@ -257,12 +262,29 @@ router.post('/sms', async (req, res) => {
       );
     }
 
+    // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
+    // (carrier compliance) instead of letting it fall into normal routing.
+    const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
+    if (detectHelp(Body).help) {
+      await db('sms_log').insert({
+        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
+      }).catch(() => {});
+      const xmlEscape = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return res.type('text/xml').send(`<Response><Message>${xmlEscape(HELP_RESPONSE_TEMPLATE)}</Message></Response>`);
+    }
+
     if (optCommand.action === 'opt_in') {
       const normalizedFrom = normalizeE164(From);
       await clearSuppression({
         phone: normalizedFrom || From,
         source: `twilio_webhook_${optCommand.detectionMethod}`,
       });
+      // Recipient double opt-in: YES from a pending third-party recipient
+      // confirms them (no-op when no recipient row exists).
+      try {
+        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'confirmed');
+      } catch { /* never block the opt-in path */ }
       try {
         if (customer) {
           await db('notification_prefs')
@@ -885,6 +907,81 @@ router.post('/status', async (req, res) => {
         } catch (e) {
           logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
         }
+
+        // Recipient double opt-in: a failed/undelivered confirmation ask
+        // flips its pending row to ask_failed so the next consented save
+        // retries — otherwise the recipient sits pending forever without
+        // ever having received the YES request. Best-effort, keyed on the
+        // undelivered number (rows are per customer+phone; all pending
+        // rows for the number failed the same delivery).
+        try {
+          const { recipientPhoneKey } = require('../services/recipient-optin');
+          const failedKey = recipientPhoneKey(To);
+          if (failedKey) {
+            // Only when THIS undelivered message was the opt-in ask itself —
+            // an unrelated failed text to the same number must not flip a
+            // possibly-delivered ask to ask_failed.
+            void db('sms_log').where({ twilio_sid: MessageSid }).first()
+              .then((logRow) => {
+                const meta = typeof logRow?.metadata === 'string'
+                  ? logRow.metadata
+                  : JSON.stringify(logRow?.metadata || {});
+                const isOptinAsk = logRow
+                  && (logRow.message_type === 'recipient_optin_request'
+                    || meta.includes('recipient_optin_request'));
+                // Strict SID match in BOTH paths: only the row whose CURRENT
+                // dispatch is this MessageSid flips — a delayed/duplicated
+                // callback for an old SID can't hit a reclaimed in-flight
+                // ask. A row whose marker/SID write failed entirely stays
+                // pending and is reconciled by the recovery sweep (its
+                // sms_log status is failed → the sweep re-dispatches).
+                if (isOptinAsk && logRow.customer_id) {
+                  // Strict SID match, with one carve-out for the race where
+                  // the callback lands before provider_sid is stamped: a
+                  // null-SID pending row flips only when this log row's ask
+                  // was created AFTER the row's claim (it IS this claim's
+                  // ask — an old SID's ask predates a reclaimed row's
+                  // requested_at and cannot match).
+                  return db('recipient_optin')
+                    .where({ phone_key: failedKey, customer_id: logRow.customer_id, status: 'pending' })
+                    .where(function sidOrRace() {
+                      this.where({ provider_sid: MessageSid })
+                        .orWhere(function raced() {
+                          this.whereNull('provider_sid');
+                          if (logRow.created_at) this.where('requested_at', '<=', logRow.created_at);
+                        });
+                    })
+                    .update({ status: 'ask_failed', updated_at: new Date() });
+                }
+                return db('recipient_optin')
+                  .where({ provider_sid: MessageSid, status: 'pending' })
+                  .update({ status: 'ask_failed', updated_at: new Date() })
+                  .then((flipped) => {
+                    // Callback raced BOTH the sms_log insert and the SID
+                    // stamp: nothing matched now, but both writes land within
+                    // seconds — retry once after 60s (best-effort; the
+                    // sweep's failed-ask pass is the durable backstop).
+                    if (!flipped && !logRow) {
+                      setTimeout(() => {
+                        void db('sms_log').where({ twilio_sid: MessageSid }).first()
+                          .then((lateRow) => {
+                            if (!lateRow) return null;
+                            const lateMeta = typeof lateRow.metadata === 'string' ? lateRow.metadata : JSON.stringify(lateRow.metadata || {});
+                            const lateOptin = lateRow.message_type === 'recipient_optin_request' || lateMeta.includes('recipient_optin_request');
+                            if (!lateOptin || !lateRow.customer_id) return null;
+                            return db('recipient_optin')
+                              .where({ phone_key: failedKey, customer_id: lateRow.customer_id, status: 'pending' })
+                              .update({ status: 'ask_failed', updated_at: new Date() });
+                          })
+                          .catch(() => {});
+                      }, 60 * 1000);
+                    }
+                    return flipped;
+                  });
+              })
+              .catch(() => {});
+          }
+        } catch { /* best-effort */ }
 
         // Channel-agnostic landline learning: a carrier 30006 ("landline or
         // unreachable carrier") means this number can't receive ANY SMS. Suppress

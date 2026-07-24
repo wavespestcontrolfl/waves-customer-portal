@@ -283,7 +283,53 @@ describe('admin customers route helpers', () => {
       service_contact3_phone: null,
       service_contact3_email: null,
       service_contact3_role: null,
+      // Identity changed (Grace removed) → the consent artifact no longer
+      // describes the stored list, so the save clears it (#2948).
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
     });
+  });
+
+  test('a service-contact identity change clears the consent artifact (#2948)', () => {
+    const before = {
+      service_contact_name: 'Terry Tenant',
+      service_contact_phone: '+19415550112',
+      service_contact_email: 'terry@example.com',
+      service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      service_contacts_consent_source: 'portal_account_holder',
+      service_contacts_consent_text_version: 'portal-2026-07-22',
+    };
+    // Admin swaps Terry's phone for a different person's number.
+    const updates = {
+      service_contact_name: 'Terry Tenant',
+      service_contact_phone: '+19415550999',
+      service_contact_email: 'terry@example.com',
+    };
+    compactServiceContactSlots(updates, before);
+    expect(updates.service_contacts_consent_at).toBeNull();
+    expect(updates.service_contacts_consent_source).toBeNull();
+    expect(updates.service_contacts_consent_text_version).toBeNull();
+  });
+
+  test('an identity-preserving echo save keeps the consent artifact (#2948)', () => {
+    const before = {
+      service_contact_name: 'Terry Tenant',
+      service_contact_phone: '+19415550112',
+      service_contact_email: 'terry@example.com',
+      service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      service_contacts_consent_source: 'portal_account_holder',
+      service_contacts_consent_text_version: 'portal-2026-07-22',
+    };
+    // Edit form echoes the same people back unchanged (whitespace only).
+    const updates = {
+      service_contact_name: ' Terry Tenant ',
+      service_contact_phone: '+19415550112',
+      service_contact_email: 'terry@example.com',
+    };
+    compactServiceContactSlots(updates, before);
+    expect(updates).not.toHaveProperty('service_contacts_consent_at');
+    expect(updates).not.toHaveProperty('service_contacts_consent_source');
   });
 
   test('an echoed shifted list carries the role with the person (codex round-5 P2)', () => {

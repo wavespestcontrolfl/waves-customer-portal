@@ -13,6 +13,22 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+
+// Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
+// the links carry only the correlation estimate_id, so under the customers-only
+// gate their (already-accepted) customers would be refused. The util owns the
+// token shape (namespace, year TTL, acceptance-day quantization — the latter
+// keeps fresh-accept and retry URLs byte-identical for the short-code dedup
+// contract). The fresh accept builds its link before the in-memory row
+// carries accepted_at (the column is written trx-side), so "now" IS the
+// acceptance day there; retries read the committed accepted_at. Returns ''
+// when no signing secret is configured (link degrades to today's shape).
+function acceptBookingGateToken(estimate) {
+  const acceptedMs = estimate?.accepted_at ? new Date(estimate.accepted_at).getTime() : Date.now();
+  const token = mintEstimateAcceptToken(estimate.id, acceptedMs);
+  return token ? `&accept_token=${encodeURIComponent(token)}` : '';
+}
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -1727,6 +1743,25 @@ function pestFloorMonthlyLift(estData, tierName, discountResolver = tierDiscount
   return Math.max(0, floorMoExact - pestMo * (1 - disc));
 }
 
+// Operator/admin audit metadata rides engine manualDiscount objects
+// (internalReason, eligibility override notes, floor-breach internals) and
+// those objects reach the public /:token/data payload through TWO doors: the
+// stored-summary normalizer below, and fresh engine replays whose
+// summary.manualDiscount is spread into pricing.frequencies[] by
+// shapeFrequencyEntry. Strip at BOTH (codex P1s on #2947, rounds 2-3) — the
+// customer-facing fields (label, type, value, amounts, cap state) pass
+// through untouched.
+function stripManualDiscountAuditFields(manual) {
+  if (!manual || typeof manual !== 'object') return manual;
+  const {
+    internalReason: _internalReason,
+    eligibilityOverrideReason: _eligibilityOverrideReason,
+    floorBreach: _floorBreach,
+    ...customerSafe
+  } = manual;
+  return customerSafe;
+}
+
 function normalizeManualDiscountSummary(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
@@ -1741,7 +1776,7 @@ function normalizeManualDiscountSummary(estData = {}) {
   if (!manual) return null;
   const amount = Math.round(Number(manual.amount) * 100) / 100;
   return {
-    ...manual,
+    ...stripManualDiscountAuditFields(manual),
     amount,
     label: manual.label || manual.catalogName || (manual.type === 'PERCENT' ? `Discount (${manual.value}%)` : 'Discount'),
     scope: manual.scope || 'recurring_annual_after_waveguard',
@@ -4066,7 +4101,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
   const hasWaveGuardMembership = require('../services/estimate-converter')
     .recurringMixHasMembershipFeeService(recurring);
-  const membershipFee = hasWaveGuardMembership
+  // Operator-stated waiver removes the fee outright (no strike-through, no
+  // invoice) — zeroing it here keeps every downstream SSR figure (fee row,
+  // pay-per-application invoice copy, prepay math) consistent.
+  const operatorSetupFeeWaived = require('../services/estimate-converter')
+    .estimateOperatorSetupFeeWaived(estData);
+  const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
   // Existing customers never pay the setup again — the fee is waived outright
@@ -9529,7 +9569,7 @@ router.put('/:token/accept', async (req, res, next) => {
       // book_one_time and enable duplicate appointments. Identity/pricing are
       // unaffected: /book treats a bare estimate_id (no estimate_token HMAC)
       // as correlation only.
-      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}${acceptBookingGateToken(estimate)}`;
       bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
         entityType: 'estimates',
@@ -10781,6 +10821,27 @@ function extractEngineInputs(estData) {
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
     out.priorQualifyingServices = estData.priorQualifyingServices;
   }
+  // Operator-stated price adjustment (agent flows, owner decision 2026-07-23):
+  // persisted OUTSIDE engineInputs (same round-trip rule as
+  // priorQualifyingServices) and re-injected as the engine's manualDiscount on
+  // every public recompute so view/accept keep the adjusted — possibly
+  // acknowledged-below-floor — totals the operator confirmed.
+  const opAdj = estData.operatorPriceAdjustment;
+  if (opAdj && typeof opAdj === 'object' && !out.manualDiscount && Number(opAdj.value) > 0) {
+    out.manualDiscount = {
+      source: 'agent_operator',
+      type: opAdj.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: Number(opAdj.value),
+      label: opAdj.label || 'Discount',
+      // internalReason is deliberately NOT injected: it is audit-only text
+      // with zero pricing effect, and a replayed engine summary is spread
+      // into public frequency entries — the reason must never be able to
+      // ride a replay into the tokenized payload (codex P1 on #2947).
+      eligibility: null,
+      eligibilityConfirmed: true,
+      floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
+    };
+  }
   return out;
 }
 
@@ -10898,7 +10959,10 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const onetime = summary.oneTimeTotal ?? null;
   const manualDiscount = summary.manualDiscount && Number(summary.manualDiscount.amount) > 0
     ? {
-        ...summary.manualDiscount,
+        // Replayed engine summaries carry audit-only fields — strip before
+        // this object rides pricing.frequencies[] to the customer (codex P1
+        // on #2947 round 3).
+        ...stripManualDiscountAuditFields(summary.manualDiscount),
         // monthlyAmount is the per-month recurring figure, so it tracks only the
         // recurring slice; the one-time slice is reflected in the one-time total.
         monthlyAmount: Math.round(
@@ -11464,7 +11528,8 @@ function normalizeOneTimeBreakdown(estData) {
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const membershipFeeMixApplies = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(recurringServicesForFee);
+    .recurringMixHasMembershipFeeService(recurringServicesForFee)
+    && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData);
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
   if (Number.isFinite(membershipFee) && membershipFee > 0 && membershipFeeMixApplies && !hasExplicitWaveGuardSetup) {
     addRows([{
@@ -11866,7 +11931,12 @@ function annualPrepayEligibleForEstimateData(estData) {
 function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload = {}) {
   const converter = require('../services/estimate-converter');
   const { recurringSvcList } = acceptanceServiceLists(estData || {});
-  if (converter.hasWaveGuardSetupService(recurringSvcList || [])) return true;
+  // estimateData-aware: an operator-waived (or member-waived) setup fee is
+  // no longer a prepay incentive — fall through to the %-savings math.
+  if (converter.shouldIncludeWaveGuardSetupFeeForRecurring({
+    recurringServices: recurringSvcList || [],
+    estimateData: estData || {},
+  })) return true;
   // Accept invoices from the SELECTED frequency's annual, so the incentive
   // exists if ANY offered cadence clears it — a lawn-only quote whose
   // default sits at the floor still earns a real discount on the
@@ -12461,7 +12531,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     // exact field the committedAppointment probe above keys on. Without it a
     // booking completed through THIS link is invisible to later retries,
     // which keep answering book_one_time and enable duplicate appointments.
-    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}${acceptBookingGateToken(estimate)}`;
     // Read-only retry contract: never stack another permanent short_codes row
     // per retry. Reuse the code already minted for exactly this target URL
     // (the fresh accept's, or the first retry's); mint at most once otherwise.
@@ -13471,6 +13541,18 @@ function isRetiredLawnTierKey(tierKey) {
 // later global re-arm must not re-clamp it); null when the estimate is
 // silent and the caller falls back to the global switch / legacy evidence
 // (codex P2s, rounds 5-7 on the #2827 main-merge).
+// Operator-acknowledged manual-discount floor breach: a per-estimate CLAMP
+// disarm that outranks the arm signals below (owner decision 2026-07-23).
+// The operator explicitly authorized a sub-floor price for THIS estimate
+// (confirm-card acknowledgement), so view/accept clamps must not lift it
+// back up. Deliberately NOT folded into estimateLawnFloorArmed: the replay
+// path (savedFloorReplayOverrides) threads the TRUTHFUL arm state so base
+// lawn pricing reprices exactly as saved — the breach only ever bypassed the
+// manual-discount cap, never base pricing.
+function estimateManualDiscountFloorBreached(estData = {}) {
+  return require('../services/estimate-converter').estimateManualDiscountFloorBreachAcknowledged(estData);
+}
+
 function estimateLawnFloorArmed(estData = {}) {
   // Highest priority: the engine stamps its RESOLVED arm state into
   // pricingMetadata on every post-#2827 pricing run — the authoritative
@@ -13774,12 +13856,33 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   // enforcement stamps on the stored rows (pre-disarm snapshots keep their
   // floor re-clamp even though they never persisted the flag).
   const perEstimateFloorArmed = estimateLawnFloorArmed(estData);
-  const marginFloorArmed = perEstimateFloorArmed != null
+  const marginFloorArmedBase = perEstimateFloorArmed != null
     ? perEstimateFloorArmed
     : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
-  // Program minimum resolved once per estimate for the same reason: every
-  // cadence row clamps at the minimum THIS quote was priced with.
-  const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
+  // Operator-acknowledged floor breach bypasses the clamps for THE ROW THE
+  // OPERATOR AUTHORIZED ONLY (codex P2 on #2947 round 5): the confirmation
+  // card showed one cadence at one number — alternate ladder rows the
+  // operator never reviewed keep the full floor clamps (UNBREACHED program
+  // minimum + armed margin floor). Fail closed: if the authorized tier
+  // can't be identified, nothing bypasses.
+  const breachAuthorizedTierKey = (() => {
+    if (!estimateManualDiscountFloorBreached(estData)) return null;
+    const marked = (Array.isArray(rows) ? rows : [])
+      .find((r) => r?.selected === true || r?.isSelected === true || r?.recommended === true || r?.isRecommended === true);
+    if (marked) return lawnTierKey(marked);
+    for (const li of [
+      ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+      ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
+    ]) {
+      if ((li?.service || '') === 'lawn_care') return lawnTierKey(li);
+    }
+    return null;
+  })();
+  // Program minimum resolved once per estimate: every cadence row clamps at
+  // the minimum THIS quote was priced with. Alternates on a breached
+  // estimate deliberately use the UNBREACHED resolution.
+  const programMinMonthly = require('../services/estimate-converter')
+    .resolveLawnProgramMinimumMonthlyIgnoringBreach(estData);
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -13816,6 +13919,8 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         ?? row.prov?.costFloorAnnual
         ?? row.costFloorAnnual,
       );
+      const rowBreachAuthorized = breachAuthorizedTierKey != null && tierKey === breachAuthorizedTierKey;
+      const rowMarginFloorArmed = rowBreachAuthorized ? false : marginFloorArmedBase;
       const {
         monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed, flooredAtMinimum,
       } = clampLawnLadderEntry({
@@ -13826,8 +13931,8 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         visits,
         manualDiscount: rawManualDiscountForTier,
         marginFloorAnnual: rowMarginFloorAnnual,
-        marginFloorArmed,
-        programMinMonthly,
+        marginFloorArmed: rowMarginFloorArmed,
+        programMinMonthly: rowBreachAuthorized ? 0 : programMinMonthly,
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -13854,7 +13959,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         // combo/accept path collects (codex P2 round 11 on #2827). CEILED
         // to the cent, matching clampLawnLadderEntry's own rule, so
         // 12 × monthly never lands under the annual floor (round 12).
-        ...(marginFloorArmed && rowMarginFloorAnnual > 0
+        ...(rowMarginFloorArmed && rowMarginFloorAnnual > 0
           ? { marginFloorMonthly: Math.ceil((rowMarginFloorAnnual / 12) * 100) / 100 }
           : {}),
         flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
@@ -15807,9 +15912,13 @@ function estimateDataRecurringServices(estData = {}) {
 }
 
 function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
-  const membershipFeeMixApplies = require('../services/estimate-converter')
+  const converter = require('../services/estimate-converter');
+  const membershipFeeMixApplies = converter
     .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
-  if (membershipFeeMixApplies) return payload;
+  // Operator-stated waiver strips the fee even when the mix carries it —
+  // this finalize choke point is what removes it from snapshot/cached
+  // bundles frozen before the waiver was applied.
+  if (membershipFeeMixApplies && !converter.estimateOperatorSetupFeeWaived(estData)) return payload;
 
   let next = payload;
   const breakdown = payload.oneTimeBreakdown;
@@ -15847,6 +15956,123 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   return next;
 }
 
+// Operator presentation relabels (set_estimate_presentation, #2947): the
+// tool rewrites STORED rows, but recomputed bundles re-derive section labels
+// from service keys/default display names — a relabel would silently vanish
+// from engine-backed and solo recurring payloads. Re-apply the audit-trail
+// overrides at this choke point so every bundle path (fresh build, snapshot,
+// cache restore) renders the operator's name. Only service-name fields are
+// rewritten; cadence labels on frequency rows are left alone.
+function presentationOverrideNormalize(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
+  const overrides = Array.isArray(estData?.presentationOverrides) ? estData.presentationOverrides : [];
+  if (!overrides.length) return payload;
+  // Last override per matched target wins (revision order preserved).
+  const renames = [];
+  for (const entry of overrides) {
+    const wanted = presentationOverrideNormalize(entry?.service);
+    const displayName = String(entry?.display_name || '').trim();
+    if (!wanted || !displayName) continue;
+    // Also match by the names the entry replaced — a recomputed row can
+    // resurface under its pre-relabel default name.
+    const keys = new Set([wanted, ...((entry.previous_names || []).map(presentationOverrideNormalize).filter(Boolean))]);
+    renames.push({ keys, displayName });
+  }
+  if (!renames.length) return payload;
+  const renameFor = (candidates) => {
+    // Chain hits (codex P3 on #2947): a second relabel keyed by the FIRST
+    // relabel's display name must still land on recomputed rows that carry
+    // only the canonical key — each hit's name joins the candidate pool for
+    // the overrides that follow, so A→B then B→C resolves A-keyed rows to C.
+    let hit = null;
+    const pool = candidates.filter(Boolean).map(presentationOverrideNormalize);
+    for (const rename of renames) {
+      if (pool.some((candidate) => rename.keys.has(candidate))) {
+        hit = rename.displayName;
+        pool.push(presentationOverrideNormalize(hit));
+      }
+    }
+    return hit;
+  };
+  const renameItemRow = (row) => {
+    if (!row || typeof row !== 'object') return row;
+    const hit = renameFor([row.service, row.serviceKey, row.key, row.name, row.label, row.displayName]);
+    if (!hit) return row;
+    return { ...row, ...(row.name !== undefined ? { name: hit } : { name: hit }), ...(row.label !== undefined ? { label: hit } : {}), ...(row.displayName !== undefined ? { displayName: hit } : {}) };
+  };
+  // The React price card renders service names from NESTED frequency rows
+  // too (perServiceTreatments[].label, included[].label), and recomputed
+  // bundles rebuild those from engine defaults — rename them or the card
+  // shows the new section label with the old name inside it (codex P2 on
+  // #2947 round 5). Cadence labels (freq.label, e.g. "Quarterly") are
+  // deliberately untouched: only rows matched by SERVICE identity rename.
+  const renameFrequencyEntry = (freq) => {
+    if (!freq || typeof freq !== 'object') return freq;
+    let next = freq;
+    if (Array.isArray(freq.perServiceTreatments)) {
+      next = {
+        ...next,
+        perServiceTreatments: freq.perServiceTreatments.map((row) => {
+          const hit = renameFor([row?.service, row?.serviceKey, row?.key, row?.label, row?.name]);
+          return hit ? { ...row, label: hit } : row;
+        }),
+      };
+    }
+    if (Array.isArray(freq.included)) {
+      next = {
+        ...next,
+        included: freq.included.map((row) => {
+          const hit = renameFor([row?.key, row?.service, row?.serviceKey, row?.label]);
+          return hit ? { ...row, label: hit } : row;
+        }),
+      };
+    }
+    return next;
+  };
+  const renameSection = (section) => {
+    if (!section || typeof section !== 'object') return section;
+    let next = Array.isArray(section.frequencies)
+      ? { ...section, frequencies: section.frequencies.map(renameFrequencyEntry) }
+      : section;
+    // Embedded one-time rows render inside the service card AND key the
+    // standalone breakdown's exclusion list by label-based identity
+    // (oneTimeRowIdentityKey = service|label|amount). They must rename in
+    // the same pass as the top-level oneTimeBreakdown items, or the
+    // identities diverge — the card shows the old wording and the renamed
+    // top-level row escapes the exclusion and renders the charge twice
+    // (codex P2 on #2947 round 11).
+    if (next.oneTimeContribution && typeof next.oneTimeContribution === 'object'
+      && Array.isArray(next.oneTimeContribution.items)) {
+      next = {
+        ...next,
+        oneTimeContribution: {
+          ...next.oneTimeContribution,
+          items: next.oneTimeContribution.items.map(renameItemRow),
+        },
+      };
+    }
+    const hit = renameFor([section.key, section.serviceKey, section.service, section.serviceCategory, section.label, section.name, section.displayName]);
+    if (!hit) return next;
+    return {
+      ...next,
+      label: hit,
+      ...(section.name !== undefined ? { name: hit } : {}),
+      ...(section.displayName !== undefined ? { displayName: hit } : {}),
+    };
+  };
+  const next = { ...payload };
+  if (Array.isArray(next.services)) next.services = next.services.map(renameSection);
+  if (Array.isArray(next.frequencies)) next.frequencies = next.frequencies.map(renameFrequencyEntry);
+  if (Array.isArray(next.serviceCadenceCombos)) next.serviceCadenceCombos = next.serviceCadenceCombos.map(renameFrequencyEntry);
+  if (next.oneTimeBreakdown && Array.isArray(next.oneTimeBreakdown.items)) {
+    next.oneTimeBreakdown = { ...next.oneTimeBreakdown, items: next.oneTimeBreakdown.items.map(renameItemRow) };
+  }
+  return next;
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
@@ -15860,7 +16086,13 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
-  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData);
+  // Presentation relabels apply LAST — attachPublicPricingContract rebuilds
+  // the section list via buildPricingServices, so an earlier rename pass
+  // would be overwritten for recomputed bundles (codex P2 on #2947 round 3).
+  const withContract = applyPresentationOverridesToBundle(
+    hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData),
+    estData,
+  );
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
@@ -16451,7 +16683,15 @@ async function buildPricingBundle(estimate) {
   const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
-    const programMinMonthly = lawnProgramMinimumMonthlyFor(estData);
+    // v1 shapes cannot carry an operator floor breach today (the operator
+    // adjustment channel persists engine-shaped drafts only), so this path
+    // fails CLOSED: unbreached program minimum, no breach disarm on the
+    // floor arm. A ladder-wide disarm here would bypass the floor on every
+    // cadence when the operator only authorized one. If v1 estimates ever
+    // gain operator breaches, scope the bypass per authorized cadence like
+    // lawnFrequenciesFromRows does — never ladder-wide.
+    const programMinMonthly = require('../services/estimate-converter')
+      .resolveLawnProgramMinimumMonthlyIgnoringBreach(estData);
     // Cost-floor arm resolution for this estimate — same rules as the
     // ladder (per-estimate signal beats the global; legacy enforcement
     // stamps on the stored rows arm silent pre-disarm saves). The
@@ -16659,6 +16899,17 @@ async function buildPricingBundle(estimate) {
     // Run the engine 3x with different pest frequencies. Each call is
     // pure JS; no external I/O beyond the engine's own DB constants
     // sync which is cached internally.
+    // Alias-normalized comparison (codex P1 on #2947 round 8): saved inputs
+    // legitimately carry 'bi_monthly' while the ladder's engineFrequency is
+    // 'bimonthly' — a raw compare would treat the AUTHORIZED cadence as an
+    // alternate and clamp the confirmed below-floor price back up.
+    const normalizePestCadence = (value) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+    // A missing saved pest frequency is NOT unidentifiable: the engine prices
+    // it as quarterly (pricePestControl defaults `frequency || 'quarterly'`),
+    // so a breach acknowledged on such a quote authorized the QUARTERLY
+    // price. Defaulting the same way here keeps the flag on that cadence
+    // instead of stripping it everywhere and re-clamping the confirmed price.
+    const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || 'quarterly';
     for (const ladder of FREQUENCY_LADDER) {
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
@@ -16666,6 +16917,19 @@ async function buildPricingBundle(estimate) {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
       };
+      // The operator's below-floor acknowledgement covered ONE computed
+      // price at the SAVED pest cadence — alternate customer-selectable
+      // cadences replay with the discount but WITHOUT the breach flag, so
+      // the lawn floors cap them exactly like unapproved lawn ladder rows
+      // (codex P1 on #2947 round 7). Fails closed: an unidentifiable saved
+      // cadence strips the flag from every replay.
+      if (inputsForFrequency.manualDiscount?.floorBreachAcknowledged === true
+        && normalizePestCadence(ladder.engineFrequency) !== savedPestFrequency) {
+        inputsForFrequency.manualDiscount = {
+          ...inputsForFrequency.manualDiscount,
+          floorBreachAcknowledged: false,
+        };
+      }
       try {
         const engineResult = generateEstimate(inputsForFrequency);
         if (!anchorEngineResult) anchorEngineResult = engineResult;

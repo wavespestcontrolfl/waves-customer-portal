@@ -291,6 +291,22 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Self-Booking customers-only mode — /book requires a verified current
+  // customer (portal OTP bearer) or an estimate-token entry; bookings that
+  // would mint a NEW customer are refused with a get-a-quote handoff (owner
+  // directive 2026-07-23: new people quote first, they don't self-schedule).
+  // The client learns the mode via GET /booking/config `customers_only`;
+  // /booking/confirm enforces it server-side regardless of what the client
+  // shows. Dark until Adam flips it in prod.
+  bookingCustomersOnly: isProd ? process.env.GATE_BOOKING_CUSTOMERS_ONLY === 'true' : true,
+
+  // Portal "Pay now" — authenticated /billing/balance includes the
+  // customer's open-invoice pay links (`openInvoices`) so the Billing tab
+  // can offer the existing tokenized /pay checkout in-app instead of the
+  // audit's pay-a-balance dead end (S2-1). Read-only surface over invoices
+  // that already exist; gate off = payload byte-identical to today.
+  portalPayNow: isProd ? process.env.GATE_PORTAL_PAY_NOW === 'true' : true,
+
   // Estimate accept — widen existing-appointment detection to ANY upcoming
   // pending/confirmed appointment belonging to the estimate's customer (not
   // just rows already linked to the estimate). A match swaps the accept
@@ -732,6 +748,24 @@ const gates = {
   // page are NOT behind this gate — their bars are already live.
   // Kill switch: unset GATE_BOOK_AI_SEARCH.
   bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
+
+  // Recipient double opt-in (#2948 follow-up): newly added on-location
+  // contacts get a "Reply YES" confirmation text, and appointment texts to
+  // them hold until confirmed. Double-dark: this gate AND the
+  // recipient_optin_request sms_templates row (seeded inactive) must both
+  // be on before anything sends. Pre-existing contacts are grandfathered
+  // (no recipient_optin row = allowed). Kill switch: unset
+  // GATE_RECIPIENT_DOUBLE_OPTIN.
+  recipientDoubleOptin: isProd ? process.env.GATE_RECIPIENT_DOUBLE_OPTIN === 'true' : true,
+
+  // Multi-service public booking (owner-authorized 2026-07-23): /book can
+  // select 2-3 services in one visit — composite service key through the
+  // same signed-offer path, summed duration, joined label. Exposed to the
+  // client via GET /api/booking/config as `multi_service` (fail-closed:
+  // the selector only renders when the portal affirms; the server also
+  // refuses composite keys while the gate is off). Kill switch: unset
+  // GATE_MULTI_SERVICE_BOOKING.
+  multiServiceBooking: isProd ? process.env.GATE_MULTI_SERVICE_BOOKING === 'true' : true,
 
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default

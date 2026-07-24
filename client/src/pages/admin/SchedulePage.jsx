@@ -47,8 +47,6 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
-import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -6520,16 +6518,28 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
 }
 
 // Whether a product controls something a tech would list as a target.
-// Fertilizers, adjuvants/surfactants, soil amendments, and growth regulators
-// don't — their cards skip the Targets picker. Unknown catalog rows keep it.
+// Adjuvants/surfactants, soil amendments/wetting agents, and growth
+// regulators don't — their cards skip the Targets picker. Fertilizer-family
+// products DO (owner request 2026-07-23): their targets are the nutrition
+// goals of the application (green-up, iron chlorosis, potassium deficiency),
+// prefilled from the catalog like pest targets. Unknown catalog rows keep it.
 export function productControlsTargets(product) {
   const category = String(
     product?.category || product?.product_category || "",
   ).toLowerCase();
   if (!category) return true;
-  return !/(fert|adjuvant|surfactant|soil|moisture|biostimulant|micronutrient|growth regulator|pgr)/.test(
+  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
     category,
   );
+}
+
+// Fertilizer-family products (incl. micros/biostimulants) target nutrition
+// goals rather than pests — their picker swaps to the nutrition suggestions.
+export function productTargetsNutrition(product) {
+  const category = String(
+    product?.category || product?.product_category || "",
+  ).toLowerCase();
+  return /(fert|micronutrient|biostimulant)/.test(category);
 }
 
 function requiresLinearFt(method) {
@@ -7119,22 +7129,17 @@ function readVideoDurationMs(file) {
 // Tech capture — record a clip (native camera) → tag the action → upload direct to
 // S3 (presigned PUT) → it lands in the recap. All optional; flag-gated, pest only.
 
-// ── Zone marking (satellite coverage PR 2, flag: zone-marking-v1) ────────────
-// The tech marks WHERE each chipped area actually is on the property's
-// satellite image. Shapes post as completion `zoneShapes` and persist into
-// property_zones.geometry_image (the PR 1 write path), which lights up the
-// satellite coverage map on the customer report. Coordinates are normalized
-// 0-1 against the 640x340 image; circle radius normalizes against the SHORT
-// side (r = px/340) to match the server contract. Existing marks preload for
-// confirm/adjust, but only TOUCHED labels resubmit — resubmitting an
-// untouched mark would restamp its drift `ref` with today's image params
-// even though the shape was drawn against older imagery.
+// ── Zone marking (satellite coverage) ────────────────────────────────────────
+// Marks WHERE each chipped area actually is on the property's satellite
+// image; shapes persist into property_zones.geometry_image, which lights up
+// the satellite coverage map on the customer report. Coordinates are
+// normalized 0-1 against the 640x340 image; circle radius normalizes against
+// the SHORT side (r = px/340) to match the server contract.
+// No longer rendered in the completion flow (retired 2026-07-23 in favor of
+// the traced Treatment Zone Mapper) — the property-capture UI in
+// Customer360ProfileV2 still uses it to record zone geometry.
 const ZONE_MARK_DEFAULT_R = 0.07;
 const ZONE_MARK_MIN_RECT = 0.02;
-
-function normalizeZoneMarkLabel(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
 
 export function ZoneMarkingStep({
   map,
@@ -8097,21 +8102,19 @@ export function CompletionPanel({
     defaultTreeShrubCloseout(service),
   );
   const [areasServiced, setAreasServiced] = useState([]);
-  // Zone marking (satellite coverage, flag zone-marking-v1). zoneMarks keys
-  // by chip label and holds THIS session's edits (null = tech cleared it);
-  // zonePreloads keys by normalized label and holds the property's existing
-  // geometry_image shapes for confirm/adjust. Only labels in zoneDirtyRef
-  // resubmit — resubmitting an untouched preload would restamp its drift
-  // `ref` with today's image params.
-  const { enabled: zoneMarkingFlag } = useFeatureFlagReady("zone-marking-v1");
-  const [zoneMarks, setZoneMarks] = useState({});
-  const [zonePreloads, setZonePreloads] = useState({});
+  // Property satellite basemap (bait-station marking). The manual per-area
+  // zone-mark widget this also fed was retired 2026-07-23 — the traced
+  // Treatment Zone Mapper is the report's coverage-map source now.
   const [propertyMap, setPropertyMap] = useState(null);
-  // Image params restored from a saved draft (checkout detour) — lets submit
-  // stamp the drift ref for marks drawn pre-detour even if the live
-  // /property-map refetch hasn't resolved yet.
+  // Image params restored from a saved draft (checkout detour) — lets a
+  // restored station submit stamp the drift ref for pins placed pre-detour
+  // even if the live /property-map refetch hasn't resolved yet.
   const [zoneMapImageFallback, setZoneMapImageFallback] = useState(null);
-  const zoneDirtyRef = useRef(new Set());
+  // Traced treatment-zone linear footage (Treatment Zone Mapper): prefills a
+  // perimeter-spray product row's Linear ft so the tech doesn't retype the
+  // footage the trace already measured. Fail-soft — no trace (or gate off)
+  // just leaves the field manual.
+  const [tracedLinearFt, setTracedLinearFt] = useState(null);
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
 
@@ -8153,13 +8156,12 @@ export function CompletionPanel({
   const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
   const stationNewSeqRef = useRef(0);
 
-  // Satellite basemap + the property's existing zone marks. Preloads land in
-  // zonePreloads (normalized-label keyed) so visit N+1 is confirm/adjust,
-  // never a redraw — and never dirty unless the tech actually touches one.
-  // Station pins ride the same payload; the fetch runs when either marking
-  // surface is on.
+  // Satellite basemap + the property's existing bait-station pins. The fetch
+  // runs only when the station surface is on — the manual zone-mark step that
+  // also consumed this payload was retired in favor of the traced Treatment
+  // Zone Mapper.
   useEffect(() => {
-    if ((!zoneMarkingFlag && !stationFeatureOn) || !service?.id) return undefined;
+    if (!stationFeatureOn || !service?.id) return undefined;
     let cancelled = false;
     adminFetch(`/admin/dispatch/${service.id}/property-map`)
       .then((res) => {
@@ -8182,55 +8184,33 @@ export function CompletionPanel({
           || Number(res.nextStationNumber)
           || 1,
         );
-        const preload = {};
-        const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
-        (res.zones || []).forEach((zone) => {
-          const shape = zone.geometryImage;
-          if (!shape || typeof shape !== "object") return;
-          if (shape.type === "rect" || shape.type === "circle") {
-            preload[normalizeZoneMarkLabel(zone.label)] = shape;
-          } else if (shape.type == null && [shape.x, shape.y, shape.w, shape.h].every(norm01)) {
-            // The report renderer treats a typeless {x,y,w,h} as a rect
-            // (satellite-treatment-map normalizeRectGeometry) — preload those
-            // legacy marks too, or the step would show them as unmarked and
-            // invite an accidental overwrite. Normalized coords only; the
-            // renderer's pixel-space branch has no meaning on this 0-1 canvas.
-            preload[normalizeZoneMarkLabel(zone.label)] = { ...shape, type: "rect" };
-          }
-        });
-        setZonePreloads(preload);
       })
       .catch(() => { if (!cancelled) setPropertyMap(null); });
     return () => { cancelled = true; };
-  }, [zoneMarkingFlag, stationFeatureOn, service?.id]);
+  }, [stationFeatureOn, service?.id]);
 
-  // What the marking step renders: this session's edit if present (null =
-  // cleared), else the property's preloaded shape.
-  const zoneSpatialAreas = zoneMarkingFlag
-    ? areasServiced.filter((a) => !AREAS_BY_SERVICE.universal.includes(a))
-    : [];
-  const zoneMarksForDisplay = {};
-  zoneSpatialAreas.forEach((label) => {
-    const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
-    const mark = local !== undefined ? local : zonePreloads[normalizeZoneMarkLabel(label)];
-    if (mark) zoneMarksForDisplay[label] = mark;
-  });
-  const setZoneMark = (label, shape) => {
-    zoneDirtyRef.current.add(label);
-    setZoneMarks((prev) => ({ ...prev, [label]: shape }));
-  };
-  const clearZoneMark = (label) => {
-    // Removing a mark drawn THIS session is local-only. Removing a PRELOADED
-    // mark must stay dirty so submit sends a clear tombstone — otherwise the
-    // step shows the area unmarked while property_zones.geometry_image keeps
-    // the stale shape and the report goes on painting it.
-    if (zonePreloads[normalizeZoneMarkLabel(label)]) {
-      zoneDirtyRef.current.add(label);
-    } else {
-      zoneDirtyRef.current.delete(label);
-    }
-    setZoneMarks((prev) => ({ ...prev, [label]: null }));
-  };
+  // Existing traced treatment zone for this visit — its measured linear feet
+  // prefill the perimeter-spray Linear ft inputs (see addProduct /
+  // applyTracedTreatmentZone, which also backfills rows added before this
+  // fetch resolves). Same endpoint the Treatment Zone Mapper modal reads;
+  // enabled:false (gate off) or no trace resolves to null and leaves the
+  // field manual.
+  useEffect(() => {
+    if (!service?.id) return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/tech/services/${service.id}/treatment-zone`, {
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        applyTracedTreatmentZone(data?.treatmentZone || null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id]);
 
   // Bait station display list + edit handlers (station-map-v1). Moves
   // overlay preloaded shapes; retired stations drop from display but submit
@@ -8329,7 +8309,13 @@ export function CompletionPanel({
     const counts = stationProgram === "trapping"
       ? { traps_checked: String(activeKeys.length - inaccessible) }
       : {
-        total_stations: String(activeKeys.length),
+        // total_stations is termite-only since 2026-07-23: the rodent
+        // schema retired it (the map's pins ARE the roster), and writing it
+        // there would trip the unknown-field rejection at submit
+        // (codex P1 on #2963).
+        ...(stationProgram === "termite"
+          ? { total_stations: String(activeKeys.length) }
+          : {}),
         stations_checked: String(activeKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
@@ -8537,12 +8523,13 @@ export function CompletionPanel({
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
-  // Tree & Shrub closeout AI review (flag-gated). treeShrubReview holds the preview
-  // { scores, observations, findings }; decisions live in the summary and are
-  // captured into the ref on Complete + Send so the submit body can carry them.
+  // Tree & Shrub AI photo review. Runs silently in the background (owner
+  // 2026-07-23: no closeout card, no tech review step) — treeShrubReview holds
+  // the signed preview { scores, observations, findings } so the submit body
+  // can carry it and the server persists the scores without a second vision
+  // pass. Absent (still analyzing / preview failed) → the server auto-scores
+  // at completion and the report finalizes on its own.
   const [treeShrubReview, setTreeShrubReview] = useState(null);
-  const [treeShrubAiStatus, setTreeShrubAiStatus] = useState("idle"); // idle|pending|complete|failed
-  const treeShrubDecisionsRef = useRef(null);
   const treeShrubScoredKeyRef = useRef("");
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
@@ -8573,6 +8560,10 @@ export function CompletionPanel({
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Tree & shrub / palm visits swap the Targets picker suggestions to the
+  // ornamental pest list (see targetPickerConfig).
+  const isTreeShrub =
+    !isTypedFindings && ["tree_shrub", "palm"].includes(serviceLineForCloseout);
   // Closeout observation/recommendation chips are scoped to the service line
   // (lawn / tree_shrub / mosquito / termite / rodent / palm each have their own
   // set; pest is the fallback). Pest-primary combined names resolve back to pest
@@ -8590,12 +8581,32 @@ export function CompletionPanel({
     serviceLineForCloseout === "pest" &&
     !backfillQuietCloseout;
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
+  // Areas-treated chips are structural-pest rooms/zones. They describe
+  // neither plant work (T&S — the Treatment Zone trace records where the
+  // visit treated; owner 2026-07-23), nor rodent visits (the typed forms
+  // carry their own location semantics — trap activity locations, entry
+  // points, sanitation areas, the station map; owner 2026-07-23), nor bed
+  // bug treatments (an interior service whose typed form records the rooms
+  // treated directly — the chip list doesn't even offer a bedroom; owner
+  // 2026-07-23). Keyed on the completion profile's TYPED FINDINGS TYPE,
+  // not the name-derived service line: a pest-primary bundle like
+  // "Pest & Rodent Control" classifies as the rodent LINE by name while
+  // its completion is a generic pest form (rodent work is a companion),
+  // and hiding areas there would lose where the pest treatment went
+  // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
+  // off the same flag so hidden state can't ride a restored draft into
+  // the submit.
+  const areasTreatedHidden = treeShrubCloseoutOn
+    || [
+      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
+      "rodent_inspection", "rodent_bait_station", "bed_bug",
+    ].includes(service.completionProfile?.findingsType);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
-  // dual-vision scoring lives server-side (no persistence) and returns the findings
-  // the tech reviews. Keyed by a photo FINGERPRINT (not just count) so swapping a
-  // photo for another at the same count still re-runs. Fully guarded — a failure
-  // just shows "Will finalize after" and the server's auto-score still backstops.
+  // dual-vision scoring lives server-side (no persistence); the result rides the
+  // submit body silently. Keyed by a photo FINGERPRINT (not just count) so swapping
+  // a photo for another at the same count still re-runs. Fully guarded — on failure
+  // the server's auto-score at completion still backstops.
   useEffect(() => {
     if (!treeShrubCloseoutOn) return undefined;
     const photos = (servicePhotos || []).filter((p) => p && p.data);
@@ -8609,8 +8620,6 @@ export function CompletionPanel({
     // or fails, completing must NOT submit the stale scores (the server's count check
     // could otherwise persist them against the new photos). Null → server auto-scores.
     setTreeShrubReview(null);
-    treeShrubDecisionsRef.current = null;
-    setTreeShrubAiStatus("pending");
     // adminFetch resolves to the parsed JSON (and throws on non-2xx) — consume it
     // directly; do NOT treat the result as a Response.
     adminFetch(`/admin/dispatch/${service.id}/tree-shrub/assess-preview`, {
@@ -8620,17 +8629,31 @@ export function CompletionPanel({
       .then((result) => {
         if (cancelled) return;
         if (result && result.scores) {
-          // Tag with the photo fingerprint so the closeout summary resets the tech's
-          // per-finding decisions when a NEW preview (new photos) arrives.
           setTreeShrubReview({ ...result, _fingerprint: fingerprint });
-          setTreeShrubAiStatus("complete");
-        } else {
-          setTreeShrubAiStatus("failed");
         }
       })
-      .catch(() => { if (!cancelled) setTreeShrubAiStatus("failed"); });
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [treeShrubCloseoutOn, servicePhotos, service.id]);
+  // Lines that dropped the Areas-treated picker (T&S 2026-07-23, rodent
+  // 2026-07-23) — a draft saved BEFORE the change can still restore stale
+  // room/zone chips into hidden state, where the tech can't see or clear
+  // them and the submit/recap/report paths would still consume them (codex
+  // P3 on #2950). Clear the state whenever it appears so every consumer
+  // sees empty. The same applies to each restored product's
+  // applicationArea: with the chips gone the per-product area selector
+  // never renders (it requires areasServiced.length), so a stale
+  // 'Kitchen'-style value would submit invisibly from p.applicationArea
+  // (codex P3 r2 on #2950).
+  useEffect(() => {
+    if (!areasTreatedHidden) return;
+    if (areasServiced.length) setAreasServiced([]);
+    setSelectedProducts((prev) => (
+      prev.some((p) => p && p.applicationArea)
+        ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
+        : prev
+    ));
+  }, [areasTreatedHidden, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -9285,14 +9308,10 @@ export function CompletionPanel({
         customerRecap,
         recapSource,
         areasServiced,
-        // Zone marks survive the billing-409 checkout detour like everything
-        // else; the dirty list rides along so restore keeps resubmit intent.
-        // The image params the marks were drawn against ride too (center/zoom
-        // /size only — never the live-display-only image URL), so a restored
-        // draft can submit with the CORRECT drift ref even before the
-        // /property-map refetch resolves.
-        zoneMarks,
-        zoneDirty: [...zoneDirtyRef.current],
+        // The satellite image params the station pins were placed against
+        // ride along (center/zoom/size only — never the live-display-only
+        // image URL), so a restored draft can submit with the CORRECT drift
+        // ref even before the /property-map refetch resolves.
         zoneMapImage: propertyMap?.available && propertyMap.image
           ? {
             center: propertyMap.image.center || null,
@@ -9381,7 +9400,6 @@ export function CompletionPanel({
     customerRecap,
     recapSource,
     areasServiced,
-    zoneMarks,
     stationNew,
     stationMoves,
     stationStatuses,
@@ -9465,17 +9483,12 @@ export function CompletionPanel({
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
       // dedupe, so re-selecting can't submit both strings). Other values pass through.
-      Array.isArray(savedDraft.areasServiced)
+      // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
+      // areas — a pre-change draft's chips would sit invisible in state (codex P3
+      // on #2950); the areasTreatedHidden clearing effect backstops any other path.
+      !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
-    );
-    setZoneMarks(
-      savedDraft.zoneMarks && typeof savedDraft.zoneMarks === "object"
-        ? savedDraft.zoneMarks
-        : {},
-    );
-    zoneDirtyRef.current = new Set(
-      Array.isArray(savedDraft.zoneDirty) ? savedDraft.zoneDirty : [],
     );
     setZoneMapImageFallback(
       savedDraft.zoneMapImage && typeof savedDraft.zoneMapImage === "object"
@@ -10073,16 +10086,24 @@ export function CompletionPanel({
     // the Sq ft field at the turf profile's treatable area and derive Total =
     // rate × area / 1,000 in the rate's own unit. Both stay editable; a
     // hand-edited Total is never recomputed (see updateProduct).
+    // Perimeter sprays start from the traced barrier's measured footage
+    // (Treatment Zone Mapper) so the tech doesn't retype what the trace
+    // already measured. Editable as before.
     const prefillArea =
       areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
         ? Number(lawnSqftForPrefill)
-        : "";
+        : areaRequirement?.unit === "linear_ft" && Number(tracedLinearFt) > 0
+          ? Number(tracedLinearFt)
+          : "";
     // A "/gal" rate is a mix concentration — rate × sqft would fabricate an
     // applied amount that really depends on carrier volume, so leave Total
-    // blank for the tech to enter.
-    const prefillTotal = defaultUnit.endsWith("/gal")
-      ? ""
-      : derivedTotalAmount(prefillRate, prefillArea);
+    // blank for the tech to enter. A linear-ft prefill derives nothing
+    // either: the derived Total is a per-1,000-sqft calculation and has no
+    // meaning against perimeter footage.
+    const prefillTotal =
+      defaultUnit.endsWith("/gal") || areaRequirement?.unit === "linear_ft"
+        ? ""
+        : derivedTotalAmount(prefillRate, prefillArea);
     setSelectedProducts((prev) => [
       ...prev,
       {
@@ -10154,6 +10175,26 @@ export function CompletionPanel({
       defaultUnit: substitution.rateUnit || "oz",
     });
   }
+  // A fresh trace saved from the Treatment Zone Mapper: adopt its measured
+  // footage and fill any perimeter-spray rows whose Linear ft is still empty.
+  // A typed value is the tech's actual and is never overwritten.
+  function applyTracedTreatmentZone(zone) {
+    const ft = Number(zone?.linear_ft);
+    if (!Number.isFinite(ft) || ft <= 0) return;
+    const rounded = Math.round(ft);
+    setTracedLinearFt(rounded);
+    setSelectedProducts((prev) =>
+      prev.map((p) => {
+        const areaRequirement = requiredApplicationArea(
+          productApplicationMethod(p, serviceTypeForArea),
+          serviceTypeForArea,
+        );
+        if (areaRequirement?.unit !== "linear_ft") return p;
+        if (Number(p.areaValue) > 0) return p;
+        return { ...p, areaValue: rounded, areaUnit: "linear_ft" };
+      }),
+    );
+  }
   function removeProduct(productId) {
     if (generating) return;
     setSelectedProducts((prev) =>
@@ -10175,6 +10216,15 @@ export function CompletionPanel({
               next.areaValue = "";
             }
             next.areaUnit = areaRequirement.unit;
+            // Switching onto perimeter spray starts from the traced barrier's
+            // measured footage when the field is empty (typed values win).
+            if (
+              areaRequirement.unit === "linear_ft" &&
+              !(Number(next.areaValue) > 0) &&
+              Number(tracedLinearFt) > 0
+            ) {
+              next.areaValue = Number(tracedLinearFt);
+            }
           } else {
             next.areaUnit = "";
             next.areaValue = "";
@@ -10686,49 +10736,6 @@ export function CompletionPanel({
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
         areasServiced,
-        // Satellite zone marks: only labels the tech TOUCHED this session,
-        // stamped with the image params they were drawn against (drift ref).
-        // Shape WRITES post only when EVERY selected spatial area is marked —
-        // the report switches to satellite mode the moment any zone carries
-        // geometry_image and drops schematic-only zones, so a partial post
-        // would publish a coverage map missing treated areas. CLEARS (tech
-        // removed a preloaded mark) always post: suppressing one would keep
-        // painting a mark the tech just said is wrong. Image params fall back
-        // to the draft-saved copy so a restore after the checkout detour can
-        // submit before the /property-map refetch resolves.
-        ...(zoneMarkingFlag
-          ? (() => {
-            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
-            if (!image) return {};
-            const ref = {
-              lat: image.center?.lat,
-              lng: image.center?.lng,
-              zoom: image.zoom,
-              width: image.width || 640,
-              height: image.height || 340,
-              capturedAt: new Date().toISOString(),
-            };
-            const effectiveMark = (label) => {
-              const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
-              return local !== undefined ? local : (zonePreloads[normalizeZoneMarkLabel(label)] || null);
-            };
-            const allMarked = zoneSpatialAreas.length > 0
-              && zoneSpatialAreas.every((label) => effectiveMark(label));
-            const dirty = [...zoneDirtyRef.current].filter((label) => areasServiced.includes(label));
-            const writes = allMarked
-              ? dirty
-                .filter((label) => zoneMarks[label])
-                .map((label) => ({ areaLabel: label, shape: { ...zoneMarks[label], ref } }))
-              : [];
-            const clears = dirty
-              .filter((label) => Object.prototype.hasOwnProperty.call(zoneMarks, label)
-                && zoneMarks[label] == null
-                && zonePreloads[normalizeZoneMarkLabel(label)])
-              .map((label) => ({ areaLabel: label, clear: true }));
-            const shapes = [...writes, ...clears];
-            return shapes.length ? { zoneShapes: shapes } : {};
-          })()
-          : {}),
         // Bait station pins + this visit's statuses (station-map-v1).
         // Statuses post for EVERY active station — 'ok' is the zero-tap
         // default, so an untouched map still records a full check. Shapes
@@ -10780,9 +10787,11 @@ export function CompletionPanel({
         observations: reportObservations,
         recommendations: reportRecommendations,
         lawnAssessmentId,
-        // Tree & Shrub tech-reviewed assessment (flag-gated). When the closeout AI
-        // review ran, carry the scores + the tech's confirm/hide/edit decisions so
-        // the server persists THOSE (no re-score). Absent → server auto-scores.
+        // Tree & Shrub AI photo assessment. When the background review ran,
+        // carry the signed scores so the server persists them without a second
+        // vision pass. There is no tech review step (owner 2026-07-23) — every
+        // finding rides as its default "monitor" action, which keeps the
+        // report's signals-only language. Absent → server auto-scores.
         treeShrubReview:
           treeShrubCloseoutOn && treeShrubReview && treeShrubReview.scores
             ? {
@@ -10793,8 +10802,7 @@ export function CompletionPanel({
                 scoredCount: treeShrubReview.scoredCount,
                 // Server HMAC proving these scores came from /assess-preview (anti-tamper).
                 signature: treeShrubReview.signature,
-                decisions: treeShrubDecisionsRef.current
-                  || (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
+                decisions: (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
               }
             : undefined,
         completionPhotos: servicePhotos.map((photo, index) => ({
@@ -11362,35 +11370,6 @@ export function CompletionPanel({
             animation: "slideIn 0.25s ease",
           }}
         >
-          {treeShrubCloseoutOn && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <TreeShrubCloseoutSummary
-                summary={{
-                  productsReady: selectedProducts.length > 0,
-                  protocolReady: true,
-                  photoCount: servicePhotos.length,
-                  areasTreated: (areasServiced || []).join(", "),
-                  smsEnabled: true,
-                  aiAnalysisStatus: treeShrubAiStatus === "idle" ? "pending" : treeShrubAiStatus,
-                  aiSummary: treeShrubReview?.aiSummary || "",
-                  suggestedCustomerAction: treeShrubReview?.suggestedCustomerAction || "",
-                  findings: treeShrubReview?.findings || [],
-                  scores: treeShrubReview?.scores || null,
-                  // Don't advertise one-tap completion while regulatory closeout fields
-                  // (bed sqft, pollinator status, IRAC/FRAC, product actuals) are still
-                  // required — the same gate handleSubmit enforces.
-                  canComplete: !submitting && servicePhotos.length >= 2 && !treeShrubCompletionBlocked,
-                }}
-                reviewKey={treeShrubReview?._fingerprint || ""}
-                completing={submitting}
-                onDecisionsChange={(d) => { treeShrubDecisionsRef.current = d; }}
-                onComplete={(decided) => {
-                  treeShrubDecisionsRef.current = decided?.findings || [];
-                  handleSubmit();
-                }}
-              />
-            </div>
-          )}
           {success && (
             <div
               style={{
@@ -12395,6 +12374,8 @@ export function CompletionPanel({
                     lat={service.lat ?? service.customer_latitude}
                     lng={service.lng ?? service.customer_longitude}
                     onClose={() => setZoneMapOpen(false)}
+                    onSaved={applyTracedTreatmentZone}
+                    appearance="light"
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
@@ -12911,16 +12892,26 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
-                      {productControlsTargets(
-                        (products || []).find(
+                      {(() => {
+                        // Fall back to the selected row's serialized category
+                        // when the catalog row is absent (protocol- or
+                        // substitution-added products), so fertilizer rows keep
+                        // the nutrition suggestions and excluded helper
+                        // categories stay hidden.
+                        const pickerProduct = (products || []).find(
                           (p) => String(p.id) === String(sp.productId),
-                        ),
-                      ) && (
+                        ) || sp;
+                        if (!productControlsTargets(pickerProduct)) return null;
+                        const picker = targetPickerConfig(pickerProduct, {
+                          isLawn,
+                          isTreeShrub,
+                        });
+                        return (
                         <ProductTargetsPicker
                           idSuffix={sp.productId}
                           targets={sp.targets}
-                          suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                          noun={isLawn ? "" : "pest"}
+                          suggestions={picker.suggestions}
+                          noun={picker.noun}
                           onChange={(next) =>
                             updateProduct(sp.productId, "targets", next)
                           }
@@ -12938,14 +12929,18 @@ export function CompletionPanel({
                             },
                           }}
                         />
-                      )}
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
               )}
             </Field>
-            {/* Areas serviced */}
-            {!quickComplete && (
+            {/* Areas serviced — hidden for Tree & Shrub and rodent lines
+                (owner 2026-07-23): the chips are structural-pest rooms/zones;
+                those visits carry their own location semantics (zone trace,
+                trap locations, entry points, station map). */}
+            {!quickComplete && !areasTreatedHidden && (
               <Field label="Areas treated">
                 {" "}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -12962,15 +12957,7 @@ export function CompletionPanel({
                       </Chip>
                     );
                   })}
-                </div>{" "}
-                <ZoneMarkingStep
-                  map={propertyMap}
-                  areas={zoneSpatialAreas}
-                  marks={zoneMarksForDisplay}
-                  onSetMark={setZoneMark}
-                  onClearMark={clearZoneMark}
-                  disabled={generating || success}
-                />
+                </div>
               </Field>
             )}
             {/* The customer-facing report summary is now auto-generated from the
@@ -14992,16 +14979,25 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
-                  {productControlsTargets(
-                    (products || []).find(
+                  {(() => {
+                    // Fall back to the selected row's serialized category when
+                    // the catalog row is absent (protocol- or substitution-
+                    // added products), so fertilizer rows keep the nutrition
+                    // suggestions and excluded helper categories stay hidden.
+                    const pickerProduct = (products || []).find(
                       (p) => String(p.id) === String(sp.productId),
-                    ),
-                  ) && (
+                    ) || sp;
+                    if (!productControlsTargets(pickerProduct)) return null;
+                    const picker = targetPickerConfig(pickerProduct, {
+                      isLawn,
+                      isTreeShrub,
+                    });
+                    return (
                     <ProductTargetsPicker
                       idSuffix={sp.productId}
                       targets={sp.targets}
-                      suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                      noun={isLawn ? "" : "pest"}
+                      suggestions={picker.suggestions}
+                      noun={picker.noun}
                       onChange={(next) =>
                         updateProduct(sp.productId, "targets", next)
                       }
@@ -15017,13 +15013,16 @@ export function CompletionPanel({
                         },
                       }}
                     />
-                  )}
+                    );
+                  })()}
                 </div>
               ))}
             </div>
           )}
-          {/* Areas Serviced */}
-          {!quickComplete && (
+          {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
+              2026-07-23): the chips are structural-pest rooms/zones; those
+              visits carry their own location semantics. */}
+          {!quickComplete && !areasTreatedHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
@@ -15052,15 +15051,6 @@ export function CompletionPanel({
                   );
                 })}
               </div>
-              <ZoneMarkingStep
-                map={propertyMap}
-                areas={zoneSpatialAreas}
-                marks={zoneMarksForDisplay}
-                onSetMark={setZoneMark}
-                onClearMark={clearZoneMark}
-                dark
-                disabled={generating || success}
-              />
             </div>
           )}
           {/* Customer recap + SMS preview removed (desktop) — the report summary is
@@ -15516,28 +15506,48 @@ function normalizeLabelTargets(value) {
   return v.map((t) => String(t).trim()).filter(Boolean);
 }
 
+// Species-specific, not category-broad (owner request 2026-07-23): the chips
+// a tech commits become the report's "targets tagged today", so "Ghost ants"
+// beats "ants" and "German cockroaches" beats "roaches".
 const PEST_TARGET_SUGGESTIONS = [
   "Ghost ants",
   "Big-headed ants",
+  "Crazy ants",
   "White-footed ants",
   "Carpenter ants",
   "Fire ants",
   "Argentine ants",
-  "American roaches",
-  "German roaches",
+  "Pharaoh ants",
+  "Rover ants",
+  "German cockroaches",
+  "American cockroaches",
+  "Smokybrown cockroaches",
+  "Australian cockroaches",
+  "Florida woods cockroaches",
+  "Wolf spiders",
+  "Widow spiders",
+  "Orb-weaver spiders",
   "Silverfish",
-  "Spiders",
   "Earwigs",
   "Millipedes",
   "Centipedes",
   "Springtails",
   "Booklice",
   "Crickets",
-  "Wasps / hornets",
+  "Paper wasps",
+  "Mud daubers",
+  "Yellowjackets",
+  "Drain flies",
+  "House flies",
   "Fleas",
   "Ticks",
-  "Pantry pests",
-  "Rodents",
+  "Bed bugs",
+  "Pantry moths & beetles",
+  "Subterranean termites",
+  "Drywood termites",
+  "Roof rats",
+  "Norway rats",
+  "House mice",
   "Mosquitoes",
   "Scorpions",
 ];
@@ -15548,6 +15558,7 @@ const LAWN_TARGET_SUGGESTIONS = [
   "Broadleaf weeds",
   "Crabgrass",
   "Nutsedge / sedge",
+  "Green kyllinga",
   "Dollarweed",
   "Doveweed",
   "Chamberbitter",
@@ -15555,18 +15566,73 @@ const LAWN_TARGET_SUGGESTIONS = [
   "Clover",
   "Goosegrass",
   "Torpedograss",
-  "Chinch bugs",
-  "Armyworms",
-  "Sod webworms",
-  "Grubs",
-  "Mole crickets",
+  "Annual bluegrass (Poa annua)",
+  "Southern chinch bugs",
+  "Fall armyworms",
+  "Tropical sod webworms",
+  "White grubs",
+  "Tawny mole crickets",
   "Fire ants",
   "Nematodes",
   "Brown patch / large patch",
   "Dollar spot",
   "Gray leaf spot",
   "Take-all root rot",
+  "Fairy ring",
+  "Pythium root rot",
 ];
+
+// Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
+// treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
+const ORNAMENTAL_TARGET_SUGGESTIONS = [
+  "Ficus whitefly",
+  "Rugose spiraling whitefly",
+  "Chilli thrips",
+  "Sri Lanka weevil",
+  "Aphids",
+  "Scale insects",
+  "Mealybugs",
+  "Spider mites",
+  "Leafminers",
+  "Caterpillars",
+  "Wood borers",
+  "Sooty mold (sap-feeder cleanup)",
+  "Fungal leaf spot",
+  "Powdery mildew",
+];
+
+// Fertilizer-family targets are the nutrition goal of the application — what
+// the feeding is meant to correct or stimulate, in customer-report language.
+const NUTRITION_TARGET_SUGGESTIONS = [
+  "Nitrogen green-up",
+  "Deep green color",
+  "Color & density",
+  "Iron chlorosis (yellowing turf)",
+  "Potassium deficiency",
+  "Root strength & stress tolerance",
+  "Balanced feeding",
+  "Micronutrient deficiency",
+  "Slow-release feeding",
+  "Winter hardiness",
+  "Magnesium deficiency (palms)",
+  "Manganese deficiency (palms)",
+  "Potassium deficiency (palms)",
+];
+
+// Which suggestion list / placeholder noun a product's Targets picker gets:
+// fertilizer-family products always take the nutrition goals; otherwise the
+// service line decides (lawn → weeds/turf pests/diseases, tree & shrub →
+// ornamental pests, pest default).
+function targetPickerConfig(product, { isLawn, isTreeShrub } = {}) {
+  if (productTargetsNutrition(product)) {
+    return { suggestions: NUTRITION_TARGET_SUGGESTIONS, noun: "nutrition" };
+  }
+  if (isLawn) return { suggestions: LAWN_TARGET_SUGGESTIONS, noun: "" };
+  if (isTreeShrub) {
+    return { suggestions: ORNAMENTAL_TARGET_SUGGESTIONS, noun: "pest" };
+  }
+  return { suggestions: PEST_TARGET_SUGGESTIONS, noun: "pest" };
+}
 
 // The standard field rig. The protocol mix amounts are shown for this tank so
 // the tech reads the ratios off one number they recognize.

@@ -487,9 +487,17 @@ router.get('/config', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {};
     res.json({
       enabled: isEnabled('selfBooking') && config.enabled !== false,
+      // Customers-only mode (GATE_BOOKING_CUSTOMERS_ONLY): the funnel must
+      // verify a current customer (portal OTP) before booking unless the
+      // entry carries an estimate token. /confirm enforces this server-side
+      // regardless — this flag just lets the client show the gate up front.
+      customers_only: isEnabled('bookingCustomersOnly'),
       // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
       // flag; the portal's own booking surfaces don't read this.
       ai_search: isEnabled('bookAiSearch'),
+      // Multi-service selector on /book — fail-closed dark-ship flag; the
+      // server independently refuses composite service keys while off.
+      multi_service: isEnabled('multiServiceBooking'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -649,6 +657,16 @@ function bookingSlotWindow(config = {}) {
 // server's authority for what each funnel service's visit takes. A known key
 // pins the duration outright; the caller-sent minutes then only matter for
 // unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
+// Pipeline stages that mark a row as a PROSPECT, not a current customer —
+// the customers-only gate refuses these even after a successful phone verify
+// (the quote wizard mints active 'new_lead' rows for anyone who runs it, and
+// admin moves unconverted leads through the rest; 'lost' is a lost lead —
+// 'churned' ex-customers are deliberately NOT here). Subset of
+// admin-customers.js CUSTOMER_STAGES; keep the two in sync.
+const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
+]);
+
 const BOOKING_FUNNEL_SERVICE_DURATIONS = {
   pest_control: 60,
   lawn_care: 60,
@@ -688,17 +706,44 @@ const BOOKING_FUNNEL_SERVICE_LABELS = {
 // "constructor" pass normalization and hand back inherited objects instead
 // of catalog values.
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-function normalizeBookingServiceKey(value) {
+
+// Multi-service bookings (GATE_MULTI_SERVICE_BOOKING, owner-authorized
+// 2026-07-23): a composite key is 2-3 funnel keys joined by '+', sorted
+// (canonical form) — it flows through the SAME signed-offer path as a
+// single key, so slot_sig covers the combined scope and summed duration.
+// Gate off ⇒ composites normalize to '' (the existing unknown-service
+// path: clamped duration, server-owned fallback label, and /confirm's
+// empty-serviceKey slot_sig rejection) — fail closed with zero new code
+// paths for crafted posts.
+const MAX_MULTI_BOOKING_SERVICES = 3;
+function normalizeBookingServiceKeys(value) {
   const text = String(value || '').trim().toLowerCase();
-  if (!text) return '';
-  if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, text)) return text;
-  return hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, text) ? BOOKING_FUNNEL_SERVICE_ALIASES[text] : '';
+  if (!text) return [];
+  const parts = text.split('+').map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('multiServiceBooking')) return [];
+    if (parts.length > MAX_MULTI_BOOKING_SERVICES) return [];
+  }
+  const keys = [];
+  for (const part of parts) {
+    let key = '';
+    if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, part)) key = part;
+    else if (hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, part)) key = BOOKING_FUNNEL_SERVICE_ALIASES[part];
+    if (!key) return []; // one unknown part invalidates the whole value
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys.sort();
+}
+function normalizeBookingServiceKey(value) {
+  return normalizeBookingServiceKeys(value).join('+');
 }
 // Allowlisted display label for a client-supplied service value ('' when the
-// value names no funnel service).
+// value names no funnel service). Composites join per-service labels.
 function canonicalBookingServiceLabel(value) {
-  const key = normalizeBookingServiceKey(value);
-  return key && hasOwn(BOOKING_FUNNEL_SERVICE_LABELS, key) ? BOOKING_FUNNEL_SERVICE_LABELS[key] : '';
+  const keys = normalizeBookingServiceKeys(value);
+  if (!keys.length) return '';
+  return keys.map((key) => BOOKING_FUNNEL_SERVICE_LABELS[key]).join(' + ');
 }
 
 // Stable location scope for signed offers: the server-resolved coordinates
@@ -722,7 +767,10 @@ function bookingOfferLocationKey(lat, lng) {
 const MIN_BOOKING_DURATION_MINUTES = 45;
 const MAX_BOOKING_DURATION_MINUTES = 90;
 function resolveBookingDuration(requested, config = {}, serviceKey = '') {
-  const catalog = BOOKING_FUNNEL_SERVICE_DURATIONS[serviceKey];
+  const keys = String(serviceKey || '').split('+').filter(Boolean);
+  const catalog = keys.length && keys.every((k) => hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, k))
+    ? keys.reduce((sum, k) => sum + BOOKING_FUNNEL_SERVICE_DURATIONS[k], 0)
+    : 0;
   if (catalog) return catalog;
   const n = parseInt(requested, 10);
   if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
@@ -1240,7 +1288,10 @@ async function createSelfBooking(payload = {}) {
       referrer_url,
       attribution,
       new_customer,
+      accept_token,
       payAtVisit,
+      customersOnly,
+      authedCustomer,
     } = payload;
 
     if (!slot_date || !slot_start) {
@@ -1293,6 +1344,73 @@ async function createSelfBooking(payload = {}) {
     // Resolve customer
     let custId = null;
     let estimate = null;
+    // "Current customer" is narrower than "row in customers" (Codex round-3
+    // P2): the public quote wizard upserts brand-new prospects as ACTIVE
+    // customers rows (pipeline_stage 'new_lead', public-quote.js), and the
+    // portal OTP verifies any active phone match — so a stranger could quote
+    // themselves into the table and walk through the gate. Rows still in a
+    // pre-customer pipeline stage are NOT verified customers here; they fall
+    // through to the standing refusal (whose quote-wizard CTA is exactly
+    // their path: finish the quote, accept, book via the accept link).
+    // Unknown/legacy/null stages fail OPEN — a real customer with an unset
+    // stage must never be locked out of booking. Won/active and even
+    // churned/dormant rows pass: a lapsed customer self-booking a visit is
+    // winback, not a stranger.
+    const verifiedCurrentCustomer = (authedCustomer
+      && !(customersOnly && PRE_CUSTOMER_PIPELINE_STAGES.has(String(authedCustomer.pipeline_stage || ''))))
+      ? authedCustomer : null;
+    // A known-customer identity (portal bearer, or an estimate bound by a
+    // server-issued token below) proves the ACCOUNT, not the typed address —
+    // and the committed booking dispatches to the bound customer row's
+    // address while capacity/slot-sig were checked against the SUBMITTED one
+    // (Codex P1/P2, rounds 1 + 5). So when an address was submitted, bind
+    // the booking to whichever of the account's property rows it matches
+    // (same addressMatchesCustomer rule as the customer_id path below); no
+    // match → refuse with a fix-it path instead of silently dispatching to
+    // the wrong door. No submitted address → the row's own address is the
+    // booking address, bind directly.
+    const bindCustomerRowByAddress = async (row) => {
+      const submittedLine1 = new_customer?.address_line1;
+      if (!submittedLine1) return { custId: row.id };
+      let matched = addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2)
+        ? row : null;
+      if (!matched) {
+        const accountId = row.account_id || row.id;
+        const accountRows = await db('customers')
+          .where(function () {
+            this.where('account_id', accountId).orWhere('id', accountId);
+          })
+          .whereNot('id', row.id)
+          .whereNull('deleted_at')
+          .andWhere(function () {
+            this.whereNull('active').orWhere('active', true);
+          })
+          .limit(25);
+        matched = (accountRows || []).find(
+          (r) => addressMatchesCustomer(r, submittedLine1, new_customer?.zip, new_customer?.address_line2),
+        ) || null;
+      }
+      if (!matched) {
+        return {
+          error: {
+            ok: false,
+            status: 400,
+            error: "That address doesn't match what we have on file for your account. Double-check the street address, or call (941) 297-5749 and we'll get it updated.",
+          },
+        };
+      }
+      return { custId: matched.id };
+    };
+    // Verified portal bearer wins identity outright (customers-only gate):
+    // the row came from a JWT the route resolved server-side, so client-sent
+    // customer_id / phone-match / estimate identity paths below are all
+    // skipped via their existing `!custId` guards — a crafted body can't
+    // re-point a verified customer's booking at someone else.
+    if (verifiedCurrentCustomer) {
+      const bound = await bindCustomerRowByAddress(verifiedCurrentCustomer);
+      if (bound.error) return bound.error;
+      custId = bound.custId;
+    }
     // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
     // share token the caller possesses) may write a submitted unit onto an
     // existing record. Phone-on-file and the public address lookup are
@@ -1307,7 +1425,19 @@ async function createSelfBooking(payload = {}) {
       // book under that customer. Only verified estimates (admin/accepted,
       // source !== 'quote_wizard') resolve identity; quote handoffs are used for
       // PRICING only, via pricing_estimate_id.
-      if (!custId && estimate && estimate.source !== 'quote_wizard') {
+      //
+      // Under the customers-only gate, a RAW verified-estimate id is no longer
+      // enough (Codex round-5 P1): estimate UUIDs ride URLs/SMS/logs beside
+      // their HMACs, so id-without-token would let anyone who saw a link (or
+      // stripped its token) book as that estimate's customer, skipping the
+      // gate entirely. Gate on → this branch also demands the SHARE token —
+      // the legacy /book/:estimateToken page posts it — putting it on the
+      // same possession footing as the wizard branch below. Gate off →
+      // unchanged.
+      if (!custId && estimate && estimate.source !== 'quote_wizard'
+          && (!customersOnly
+            || (estimate.token && estimate_share_token
+              && String(estimate.token) === String(estimate_share_token)))) {
         custId = estimate.customer_id;
         unitBackfillAllowed = true;
       }
@@ -1331,6 +1461,103 @@ async function createSelfBooking(payload = {}) {
     // the customer would bypass the phone-on-file guard. It is used only as a
     // "this booking came from an estimate deep link" signal for the
     // customer-derived lead conversion after the booking commits (see below).
+
+    // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
+    // 2026-07-23): with no verified customer (portal bearer) and no
+    // estimate-bound identity, refuse BEFORE the typed-phone match and the
+    // new-customer mint below. Placement matters twice over: it stops
+    // strangers creating customer records, and it stops "I typed a phone
+    // number I know" from impersonating an existing customer without OTP.
+    // Estimate entries stay allowed two ways: identity resolved from a
+    // verified/share-token estimate above (custId set), or a valid HMAC
+    // pricing handoff (the one-time estimate-accept booking link, which
+    // legitimately creates the customer it prices for). The refusal carries
+    // the quote-wizard URL so the client renders a forward action, never a
+    // dead end.
+    if (customersOnly && !custId) {
+      const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+      // Two token-proven entries can pass: the quote-wizard pricing handoff
+      // (pricing_estimate_id + its HMAC — quote-first booking is the
+      // sanctioned funnel for new customers) and the accepted-estimate /
+      // admin-resend booking link (source_estimate_id + the namespaced
+      // accept HMAC). The namespace keeps the two token kinds from
+      // substituting for each other.
+      //
+      // But possession alone is NOT identity (Codex rounds 4-5: links
+      // forward, and anyone can mint a pricing handoff by running the
+      // public quote wizard). BOTH passes are therefore BOUND to the
+      // estimate the token names, never generic:
+      //   - the estimate's customer books AS that customer, through the
+      //     same address-to-account-property bind as the bearer path
+      //     (custId set here → the legacy typed-phone / customer_id paths
+      //     below are all skipped, so a self-minted handoff can no longer
+      //     re-point a booking at an unrelated on-file customer);
+      //   - a customer-less estimate books only if the typed phone matches
+      //     the estimate's own contact phone (its new-customer mint);
+      //   - a missing estimate, a vanished customer row, an address that
+      //     matches no account property, or a foreign contact all fall to
+      //     the refusal / fix-it responses below.
+      const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      const bindGateEstimate = async (estimateId) => {
+        const gateEstimate = await db('estimates')
+          .where('id', estimateId)
+          .first()
+          .catch(() => null);
+        if (!gateEstimate) return { valid: false };
+        if (gateEstimate.customer_id) {
+          const estCustomer = await db('customers')
+            .where('id', gateEstimate.customer_id)
+            .whereNull('deleted_at')
+            .first()
+            .catch(() => null);
+          if (!estCustomer) return { valid: false };
+          const bound = await bindCustomerRowByAddress(estCustomer);
+          if (bound.error) return { valid: true, error: bound.error };
+          return { valid: true, custId: bound.custId };
+        }
+        if (gateEstimate.customer_phone) {
+          const typed = last10(new_customer?.phone);
+          if (typed.length === 10 && typed === last10(gateEstimate.customer_phone)) {
+            return { valid: true, custId: null }; // the estimate's own contact, minting their record
+          }
+        }
+        return { valid: false };
+      };
+      let gatePass = { valid: false };
+      if (pricing_estimate_id && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+        // A valid HMAC proves the token was minted for THIS estimate id — but
+        // the wizard refreshes drafts in place, so the estimate's CURRENT
+        // shape may no longer be self-bookable (recalculated into commercial /
+        // manual / mixed-billing / bed-bug, or promoted by staff). Re-check
+        // the live row before honoring the token as a gate pass (Codex #2964
+        // r2) — a stale link falls to the standing refusal, whose quote CTA
+        // re-runs the wizard and mints a fresh, current link. The accept-token
+        // arm below is deliberately NOT shape-checked: accepted estimates are
+        // past 'draft' by definition and their booking link is the sanctioned
+        // post-accept path.
+        const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+        const handoffRow = await db('estimates').where('id', pricing_estimate_id).first().catch(() => null);
+        if (wizardDraftSelfServeBookable(handoffRow)) {
+          gatePass = await bindGateEstimate(pricing_estimate_id);
+        }
+      }
+      if (!gatePass.valid && source_estimate_id && accept_token
+          && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
+        gatePass = await bindGateEstimate(source_estimate_id);
+      }
+      if (gatePass.valid && gatePass.error) return gatePass.error;
+      if (gatePass.valid && gatePass.custId) custId = gatePass.custId;
+      if (!gatePass.valid) {
+        const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
+        return {
+          ok: false,
+          status: 403,
+          customersOnly: true,
+          quoteUrl: ESTIMATE_MARKETING_REDIRECTS['/quote'],
+          error: "Online self-scheduling is for current Waves customers. New to Waves? Get your free quote and we'll take care of the rest.",
+        };
+      }
+    }
 
     const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
     if (!custId && phoneDigits) {
@@ -1673,7 +1900,7 @@ async function createSelfBooking(payload = {}) {
     // posted values, then from the server-side estimate row. A crafted
     // ?service_label= string ("FREE Termite Treatment call 941-…") must never
     // land on the confirmation page, owner SMS, or dispatch surfaces.
-    const resolvedServiceType = BOOKING_FUNNEL_SERVICE_LABELS[serviceKey]
+    const resolvedServiceType = canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
       || cleanBookingServiceLabel(estimate?.services?.[0])
@@ -1740,12 +1967,17 @@ async function createSelfBooking(payload = {}) {
         // wizard drafts, so once staff promote the same estimate (sent/accepted/
         // declined) a not-yet-expired token must not stamp pricing from a quote
         // that is no longer the live self-serve draft.
-        const pricingEstData = pricingEstimate?.estimate_data || {};
-        const pricingEstimateEligible = !!pricingEstimate
-          && pricingEstimate.source === 'quote_wizard'
-          && pricingEstimate.status === 'draft'
-          && !pricingEstData.commercialEstimatedPricing
-          && !pricingEstData.quoteRequired;
+        // Shape eligibility of the CURRENT stored draft — shared predicate
+        // with the customers-only gate pass above (wizardDraftSelfServeBookable:
+        // wizard source, still 'draft', not commercial/manual, not mixed
+        // recurring+one-time, no bed-bug line). The wizard refreshes drafts in
+        // place, so a token minted while the quote was residential/recurring
+        // must not price a snapshot that has since changed shape — mixed
+        // billing in particular would stamp the recurring per-visit price
+        // while every one-time add-on silently vanishes from the series'
+        // billing (an undercharge).
+        const { wizardDraftSelfServeBookable: pricingShapeEligible } = require('../services/booking-pay-at-visit');
+        const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
@@ -2113,13 +2345,24 @@ async function createSelfBooking(payload = {}) {
     // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
     // Both must independently map to pest_control (a legit quarterly pest
     // booking signs pest and labels pest, so this only tightens the gate).
-    const signedServiceKeyIsPest =
-      RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    // Composite-aware: a multi-service booking whose SIGNED key includes
+    // pest_control is a pest booking for series purposes — serviceKeyFor's
+    // regex order would otherwise classify "mosquito+pest_control" (or the
+    // joined label) as mosquito and silently drop the quarterly series the
+    // customer just bought (#2957 codex P1). Component check runs on the
+    // signed key ONLY — the label side stays serviceKeyFor so a crafted
+    // label still can't conjure a pest series from a non-pest signature.
+    const signedKeyComponents = String(serviceKey || '').split('+').filter(Boolean);
+    const signedServiceKeyIsPest = signedKeyComponents.includes('pest_control')
+      || RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    const resolvedLabelIsPest = signedKeyComponents.length > 1
+      ? String(resolvedServiceType || '').toLowerCase().includes('pest control')
+      : RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
       && signedServiceKeyIsPest
-      && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+      && resolvedLabelIsPest;
     // Duplicate-series guard: don't seed a SECOND active series of the same
     // service family — the booked visit itself stays (the customer chose it),
     // but the 3 seeded follow-ups are what mint a duplicate quarterly series
@@ -2138,20 +2381,34 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Composite parents (Pest + add-ons) guard and seed as the PEST
+          // family: serviceKeyFor on the joined label would classify the
+          // series as mosquito/lawn and (a) miss an existing pest series
+          // (duplicate seeding) and (b) mint children that look like full
+          // combined visits at the pest cadence (#2957 codex r2).
+          const compositePest = signedKeyComponents.length > 1 && signedKeyComponents.includes('pest_control');
           const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
             customerId: custId,
             serviceId: serviceRow.service_id || null,
-            serviceType: serviceRow.service_type || resolvedServiceType,
+            serviceType: compositePest ? 'Pest Control' : (serviceRow.service_type || resolvedServiceType),
             excludeParentId: serviceRow.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
           if (matches.length > 0) return { kept: matches[0] };
+          const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
+          const pestEndMin = timeToMin(slot_start) + pestDuration;
+          const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, serviceRow, {
             pattern: 'quarterly',
             plannedCount: 4,
             skipWeekends: true,
             weekendShift: 'forward',
-            durationMinutes: duration,
+            // Children of a composite parent are PEST-ONLY visits: pest
+            // label, pest duration, pest window — the add-on services were
+            // a first-visit bundle; their cadences are set up by the office
+            // from the owner alert (v1 constraint, PR body).
+            durationMinutes: compositePest ? pestDuration : duration,
+            ...(compositePest ? { serviceType: 'Pest Control', windowEnd: pestWindowEnd } : {}),
             source: source || 'self_booked',
             // Follow-ups bill the even quotient — the parent already absorbed
             // the remainder cents — instead of inheriting the parent's price
@@ -2253,7 +2510,29 @@ async function createSelfBooking(payload = {}) {
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
     let leadConversion = null;
-    if (followUpRows.length > 0 || lead_id) {
+    // Handoff-derived trigger (Codex #2964 r3): recovery-rebuilt /book links
+    // and older quote links carry the estimate handoff but no ?lead= param,
+    // so a non-pest/one-time booking (which seeds no series) would strand the
+    // quote's lead in new_lead. A VERIFIED handoff names its wizard estimate,
+    // and the wizard stamps estimate_data.lead_id — derive the trigger from
+    // that when the client sent none. Trigger only, like lead_id itself: the
+    // conversion below stays keyed off the VERIFIED customer with
+    // enforceOriginating, so neither a forged lead_id nor a derived one can
+    // convert a lead the booker doesn't own. Best-effort — the booking is
+    // already committed.
+    let leadTrigger = !!lead_id;
+    if (!leadTrigger && followUpRows.length === 0 && pricing_estimate_id) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
+          leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
+        }
+      } catch (err) {
+        logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
+      }
+    }
+    if (followUpRows.length > 0 || leadTrigger) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         leadConversion = await convertLeadFromEvent({
@@ -2371,13 +2650,41 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     if (!isEnabled('selfBooking')) {
       return res.status(503).json({ error: 'Self-scheduling coming soon' });
     }
+    // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY): an optional portal
+    // bearer proves "current customer". Resolved server-side and passed
+    // AFTER the spread so the body can never forge it; absent/invalid
+    // headers just resolve to null and the gate inside createSelfBooking
+    // decides what that means.
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = isEnabled('bookingCustomersOnly') ? await resolveBearerCustomer(req) : null;
+    // A PRESENTED-but-expired access token gets authenticateCore's
+    // refreshable 401 instead of the customers-only refusal: 15-minute
+    // tokens routinely expire while a customer picks a slot, and the api
+    // client's fetchRaw path refreshes + retries on exactly this shape.
+    // Only the resolver stamps bearerTokenExpired, so absent/garbage
+    // headers still fall through to the gate refusal below.
+    if (!authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     const result = await createSelfBooking({
       ...req.body,
       referrer_url: req.body?.referrer_url || req.get('referer') || null,
-      // Server-resolved gate — set AFTER the spread so a client can't forge it.
+      // Server-resolved gates — set AFTER the spread so a client can't forge them.
       payAtVisit: isEnabled('bookingPayAtVisit'),
+      customersOnly: isEnabled('bookingCustomersOnly'),
+      // The resolved ROW (not just the id): createSelfBooking verifies the
+      // submitted service address against the account's properties before
+      // binding the booking, so it needs the bearer's customer record.
+      authedCustomer: authedCustomer || null,
     });
-    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    if (!result.ok) {
+      return res.status(result.status).json({
+        error: result.error,
+        // Customers-only refusal carries its forward action (the quote
+        // wizard) so the client never renders a dead end.
+        ...(result.customersOnly ? { customersOnly: true, quoteUrl: result.quoteUrl } : {}),
+      });
+    }
     // Sanitize HERE, not inside createSelfBooking — the service returns the
     // full row for internal callers; the public response gets the safe shape
     // (covers BOTH the fresh-booking body and the double-submit replay body).

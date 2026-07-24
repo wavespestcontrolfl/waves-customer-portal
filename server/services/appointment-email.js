@@ -99,6 +99,10 @@ async function loadCustomer(customerId) {
       // Service-contact slots so the email fallback can reach the same recipients
       // the appointment SMS targets (getAppointmentContacts reads these).
       ...SERVICE_CONTACT_COLUMNS,
+      // Consent stamp — getAppointmentContacts treats a row without it as
+      // unconsented, so a projection that omits it would mis-resolve the
+      // SMS recipient set this email mirrors (#2955 codex P2).
+      'service_contacts_consent_at',
     )
     .first();
 }
@@ -130,7 +134,10 @@ async function resolveRecipients(customer) {
   // mislabels the email (phone-only buyer/tenant slots made this common).
   const primary = getPrimaryContact(customer);
   const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
-  for (const c of getAppointmentContacts(customer, prefs || {})) {
+  // skipConsentGate: the consent artifact attests to receiving TEXTS; email
+  // routing follows notification prefs alone (see the recipient spec in
+  // tests/appointment-email-recipients.test.js).
+  for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);

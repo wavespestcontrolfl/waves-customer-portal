@@ -2198,3 +2198,69 @@ describe('parked review-signal insurance (astro #394/#395 wedge, 2026-07-22)', (
     expect(gh._calls.comments).toHaveLength(0);
   });
 });
+
+describe('p2OnlyMergeEligible — remediation-declined parks open the bar (2026-07-22 wedge)', () => {
+  const p2Body = (title) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**\n\ndetail`;
+  const p1Body = (title) => `**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  ${title}**\n\ndetail`;
+  const parkedDb = (reason, over = {}) => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: reason, ...over }] });
+
+  test('whitelist park on the current head + all-P2 completed round → eligible (declined)', async () => {
+    const db = parkedDb('fix changed frontmatter beyond the whitelist: hero_image.alt changed but no finding in this round targets it');
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.declined).toBe(true);
+    expect(r.p2Count).toBe(1);
+  });
+
+  test('no-change park (false-positive findings) → eligible (declined)', async () => {
+    const db = parkedDb('remediation produced no change (likely false-positive findings)');
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.declined).toBe(true);
+  });
+
+  test('declined park + any P1 finding still blocks', async () => {
+    const db = parkedDb('fix changed frontmatter beyond the whitelist: meta_description changed but no finding in this round targets it');
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') }), finding({ body: p1Body('b') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/blocking findings/);
+  });
+
+  test('infrastructure park (sync failure) does NOT open the bar — human hold', async () => {
+    const db = parkedDb(`portal row sync failed after fix commit ${HEAD.slice(0, 7)}: boom`);
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+  });
+
+  test('a declined park on an OLDER head does not count for the current head', async () => {
+    const db = parkedDb('fix changed frontmatter beyond the whitelist: x', { parked_head_sha: 'older9999999' });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+  });
+});
+
+describe('P3 badges are recognized as nonblocking (Codex round-1 on the declined-parks bar)', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const p3Body = (t) => `**<sub><sub>![P3 Badge](https://img.shields.io/badge/P3-lightgrey?style=flat)</sub></sub>  ${t}**\n\nd`;
+
+  test('findingSeverity parses a P3 badge as P3, not unbadged-P1', () => {
+    expect(rem.findingSeverity(p3Body('nit'))).toBe('P3');
+    expect(rem.findingSeverity('no badge at all')).toBe('P1');
+  });
+
+  test('declined park + P2/P3-only round → eligible (the astro #395 shape)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'remediation produced no change (likely false-positive findings)' }] });
+    const gh = makeGh({
+      reviewComments: [finding({ body: p2Body('a') }), finding({ body: p3Body('b') }), finding({ body: p3Body('c') })],
+      reviews: [codexReview()],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(3);
+  });
+});

@@ -25,6 +25,18 @@ html {
   text-size-adjust: 100%;
 }
 
+/* Kill the iOS rubber-band bounce on the document scroller (owner
+   2026-07-22): during the bounce the whole page — sticky header and fixed
+   bottom nav included — drags with the gesture, so the header appears to
+   move/detach with a blank gap above it while scrolling. Pinning the root
+   scroller keeps the header stationary and one size. Also prevents
+   accidental pull-to-refresh inside the app shell. Inner scrollers keep
+   their own overscroll-behavior rules below. */
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
 /* iOS Safari/WKWebView auto-zooms the whole page in whenever a focused form
    control has a font smaller than 16px, then leaves the user stranded
    zoomed-in with the fixed chrome (tab bar/header) clipped off-screen

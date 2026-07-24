@@ -39,10 +39,27 @@ const {
   normalizeProtocolKey,
 } = require('../protocol-reader');
 const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
+const { clearEstimatePricingCache } = require('../estimate-pricing-cache');
 const { executeProcurementTool } = require('./procurement-tools');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const PROPERTY_FACT_FALLBACK_SECRET = crypto.randomBytes(32);
+
+// Shared schema for the one sanctioned discount channel (owner decision
+// 2026-07-23). Rides as its own tool param — NEVER inside engineInputs.
+const OPERATOR_PRICE_ADJUSTMENT_SCHEMA = {
+  type: 'object',
+  description: `Operator-stated price adjustment. ONLY populate this when the operator explicitly asked to change the price in this conversation ("give them 5% off", "knock it from $117 to $110", "waive the $99 setup fee") — never volunteer a discount or waiver yourself, and never guess the reason. Applied server-side through the engine's manual-discount machinery after WaveGuard: PERCENT cuts each bucket by the percentage; FIXED spreads one dollar amount proportionally across recurring-annual + one-time work (for "take monthly from X to Y" on a recurring-only quote, FIXED value = (X−Y)×12; verify the resulting totals in the response and iterate if needed). Lawn floors cap the discount unless the operator EXPLICITLY authorizes going below floor — only then set floorBreachAcknowledged and tell the operator the quote will be below the protected floor. waiveSetupFee removes the $99 WaveGuard setup fee from the estimate AND the first invoice entirely — a true waiver, usable alone or alongside a discount.`,
+  properties: {
+    type: { type: 'string', enum: ['PERCENT', 'FIXED'], description: 'PERCENT of each discountable bucket, or FIXED total dollars spread across the estimate. Omit for a fee-waiver-only adjustment.' },
+    value: { type: 'number', description: 'Percent (0-100] or dollar amount, as the operator stated it. Omit for a fee-waiver-only adjustment.' },
+    label: { type: 'string', description: 'Customer-facing discount label shown on the estimate (≤80 chars), e.g. "Multi-service discount". Required with a discount; not used for a fee-waiver-only adjustment.' },
+    internalReason: { type: 'string', description: "The operator's stated reason, verbatim or near-verbatim (≤300 chars). Audit-only, never customer-visible. Always required." },
+    floorBreachAcknowledged: { type: 'boolean', description: 'true ONLY when the operator explicitly authorized pricing below the lawn program/margin floor after being told the floor would cap the discount' },
+    waiveSetupFee: { type: 'boolean', description: 'true ONLY when the operator explicitly said to waive the WaveGuard setup fee. Removes it from the customer estimate and the first invoice.' },
+  },
+  required: ['internalReason'],
+};
 
 const ESTIMATE_TOOLS = [
   {
@@ -89,6 +106,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
         yearBuilt: { type: 'number' },
         pool: { type: 'boolean' },
         poolCage: { type: 'boolean' },
+        operatorPriceAdjustment: OPERATOR_PRICE_ADJUSTMENT_SCHEMA,
         services: {
           type: 'object',
               description: 'Only services requested in this quote. The server selects the approved React presentation from priced line items. Recurring keys: pest, lawn, mosquito, treeShrub, termiteBait, rodentBait. One-time/specialty keys: oneTimePest, oneTimeLawn, lawnPestControl, oneTimeMosquito, germanRoach (multi-visit cleanout), pestInitialRoach (standalone cockroach treatment), flea, bedBug, stinging, rodentTrapping, trenching, boraCare, preSlabTermiticide. Never substitute generic pest for a specifically requested one-time or cockroach program.',
@@ -214,6 +232,10 @@ NEVER call this without first calling compute_estimate. If compute_estimate erro
           },
         },
         sqftSource: { type: 'string', enum: ['property_lookup', 'user_input'], description: 'Where the sqft came from' },
+        operatorPriceAdjustment: {
+          ...OPERATOR_PRICE_ADJUSTMENT_SCHEMA,
+          description: `${OPERATOR_PRICE_ADJUSTMENT_SCHEMA.description} Pass the SAME adjustment you gave compute_estimate — the server reprices with it and the totals cross-check refuses a mismatch.`,
+        },
         reasoning: { type: 'string', description: '1-3 sentences explaining why this estimate fits the situation (operator review only — never shown to the customer)' },
         assumptions: { type: 'array', items: { type: 'string' }, description: 'Things you inferred but did not confirm (empty array if none)' },
         uncertainty: { type: 'array', items: { type: 'string' }, description: 'Things you flagged as unsure (empty array if none)' },
@@ -235,6 +257,10 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
         customerEmail: { type: 'string' },
         address: { type: 'string', description: 'Full service address.' },
         engineInputs: { type: 'object', description: 'Exact engine_input returned by the latest compute_estimate call.' },
+        operatorPriceAdjustment: {
+          ...OPERATOR_PRICE_ADJUSTMENT_SCHEMA,
+          description: `${OPERATOR_PRICE_ADJUSTMENT_SCHEMA.description} The confirmation card shows the engine anchor vs the adjusted totals; on revision, re-state the adjustment (or omit it to remove the discount).`,
+        },
         reasoning: { type: 'string', description: 'Short operator-facing basis for service selections; stored internally, never in customer notes.' },
         assumptions: { type: 'array', items: { type: 'string' } },
         uncertainty: { type: 'array', items: { type: 'string' } },
@@ -297,6 +323,21 @@ Use for: per-estimate v2 rollout during Virginia's UAT. Reversible — flipping 
     },
   },
   {
+    name: 'set_estimate_presentation',
+    description: `Fix how a service is DISPLAYED on an existing estimate's customer-facing page without re-pricing: override the customer-visible service name (e.g. the operator says "that line should read German Roach Cleanout, not Bed Bug Treatment"). Display-layer only — the priced service key, dollars, scheduling, and conversion are untouched.
+IMPORTANT: if the estimate is rendering the WRONG SERVICE SECTION because the wrong service was priced (bed bug priced when the job is a roach cleanout), do NOT use this — revise the draft with the correct service key instead (Agent Estimate revision or a new draft) so price, section, and scheduling agree. Use this tool only for wording/label corrections the operator explicitly asked for. Accepts UUID, token, or customer phone. Works on draft/sent/viewed estimates; accepted estimates are frozen.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        estimate_identifier: { type: 'string', description: 'Estimate UUID, token, or customer phone (phone resolves to their most recent estimate)' },
+        service: { type: 'string', description: 'The priced service to relabel — its engine key (e.g. "pest_control", "bed_bug") or its current displayed name' },
+        display_name: { type: 'string', description: 'New customer-facing name for the service section (≤80 chars)' },
+        reason: { type: 'string', description: "The operator's stated reason for the relabel (audit-only, ≤300 chars)" },
+      },
+      required: ['estimate_identifier', 'service', 'display_name', 'reason'],
+    },
+  },
+  {
     name: 'toggle_show_one_time_option',
     description: `Flip the estimates.show_one_time_option flag on a single estimate. When true, the customer sees a segmented toggle above the price card that lets them switch between recurring pricing and one-time pricing. Default off — most customers see recurring-only. Use when the operator says "enable one-time option for [estimate]", "show one-time pricing to Adam", or "let them pick one-time or recurring". Accept UUID, token, or phone. When enabled is omitted, toggles the current value.
 Use for: customers who explicitly want to weigh both recurring and one-time. Reversible — flipping off hides the toggle without losing state.`,
@@ -326,6 +367,7 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
       case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
       case 'create_pending_estimate': return await createPendingEstimate(input);
       case 'create_agent_estimate_draft': return await createAgentEstimateDraft(input, actionContext);
+      case 'set_estimate_presentation': return await setEstimatePresentation(input, actionContext);
       case 'toggle_estimate_v2_view': return await toggleEstimateV2View(input);
       case 'toggle_show_one_time_option': return await toggleShowOneTimeOption(input);
       default: return { error: `Unknown estimate tool: ${toolName}` };
@@ -873,6 +915,11 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'manageroverride',
   'manualdiscount',
   'margindivisor',
+  // The sanctioned adjustment is a dedicated TOOL param — nested inside
+  // engineInputs it would ride the echoed/stored inputs (or, on the pending
+  // path, be silently promoted by the reprice spread) and desync the
+  // persisted estimate from what was priced (codex P2 on #2947).
+  'operatorpriceadjustment',
   'priceoverride',
   'pricingconfig',
   'priorqualifyingservices',
@@ -919,6 +966,126 @@ function forbiddenPricingInputError(input) {
   const forbidden = [...new Set(findForbiddenAgentPricingInputs(input))];
   if (!forbidden.length) return null;
   return `Agent Estimate cannot set price, cost, discount, margin, or manager-override inputs (${forbidden.slice(0, 8).join(', ')}). Remove them and let generateEstimate use DB-authoritative pricing.`;
+}
+
+// ─── Operator price adjustment (owner decision 2026-07-23) ─────────────────
+// The ONE sanctioned way a discount reaches agent pricing. It is a dedicated
+// tool param — never an engineInputs key, so the forbidden-input wall above
+// stays airtight — and it must carry the operator's own stated intent: the
+// model may populate it only from an explicit operator instruction, and every
+// path that persists it runs through the UI-confirm card, which shows the
+// engine anchor vs the adjusted totals (+ any floor breach) before anything
+// is written. The server maps it onto the engine's manualDiscount at reprice
+// time; it is never merged into echoed/stored engineInputs (same round-trip
+// rule as priorQualifyingServices).
+const OPERATOR_ADJUSTMENT_MAX_FIXED = 100000;
+
+function validateOperatorPriceAdjustment(raw) {
+  if (raw === undefined || raw === null) return { adjustment: null };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: 'operatorPriceAdjustment must be an object' };
+  }
+  const waiveSetupFee = raw.waiveSetupFee === true;
+  // Idempotent on its own output (codex P2 on #2947): a waiver-only spec
+  // normalizes to { type: null, value: 0, ... } and createPendingEstimate
+  // feeds the NORMALIZED object back through computeEstimate's validation at
+  // confirm time — present-but-empty discount fields must read as "no
+  // discount", not as a malformed one, or the confirmed write fails after a
+  // successful preview.
+  const hasDiscountFields = raw.type != null || (raw.value !== undefined && Number(raw.value) > 0);
+  if (!hasDiscountFields && !waiveSetupFee) {
+    return { error: 'operatorPriceAdjustment requires a discount (type + value + label) and/or waiveSetupFee: true' };
+  }
+  let type = null;
+  let value = 0;
+  let label = '';
+  if (hasDiscountFields) {
+    type = raw.type === 'PERCENT' ? 'PERCENT' : (raw.type === 'FIXED' ? 'FIXED' : null);
+    if (!type) return { error: 'operatorPriceAdjustment.type must be PERCENT or FIXED' };
+    value = Number(raw.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      return { error: 'operatorPriceAdjustment.value must be a positive number' };
+    }
+    if (type === 'PERCENT' && value > 100) {
+      return { error: 'operatorPriceAdjustment.value cannot exceed 100 percent' };
+    }
+    if (type === 'FIXED' && value > OPERATOR_ADJUSTMENT_MAX_FIXED) {
+      return { error: `operatorPriceAdjustment.value cannot exceed $${OPERATOR_ADJUSTMENT_MAX_FIXED}` };
+    }
+    label = String(raw.label || '').trim();
+    if (!label || label.length > 80) {
+      return { error: 'operatorPriceAdjustment.label (customer-facing, ≤80 chars) is required with a discount' };
+    }
+  }
+  const internalReason = String(raw.internalReason || '').trim();
+  if (!internalReason || internalReason.length > 300) {
+    return { error: 'operatorPriceAdjustment.internalReason (the operator\'s stated reason, ≤300 chars) is required' };
+  }
+  return {
+    adjustment: {
+      type,
+      value: Math.round(value * 100) / 100,
+      label: label || null,
+      internalReason,
+      floorBreachAcknowledged: raw.floorBreachAcknowledged === true,
+      waiveSetupFee,
+    },
+  };
+}
+
+function operatorAdjustmentToManualDiscount(adjustment) {
+  if (!adjustment || !adjustment.type || !(adjustment.value > 0)) return null;
+  return {
+    source: 'agent_operator',
+    type: adjustment.type,
+    value: adjustment.value,
+    label: adjustment.label,
+    internalReason: adjustment.internalReason,
+    eligibility: null,
+    // The eligibility sign-off is the operator's Confirm click on the card
+    // that displayed this exact adjustment — free-form operator discounts
+    // carry no preset eligibility requirements to confirm beyond that.
+    eligibilityConfirmed: true,
+    floorBreachAcknowledged: adjustment.floorBreachAcknowledged === true,
+  };
+}
+
+// Operator-facing disclosure for previews/results: what was asked, what the
+// engine actually applied, the pre-adjustment anchor, and any floor outcome.
+function describeOperatorAdjustment(adjustment, summary = {}, totals = {}) {
+  if (!adjustment) return null;
+  const applied = summary.manualDiscount || {};
+  const recurringAmount = Number(applied.recurringAmount || 0);
+  const oneTimeAmount = Number(applied.oneTimeAmount || 0);
+  const monthly = Number(totals.monthly || 0);
+  const oneTime = Number(totals.oneTime || 0);
+  const floorBreach = applied.floorBreach || null;
+  return {
+    requested: {
+      type: adjustment.type,
+      value: adjustment.value,
+      label: adjustment.label,
+      internal_reason: adjustment.internalReason,
+      floor_breach_acknowledged: adjustment.floorBreachAcknowledged === true,
+      waive_setup_fee: adjustment.waiveSetupFee === true,
+    },
+    setup_fee_waived: adjustment.waiveSetupFee === true,
+    applied_recurring_annual: Math.round(recurringAmount * 100) / 100,
+    applied_one_time: Math.round(oneTimeAmount * 100) / 100,
+    anchor_monthly_total: Math.round((monthly + recurringAmount / 12) * 100) / 100,
+    anchor_onetime_total: Math.round((oneTime + oneTimeAmount) * 100) / 100,
+    adjusted_monthly_total: Math.round(monthly * 100) / 100,
+    adjusted_onetime_total: Math.round(oneTime * 100) / 100,
+    capped: applied.capped === true,
+    cap_reason: applied.capReason || null,
+    floor_breach: floorBreach
+      ? {
+        bypassed_cap: floorBreach.bypassedCapReason,
+        below_floor_annual: Number(floorBreach.breachedRecurringAnnual || 0),
+        lawn_floor_protected_annual: Number(floorBreach.lawnFloorProtectedAnnual || 0),
+      }
+      : null,
+  };
 }
 
 const APPROVED_REACT_SERVICE_TEMPLATES = Object.freeze({
@@ -1262,7 +1429,14 @@ function verifyAgentEvidenceQuotes(evidence, context) {
 // needs the raw engine lines for the membership snapshot) — it rides the
 // second ARGUMENT, never the model-visible input, so the model can't request
 // the raw payload.
-async function computeEstimate(input, { includeRawEngineResult = false } = {}) {
+async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}) {
+  // The sanctioned operator adjustment rides its own param — pull it out
+  // BEFORE the forbidden-input scan so the discount wall on engine inputs
+  // stays absolute, then validate it against its own strict shape.
+  const { operatorPriceAdjustment: rawAdjustment, ...input } = rawInput || {};
+  const adjustmentCheck = validateOperatorPriceAdjustment(rawAdjustment);
+  if (adjustmentCheck.error) return { error: adjustmentCheck.error };
+  const operatorAdjustment = adjustmentCheck.adjustment;
   const forbiddenError = forbiddenPricingInputError(input);
   if (forbiddenError) return { error: forbiddenError };
 
@@ -1350,7 +1524,15 @@ async function computeEstimate(input, { includeRawEngineResult = false } = {}) {
       customer_account: accountPricing.customerAccount,
     };
   }
-  const pricingEngineInput = buildAgentPricingInput(engineInput, accountPricing);
+  let pricingEngineInput = buildAgentPricingInput(engineInput, accountPricing);
+  // Transient injection only — the echoed engine_input below never carries
+  // the discount, so revision round-trips stay clean of forbidden keys.
+  if (operatorAdjustment) {
+    pricingEngineInput = {
+      ...pricingEngineInput,
+      manualDiscount: operatorAdjustmentToManualDiscount(operatorAdjustment),
+    };
+  }
   if (needsSync()) await syncConstantsFromDB(db);
   const estimate = generateEstimate(pricingEngineInput);
 
@@ -1392,6 +1574,14 @@ async function computeEstimate(input, { includeRawEngineResult = false } = {}) {
     line_items: compactLines,
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(services, estimate),
+    ...(operatorAdjustment
+      ? {
+        operator_price_adjustment: describeOperatorAdjustment(operatorAdjustment, summary, {
+          monthly: monthlyTotal,
+          oneTime: oneTimeTotal,
+        }),
+      }
+      : {}),
     margin_check: {
       loaded_labor_rate_per_hour: 35,
       target_collected_margin: 0.35,
@@ -1575,6 +1765,16 @@ async function createPendingEstimate(input) {
   if (!customerName || !address || !engineInputs || typeof engineInputs !== 'object') {
     return { error: 'Missing required fields: customerName, address, engineInputs' };
   }
+  const adjustmentCheck = validateOperatorPriceAdjustment(input.operatorPriceAdjustment);
+  if (adjustmentCheck.error) return { error: adjustmentCheck.error };
+  const operatorAdjustment = adjustmentCheck.adjustment;
+  // Nested placement would be PROMOTED to a real adjustment by the reprice
+  // spread below while persistence records none — the customer link would
+  // then recompute without the discount/waiver the confirmed draft used
+  // (codex P2 on #2947). Reject it outright.
+  if (engineInputs.operatorPriceAdjustment !== undefined) {
+    return { error: 'operatorPriceAdjustment must be its own parameter, never a key inside engineInputs. Move it to the top level and retry.' };
+  }
 
   // Bind the draft identity to the selected lead. leadId selects another
   // account's services and membership tier for pricing, so the contact this
@@ -1605,7 +1805,14 @@ async function createPendingEstimate(input) {
   // leadId (an EXISTING customer's services/tier must reprice at the
   // combined account context, or expansion drafts overcharge), duplicate
   // -service block, generateEstimate — and ITS totals are what get written.
-  const priced = await computeEstimate({ ...engineInputs, leadId, address }, { includeRawEngineResult: true });
+  const priced = await computeEstimate({
+    ...engineInputs,
+    leadId,
+    address,
+    // The reprice must run with the SAME operator adjustment the totals were
+    // quoted with, or the cents-exact cross-check below refuses the write.
+    ...(operatorAdjustment ? { operatorPriceAdjustment: operatorAdjustment } : {}),
+  }, { includeRawEngineResult: true });
   if (priced.error) {
     return {
       error: `Draft not written — server reprice failed: ${priced.error}`,
@@ -1715,6 +1922,10 @@ async function createPendingEstimate(input) {
     engineResult: priced.raw_engine_result,
     agentDraft: true,
     ...(leadId ? { lead_id: leadId } : {}),
+    // Operator-stated adjustment spec — the public replay re-injects it as
+    // manualDiscount (extractEngineInputs), same pattern as
+    // priorQualifyingServices; it is deliberately NOT inside engineInputs.
+    ...(operatorAdjustment ? { operatorPriceAdjustment: operatorAdjustment } : {}),
     // The account context the reprice used: extractEngineInputs re-injects
     // priorQualifyingServices on every public recompute, and the membership
     // snapshot drives existing-customer treatment (waived setup fee, no
@@ -1737,6 +1948,9 @@ async function createPendingEstimate(input) {
       ],
       marginCheck: priced.margin_check || null,
       pricingAuthority: 'SERVER',
+      ...(priced.operator_price_adjustment
+        ? { operatorPriceAdjustment: priced.operator_price_adjustment }
+        : {}),
     },
   };
 
@@ -1896,8 +2110,24 @@ function titleWaveGuardTier(value) {
 }
 
 function compactAgentLine(line) {
-  const annual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
-  const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
+  // When an operator adjustment touched this line the engine stamps
+  // manualFinalAnnual/manualFinalMargin as the post-manual-discount truth;
+  // annualAfterDiscount still holds the pre-manual (WaveGuard-only) anchor,
+  // so grading it would overstate annual and collected margin on every
+  // operator-discounted quote.
+  const manualFinalAnnual = Number(line.manualFinalAnnual);
+  const hasManualFinalAnnual = Number.isFinite(manualFinalAnnual) && manualFinalAnnual >= 0;
+  const annual = hasManualFinalAnnual
+    ? manualFinalAnnual
+    : Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
+  // Same rule for the one-time slice: the engine stamps manualFinalOneTime
+  // on discounted one-time/specialty lines (summary-level pooling leaves the
+  // line's gross price untouched).
+  const manualFinalOneTime = Number(line.manualFinalOneTime);
+  const hasManualFinalOneTime = Number.isFinite(manualFinalOneTime) && manualFinalOneTime >= 0;
+  const oneTime = hasManualFinalOneTime
+    ? manualFinalOneTime
+    : Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
   const priceBasis = annual > 0 ? annual : oneTime;
   // Recurring lawn lines expose their annual cost as costs.total; without it
   // the margin falls back to line.margin, which was computed from the PRE-
@@ -1908,14 +2138,24 @@ function compactAgentLine(line) {
     : (line.costs?.oneTimeCost ?? line.costs?.total ?? line.oneTimeCost ?? line.estimatedCost);
   const cost = Number(rawCost);
   const hasCostBasis = Number.isFinite(cost) && cost >= 0;
-  const collectedMargin = priceBasis > 0 && hasCostBasis
-    ? Math.round(((priceBasis - cost) / priceBasis) * 1000) / 1000
-    : (Number.isFinite(Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin))
-      ? Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin)
-      : null);
+  const manualFinalMargin = Number(line.manualFinalMargin);
+  const collectedMargin = Number.isFinite(manualFinalMargin)
+    ? manualFinalMargin
+    : (priceBasis > 0 && hasCostBasis
+      ? Math.round(((priceBasis - cost) / priceBasis) * 1000) / 1000
+      : (Number.isFinite(Number(line.finalMargin ?? line.margin))
+        ? Number(line.finalMargin ?? line.margin)
+        : null));
+  // Recurring monthly is annual / 12 cent-rounded everywhere in the engine
+  // (pricePestControl et al) — derive the manual-final monthly the same way
+  // so a discounted line never shows the anchor monthly beside its
+  // discounted annual.
+  const monthly = hasManualFinalAnnual
+    ? (annual > 0 ? Math.round((annual / 12) * 100) / 100 : 0)
+    : Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0);
   return {
     service: line.service || line.name || 'unknown',
-    monthly: Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0) || null,
+    monthly: monthly || null,
     annual: annual || null,
     one_time: oneTime || null,
     estimated_cost: hasCostBasis ? cost : null,
@@ -1952,9 +2192,19 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   if (duplicateServices.length) {
     return { error: `The customer already has active ${duplicateServices.join(', ')} service. Quote only requested additions.` };
   }
+  const adjustmentCheck = validateOperatorPriceAdjustment(input.operatorPriceAdjustment);
+  if (adjustmentCheck.error) return { error: adjustmentCheck.error };
+  const operatorAdjustment = adjustmentCheck.adjustment;
 
   if (needsSync()) await syncConstantsFromDB(db);
-  const pricingEngineInputs = buildAgentPricingInput(input.engineInputs, accountPricing);
+  let pricingEngineInputs = buildAgentPricingInput(input.engineInputs, accountPricing);
+  // Transient — never merged into echoed/stored engineInputs (round-trip rule).
+  if (operatorAdjustment) {
+    pricingEngineInputs = {
+      ...pricingEngineInputs,
+      manualDiscount: operatorAdjustmentToManualDiscount(operatorAdjustment),
+    };
+  }
   const engineResult = generateEstimate(pricingEngineInputs);
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {
@@ -2444,6 +2694,20 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     if (row?.warning) laneReasons.push(`protocol: ${row.warning}`);
   }
 
+  const operatorAdjustmentDisclosure = describeOperatorAdjustment(
+    operatorAdjustment,
+    engineResult?.summary || {},
+    totals,
+  );
+  if (operatorAdjustmentDisclosure?.floor_breach) {
+    // An authorized sub-floor price is a yellow-lane condition FIRST in the
+    // list: the confirm card and the first send both make the operator face
+    // the breach explicitly (the send path's acknowledgeEngineReview 409).
+    pricingLaneReasons.unshift(
+      `operator-authorized BELOW-FLOOR pricing: lawn floor breached by $${operatorAdjustmentDisclosure.floor_breach.below_floor_annual.toFixed(2)}/yr (${operatorAdjustmentDisclosure.requested.label})`,
+    );
+  }
+
   const allLaneReasons = [...new Set([...pricingLaneReasons, ...laneReasons])];
   return {
     preview: true,
@@ -2461,6 +2725,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     inventoryReview: inventoryValidation.rows,
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(input.engineInputs.services, engineResult),
+    operator_price_adjustment: operatorAdjustmentDisclosure,
   };
 }
 
@@ -2482,6 +2747,11 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
   const isCommercial = String(input.engineInputs.propertyType || '').toLowerCase() === 'commercial'
     || (preview.engineResult?.lineItems || []).some((line) => String(line.service || '').startsWith('commercial_'));
 
+  // Persist the NORMALIZED adjustment spec (not the raw model input) — the
+  // public replay re-injects it as manualDiscount, and it lives outside
+  // engineInputs so revision round-trips never trip the forbidden-input wall.
+  const persistedAdjustment = validateOperatorPriceAdjustment(input.operatorPriceAdjustment).adjustment || null;
+
   return {
     data: {
       engineInputs: input.engineInputs,
@@ -2492,6 +2762,7 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
       ...(accountPricing.priorQualifyingServices.length
         ? { priorQualifyingServices: accountPricing.priorQualifyingServices }
         : {}),
+      ...(persistedAdjustment ? { operatorPriceAdjustment: persistedAdjustment } : {}),
       estimatorEngine: {
         version: 3,
         origin: 'manual_agent',
@@ -2511,6 +2782,9 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
         loadedLaborRate: 35,
         targetCollectedMargin: 0.35,
         existingCustomerExpansion: accountPricing.recognized,
+        ...(preview.operator_price_adjustment
+          ? { operatorPriceAdjustment: preview.operator_price_adjustment }
+          : {}),
         presentationTemplate: preview.presentation?.template || 'manual_review',
         serviceTemplateKeys: preview.presentation?.serviceTemplateKeys || [],
         reactEstimatePage: preview.presentation?.reactPage || 'estimate_v2',
@@ -2731,6 +3005,11 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     const mergedData = { ...currentData, ...payload.data };
     if (!payload.data.membershipSnapshot) delete mergedData.membershipSnapshot;
     if (!payload.data.priorQualifyingServices) delete mergedData.priorQualifyingServices;
+    // Omitting operatorPriceAdjustment on a revision is the documented way to
+    // REMOVE the discount/fee waiver — a surviving stale key would be
+    // re-injected as manualDiscount by the public replay even though the
+    // confirmed totals exclude it (codex P1 on #2947).
+    if (!payload.data.operatorPriceAdjustment) delete mergedData.operatorPriceAdjustment;
     if (currentData.proposal?.enabled) {
       delete mergedData.proposal;
       delete mergedData.proposalDelivery;
@@ -3002,6 +3281,205 @@ async function resolveEstimateByIdentifier(identifier) {
   }
 
   return null;
+}
+
+// ─── set_estimate_presentation ─────────────────────────────────
+// Display-layer relabel of a priced service on the customer-facing page.
+// Accepted/converted estimates are frozen: their displayed names already ride
+// invoices and scheduling records.
+const PRESENTATION_EDITABLE_STATUSES = new Set(['draft', 'sent', 'viewed']);
+
+function normalizeServiceMatchText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function presentationRowMatches(row, wanted) {
+  if (!row || typeof row !== 'object') return false;
+  return [row.service, row.key, row.serviceKey, row.name, row.label, row.displayName]
+    .some((candidate) => candidate && normalizeServiceMatchText(candidate) === wanted);
+}
+
+// Every stored shape the public payload builders read display names from —
+// recurring rows, engine line items, AND the nested one-time/specialty
+// shapes v1/admin estimates persist (result.oneTime.items / specItems and
+// their results.* nesting), which the public accept/view path reads
+// (codex P2 on #2947). displayName wins the fallback chain at every
+// assembly site, so setting displayName alone re-labels the rendered
+// section without touching the priced service key OR the label some legacy
+// rows are classified by (pricing, scheduling, and conversion stay
+// unchanged).
+function presentationRowArrays(estData = {}) {
+  return [
+    estData.engineResult?.lineItems,
+    estData.result?.lineItems,
+    estData.recurring?.services,
+    estData.result?.recurring?.services,
+    estData.result?.results?.recurring?.services,
+    estData.oneTimeServices,
+    estData.result?.oneTimeServices,
+    estData.oneTime?.items,
+    estData.oneTime?.specItems,
+    estData.result?.oneTime?.items,
+    estData.result?.oneTime?.specItems,
+    estData.result?.results?.oneTime?.items,
+    estData.result?.results?.oneTime?.specItems,
+    estData.result?.specItems,
+    estData.specItems,
+  ].filter(Array.isArray);
+}
+
+function matchPresentationRows(estData, wanted) {
+  const matched = [];
+  for (const rows of presentationRowArrays(estData)) {
+    for (const row of rows) {
+      if (presentationRowMatches(row, wanted)) matched.push(row);
+    }
+  }
+  return matched;
+}
+
+function parseEstimateDataBlob(raw) {
+  try {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+// Two-step write (write-gates WRITE_TWO_STEP): the no-confirmed call is
+// mutation-free and returns the rich preview (current name → new name); only
+// the operator's Confirm (or the legacy conversational confirmed:true when
+// the UI gate is off) commits.
+async function setEstimatePresentation(input, actionContext = {}) {
+  const { estimate_identifier, service, display_name, reason } = input || {};
+  if (!estimate_identifier) return { error: 'estimate_identifier required (UUID, token, or phone)' };
+  const displayName = String(display_name || '').trim();
+  if (!displayName || displayName.length > 80) return { error: 'display_name (customer-facing, ≤80 chars) is required' };
+  const auditReason = String(reason || '').trim();
+  if (!auditReason || auditReason.length > 300) return { error: 'reason (≤300 chars) is required' };
+  const wanted = normalizeServiceMatchText(service);
+  if (!wanted) return { error: 'service is required (engine key or current displayed name)' };
+
+  const estimate = await resolveEstimateByIdentifier(estimate_identifier);
+  if (!estimate) return { error: `No estimate found matching "${estimate_identifier}" (try a token, UUID, or phone)` };
+  const status = String(estimate.status || '').toLowerCase();
+  if (!PRESENTATION_EDITABLE_STATUSES.has(status)) {
+    return { error: `Estimate is ${status || 'in an unknown state'} — presentation can only be corrected on draft, sent, or viewed estimates.` };
+  }
+
+  const estData = parseEstimateDataBlob(estimate.estimate_data);
+  if (!estData) {
+    return { error: 'Estimate data could not be parsed — correct this estimate in the editor instead.' };
+  }
+
+  const matchedRows = matchPresentationRows(estData, wanted);
+  if (!matchedRows.length) {
+    return { error: `No priced service on this estimate matches "${service}". Use the engine key or the name currently displayed.` };
+  }
+  const previousNames = [...new Set(matchedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
+
+  const confirmed = input?.confirmed === true || actionContext.confirmed === true;
+  if (!confirmed) {
+    return {
+      preview: true,
+      action: 'relabel_service_presentation',
+      estimate_id: estimate.id,
+      customer_name: estimate.customer_name,
+      status,
+      service: String(service),
+      previous_names: previousNames,
+      new_display_name: displayName,
+      rows_matched: matchedRows.length,
+      reason: auditReason,
+      customer_link_updates_immediately: status !== 'draft',
+      note: 'No change written. Confirm to relabel the customer-facing section.',
+    };
+  }
+
+  // Commit under a row lock (codex P2 on #2947): a customer can accept
+  // between the preview SELECT and this write, and the freeze rule must hold
+  // at COMMIT time — re-read and re-match on the FRESH blob so an accept's
+  // estimate_data stamps are never overwritten by the stale pre-accept copy,
+  // and make the UPDATE itself conditional on an editable status.
+  const commit = await db.transaction(async (trx) => {
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!locked) return { error: 'Estimate disappeared before the relabel was written.' };
+    const lockedStatus = String(locked.status || '').toLowerCase();
+    if (!PRESENTATION_EDITABLE_STATUSES.has(lockedStatus)) {
+      return { error: `Estimate is now ${lockedStatus || 'in an unknown state'} — presentation is frozen once accepted. Nothing was changed.` };
+    }
+    const lockedData = parseEstimateDataBlob(locked.estimate_data);
+    if (!lockedData) {
+      return { error: 'Estimate data could not be parsed — correct this estimate in the editor instead.' };
+    }
+    const lockedRows = matchPresentationRows(lockedData, wanted);
+    if (!lockedRows.length) {
+      return { error: `No priced service on this estimate matches "${service}" anymore — it changed after the preview. Nothing was changed.` };
+    }
+    const lockedPrevious = [...new Set(lockedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
+    for (const row of lockedRows) {
+      // displayName ONLY — never label: legacy rows without a stable
+      // service/key are CLASSIFIED by label (recurringServiceKey and
+      // serviceCategoryForOneTimeItem fall back to it), so writing operator
+      // wording into label could re-categorize the row at accept/convert
+      // time. displayName wins every render fallback chain, and
+      // applyPresentationOverridesToBundle renames anything still derived
+      // from the untouched label.
+      row.displayName = displayName;
+    }
+    // Send-time frozen pricing bundles fast-path the customer payload as
+    // long as totals match — a relabel doesn't change totals, so the frozen
+    // bundle would keep serving the OLD name (codex P2 on #2947). Drop it;
+    // the payload rebuilds from the relabeled rows on next view.
+    if (lockedData.sendSnapshot && typeof lockedData.sendSnapshot === 'object'
+      && lockedData.sendSnapshot.pricingBundle) {
+      delete lockedData.sendSnapshot.pricingBundle;
+    }
+    lockedData.presentationOverrides = [
+      ...(Array.isArray(lockedData.presentationOverrides) ? lockedData.presentationOverrides : []),
+      {
+        at: new Date().toISOString(),
+        service: String(service),
+        previous_names: lockedPrevious,
+        display_name: displayName,
+        reason: auditReason,
+        matched_rows: lockedRows.length,
+      },
+    ].slice(-20);
+    const updated = await trx('estimates')
+      .where({ id: estimate.id })
+      .whereIn('status', [...PRESENTATION_EDITABLE_STATUSES])
+      // updated_at is part of the pricing-cache KEY — bumping it in the same
+      // write invalidates cached bundles on EVERY web process, not just the
+      // one whose in-memory cache we clear below (codex P2 on #2947).
+      .update({ estimate_data: JSON.stringify(lockedData), updated_at: trx.fn.now() });
+    if (!updated) {
+      return { error: 'Estimate status changed mid-write — presentation is frozen once accepted. Nothing was changed.' };
+    }
+    return { previousNames: lockedPrevious, rowsUpdated: lockedRows.length, status: lockedStatus };
+  });
+  if (commit.error) return commit;
+  // The runtime pricing cache also serves pre-relabel names — clear it so
+  // the next customer view rebuilds from the updated rows.
+  clearEstimatePricingCache(estimate.id);
+  // Operator-typed relabel text can carry customer names/addresses — log
+  // IDs and counts only (AGENTS.md: PII in logs). The full wording is
+  // already audited in estimate_data.presentationOverrides.
+  logger.info(`[estimate-presentation] Relabeled ${commit.rowsUpdated} row(s) on estimate ${estimate.id}`);
+
+  return {
+    success: true,
+    estimate_id: estimate.id,
+    customer_name: estimate.customer_name,
+    status: commit.status,
+    previous_names: commit.previousNames,
+    new_display_name: displayName,
+    rows_updated: commit.rowsUpdated,
+    note: commit.status === 'draft'
+      ? 'Draft presentation updated. Preview before sending.'
+      : 'Live estimate updated — the customer link now shows the corrected name.',
+  };
 }
 
 async function toggleEstimateV2View({ estimate_identifier, enabled }) {

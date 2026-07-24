@@ -315,12 +315,12 @@ const PROJECT_TYPES = {
     description: 'Rodent exclusion repair visit: work areas, entry points addressed, repairs and materials, remaining concerns.',
     requiresFollowup: false,
     photoCategories: ['exterior', 'entry_point', 'exclusion_work', 'before', 'after', 'attic', 'garage', 'crawlspace', 'other'],
+    // Simplified 2026-07-23 (owner directive, same lane as the T&S closeout):
+    // exclusion_areas retired — the entry points ARE the work locations, so
+    // the tech was tapping the same places twice. The report opener falls
+    // back to its generic sentence and the entry-points sentence carries the
+    // location detail. Copy-map labels stay for stored snapshots.
     findingsFields: [
-      { key: 'exclusion_areas', label: 'Inspection / work areas', type: 'chips', section: 'Work areas', options: [
-        'Roofline', 'Soffit / fascia', 'Garage', 'Exterior perimeter',
-        'AC / utility penetrations', 'Vents', 'Doors', 'Lanai / pool cage',
-        'Crawlspace', 'Attic access', 'Other',
-      ] },
       { key: 'entry_points_addressed', label: 'Entry points addressed', type: 'chips', section: 'Entry points', options: [
         'Garage door gaps', 'AC line penetration', 'Plumbing / electrical penetration',
         'Roof return gap', 'Soffit / fascia gap', 'Vent / screen opening',
@@ -364,10 +364,11 @@ const PROJECT_TYPES = {
       { key: 'contamination_level', label: 'Contamination level', type: 'select', section: 'Areas serviced', options: [
         'Light', 'Moderate', 'Heavy', 'Severe — office review needed',
       ] },
-      { key: 'evidence_cleaned', label: 'Evidence cleaned', type: 'chips', section: 'Evidence cleaned', options: [
-        'Droppings', 'Urine staining', 'Nesting material', 'Dead rodent / remains',
-        'Odor source', 'Contaminated insulation', 'Food debris', 'Other',
-      ] },
+      // evidence_cleaned retired 2026-07-23 (owner simplification): the work
+      // chips below already name everything removed (droppings, nesting,
+      // remains, …) — the tech was recording the same cleanup twice. The
+      // report's "we removed and treated …" sentence drops; the work-chip
+      // verb phrases carry the removal story.
       { key: 'sanitation_work_completed', label: 'Work completed', type: 'chips', section: 'Work completed', options: [
         'Removed droppings', 'Removed nesting material', 'Removed dead rodent',
         'HEPA vacuum / controlled cleanup', 'Disinfected / sanitized affected areas',
@@ -410,9 +411,11 @@ const PROJECT_TYPES = {
         'Vegetation touching structure', 'Pet food / bird seed accessible', 'Trash / clutter',
         'Open water source',
       ] },
-      { key: 'interior_concern', label: 'Interior concern', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
-      { key: 'exterior_pressure', label: 'Exterior pressure', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
-      { key: 'photos_taken', label: 'Photos taken', type: 'select', section: 'Assessment', options: ['Yes', 'No'] },
+      // The three Assessment selects retired 2026-07-23 (owner
+      // simplification): interior/exterior pressure never reached the report
+      // narrative (label-map only), and photos_taken duplicated the actual
+      // photo attachments on the completion. The findings + recommendation
+      // fields carry the diagnostic story.
       { key: 'recommended_service', label: 'Recommended service', type: 'select', section: 'Recommendation', options: [
         'Rodent trapping program', 'Trapping with exclusion to follow', 'Exclusion repairs',
         'Sanitation cleanup', 'Bait station monitoring', 'No service needed at this time',
@@ -427,11 +430,19 @@ const PROJECT_TYPES = {
     description: 'Active trapping setup, trap checks, activity findings, and follow-up plan.',
     requiresFollowup: true,
     photoCategories: ['trap_placement', 'entry_point', 'droppings', 'damage', 'attic', 'garage', 'crawlspace', 'other'],
-    // Sectioned tap-to-fill checklists (owner spec, 2026-06-12): the tech
-    // checks what they saw/did instead of thumb-typing prose; the report
-    // narrative is composed from these selections. `chips` fields store a
-    // comma-joined string (multi_select convention); only `species` is
-    // required — everything else is optional quick-checks.
+    // Sectioned tap-to-fill checklists (owner spec 2026-06-12; simplified
+    // 2026-07-23, same lane as the T&S closeout — a recurring trap check
+    // must close out in well under a minute). The report narrative composes
+    // from counts + trap actions (trapActivitySentence), so the retired
+    // fields were duplicates or diagnostic noise on a recurring visit:
+    // work_completed re-listed the trap actions chip-for-chip (its one
+    // unique phrase moved into trap_actions), trap_quiet_locations /
+    // exclusion_notes / customer_reported / customer_discussed re-typed
+    // what notes + the activity-locations field already carry, and the
+    // 12-chip conducive_conditions checklist belongs to the DIAGNOSTIC
+    // visit (rodent_inspection keeps it) — not every recurring check.
+    // `chips` fields store a comma-joined string (multi_select convention);
+    // only `species` is required — everything else is optional quick-checks.
     findingsFields: [
       { key: 'species', label: 'Species', type: 'select', section: 'Evidence observed', options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
       { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence observed', options: [
@@ -444,20 +455,9 @@ const PROJECT_TYPES = {
       { key: 'trap_actions', label: 'Trap actions', type: 'chips', section: 'Trap activity', options: [
         'Traps reset', 'Traps moved', 'Traps replaced', 'New traps added',
         'Bait/lure refreshed', 'Damaged or missing traps found',
+        'Exterior inspection completed',
       ] },
       { key: 'trap_activity_locations', label: 'Locations with activity', type: 'text', section: 'Trap activity', placeholder: 'Attic near A/C plenum, garage corner…' },
-      { key: 'trap_quiet_locations', label: 'Locations with no activity', type: 'text', section: 'Trap activity', placeholder: 'Soffit traps, crawlspace…' },
-      { key: 'conducive_conditions', label: 'Conducive conditions', type: 'chips', section: 'Conducive conditions', options: [
-        'Gaps under doors', 'Garage door seal gaps', 'A/C line penetrations', 'Roof returns',
-        'Soffit / fascia gaps', 'Weep holes', 'Utility penetrations', 'Vents / screens',
-        'Vegetation touching structure', 'Pet food / bird seed accessible', 'Trash / clutter',
-        'Open water source',
-      ] },
-      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
-        'Traps checked', 'Captures removed', 'Traps reset', 'Trap locations adjusted',
-        'New traps added', 'Bait/lure replaced', 'Exterior inspection completed',
-        'Entry points photographed', 'Recommendations reviewed with customer',
-      ] },
       { key: 'sanitation_recommendations', label: 'Sanitation recommendations', type: 'chips', section: 'Recommendations', options: [
         'Remove pet food overnight', 'Store seed in sealed containers',
         'Clean droppings only with proper PPE', 'Reduce garage clutter',
@@ -466,15 +466,6 @@ const PROJECT_TYPES = {
       { key: 'exclusion_recommendation', label: 'Exclusion', type: 'select', section: 'Recommendations', options: [
         'Not needed at this time', 'Recommended after activity stops',
         'Quote provided — awaiting approval', 'Approved — scheduling', 'Completed previously',
-      ] },
-      { key: 'exclusion_notes', label: 'Entry points to seal', type: 'text', section: 'Recommendations', placeholder: 'A/C line gap, garage door corner…' },
-      { key: 'customer_reported', label: 'Customer reported', type: 'chips', section: 'Customer communication', options: [
-        'Heard noises in attic', 'Heard noises in walls', 'Saw a rodent', 'Smelled odor',
-        'No activity noticed since last visit',
-      ] },
-      { key: 'customer_discussed', label: 'Discussed with customer', type: 'chips', section: 'Customer communication', options: [
-        'Informed of capture(s)', 'Explained current trap activity', 'Reviewed exclusion recommendation',
-        'Approved follow-up visit', 'Approved exclusion quote',
       ] },
       // Combo-key modules (owner spec §3): the rodent_trapping_* combo keys
       // share this base checklist plus these OPTIONAL sections — fill them
@@ -529,8 +520,11 @@ const PROJECT_TYPES = {
     description: 'Quarterly exterior rodent bait station service: consumption, evidence, station condition, attractants.',
     requiresFollowup: false,
     photoCategories: ['station', 'droppings', 'harborage', 'entry_point', 'exterior', 'other'],
+    // total_stations retired 2026-07-23 (owner simplification): a property
+    // constant the tech re-typed every quarter — the station map's pins are
+    // the station roster, and stations_checked + stations_inaccessible
+    // already tell the coverage story. (Termite bait stations unchanged.)
     findingsFields: [
-      { key: 'total_stations', label: 'Total stations on property', type: 'count', section: 'Station inspection' },
       { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
       { key: 'stations_inaccessible', label: 'Stations inaccessible', type: 'count', section: 'Station inspection' },
       { key: 'station_actions', label: 'Station service performed', type: 'chips', section: 'Station inspection', options: [
@@ -749,17 +743,26 @@ const PROJECT_TYPES = {
     ],
   },
 
-  // Tree & Shrub program visit (owner spec 2026-06-12, Phase 2 §6) —
-  // plant-health storytelling: base scope/condition + palm, shrub/ornamental,
-  // and bed/pre-emergent modules. Modules render as optional sections; the
-  // palm module core becomes required via cross-field validation when
-  // 'Palms' is among the serviced plant groups. The two `internal: true`
-  // compliance fields feed the ported closeout checks (pollinator block,
-  // IRAC/FRAC) and never render on customer reports.
+  // Tree & Shrub program visit (owner spec 2026-06-12, Phase 2 §6; simplified
+  // by owner directive 2026-07-21 and again 2026-07-23) — on a PRIMARY T&S
+  // completion the tech records scope + overall condition only. Everything
+  // condition-grade the old palm/shrub/bed detail modules captured by hand
+  // (pest/disease pressure, deficiency, canopy, spear leaf, Ganoderma, bed
+  // weeds, …) now comes from the AI photo review (tree-shrub-assessment.js
+  // dual-vision scoring), and treatments derive from the recorded products.
+  // The detail fields survive as `companionOnly: true`: COMPANION T&S
+  // sections on combined visits (e.g. lawn + T&S) run no per-line photo
+  // assessment, so hand capture stays the only condition source there —
+  // the same reason treatments_completed is companion-collected (codex P2
+  // on #2950). findingsSchemaForType drops companionOnly fields from the
+  // primary slice, and validateTypedFindings rejects them on primary
+  // submissions. The two `internal: true` compliance fields feed the ported
+  // closeout checks (pollinator block, IRAC/FRAC) and never render on
+  // customer reports.
   tree_shrub: {
     label: 'Tree & Shrub Service',
     short: 'Tree & Shrub',
-    description: 'Tree & Shrub program visit: plant groups serviced, landscape condition, observed issues, treatments, and module detail for palms, shrubs, and beds.',
+    description: 'Tree & Shrub program visit: plant groups serviced, landscape condition, photos (AI-scored plant health), and solutions used.',
     requiresFollowup: false,
     photoCategories: ['palm', 'shrub', 'bed', 'disease', 'pest_activity', 'treatment_area', 'before', 'after', 'other'],
     findingsFields: [
@@ -770,7 +773,7 @@ const PROJECT_TYPES = {
       { key: 'landscape_condition', label: 'Overall landscape condition', type: 'select', section: 'Service scope', options: [
         'Excellent', 'Good', 'Fair', 'Poor', 'Declining', 'Recovering',
       ] },
-      { key: 'observed_conditions', label: 'Observed plant conditions', type: 'multi_select', section: 'Observed conditions', detail: true, options: [
+      { key: 'observed_conditions', label: 'Observed plant conditions', type: 'multi_select', section: 'Observed conditions', detail: true, companionOnly: true, options: [
         'Healthy / new growth', 'Yellowing / chlorosis', 'Leaf spot', 'Scale',
         'Mealybug', 'Aphids', 'Whitefly', 'Mites', 'Caterpillar damage',
         'Sooty mold', 'Fungal pressure', 'Nutrient deficiency', 'Drought stress',
@@ -787,24 +790,24 @@ const PROJECT_TYPES = {
         'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
         'Soil amendment / acidifier', 'Inspection only',
       ] },
-      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm module', detail: true },
-      { key: 'palm_condition', label: 'Palm condition', type: 'select', section: 'Palm module', detail: true, options: ['Good', 'Fair', 'Poor', 'Declining'] },
-      { key: 'palm_nutrient_stress', label: 'Palm nutrient stress', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
-      { key: 'spear_leaf_condition', label: 'Spear leaf condition', type: 'select', section: 'Palm module', detail: true, options: ['Firm', 'Soft', 'Pulling', 'Not checked'] },
-      { key: 'canopy_density', label: 'Canopy density', type: 'select', section: 'Palm module', detail: true, options: ['Full', 'Moderate', 'Thin', 'Declining'] },
-      { key: 'palm_trunk_concern', label: 'Trunk concern', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
-      { key: 'ganoderma_conk_observed', label: 'Visible Ganoderma conk', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
-      { key: 'injection_recommended', label: 'Injection recommended', type: 'select', section: 'Palm module', detail: true, options: ['Yes', 'No'] },
-      { key: 'pest_pressure', label: 'Pest pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'deficiency_symptoms', label: 'Deficiency symptoms', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'new_growth_present', label: 'New growth present', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
-      { key: 'pruning_issue_observed', label: 'Pruning issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
-      { key: 'irrigation_issue_observed', label: 'Irrigation issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, options: ['Yes', 'No'] },
-      { key: 'bed_weed_pressure', label: 'Bed weeds present', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
-      { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['Yes', 'No'] },
-      { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', detail: true, options: ['Yes', 'No'] },
-      { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', detail: true, placeholder: 'Front bed near driveway…' },
+      { key: 'palms_serviced', label: 'Palms serviced', type: 'count', section: 'Palm module', detail: true, companionOnly: true },
+      { key: 'palm_condition', label: 'Palm condition', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Good', 'Fair', 'Poor', 'Declining'] },
+      { key: 'palm_nutrient_stress', label: 'Palm nutrient stress', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'spear_leaf_condition', label: 'Spear leaf condition', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Firm', 'Soft', 'Pulling', 'Not checked'] },
+      { key: 'canopy_density', label: 'Canopy density', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Full', 'Moderate', 'Thin', 'Declining'] },
+      { key: 'palm_trunk_concern', label: 'Trunk concern', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'ganoderma_conk_observed', label: 'Visible Ganoderma conk', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'injection_recommended', label: 'Injection recommended', type: 'select', section: 'Palm module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'pest_pressure', label: 'Pest pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'deficiency_symptoms', label: 'Deficiency symptoms', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'new_growth_present', label: 'New growth present', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'pruning_issue_observed', label: 'Pruning issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'irrigation_issue_observed', label: 'Irrigation issue observed', type: 'select', section: 'Shrub & ornamental module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'bed_weed_pressure', label: 'Bed weeds present', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['None', 'Light', 'Moderate', 'Heavy'] },
+      { key: 'pre_emergent_applied', label: 'Pre-emergent applied', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'mulch_depth_concern', label: 'Mulch depth concern', type: 'select', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, options: ['Yes', 'No'] },
+      { key: 'weed_breakthrough_areas', label: 'Weed breakthrough areas', type: 'text', section: 'Bed & pre-emergent module', detail: true, companionOnly: true, placeholder: 'Front bed near driveway…' },
       // Ported closeout compliance (internal-only; see tree-shrub-closeout
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance
@@ -914,13 +917,14 @@ const PROJECT_TYPES = {
     description: 'Bed-bug inspection + initial treatment. Supports an optional 14-day follow-up.',
     requiresFollowup: true,
     photoCategories: ['bedroom', 'evidence', 'equipment', 'room_treated', 'furniture', 'other'],
+    // areas_inspected retired 2026-07-23 (owner simplification, same lane as
+    // the rodent/T&S closeouts): its 13 chips re-listed what the work chips
+    // already name (mattress/box spring/bed frame/baseboards/furniture/
+    // adjacent rooms) and it fed no narrative — the report composes from
+    // work_completed + evidence + rooms_treated. Copy-map label stays for
+    // stored snapshots.
     findingsFields: [
       { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Inspection', placeholder: 'Primary bedroom, guest bedroom…' },
-      { key: 'areas_inspected', label: 'Areas inspected', type: 'chips', section: 'Inspection', options: [
-        'Mattress seams', 'Box spring', 'Bed frame', 'Headboard', 'Nightstands', 'Baseboards',
-        'Couch / seating', 'Recliners', 'Curtains', 'Closet edges', 'Luggage areas',
-        'Wall hangings', 'Adjacent rooms',
-      ] },
       { key: 'evidence_level', label: 'Evidence level', type: 'select', section: 'Evidence', options: ['No active signs observed', 'Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
       { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
         'Live bed bugs', 'Dead bed bugs', 'Eggs', 'Cast skins', 'Fecal spotting',

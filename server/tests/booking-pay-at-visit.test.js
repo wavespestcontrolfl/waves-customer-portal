@@ -33,6 +33,17 @@ jest.mock('../services/estimate-converter', () => ({
       .map((s) => s && s.service).filter(Boolean)));
     return keys.length === 1 && ['pest_control', 'mosquito'].includes(keys[0]);
   },
+  // Real-enough mirrors of the per-estimate stamps the fee/clamp gates read
+  // (operator setup-fee waiver + acknowledged floor breach, #2947).
+  estimateOperatorSetupFeeWaived: (estData = {}) => (
+    estData?.operatorPriceAdjustment?.waiveSetupFee === true
+  ),
+  estimateManualDiscountFloorBreachAcknowledged: (estData = {}) => (
+    (estData?.result?.pricingMetadata?.manualDiscountFloorBreach
+      ?? estData?.engineResult?.pricingMetadata?.manualDiscountFloorBreach)?.acknowledged === true
+    || (estData?.result?.manualDiscount ?? estData?.result?.summary?.manualDiscount
+      ?? estData?.summary?.manualDiscount)?.floorBreach?.acknowledged === true
+  ),
   recurringServicesFromEstimateData: (data = {}) => (
     Array.isArray(data.services) ? data.services
       : Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems
@@ -41,7 +52,7 @@ jest.mock('../services/estimate-converter', () => ({
   ),
 }));
 
-const { derivePerApplicationAmount, resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+const { derivePerApplicationAmount, resolveBookingVisitPrice, wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
 
 const Q = 4; // quarterly visits/yr
 const est = (annual_total, services, extra = {}) => ({ annual_total, estimate_data: { services }, ...extra });
@@ -140,37 +151,104 @@ describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadenc
   });
 });
 
-// The quote→book handoff mint gate (public-quote.js) calls
-// resolveBookingVisitPrice({ estimate: {estimate_data, annual_total,
-// monthly_total}, serviceKey: 'pest_control', bookingVisits: 4 }) over the
-// wizard-mirror shape it just stored, and mints a token only when that prices —
-// so a token is never minted for a shape /booking/confirm can't price. These
-// pin that predicate over the STORED wizard shape (services is an OBJECT in the
-// wizard payload, so engineResult.lineItems is the only recurring source).
-describe('quote→book handoff mint gate — wizard-mirror shape priceability', () => {
+// /booking/confirm's pricing branch calls resolveBookingVisitPrice({
+// estimate: {estimate_data, annual_total, monthly_total}, serviceKey:
+// 'pest_control', bookingVisits: 4 }) over the STORED wizard-mirror shape
+// (services is an OBJECT in the wizard payload, so engineResult.lineItems is
+// the only recurring source). The handoff token now mints for EVERY
+// self-bookable shape (it doubles as the customers-only gate pass), so this
+// predicate is what decides pay-at-visit STAMPING at confirm — an unpriceable
+// shape carries a token, passes the gate, and books price-less. These pin
+// that confirm-side predicate.
+describe('confirm-side pricing predicate — wizard-mirror shape priceability', () => {
   const wizardEst = (lineItems, annual, monthly = null) => ({
     annual_total: annual,
     monthly_total: monthly,
     estimate_data: { services: { pest: true }, engineResult: { lineItems } },
   });
-  const mintGate = (estimate) => !!resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: 4 });
+  const confirmPrices = (estimate) => !!resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: 4 });
 
-  test('single quarterly pest line (stored frequency:4) → mints', () => {
-    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 }], 387.96))).toBe(true);
+  test('single quarterly pest line (stored frequency:4) → prices', () => {
+    expect(confirmPrices(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 }], 387.96))).toBe(true);
   });
 
-  test('lawn-only quote → NO token (confirm only prices quarterly pest)', () => {
-    expect(mintGate(wizardEst([{ service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 }], 480))).toBe(false);
+  test('lawn-only quote → books price-less (confirm only prices quarterly pest)', () => {
+    expect(confirmPrices(wizardEst([{ service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 }], 480))).toBe(false);
   });
 
-  test('pest+lawn (two priced recurring lines) → NO token (ambiguous total)', () => {
-    expect(mintGate(wizardEst([
+  test('pest+lawn (two priced recurring lines) → books price-less (ambiguous total)', () => {
+    expect(confirmPrices(wizardEst([
       { service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 },
       { service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 },
     ], 867.96))).toBe(false);
   });
 
-  test('monthly pest quote → NO token (cadence ≠ the quarterly series confirm seeds)', () => {
-    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
+  test('monthly pest quote → books price-less (cadence ≠ the quarterly series confirm seeds)', () => {
+    expect(confirmPrices(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
+  });
+});
+
+// The wizard refreshes drafts in place, so /booking/confirm re-checks the
+// stored row's CURRENT shape with this one predicate before honoring a
+// handoff token — as the customers-only gate pass AND before pay-at-visit
+// pricing. Row-shape mirror of public-quote's mint conditions.
+describe('wizardDraftSelfServeBookable — current-shape re-check for stored handoff drafts', () => {
+  const draft = (overrides = {}, data = {}) => ({
+    id: 'pe-1', source: 'quote_wizard', status: 'draft', estimate_data: data, ...overrides,
+  });
+
+  test('live self-bookable wizard draft → eligible', () => {
+    expect(wizardDraftSelfServeBookable(draft())).toBe(true);
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 480,
+      engineResult: { summary: { recurringAnnualAfterDiscount: 480, oneTimeTotal: 0 }, lineItems: [{ service: 'lawn_care', annual: 480 }] },
+    }))).toBe(true);
+  });
+
+  test('missing row / wrong source / promoted status → not eligible', () => {
+    expect(wizardDraftSelfServeBookable(null)).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ source: 'admin' }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ status: 'sent' }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({ status: 'accepted' }))).toBe(false);
+  });
+
+  test('commercial / manual-review shapes → not eligible', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, { commercialEstimatedPricing: true }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, { quoteRequired: true }))).toBe(false);
+  });
+
+  test('mixed recurring + one-time → not eligible (summary first, top-level fallback)', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      engineResult: { summary: { recurringAnnualAfterDiscount: 388, oneTimeTotal: 150 } },
+    }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 388, oneTimeTotal: 150 }))).toBe(false);
+    // One-time-ONLY stays eligible (no recurring side of the mix).
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 0, oneTimeTotal: 150 }))).toBe(true);
+  });
+
+  test('bed-bug line → not eligible (no right-sized bookable slot)', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] },
+    }))).toBe(false);
+  });
+
+  test('recurring draft with no funnel-mappable line → not eligible (unmapped programs withhold links)', () => {
+    // foam_recurring has no /book funnel service — the mint withholds the
+    // link, so a stale token must not gate-pass either (Codex r3).
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 600,
+      engineResult: { summary: { recurringAnnualAfterDiscount: 600, oneTimeTotal: 0 }, lineItems: [{ service: 'foam_recurring', annual: 600 }] },
+    }))).toBe(false);
+    // Recurring billing with NO line items at all fails closed too.
+    expect(wizardDraftSelfServeBookable(draft({}, { annual: 600 }))).toBe(false);
+    // Mapped recurring programs stay eligible (mosquito/termite/rodent).
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 780,
+      engineResult: { lineItems: [{ service: 'mosquito', annual: 780 }] },
+    }))).toBe(true);
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 1200,
+      engineResult: { lineItems: [{ service: 'termite_bond', annual: 1200 }] },
+    }))).toBe(true);
   });
 });

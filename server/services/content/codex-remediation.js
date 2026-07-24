@@ -56,6 +56,7 @@ const fm = require('../content-astro/frontmatter');
 const { assertValidBlogFrontmatter } = require('../content-astro/schema-validator');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 const contentGuardrails = require('./content-guardrails');
+const { refineFootprintFindings } = require('./footprint-claim-classifier');
 const comparisonTableGate = require('./comparison-table-gate');
 const factCheckGate = require('./fact-check-gate');
 const { etDateString } = require('../../utils/datetime-et');
@@ -178,7 +179,10 @@ function p2MergeEnabled() {
   return String(process.env.AUTONOMOUS_CODEX_P2_MERGE || '').trim().toLowerCase() !== 'false';
 }
 
-const SEVERITY_BADGE_RE = /!\[P([012])\s+Badge\]/i;
+// P3 included: a P3 badge parsed as "unbadged" would fail closed into P1
+// and permanently block the P2-only bar on advisory-only rounds (observed:
+// astro #395 carried 1 P2 + 3 P3s and could never merge).
+const SEVERITY_BADGE_RE = /!\[P([0123])\s+Badge\]/i;
 
 function findingSeverity(body) {
   const m = String(body || '').match(SEVERITY_BADGE_RE);
@@ -202,23 +206,37 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
   const state = await getState(db, prNumber);
-  if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
-  // Round-9 (Codex P2): rounds counts ATTEMPTS — the no-valid-fix retry
-  // path increments it with nothing pushed, so an outage/truncation streak
-  // must not read as "remediation improved the PR". Improvement means the
-  // head under review IS a remediation commit this loop pushed: require the
-  // SHA the successful push path records (last_push_sha — failed attempts
-  // never write it) to EQUAL the current head. Presence alone is not
-  // enough — a park re-arm resets rounds but keeps last_push_sha as
-  // history, so a stale SHA from a pre-park era plus a failed-attempt
-  // round would otherwise open the bar on a head remediation never
-  // touched.
+  // Two ways remediation "had its shot" (the bar's precondition under the
+  // owner directive):
+  //   IMPROVED — the head under review IS a remediation commit this loop
+  //   pushed (last_push_sha equals the current head; failed attempts never
+  //   write it, and a park re-arm resets rounds but keeps last_push_sha as
+  //   history, so presence alone is not enough — Round-9, Codex P2).
+  //   DECLINED — remediation ATTEMPTED this head and parked with one of its
+  //   own fix-safety verdicts (frontmatter-whitelist violation or a
+  //   no-change round): the P2s are real but not auto-fixable within the
+  //   whitelist. Observed 2026-07-22: every open content PR (#394–#398)
+  //   carried ONLY P2/P3 findings yet sat unmergeable because the declined
+  //   park kept last_push_sha ≠ head forever — the fixer's safety whitelist
+  //   starved the very bar the "no gates on the auto blog" directive added.
+  //   Scoped to the CURRENT head and to the two decline classes only —
+  //   infrastructure parks (sync failures, unresolvable targets, exhausted
+  //   rounds) keep holding for a human.
+  const head = String(headSha).trim().toLowerCase();
   const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
-  if (!lastPush) {
-    return { eligible: false, reason: 'no pushed remediation commit recorded (spent rounds may be failed attempts)' };
-  }
-  if (lastPush !== String(headSha).trim().toLowerCase()) {
+  const remediationImproved = Boolean(lastPush) && lastPush === head;
+  const remediationDeclined = state.status === 'parked'
+    && String(state.parked_head_sha || '').trim().toLowerCase() === head
+    && /^(?:fix changed frontmatter beyond the whitelist|remediation produced no change)/.test(String(state.park_reason || ''));
+  if (!remediationImproved && !remediationDeclined) {
+    if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
+    if (!lastPush) {
+      return { eligible: false, reason: 'no pushed remediation commit recorded (spent rounds may be failed attempts)' };
+    }
     return { eligible: false, reason: `current head ${shortSha(headSha)} is not the last pushed remediation commit ${shortSha(state.last_push_sha)}` };
+  }
+  if (remediationImproved && !remediationDeclined && (state.rounds || 0) < 1) {
+    return { eligible: false, reason: 'no remediation round spent yet' };
   }
   const reviewComments = await gh.listPrReviewComments(prNumber);
   const findings = parseCodexFindings(reviewComments, headSha);
@@ -267,7 +285,7 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   if (!codexRoundCompleted({ reviews, issueComments, headSha, requestedAt: latestRequestAt })) {
     return { eligible: false, reason: 'codex review round not completed for current head (inline findings may be partial)' };
   }
-  return { eligible: true, p2Count: findings.length, rounds: state.rounds };
+  return { eligible: true, p2Count: findings.length, rounds: state.rounds, declined: remediationDeclined && !remediationImproved };
 }
 
 /**
@@ -404,7 +422,11 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     },
   );
   if (!guardrails.pass) {
-    const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    // Same refinement the publisher applies: a false-positive footprint
+    // claim must not park a remediation the classifier can clear; any
+    // classifier failure keeps the deterministic verdict (fail closed).
+    const refined = await refineFootprintFindings(guardrails.findings || []);
+    const blocking = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1');
     if (blocking.length) return { ok: false, reason: `guardrails ${blocking.map((f) => f.code).join(',')}` };
   }
 
@@ -811,9 +833,15 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     if (!opp) return { ok: false, reason: 'opportunity row unavailable for guardrail context' };
     const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
     const guardResult = guardrailsMod.evaluate(draft, guardOptions);
-    if (!guardResult || guardResult.pass !== true) {
-      const codes = (((guardResult && guardResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => `${f.severity} ${f.code}`);
-      return { ok: false, reason: `run-context guardrails: ${codes.join('; ') || 'no result'}` };
+    if (!guardResult) return { ok: false, reason: 'run-context guardrails: no result' };
+    if (guardResult.pass !== true) {
+      // Same footprint refinement validateFixedBlogFile applies — the
+      // run-context revalidation must not re-park a fix on a false positive
+      // the classifier already clears; classifier failure keeps the
+      // deterministic findings (fail closed).
+      const refined = await refineFootprintFindings(guardResult.findings || []);
+      const codes = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => `${f.severity} ${f.code}`);
+      if (codes.length) return { ok: false, reason: `run-context guardrails: ${codes.join('; ')}` };
     }
     let namedCompetitorEnabled = false;
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }

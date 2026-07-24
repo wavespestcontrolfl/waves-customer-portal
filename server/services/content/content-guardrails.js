@@ -1010,6 +1010,11 @@ function offFootprintCityFinding(text) {
     }
   }
   const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+  // Every offending (city, rendered clause) pair — not just the first —
+  // feeds the async LLM refinement pass (footprint-claim-classifier), which
+  // may dismiss the finding only if EVERY pair classifies as a non-claim.
+  const offenders = [];
+  const offenderKeys = new Set();
   for (let sentenceIndex = 0; sentenceIndex < sentences.length; sentenceIndex += 1) {
     let sentence = sentences[sentenceIndex];
     // Inline wrappers (bold/italic/code/links) render as plain text — strip
@@ -1168,13 +1173,23 @@ function offFootprintCityFinding(text) {
             return cityStart >= dEnd && DISCLAIMER_LIST_GLUE_RE.test(normalized.slice(dEnd));
           });
           if (disclaimed) continue;
-          return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
+          // Collect instead of returning — every offending (city, clause)
+          // pair feeds the LLM refinement pass (see offenders above).
+          const offenderKey = `${city}|${normalized}`;
+          if (!offenderKeys.has(offenderKey)) {
+            offenderKeys.add(offenderKey);
+            offenders.push({ city, clause: normalized });
+          }
         }
       }
     }
     }
   }
-  return null;
+  if (!offenders.length) return null;
+  return {
+    ...finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${offenders[0].city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`),
+    evidence: offenders,
+  };
 }
 
 // ── internal-route gate ─────────────────────────────────────────────

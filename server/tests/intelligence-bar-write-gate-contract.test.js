@@ -91,6 +91,7 @@ function discoverAllTools() {
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
   'create_agent_estimate_draft',
+  'set_estimate_presentation',
   'create_customer',
   'update_property_access',
   'optimize_all_routes',
@@ -412,6 +413,17 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     scheduled_services: STOPS,
     products_catalog: PRODUCTS,
     product_restock_requests: RESTOCK_REQUESTS,
+    // set_estimate_presentation's lookup + row match must succeed so the
+    // executor reaches its confirmation gate (draft status, matchable line).
+    estimates: [{
+      id: 'est-1',
+      token: 'esttoken1',
+      status: 'draft',
+      customer_name: 'Road Tester',
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'pest_control', displayName: 'Pest Control' }] },
+      },
+    }],
   };
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
@@ -427,6 +439,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         services: { pest: { frequency: 'quarterly' } },
       },
       reasoning: 'Behavioral contract preview.',
+    }],
+    ['estimate-tools', 'executeEstimateTool', 'set_estimate_presentation', {
+      estimate_identifier: 'esttoken1',
+      service: 'pest_control',
+      display_name: 'General Pest Control',
+      reason: 'Behavioral contract preview.',
     }],
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],

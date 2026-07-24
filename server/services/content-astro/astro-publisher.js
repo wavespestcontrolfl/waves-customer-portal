@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
@@ -905,11 +906,17 @@ async function publishAstro(postId) {
       },
     );
     if (!guardrails.pass) {
-      const blocking = guardrails.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
-      const gErr = new Error(`content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
-      gErr.code = 'BLOG_GUARDRAILS_FAILED';
-      gErr.details = blocking;
-      throw gErr;
+      // Async LLM refinement (footprint-claim-classifier) may dismiss a
+      // false-positive OFF_FOOTPRINT_CITY_CLAIM; every other finding — and
+      // any classifier failure — keeps the deterministic verdict.
+      const refined = await refineFootprintFindings(guardrails.findings);
+      const blocking = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+      if (blocking.length) {
+        const gErr = new Error(`content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+        gErr.code = 'BLOG_GUARDRAILS_FAILED';
+        gErr.details = blocking;
+        throw gErr;
+      }
     }
 
     // 2b-2. Comparison-table / named-competitor legal scan. The autonomous

@@ -857,12 +857,17 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
 
   test('an accept-time short code for the same target is reused — the retry mints nothing', async () => {
     resetStore(unbookedOneTime({ id: 'est-shortlink-2', token: 'tok-shortlink-2' }));
+    // Exactly the URL the retry rebuilds (service derived canonically +
+    // estimate correlation + the customers-only-gate accept token). The token
+    // mint is quantized to the acceptance day — this fixture carries no
+    // accepted_at, so route and test both derive it from today — which is
+    // precisely what keeps fresh-accept and retry URLs identical for dedupe.
+    const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+    const acceptToken = mintEstimateAcceptToken('est-shortlink-2');
     db.__state.tables.short_codes = [{
       id: 'sc-accept-1',
       code: 'acc99',
-      // Exactly the URL the retry rebuilds (service derived canonically +
-      // estimate correlation) — as the fresh accept now mints it.
-      target_url: 'https://portal.wavespestcontrol.com/book?service=lawn_care&source=estimate-accept&estimate_id=est-shortlink-2',
+      target_url: `https://portal.wavespestcontrol.com/book?service=lawn_care&source=estimate-accept&estimate_id=est-shortlink-2&accept_token=${encodeURIComponent(acceptToken)}`,
       entity_type: 'estimates',
       entity_id: 'est-shortlink-2',
       purpose: 'estimate_accept_booking',

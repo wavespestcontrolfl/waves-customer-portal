@@ -274,6 +274,15 @@ function normalizeBlocks(blocks) {
         href: block.href ? String(block.href) : '',
       };
     }
+    if (type === 'list') {
+      // items survives admin edits for the same reason details.variant
+      // does — the default branch below would collapse the block to
+      // {type, content} and silently drop every row.
+      return {
+        type,
+        items: Array.isArray(block.items) ? block.items.map((item) => String(item || '')) : [],
+      };
+    }
     return { type, content: String(block?.content || '') };
   });
 }
@@ -309,7 +318,23 @@ function renderBlocks(blocks, payload) {
         const valueText = renderInline(row.value, payload, { html: false });
         return { labelHtml, valueHtml, labelText, valueText };
       }).filter((row) => String(row.valueText || '').trim() !== '');
-      if (rows.length) {
+      if (rows.length && block.variant === 'faq') {
+        // Question-over-answer, single column (variant preserved by
+        // normalizeBlocks for exactly this): the two-column money-table
+        // layout below right-aligns values in bold, which mangles
+        // sentence-length answers. Empty answers already dropped above —
+        // that's how truth-scoped FAQ rows (contract/callback claims)
+        // disappear for the categories that can't make the claim.
+        htmlParts.push(`
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;">
+            ${rows.map((row) => `
+              <tr><td style="padding:7px 0 1px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.labelHtml}</td></tr>
+              <tr><td style="padding:0 0 7px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${row.valueHtml}</td></tr>
+            `).join('')}
+          </table>
+        `);
+        textParts.push(rows.map((row) => `${row.labelText}\n${row.valueText}`).join('\n\n'));
+      } else if (rows.length) {
         htmlParts.push(`
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
@@ -355,17 +380,43 @@ function renderBlocks(blocks, payload) {
         else if (altText) textParts.push(altText);
         else if (href) textParts.push(href);
       }
+    } else if (block.type === 'list') {
+      // Check-list rows (single column, navy check) — resolved {{variables}}
+      // like every other block; an item that resolves to blank drops, so
+      // truth-scoped claims can be payload-driven the same way FAQ rows are.
+      const items = (block.items || [])
+        .map((item) => ({
+          html: renderInline(item, payload),
+          text: renderInline(item, payload, { html: false }),
+        }))
+        .filter((item) => String(item.text || '').trim() !== '');
+      if (items.length) {
+        htmlParts.push(`
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:14px 0;">
+            ${items.map((item) => `
+              <tr>
+                <td valign="top" width="22" style="padding:5px 8px 5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.heading};font-weight:700;">&#10003;</td>
+                <td style="padding:5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${item.html}</td>
+              </tr>
+            `).join('')}
+          </table>
+        `);
+        textParts.push(items.map((item) => `- ${item.text}`).join('\n'));
+      }
     } else if (block.type === 'divider') {
       htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
       textParts.push('---');
     } else if (block.type === 'signature') {
-      const content = renderInline(block.content || 'The Waves Pest Control team', payload);
+      // Default sign-off is "— The Waves Team" (owner call 2026-07-21) —
+      // company-name signatures were retired across every template by
+      // migration 20260721100020.
+      const content = renderInline(block.content || '— The Waves Team', payload);
       // white-space:pre-line lets authored signatures split onto two lines
       // ("We look forward to servicing your home.\n— The Waves Team")
       // without HTML in block content; single-line signatures render
       // exactly as before.
       htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
-      textParts.push(renderInline(block.content || 'The Waves Pest Control team', payload, { html: false }));
+      textParts.push(renderInline(block.content || '— The Waves Team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
       if (content) {
