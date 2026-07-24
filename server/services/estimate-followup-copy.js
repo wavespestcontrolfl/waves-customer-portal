@@ -60,11 +60,12 @@ const FAQ_PRICE =
 // email module renders an animated preview linked to the mp4. Truth scope:
 // a category only gets a video of the report type its plan actually
 // produces — pest/lawn/tree_shrub their own, palm injection folds into the
-// tree & shrub report (its visits are documented on that report), bundle
-// gets the generic-captioned pest tour (every bundle visit is documented in
-// a service report). mosquito/rodent/termite/commercial/unknown get NO
-// video (empty slots — the renderer drops the blocks) rather than a
-// mismatched report tour.
+// tree & shrub report (its visits are documented on that report). The
+// videos state the recurring-terms benefits on camera (callbacks /
+// no-contract / 90-day), so ONLY packs carrying RECURRING_TERMS_BENEFIT
+// may reference one — bundle/mosquito/rodent/termite/commercial/unknown
+// get empty slots and the renderer drops the blocks (v2 owner round
+// 2026-07-23: benefit-forward re-cut).
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -206,7 +207,6 @@ const PACKS = {
     included: 'Every service on your plan was priced from your actual property — one plan, one schedule, one team accountable for all of it.',
     process: 'Approve online once and we schedule everything — each service runs on its own right cadence, and every visit is documented in your report.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
-    video: { slug: 'pest', caption: 'Tap to watch — what a real Waves service report looks like.' },
   },
   // Property-generic claims only, so nothing service-specific can be wrong
   // (same rule as glassEstimateCopyFor's unknown fallback).
