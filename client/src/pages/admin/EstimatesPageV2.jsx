@@ -4064,8 +4064,15 @@ export default function EstimatesPageV2() {
       ? "estimates"
       : null;
 
+  // Prefill (editEstimateId / lead / customer seeding) must win over a tab
+  // param: the legacy /admin/estimates redirect injects tab=estimates into
+  // prefill links that omit tab=new, and mounting on any tab other than "new"
+  // lets the leave-create-tab cleanup effect below wipe the prefill in the
+  // very first effects pass — the builder then opens blank. The URL-watcher
+  // effect resolves incoming prefill to the "new" tab anyway; starting there
+  // keeps the initial state consistent with it.
   const [activeTab, setActiveTab] = useState(
-    initialTab || (hasPrefill ? "new" : "leads"),
+    hasPrefill ? "new" : initialTab || "leads",
   );
 
   // The deep-link target for the Estimates list. Captured into state (and
