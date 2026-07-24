@@ -1566,15 +1566,14 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
 // derived from the engine's own floor rather than a chosen fraction.
 // Mirrors service-pricing.js `pricePestControl`: basePrice is floored
 // at PEST.floor, then multiplied by the cadence's frequency multiplier
-// before being turned into a monthly. Defaults to v1 rates (the live
-// shape for admin-created estimates); v2 multipliers are slightly
-// gentler so falling back to v1 just makes the floor a touch lower,
-// which is the safer direction.
+// before being turned into a monthly. Uses v2 rates — the live default
+// curve since 2026-07-23 — so this floor tracks what new estimates are
+// actually priced with.
 function pestMonthlyFloor(visitsPerYear) {
   const freqKey = visitsPerYear >= 12 ? 'monthly'
                 : visitsPerYear >= 6  ? 'bimonthly'
                 : 'quarterly';
-  const freqMult = PEST.frequencyDiscounts.v1?.[freqKey] ?? 1.0;
+  const freqMult = PEST.frequencyDiscounts.v2?.[freqKey] ?? 1.0;
   return PEST.floor * freqMult * visitsPerYear / 12;
 }
 

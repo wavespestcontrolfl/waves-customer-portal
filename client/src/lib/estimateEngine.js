@@ -1705,11 +1705,12 @@ export function calculateEstimate(inputs) {
     : 'MEDIUM';
   const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };
   // Deprecated client mirror of server/services/pricing-engine/constants.PEST.
-  // Keep these literals synced until this file is retired.
+  // Keep these literals synced until this file is retired. Synced to the v2
+  // cadence curve (live default since 2026-07-23).
   const pestFrequencyTiers = [
     { f: 4, label: 'Quarterly', disc: 1.00, rec: pestFreq === 4 },
-    { f: 6, label: 'Bi-Monthly', disc: 0.85, rec: pestFreq === 6 },
-    { f: 12, label: 'Monthly', disc: 0.70, rec: pestFreq === 12 },
+    { f: 6, label: 'Bi-Monthly', disc: 0.88, rec: pestFreq === 6 },
+    { f: 12, label: 'Monthly', disc: 0.78, rec: pestFreq === 12 },
   ];
 
   // Track active pest price modifiers and non-pricing property context.
