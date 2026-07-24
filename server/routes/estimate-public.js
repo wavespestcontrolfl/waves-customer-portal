@@ -16686,16 +16686,27 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
 // tier-plan surfaces, so pre-flag send snapshots (sent before this change)
 // serve the same disclosure as fresh builds.
 async function estimateCustomerPreservesMonthlyBilling(estimate) {
-  const customerId = estimate?.customer_id;
-  if (!customerId) return false;
+  if (!estimate?.customer_id && !estimate?.customer_phone) return false;
   try {
-    const customer = await db('customers').where({ id: customerId }).first();
+    let customer = null;
+    if (estimate.customer_id) {
+      customer = await db('customers').where({ id: estimate.customer_id }).first();
+    } else {
+      // UNLINKED estimates link at accept through this same matcher
+      // (matchAcceptCustomerByPhone → convertEstimate, the #2680 r3
+      // shared-resolution contract) — resolve the prospective customer
+      // identically so the disclosure matches the billing accept will
+      // actually apply (codex #2978 r4). Ambiguous matches return null,
+      // exactly like accept (no link → converts per-application).
+      ({ match: customer } = await matchAcceptCustomerByPhone(estimate));
+    }
     if (!customer) return false;
     return BillingCadence.customerPreservesMonthlyMembership(customer);
   } catch (e) {
-    // Unknown lane on a LINKED estimate: keep the monthly disclosure.
-    // Wrongly suppressing it hides a description of a real charge; wrongly
-    // showing it merely over-discloses for one transient failure window.
+    // Unknown lane with a customer signal present: keep the monthly
+    // disclosure. Wrongly suppressing it hides a description of a real
+    // charge; wrongly showing it merely over-discloses for one transient
+    // failure window.
     logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
     return true;
   }

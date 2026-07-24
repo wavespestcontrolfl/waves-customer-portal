@@ -11,7 +11,14 @@
  * snapshots included).
  */
 
-const mockDbState = { customer: null, calls: [], billingModeColumnExists: true };
+const mockDbState = {
+  customer: null,
+  calls: [],
+  billingModeColumnExists: true,
+  // Candidate rows for the awaited-as-list customers query
+  // (matchAcceptCustomerByPhone's phone sweep).
+  phoneCandidates: [],
+};
 
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -22,6 +29,7 @@ jest.mock('../models/db', () => {
       whereNotNull: () => builder,
       andWhere: () => builder,
       orderBy: () => builder,
+      orderByRaw: () => builder,
       limit: () => builder,
       select: async () => [],
       first: async () => {
@@ -31,6 +39,15 @@ jest.mock('../models/db', () => {
           return mockDbState.customer;
         }
         return null;
+      },
+      // Awaiting the builder without .first() (the phone-candidate sweep)
+      // resolves the canned candidate list.
+      then: (resolve, reject) => {
+        mockDbState.calls.push(`${table}:list`);
+        if (table === 'customers' && mockDbState.phoneCandidates instanceof Error) {
+          return reject(mockDbState.phoneCandidates);
+        }
+        return resolve(table === 'customers' ? (mockDbState.phoneCandidates || []) : []);
       },
     };
     return builder;
@@ -55,11 +72,12 @@ const {
   _resetPerApplicationColumnsProbeForTests,
 } = require('../routes/estimate-public');
 
-function lawnEstimateRow({ customerId = null } = {}) {
+function lawnEstimateRow({ customerId = null, customerPhone = null } = {}) {
   return {
     id: `estimate-lane-${customerId || 'lead'}`,
     status: 'sent',
     customer_id: customerId,
+    customer_phone: customerPhone,
     monthly_total: 55.5,
     annual_total: 666,
     onetime_total: 0,
@@ -98,14 +116,37 @@ beforeEach(() => {
   mockDbState.customer = null;
   mockDbState.calls = [];
   mockDbState.billingModeColumnExists = true;
+  mockDbState.phoneCandidates = [];
   _resetPerApplicationColumnsProbeForTests();
 });
 
 describe('buildPricingBundle lane enforcement', () => {
-  test('lead estimate (no customer link): flags present, no customer lookup', async () => {
+  test('lead estimate (no customer link, no phone): flags present, no customer lookup', async () => {
     const bundle = await buildPricingBundle(lawnEstimateRow());
     expect(collectFlags(bundle).length).toBeGreaterThan(0);
     expect(mockDbState.calls).not.toContain('customers');
+  });
+
+  test('UNLINKED estimate whose phone matches a monthly member strips — accept links that member and bills monthly (codex r4)', async () => {
+    mockDbState.phoneCandidates = [{
+      id: 'cust-m', phone: '+19415551234', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: null,
+    }];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415551234' }));
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('unlinked phone matching a per_application customer keeps the flags', async () => {
+    mockDbState.phoneCandidates = [{
+      id: 'cust-p', phone: '+19415551234', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'per_application',
+    }];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415551234' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('unlinked phone with no candidate rows keeps the flags (new signup, per-application)', async () => {
+    mockDbState.phoneCandidates = [];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415550000' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
   });
 
   test('linked CURRENT monthly member (legacy NULL lane): every flag stripped, note preserved', async () => {
