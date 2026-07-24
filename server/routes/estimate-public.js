@@ -3889,7 +3889,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+              // #2969 parity (owner 2026-07-23): the standalone risk-free /
+              // 90-day line was removed from the React page as a duplicate —
+              // the plan-terms strip below already carries the money-back
+              // guarantee. Factual assurance copy, matching the other
+              // categories' recurringAssurance lines.
+              recurringAssurance: 'Your plan includes scheduled pest treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
@@ -4558,15 +4563,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const price = oneTimeItemAmount(it);
     return price ? Math.round((sum + price) * 100) / 100 : sum;
   }, 0);
-  const realOneTimeRows = displayableOneTimeItems.map((it) => {
-    const price = oneTimeItemAmount(it);
-    const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
-    if (price <= 0 && !includedByServiceCredit) return '';
-    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
-  }).filter(Boolean).join('');
-  const hasRealOneTime = realOneTimeRows.length > 0;
+  const billableOneTimeItems = displayableOneTimeItems.filter((it) => (
+    oneTimeItemAmount(it) > 0 || it.serviceSpecificDiscountApplied === true
+  ));
+  const hasRealOneTime = billableOneTimeItems.length > 0;
+  // #2969 SSR parity (owner 2026-07-23): the React OneTimeBreakdownCard
+  // drops the total row on single-item breakdowns (the item line already
+  // states the price) and, on one-time-ONLY pages, also drops the lone
+  // row's dollars when they just repeat the hero figure — the row survives
+  // for the service NAME. A manual one-time discount re-introduces real
+  // arithmetic, so the full table stays; quote-required pages never reach
+  // here (displayableOneTimeItems is [] when quoteRequired).
   // Net the manual/custom one-time discount slice into the legacy (non-React)
   // HTML card so its itemized total matches the already-discounted hero and
   // accept totals. The slice never covers the termite install fee (kept at full
@@ -4574,6 +4581,20 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const manualOneTimeDiscount = (!quoteRequired && hasRealOneTime)
     ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
     : 0;
+  const oneTimeSingleRowNoDiscount = billableOneTimeItems.length === 1
+    && manualOneTimeDiscount === 0;
+  const suppressLoneOneTimeRowAmount = isOneTimeOnly
+    && oneTimeSingleRowNoDiscount
+    && billableOneTimeItems[0].serviceSpecificDiscountApplied !== true
+    && Math.abs(oneTimeItemAmount(billableOneTimeItems[0]) - onetimeTotal) < 0.005;
+  const realOneTimeRows = billableOneTimeItems.map((it) => {
+    const price = oneTimeItemAmount(it);
+    const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
+    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
+    const priceCell = suppressLoneOneTimeRowAmount ? '' : priceHtml;
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
+  }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
     ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
     : '';
@@ -4585,7 +4606,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
     <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
     <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
-      <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
+      ${oneTimeSingleRowNoDiscount ? '' : `<tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>`}
     </table>
     ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : '';
