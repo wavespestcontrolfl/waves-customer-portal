@@ -1082,6 +1082,13 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         .map(([, patch]) => patch)
         .find((patch) => patch.billing_mode === 'per_application');
       expect(laneStamp).toBeTruthy();
+      // The completing claim is PLAN-VALUE-GUARDED (Codex #2980 r4): a
+      // concurrent plan switch after the plan check makes the claim miss.
+      const claimChain = touches('appointment_card_requests')
+        .map((t) => t.chain)
+        .find((c) => c.calls.some(([op, patch]) => op === 'update' && patch?.status === 'completing'));
+      expect(claimChain).toBeTruthy();
+      expect(claimChain.calls).toContainEqual(['where', { selected_plan: 'per_application' }]);
     });
 
     test('settled prepay invoice → secured and the pending row heals to satisfied', async () => {

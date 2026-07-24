@@ -303,31 +303,43 @@ async function selectSecurePlan({ token, plan }) {
         .where({ id: request.id, prepay_invoice_id: request.prepay_invoice_id })
         .update({ prepay_invoice_id: null, annual_prepay_term_id: null, updated_at: new Date() });
     }
+    // Selection + setup-fee obligation land in ONE transaction (Codex
+    // #2980 r4): a durable per_application selection without its fee stamp
+    // would let the first completion auto-charge WITHOUT the disclosed $99
+    // — either both persist or neither does, and a failed fee stamp rolls
+    // the selection back to retryable.
     const stamp = new Date();
-    const stamped = await db('appointment_card_requests')
-      .where({ id: request.id, status: 'pending' })
-      .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
-    if (stamped !== 1) {
-      // The CAS lost (Codex #2980 r2): /complete raced this selection and
-      // the request is no longer pending — stamping the fee anyway would
-      // bill a $99 no durable selection authorizes. Report the true state.
+    let casLost = false;
+    await db.transaction(async (trx) => {
+      const stamped = await trx('appointment_card_requests')
+        .where({ id: request.id, status: 'pending' })
+        .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
+      if (stamped !== 1) {
+        // The CAS lost (Codex #2980 r2): /complete raced this selection and
+        // the request is no longer pending — stamping the fee anyway would
+        // bill a $99 no durable selection authorizes.
+        casLost = true;
+        return;
+      }
+      // Owner decision 2026-07-24: the per-application choice on a solo
+      // pest/mosquito series owes the $99 setup fee on the FIRST completion
+      // invoice. Snapshot the amount now (billed fee === disclosed fee) on
+      // the SERIES PARENT — the completion mint's atomic claim always reads
+      // the parent, so a child-attached link must not stamp the child.
+      // Guarded so a re-selection never re-stamps a consumed fee.
+      if (context.setupFee) {
+        await trx('scheduled_services')
+          .where({ id: seriesAnchorId(visit) })
+          .whereNull('pending_setup_fee')
+          .update({ pending_setup_fee: context.setupFee.amount, updated_at: stamp });
+      }
+    });
+    if (casLost) {
       const fresh = await db('appointment_card_requests')
         .where({ id: request.id })
         .first('status');
       if (fresh?.status === 'completed' || fresh?.status === 'satisfied') throw fail('already_secured');
       throw fail('selection_conflict');
-    }
-    // Owner decision 2026-07-24: the per-application choice on a solo
-    // pest/mosquito series owes the $99 setup fee on the FIRST completion
-    // invoice. Snapshot the amount now (billed fee === disclosed fee) on
-    // the SERIES PARENT — the completion mint's atomic claim always reads
-    // the parent, so a child-attached link must not stamp the child.
-    // Guarded so a re-selection never re-stamps a consumed fee.
-    if (context.setupFee) {
-      await db('scheduled_services')
-        .where({ id: seriesAnchorId(visit) })
-        .whereNull('pending_setup_fee')
-        .update({ pending_setup_fee: context.setupFee.amount, updated_at: stamp });
     }
     return { ok: true, plan: 'per_application' };
   }
@@ -407,6 +419,14 @@ async function selectSecurePlan({ token, plan }) {
         .where({ id: visit.id })
         .forUpdate()
         .first('id', 'status', 'scheduled_date');
+      // Also lock the CUSTOMER row (Codex #2980 r4): resolveForInvoice
+      // falls back to customers.payer_id, which staff can change from
+      // Customer360 — a default-payer attach must serialize behind this
+      // mint, not slip between the refusal check and the invoice insert.
+      await trx('customers')
+        .where({ id: visit.customer_id })
+        .forUpdate()
+        .first('id');
       const liveDate = liveVisit ? callBookingDateOnly(liveVisit.scheduled_date) : null;
       if (!liveVisit
         || !LIVE_VISIT_STATUSES.includes(liveVisit.status)

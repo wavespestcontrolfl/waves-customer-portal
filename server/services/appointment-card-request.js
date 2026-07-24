@@ -739,9 +739,19 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   // fresh status and either acks (already done) or retries
   // (completion_in_progress → the webhook branch throws so Stripe's retry
   // schedule re-runs it; the page returns a retryable 409).
-  let claimed = await db('appointment_card_requests')
-    .where({ id: request.id, status: 'pending' })
-    .update({ status: 'completing', updated_at: new Date() });
+  // The claim is PLAN-VALUE-GUARDED (Codex #2980 r4): the plan check above
+  // validated the selection this function READ — if a concurrent
+  // select-plan switched it (e.g. to prepay_annual) after that read, the
+  // guard makes this claim miss and the retry re-reads the fresh request,
+  // whose plan_required refusal then applies. selected_plan can only
+  // change while the row is 'pending', so the completing lease below never
+  // needs the guard.
+  let claimQuery = db('appointment_card_requests')
+    .where({ id: request.id, status: 'pending' });
+  claimQuery = request.selected_plan == null
+    ? claimQuery.whereNull('selected_plan')
+    : claimQuery.where({ selected_plan: request.selected_plan });
+  let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
   if (claimed !== 1) {
     const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status', 'updated_at');
     if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
