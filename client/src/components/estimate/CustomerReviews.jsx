@@ -24,7 +24,9 @@ function pageSizeForViewport() {
 const ROTATE_MS = 6000;
 
 // All four GBP profiles (owner directive 2026-07-10) — same list the
-// server-rendered page falls back to.
+// server-rendered page falls back to. No `location` on these cards: the
+// profile name already names the location, so "Waves Venice · Venice" read
+// double (owner directive 2026-07-23).
 const REVIEW_FALLBACKS = [
   { name: 'Lakewood Ranch', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
   { name: 'Parrish', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
@@ -33,7 +35,6 @@ const REVIEW_FALLBACKS = [
 ].map((l) => ({
   reviewerName: `Waves ${l.name}`,
   text: `Read current Google reviews for our ${l.name} location.`,
-  location: l.name,
   url: `https://www.google.com/maps/place/?q=place_id:${l.placeId}`,
   fallback: true,
 }));

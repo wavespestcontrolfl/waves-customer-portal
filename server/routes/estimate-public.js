@@ -4541,10 +4541,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
+  // No `location`: the profile name already names it — "Waves Venice ·
+  // Venice" read double (owner directive 2026-07-23).
   const reviewFallbacks = LOCATIONS.map((l) => ({
     reviewerName: `Waves ${l.name}`,
     text: `Read current Google reviews for our ${l.name} location.`,
-    location: l.name,
     url: `https://www.google.com/maps/place/?q=place_id:${l.placeId}`,
     fallback: true,
   }));

@@ -270,6 +270,26 @@ export function glassEstimateCopyFor(serviceCategory) {
   return GLASS_PACKS[serviceCategory] || GLASS_PACKS.bundle;
 }
 
+// One-time-only estimates carry different terms than recurring plans — no
+// recurring callback promise, no 90-day money-back guarantee (the one-time
+// price card states its own 30-day callback period). The category packs
+// above all speak recurring-plan language ("unlimited free callbacks",
+// "90-day money-back guarantee"), so a one-time-only estimate overlays a
+// terms-neutral hero (owner directive 2026-07-23). Every claim here is
+// already shipped: "Licensed & insured · Satisfaction guaranteed" is the
+// ONE_TIME_CTA_MICRO / GuaranteeStrip line, and the property-priced claim
+// is the packs' own aiBody. AI copy, chips, and CTA micro stay the
+// category pack's — only the hero promises change.
+const GLASS_ONE_TIME_HERO = {
+  heroH1: 'Hello {first}, your {city} service quote is ready!',
+  heroSub: 'One visit, priced from your actual property — approve online and pick a day that works. Licensed & insured, satisfaction guaranteed.',
+};
+
+export function glassOneTimeHeroOverlay(pack) {
+  if (!glassCopyActive()) return null;
+  return { ...(pack || GLASS_PACKS.bundle), ...GLASS_ONE_TIME_HERO };
+}
+
 // CTA micro line under the primary booking CTA. Recurring plans keep the
 // service-agnostic recurring terms (contract/callbacks/guarantee — all
 // already shipped on pest+lawn); packs override where those terms don't

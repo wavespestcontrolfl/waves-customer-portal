@@ -57,6 +57,7 @@ import {
   glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
+  glassOneTimeHeroOverlay,
   glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
@@ -1988,13 +1989,14 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
-// Plan-level discount summary for a multi-service plan carrying a plan-wide
-// credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
-// price PRE credit — the credit is applied to the combined plan, not baked into
-// each row — so this is the one place the customer sees list subtotal → credit →
-// the net they actually pay. Renders ONLY when there's a credit to itemize: the
-// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
-// a no-credit multi-service plan stays summary-free and unchanged.
+// Plan-level summary for a multi-service plan. With a plan-wide credit
+// (e.g. Referral Credit) it itemizes list subtotal → credit → net — the
+// per-service cards quote their WaveGuard-net price PRE credit, so this is
+// the one place that story appears. Without a credit it renders a simple
+// "Plan total $X/mo" row (owner directive 2026-07-23, reversing the
+// 2026-07-07 no-total ruling — a 3+ service plan gave the customer no
+// number anchoring the whole plan). Ranged/quote-required plans stay
+// total-free either way.
 export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
   if (!combined) return null;
   // The live discount object (selected row first — the server nulls
@@ -2016,11 +2018,33 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     || selectedFrequency?.manualDiscountSuppressed === true
     || Boolean(combined.manualDiscount)
     || Boolean(planDiscount);
-  if (!planHasCredit) return null;
-  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
   // Quote-required selection: the rest of the estimate hides exact dollars for a
   // quote-required row, so there's no exact subtotal/net to itemize here either.
   if (selectedFrequency?.quoteRequired === true) return null;
+  // No-credit multi-service plan: one simple "Plan total" row at the selected
+  // cadences (owner directive 2026-07-23, reversing the 2026-07-07 removal —
+  // a 3+ service plan gave the customer no number to anchor the whole plan).
+  // Low-confidence ranged plans stay total-free: the page deliberately quotes
+  // a confirmed-on-site range, and an exact total would contradict it.
+  if (!planHasCredit) {
+    const noCreditLowConfidence = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) > 0;
+    const totalMonthly = Math.round(Number(preCreditMonthly) * 100) / 100;
+    if (noCreditLowConfidence || !(totalMonthly > 0)) return null;
+    return (
+      <section style={estimateCard()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT }}>Plan total</span>
+          <strong style={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', fontSize: 20, color: ESTIMATE_TEXT }}>
+            {fmtMoney(totalMonthly)}<span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> /mo</span>
+          </strong>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          All services on this plan at your selected schedules — each service bills per application.
+        </div>
+      </section>
+    );
+  }
+  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
 
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
   // A $0 net is real — a credit can fully comp the plan, and that's exactly when
@@ -3395,31 +3419,22 @@ export function ServiceSection({
             </span>
           </div>
         ) : null}
-        {servicesLength > 1 ? (
-          <h3 style={{
-            fontSize: 18,
-            color: ESTIMATE_TEXT,
-            margin: '0 0 16px',
-            // Keep clear of the absolutely-positioned corner badge — sized
-            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
-            // padding + the 16px corner inset). No clearance needed when the
-            // badge stacks in flow on phones.
-            paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
-            fontWeight: 800,
-          }}>
-            {displayServiceLabel(section.label) || 'Service'}
-          </h3>
-        ) : null}
-
         {/* Every service box leads with its own service-related headline —
             the "HOW OFTEN?" eyebrow is gone and no-selector services
-            (termite monitoring) get a headline too (owner 2026-07-10). */}
+            (termite monitoring) get a headline too (owner 2026-07-10). The
+            small service-name subheader that used to precede this on
+            multi-service estimates is gone too (owner 2026-07-23): the
+            headline already names the service, so "Tree & Shrub" over
+            "Tree & Shrub Care by Waves" read double. */}
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
           color: '#04395E', margin: '0 0 4px',
-          // Same corner-badge clearance as the h3 above; only needed when
-          // this headline is the first line in the card (single-service).
-          paddingRight: servicesLength > 1 || !showTierBadge || compactTierBadge ? 0 : 170,
+          // Corner-badge clearance — the headline is now the first line in
+          // the card on every composition, so it always needs to clear the
+          // absolutely-positioned WaveGuard chip (sized for the widest chip,
+          // "WaveGuard Platinum"). None needed when the badge stacks in
+          // flow on phones.
+          paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
@@ -3479,7 +3494,10 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
-            showGuarantee={servicesLength === 1}
+            // Guarantee line off everywhere (owner 2026-07-23) — the approve
+            // CTA's micro line states the same 90-day guarantee immediately
+            // below, so the in-card line read twice.
+            showGuarantee={false}
           />
         ) : null}
 
@@ -4816,7 +4834,12 @@ function EstimateViewPageInner() {
   // bundle pack), and every use below still falls back to the standard copy
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
-  const glassPack = glassEstimateCopyFor(serviceCategory);
+  // One-time-only estimates overlay a terms-neutral hero on the category
+  // pack — the packs' recurring promises (unlimited callbacks, 90-day
+  // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
+  const glassPack = estimate.isOneTimeOnly === true
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory))
+    : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -5006,13 +5029,11 @@ function EstimateViewPageInner() {
           })}
           </div>
 
-          {/* The combined "Recurring total" card was removed (owner directive
-              2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. It returns ONLY to itemize a plan-wide
-              credit (e.g. Referral Credit) and show the net: the per-service
-              cards are pre-credit, so without this the credit + final price
-              would never appear on a split multi-service plan. Renders nothing
-              when there's no credit, so no-credit bundles stay unchanged. */}
+          {/* Plan-level summary (owner 2026-07-23): every multi-service plan
+              shows a simple "Plan total $X/mo" row at the selected cadences —
+              reversing the 2026-07-07 removal. With a plan-wide credit it
+              itemizes credit → net instead; ranged/quote-required plans stay
+              total-free (PlanTotalSummary gates internally). */}
           {services.length > 1 ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
@@ -5035,13 +5056,11 @@ function EstimateViewPageInner() {
             />
           ) : null}
 
-          {/* One guarantee line for the whole plan — not one per box. */}
-          {services.length > 1 ? (
-            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
-              Try us risk-free — 90-day money-back guarantee.
-            </div>
-          ) : null}
-
+          {/* The standalone "Try us risk-free — 90-day money-back guarantee."
+              line is gone (owner 2026-07-23): the approve CTA's micro line
+              ("No long-term contract · Unlimited free callbacks · 90-day
+              money-back guarantee") already carries the claim, so it read
+              twice back to back. */}
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (

@@ -826,9 +826,12 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).not.toContain('/ year');
   });
 
-  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+  it('renders the simple Plan total row when there is no credit (owner 2026-07-23)', () => {
     const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
-    expect(container).toBeEmptyDOMElement();
+    expect(container.textContent).toContain('Plan total');
+    expect(container.textContent).toContain('$84.08');
+    // No credit line materializes on a creditless plan.
+    expect(container.textContent).not.toMatch(/Credit|Discount/);
   });
 
   it('renders nothing without a combined payload', () => {
@@ -1013,7 +1016,8 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
 
   it('never conjures a discount line from reconciliation drift on a creditless plan', () => {
     // Positive subtotal−net difference but NO credit signal anywhere (no live
-    // object, no suppressed flag, no planDiscount) → nothing renders.
+    // object, no suppressed flag, no planDiscount) → the simple Plan total row
+    // renders (owner 2026-07-23), but no credit/discount line materializes.
     const { container } = render(
       <PlanTotalSummary
         combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
@@ -1021,7 +1025,8 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={84.08}
       />,
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(container.textContent).toContain('Plan total');
+    expect(container.textContent).not.toMatch(/Credit|Discount/);
   });
 
   it('ranged plan with no per-service sum prices the fallback from planDiscount when row objects are absent', () => {
