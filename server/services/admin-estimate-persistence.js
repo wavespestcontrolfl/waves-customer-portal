@@ -184,7 +184,11 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       if (!row || typeof row !== 'object') continue;
       const stampedPa = Number(row.floorPa);
       const hasMetadata = Number.isFinite(stampedPa);
-      const isClientStamped = hasMetadata && (
+      // A row STAMPED pricingVersion v2 with no client marker is a SERVER v2
+      // snapshot — the quarterly literal (89) overlaps both curves, so the
+      // stamp must win before any literal check (codex #2966 r3 P2).
+      const isServerV2Snapshot = !isClientEngineResult && row.pricingVersion === 'v2';
+      const isClientStamped = hasMetadata && !isServerV2Snapshot && (
         CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
         || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
       );
@@ -205,7 +209,9 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!row || typeof row !== 'object') continue;
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
-    const isClientStamped = hasMetadata && (
+    // Same server-v2-snapshot short-circuit as the rejection gate above.
+    const isServerV2Snapshot = !isClientEngineResult && row.pricingVersion === 'v2';
+    const isClientStamped = hasMetadata && !isServerV2Snapshot && (
       CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
       || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
     );

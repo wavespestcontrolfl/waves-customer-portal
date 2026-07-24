@@ -11038,6 +11038,9 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         monthlyBase: baseMonthly ? Math.round(baseMonthly * 100) / 100 : null,
         monthly: netMonthly,
+        // Curve stamp for the version-aware pest floors — the selected-
+        // frequency preference caps read it off these rows (codex #2966 r3).
+        ...(li.pricingVersion ? { pricingVersion: li.pricingVersion } : {}),
         estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
         // Carry the per-service cadence (foam has its own, e.g. bimonthly) so a
         // mixed plan whose top-level frequency is the generic quarterly ladder
@@ -16241,7 +16244,13 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     : null;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
   const pestRecurring = pestTier
-    ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
+    ? {
+      monthlyBase: pestMoBefore,
+      visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4,
+      // Version-aware preference cap: the mapped tier row carries the curve
+      // stamp; unstamped legacy tiers read as v1 (codex #2966 r3 P2).
+      pricingVersion: pestPricingVersionOf(pestTier),
+    }
     : null;
   const { monthlyOff } = computePrefDiscount(prefs, pestRecurring, false, 0);
   const discountMonthly = (monthly, svc) => {

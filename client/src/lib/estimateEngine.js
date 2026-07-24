@@ -1964,14 +1964,14 @@ export function calculateEstimate(inputs) {
             return { floorPa, floorAnn, floorMo };
           })()
         : {};
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, ...pestFloorMeta });
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, pricingVersion: 'v2', ...pestFloorMeta });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, ...pestFloorMeta };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, pricingVersion: 'v2', ...pestFloorMeta };
       }
     });
     R.pestRoachMod = roachMod;
     R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
-    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps });
+    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps, pricingVersion: 'v2' });
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */
