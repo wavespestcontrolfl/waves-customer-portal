@@ -272,10 +272,30 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     // case — the schema permits one split field null beside a complete
     // name_full, and skipping derivation there persisted a customer without
     // the available surname (codex r7 P2). Present split fields stay
-    // authoritative for their own slot.
-    const parts = String(caller.name_full).trim().split(/\s+/);
-    if (!has(v2First)) v2First = parts[0] || null;
-    if (!has(v2Last)) v2Last = parts.slice(1).join(' ') || null;
+    // authoritative for their own slot, and the fill must respect them
+    // POSITIONALLY: a surname-only name_full ("Galliano" beside
+    // last_name:"Galliano") contains NO first name — naively taking
+    // parts[0] minted the surname as a first name and broke the
+    // surname-only conflict regime (caught by CI).
+    const full = String(caller.name_full).trim();
+    const lower = full.toLowerCase();
+    if (has(v2First) && !has(v2Last)) {
+      const first = String(v2First).trim();
+      const rest = lower.startsWith(first.toLowerCase())
+        ? full.slice(first.length).trim()
+        : full.split(/\s+/).slice(1).join(' ');
+      if (rest && rest.toLowerCase() !== first.toLowerCase()) v2Last = rest;
+    } else if (!has(v2First) && has(v2Last)) {
+      const last = String(v2Last).trim();
+      const rest = lower.endsWith(last.toLowerCase())
+        ? full.slice(0, full.length - last.length).trim()
+        : (full.split(/\s+/).length > 1 ? full.split(/\s+/)[0] : '');
+      if (rest && rest.toLowerCase() !== last.toLowerCase()) v2First = rest;
+    } else {
+      const parts = full.split(/\s+/);
+      v2First = parts[0] || null;
+      v2Last = parts.slice(1).join(' ') || null;
+    }
   }
   const v1HasName = has(merged.first_name) || has(merged.last_name);
   const v2HasName = has(v2First) || has(v2Last);
