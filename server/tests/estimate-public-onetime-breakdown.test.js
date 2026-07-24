@@ -5969,13 +5969,17 @@ describe('public estimate one-time breakdown', () => {
     })).toBe(350.1);
   });
 
-  test('selected-frequency preference discounts respect the pest monthly floor', () => {
+  test('selected-frequency preference discounts respect the VERSIONED pest monthly floor', () => {
     const prefs = { interior_spray: false, exterior_sweep: false };
 
-    // v2 cadence curve (live default 2026-07-23): monthly floor is
-    // PEST.floor(89) x 0.78 = $69.42/mo, so a $70 base only has $0.58 of
-    // headroom before the discounts would breach the floor.
-    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(0.58);
+    // Version-aware (codex #2966 P2): the floor tracks the curve the quote
+    // was priced under, never unconditionally v2.
+    // Unstamped = legacy v1 quote: floor 89 x 0.70 = $62.30/mo, so a $70
+    // base keeps its full $7.70 of headroom.
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(7.7);
+    // v2-stamped quote: floor 89 x 0.78 = $69.42/mo → only $0.58 headroom.
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70, 'v2')).toBe(0.58);
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150, 'v2')).toBe(20);
     expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150)).toBe(20);
   });
 

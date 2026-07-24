@@ -1398,7 +1398,7 @@ function detectPestRecurring(recurring) {
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
   const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
-  return { count: pest.length, visitsPerYear: vpy, monthlyBase };
+  return { count: pest.length, visitsPerYear: vpy, monthlyBase, pricingVersion: pestPricingVersionOf(...pest) };
 }
 
 // The interior-spray / exterior-eave-sweep preference toggles describe the
@@ -1566,15 +1566,30 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
 // derived from the engine's own floor rather than a chosen fraction.
 // Mirrors service-pricing.js `pricePestControl`: basePrice is floored
 // at PEST.floor, then multiplied by the cadence's frequency multiplier
-// before being turned into a monthly. Uses v2 rates — the live default
-// curve since 2026-07-23 — so this floor tracks what new estimates are
-// actually priced with.
-function pestMonthlyFloor(visitsPerYear) {
+// before being turned into a monthly. VERSION-AWARE (codex #2966 P2):
+// this floor caps opt-out discounts on ALREADY-SENT estimates, so it must
+// track the curve the quote was actually priced under — a v1 monthly quote
+// clamped against the higher v2 floor would rewrite its stored totals
+// upward. Lines stamped 'v2' (every engine quote since the v2 default)
+// use v2; unstamped legacy lines predate the stamp and were priced v1.
+function pestMonthlyFloor(visitsPerYear, pricingVersion = 'v1') {
   const freqKey = visitsPerYear >= 12 ? 'monthly'
                 : visitsPerYear >= 6  ? 'bimonthly'
                 : 'quarterly';
-  const freqMult = PEST.frequencyDiscounts.v2?.[freqKey] ?? 1.0;
+  const curve = pricingVersion === 'v2' ? PEST.frequencyDiscounts.v2 : PEST.frequencyDiscounts.v1;
+  const freqMult = curve?.[freqKey] ?? 1.0;
   return PEST.floor * freqMult * visitsPerYear / 12;
+}
+
+// The pest curve version a stored pest line/row was priced under: its own
+// stamp when present, else 'v1' (stamps ship with the v2-default engine, so
+// an unstamped line predates the curve change).
+function pestPricingVersionOf(...candidates) {
+  for (const c of candidates) {
+    const v = c && typeof c === 'object' ? c.pricingVersion : c;
+    if (v === 'v1' || v === 'v2') return v;
+  }
+  return 'v1';
 }
 
 function normalizePrefs(raw) {
@@ -1860,7 +1875,7 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
     }
   }
   if (pestRecurring) {
-    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear);
+    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear, pestRecurring.pricingVersion);
     const pestMonthlyBase = Number(pestRecurring.monthlyBase || 0);
     const maxMonthlyOff = Math.max(0, pestMonthlyBase - floor);
     monthlyOff = Math.min(monthlyOff, maxMonthlyOff);
@@ -1875,7 +1890,7 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
   };
 }
 
-function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null) {
+function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null, pricingVersion = 'v1') {
   const visits = Number(visitsPerYear || 0);
   if (!(visits > 0)) return 0;
   const p = normalizePrefs(prefs);
@@ -1885,7 +1900,7 @@ function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = n
   const base = Number(monthlyBase);
   let cappedOff = monthlyOff;
   if (Number.isFinite(base) && base > 0) {
-    const floor = pestMonthlyFloor(visits);
+    const floor = pestMonthlyFloor(visits, pricingVersion);
     if (base - cappedOff < floor) {
       cappedOff = Math.max(0, base - floor);
     }
@@ -2216,7 +2231,7 @@ function pestRecurringForPricingRows(rows = []) {
     const visits = treatmentVisitsForPricingRow(row) || visitsPerYear;
     return amount && visits ? sum + ((amount * visits) / 12) : sum;
   }, 0);
-  return { count: pestRows.length, visitsPerYear, monthlyBase };
+  return { count: pestRows.length, visitsPerYear, monthlyBase, pricingVersion: pestPricingVersionOf(...pestRows) };
 }
 
 function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
@@ -8240,7 +8255,12 @@ router.put('/:token/accept', async (req, res, next) => {
     const acceptPestRecurring = detectPestRecurring(recurringSvcList);
     const { monthlyOff: storedCadencePrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
     const acceptPrefMonthlyOff = selectedFrequencyPestVisits
-      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits, selectedFrequencyPestMonthlyBase)
+      ? preferenceMonthlyOffForPestVisits(
+        acceptPrefs,
+        selectedFrequencyPestVisits,
+        selectedFrequencyPestMonthlyBase,
+        pestPricingVersionOf(selectedFrequency, acceptPestRecurring),
+      )
       : storedCadencePrefMonthlyOff;
     const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
     const acceptEstResult = acceptedEstDataForPricing?.result || acceptedEstDataForPricing || {};

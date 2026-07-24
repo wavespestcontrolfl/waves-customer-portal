@@ -99,10 +99,15 @@ function estimateResultRoot(estimateData) {
 // Manual discounts are warn-only and their computed amount is kept as-is.
 const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
 // round(89 × v1 mult) per cadence — the exact values the client literal produces.
-const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+// Pre-stamp client saves floor at 89 × the client mirror's cadence mult —
+// BOTH curves' literals are recognized (v1: 0.85/0.70 → 75.65/62.30; v2:
+// 0.88/0.78 → 78.32/69.42) because a cached pre-v2 client can still save
+// v1-stamped rows after the v2 mirror ships (codex #2966 P2).
+const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30, 78.32, 69.42]);
 // The client fallback's own cadence multipliers (pestFrequencyTiers ft.disc)
 // — used to recognize CONFIGURED-floor client stamps below.
 const CLIENT_PEST_V1_MULTS = { 4: 1.0, 6: 0.85, 12: 0.7 };
+const CLIENT_PEST_V2_MULTS = { 4: 1.0, 6: 0.88, 12: 0.78 };
 function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
   if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
   if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
@@ -139,10 +144,16 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
   // client floor metadata as if it were a server snapshot (codex P2
   // round 11). The 89-literal set still covers pre-stamp client saves.
   const clientFloorBase = Number(root?.pricingMetadata?.pestProgramFloorPerVisit);
-  const clientStampForRow = (row) => {
-    const mult = CLIENT_PEST_V1_MULTS[Number(row.apps ?? row.v)];
-    if (!mult || !Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return null;
-    return Math.round(clientFloorBase * mult * 100) / 100;
+  // Recognize stamps from BOTH client curve generations: the v2 mirror ships
+  // with this change, but a cached pre-v2 client keeps stamping v1 mults
+  // until refresh — either is a CLIENT stamp, never a server snapshot
+  // (codex #2966 P2).
+  const clientStampsForRow = (row) => {
+    if (!Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return [];
+    const apps = Number(row.apps ?? row.v);
+    return [CLIENT_PEST_V1_MULTS[apps], CLIENT_PEST_V2_MULTS[apps]]
+      .filter((mult) => Number.isFinite(mult) && mult > 0)
+      .map((mult) => Math.round(clientFloorBase * mult * 100) / 100);
   };
 
   // Fail-closed gates BEFORE any mutation (pre-push P0s on the main-merge).
@@ -169,13 +180,13 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       const hasMetadata = Number.isFinite(stampedPa);
       const isClientStamped = hasMetadata && (
         CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-        || (isClientEngineResult && stampedPa === clientStampForRow(row))
+        || (isClientEngineResult && clientStampsForRow(row).includes(stampedPa))
       );
       if (hasMetadata && !isClientStamped) continue; // server snapshot — untouched below
       if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
       const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
       if (!frequencyKey) continue; // stripped below, never stamped
-      const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+      const freqMult = (PEST.frequencyDiscounts?.v2 || {})[frequencyKey] || 1.0; // live default curve — restamp/reject against what a regenerate would price (codex #2966 P2)
       const liveFloorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
       if (liveFloorPa !== null && Number.isFinite(Number(row.pa))
         && Number(row.pa) < liveFloorPa - 0.005) {
@@ -190,7 +201,7 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     const hasMetadata = Number.isFinite(stampedPa);
     const isClientStamped = hasMetadata && (
       CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-      || (isClientEngineResult && stampedPa === clientStampForRow(row))
+      || (isClientEngineResult && clientStampsForRow(row).includes(stampedPa))
     );
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
     // Metadata-less rows get stamped only on client-engine payloads, where the
@@ -204,7 +215,7 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!PEST.enforceFloorPostDiscount) continue;
     const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
     if (!frequencyKey) continue;
-    const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+    const freqMult = (PEST.frequencyDiscounts?.v2 || {})[frequencyKey] || 1.0; // live default curve — restamp/reject against what a regenerate would price (codex #2966 P2)
     const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
     if (floorAnn === null) continue;
     row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);

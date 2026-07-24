@@ -37,15 +37,27 @@ function platinumBundle() {
 }
 
 describe('program floor metadata on engine tier rows + legacy mapper', () => {
-  test('every pest tier row carries the floor for ITS cadence (v1 curve)', () => {
+  test('every pest tier row carries the floor for ITS cadence (v2 live default)', () => {
     // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
     // to pin the metadata machinery kept for legacy stored payloads.
     constants.PEST.enforceFloorPostDiscount = true;
     const est = generateEstimate(platinumBundle());
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     const byFreq = Object.fromEntries(pest.tiers.map(t => [t.frequency, t]));
-    // floor $89, per-visit basis rounded first: round(89 × mult) × visits.
+    // floor $89, per-visit basis rounded first: round(89 × mult) × visits —
+    // v2 curve (live default, codex #2966 P1): 1.00 / 0.88 / 0.78.
     expect(byFreq.quarterly).toMatchObject({ programFloorPerVisit: 89, programFloorAnnual: 356, programFloorMonthly: 29.67 });
+    expect(byFreq.bimonthly).toMatchObject({ programFloorPerVisit: 78.32, programFloorAnnual: 469.92, programFloorMonthly: 39.16 });
+    expect(byFreq.monthly).toMatchObject({ programFloorPerVisit: 69.42, programFloorAnnual: 833.04, programFloorMonthly: 69.42 });
+  });
+
+  test('explicit services.pest.version="v1" still prices floors under the legacy curve (replay channel)', () => {
+    constants.PEST.enforceFloorPostDiscount = true;
+    const inputs = platinumBundle();
+    inputs.services.pest.version = 'v1';
+    const est = generateEstimate(inputs);
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    const byFreq = Object.fromEntries(pest.tiers.map(t => [t.frequency, t]));
     expect(byFreq.bimonthly).toMatchObject({ programFloorPerVisit: 75.65, programFloorAnnual: 453.90, programFloorMonthly: 37.82 });
     expect(byFreq.monthly).toMatchObject({ programFloorPerVisit: 62.30, programFloorAnnual: 747.60, programFloorMonthly: 62.30 });
   });
@@ -59,7 +71,7 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
     const quarterly = mapped.results.pestTiers.find(t => t.label === 'Quarterly');
     expect(quarterly).toMatchObject({ floorPa: 89, floorAnn: 356, floorMo: 29.67 });
     const bimonthly = mapped.results.pestTiers.find(t => t.label === 'Bi-Monthly');
-    expect(bimonthly).toMatchObject({ floorPa: 75.65, floorAnn: 453.90, floorMo: 37.82 });
+    expect(bimonthly).toMatchObject({ floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 });
     expect(mapped.results.pest).toMatchObject({ floorPa: 89, floorAnn: 356, floorMo: 29.67 });
   });
 
@@ -283,19 +295,23 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     const estData = clientStampedEstData();
     normalizeClientPestFloorMetadata(estData);
     const [q, b, m] = estData.result.results.pestTiers;
-    // Per-visit basis rounded first: round(79 × fm) × visits (v1 curve).
+    // Per-visit basis rounded first: round(79 × fm) × visits — restamps use
+    // the LIVE default curve (v2, codex #2966 P2): a regenerate would price
+    // at these floors, so the restamp must match them.
     expect(q).toMatchObject({ floorPa: 79, floorAnn: 316 });
-    expect(b).toMatchObject({ floorPa: 67.15, floorAnn: 402.90 });
-    expect(m).toMatchObject({ floorPa: 55.30, floorAnn: 663.60 });
+    expect(b).toMatchObject({ floorPa: 69.52, floorAnn: 417.12 });
+    expect(m).toMatchObject({ floorPa: 61.62, floorAnn: 739.44 });
     expect(q.floorMo).toBe(Math.round((316 / 12) * 100) / 100);
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
   });
 
   test('recognizes CONFIGURED-floor client stamps via the pricingMetadata base (codex P2 round 11 #2827)', () => {
     // A fallback quote priced under a configured $79 floor stamps
-    // 79/67.15/55.30 + pricingMetadata.pestProgramFloorPerVisit: 79. If the
-    // live floor moves to $95 before save, those rows are still CLIENT
-    // stamps (not server snapshots) and must restamp to the live 95 basis.
+    // 79/67.15/55.30 (v1-era client) + pricingMetadata.pestProgramFloorPerVisit:
+    // 79. If the live floor moves to $95 before save, those rows are still
+    // CLIENT stamps (not server snapshots) and must restamp to the live 95
+    // basis on the LIVE (v2) curve — rows here price at that basis so the
+    // below-floor regenerate gate stays quiet.
     constants.PEST.enforceFloorPostDiscount = true;
     constants.PEST.floor = 95;
     const estData = {
@@ -305,7 +321,7 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
         results: {
           pestTiers: [
             { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
-            { pa: 80.75, apps: 6, ann: 484.50, mo: 40.38, label: 'Bi-Monthly', floorPa: 67.15, floorAnn: 402.90, floorMo: 33.58 },
+            { pa: 83.60, apps: 6, ann: 501.60, mo: 41.80, label: 'Bi-Monthly', floorPa: 67.15, floorAnn: 402.90, floorMo: 33.58 },
           ],
           pest: { pa: 95, apps: 4, ann: 380, mo: 31.67, label: 'Quarterly', floorPa: 79, floorAnn: 316, floorMo: 26.33 },
         },
@@ -314,7 +330,7 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     normalizeClientPestFloorMetadata(estData);
     const [q, b] = estData.result.results.pestTiers;
     expect(q).toMatchObject({ floorPa: 95, floorAnn: 380 });
-    expect(b).toMatchObject({ floorPa: 80.75, floorAnn: 484.50 });
+    expect(b).toMatchObject({ floorPa: 83.60, floorAnn: 501.60 });
     expect(estData.result.results.pest).toMatchObject({ floorPa: 95, floorAnn: 380 });
     // The replay stamps sync ATOMICALLY with the restamped rows — a save
     // normalized to the live $95 floor must not keep a $79 stamp, or the
