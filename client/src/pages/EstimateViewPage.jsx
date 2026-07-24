@@ -1755,13 +1755,21 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null }) {
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
+  // One-time-ONLY pages pass headlineTotal (the big price card's figure).
+  // With a single billable row matching it, the row's amount and the total
+  // row are pure repeats of the headline (owner 2026-07-23: "$257.00" read
+  // three times) — keep the row for the service NAME, drop its dollars.
+  const singleHeadlineMatch = headlineTotal != null
+    && items.length === 1
+    && items[0]?.quoteRequired !== true && items[0]?.kind !== 'quote_required'
+    && Math.abs((Number(items[0]?.amount) || 0) - Number(headlineTotal)) < 0.005;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
   // the fee is actually waivable. Legacy label-only setup rows carry no
@@ -1816,28 +1824,36 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   </div>
                 ) : null}
               </div>
-              <div style={{
-                fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
-                whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
-              }}>
-                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
-                {showPrepayWaiverNote ? '*' : ''}
-              </div>
+              {singleHeadlineMatch ? null : (
+                <div style={{
+                  fontSize: 14, fontWeight: 700,
+                  color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
+                  whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+                }}>
+                  {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                  {showPrepayWaiverNote ? '*' : ''}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', gap: 12,
-        borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
-        fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
-      }}>
-        <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
-        <span style={totalIsQuoteRequired ? { color: W.red } : null}>
-          {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
-        </span>
-      </div>
+      {/* Single-item breakdowns skip the total row (owner 2026-07-23): the
+          item line already states the price, so "$199.00 / One-time total
+          $199.00" read twice. Quote-required singles keep the status row —
+          it carries information the item line doesn't. */}
+      {items.length > 1 || totalIsQuoteRequired ? (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: 12,
+          borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
+          fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
+        }}>
+          <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
+          <span style={totalIsQuoteRequired ? { color: W.red } : null}>
+            {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
+          </span>
+        </div>
+      ) : null}
       {totalIsQuoteRequired ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
@@ -5108,7 +5124,13 @@ function EstimateViewPageInner() {
           breakdown={pricing.oneTimeBreakdown}
         />
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
-        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {/* headlineTotal: a single-item breakdown matching the price card
+            above keeps the service NAME but drops its repeated dollars
+            (owner 2026-07-23). */}
+        <OneTimeBreakdownCard
+          breakdown={pricing.oneTimeBreakdown}
+          headlineTotal={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+        />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
