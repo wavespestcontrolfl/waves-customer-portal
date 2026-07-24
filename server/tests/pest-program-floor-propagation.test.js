@@ -322,25 +322,23 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
   });
 
-  test('server-priced v2 default stamps (78.32/69.42) are NOT client stamps — snapshot untouched across a floor change', () => {
+  test('server v2 snapshots at/above the live floor pass validation with metadata untouched', () => {
     // An armed server-priced v2 estimate stamps floorPa 78.32/69.42 (89-floor
-    // defaults). Those rows are SERVER snapshots: a later save after the live
-    // floor moved must leave them exactly as stored — never rewrite or reject
-    // them through the client-restamp path (codex #2966 r2 P2).
+    // defaults). Rows are VALIDATED (nothing in the payload trustably proves
+    // provenance — codex #2966 r4 P1) but never RESTAMPED: with the live
+    // floor moved DOWN, the rows clear validation and the stored server
+    // metadata survives exactly as saved (r3).
     constants.PEST.enforceFloorPostDiscount = true;
-    constants.PEST.floor = 95; // live config changed since the snapshot
-    // True server shape: no recurring.pestProgramFloorApplied key (that key
-    // is the CLIENT engine's marker), rows priced below the moved floor —
-    // exactly the case a client-classification would 409 on.
+    constants.PEST.floor = 79; // live floor moved DOWN since the snapshot
     const estData = {
       result: {
         recurring: { discount: 0 },
         results: {
           pestTiers: [
-            { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
-            { pa: 69.42, apps: 12, ann: 833.04, mo: 69.42, label: 'Monthly', floorPa: 69.42, floorAnn: 833.04, floorMo: 69.42 },
+            { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', pricingVersion: 'v2', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
+            { pa: 69.42, apps: 12, ann: 833.04, mo: 69.42, label: 'Monthly', pricingVersion: 'v2', floorPa: 69.42, floorAnn: 833.04, floorMo: 69.42 },
           ],
-          pest: { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
+          pest: { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', pricingVersion: 'v2', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
         },
       },
     };
@@ -348,6 +346,26 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     const [b, m] = estData.result.results.pestTiers;
     expect(b).toMatchObject({ floorPa: 78.32, floorAnn: 469.92 });
     expect(m).toMatchObject({ floorPa: 69.42, floorAnn: 833.04 });
+  });
+
+  test('a spoofed v2 stamp cannot skip the armed-floor 409 — below-floor unmarked rows still reject', () => {
+    // CLIENT_FALLBACK payloads are caller-controlled: omitting the client
+    // marker and stamping pricingVersion v2 on a below-floor row must NOT
+    // bypass validation (codex #2966 r4 P1).
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95;
+    const estData = {
+      result: {
+        recurring: { discount: 0 },
+        results: {
+          pestTiers: [
+            { pa: 60, apps: 12, ann: 720, mo: 60, label: 'Monthly', pricingVersion: 'v2', floorPa: 69.42, floorAnn: 833.04, floorMo: 69.42 },
+          ],
+          pest: { pa: 60, apps: 12, ann: 720, mo: 60, label: 'Monthly', pricingVersion: 'v2', floorPa: 69.42, floorAnn: 833.04, floorMo: 69.42 },
+        },
+      },
+    };
+    expect(() => normalizeClientPestFloorMetadata(estData)).toThrow(/regenerate the estimate/);
   });
 
   test('recognizes CONFIGURED-floor client stamps via the pricingMetadata base (codex P2 round 11 #2827)', () => {

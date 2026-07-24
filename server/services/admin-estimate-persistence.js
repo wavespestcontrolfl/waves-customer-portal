@@ -184,15 +184,20 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       if (!row || typeof row !== 'object') continue;
       const stampedPa = Number(row.floorPa);
       const hasMetadata = Number.isFinite(stampedPa);
-      // A row STAMPED pricingVersion v2 with no client marker is a SERVER v2
-      // snapshot — the quarterly literal (89) overlaps both curves, so the
-      // stamp must win before any literal check (codex #2966 r3 P2).
-      const isServerV2Snapshot = !isClientEngineResult && row.pricingVersion === 'v2';
-      const isClientStamped = hasMetadata && !isServerV2Snapshot && (
+      // EVERYTHING in this payload is caller-controlled — there is no in-band
+      // signal that trustably proves server provenance, and a spoofed
+      // pricingVersion must never skip the armed-floor validation
+      // (codex #2966 r4 P1). So the split is: VALIDATION runs for client
+      // stamps AND for v2-stamped unmarked rows (a genuine server v2 snapshot
+      // at/above the live floor passes untouched; a forged below-floor row
+      // 409s); RESTAMPING below stays client-only, so genuine server
+      // metadata is never rewritten (r3).
+      const isClientStamped = hasMetadata && (
         CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
         || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
       );
-      if (hasMetadata && !isClientStamped) continue; // server snapshot — untouched below
+      const isV2StampedUnmarked = hasMetadata && !isClientEngineResult && row.pricingVersion === 'v2';
+      if (hasMetadata && !isClientStamped && !isV2StampedUnmarked) continue; // server snapshot — untouched below
       if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
       const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
       if (!frequencyKey) continue; // stripped below, never stamped
@@ -209,7 +214,10 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!row || typeof row !== 'object') continue;
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
-    // Same server-v2-snapshot short-circuit as the rejection gate above.
+    // RESTAMPING stays client-only: a v2-stamped row with no client marker is
+    // either a genuine server snapshot (metadata must survive untouched) or a
+    // forgery the armed-floor gate above already 409'd when it mattered
+    // (below floor). Either way it is never rewritten here (r3 + r4).
     const isServerV2Snapshot = !isClientEngineResult && row.pricingVersion === 'v2';
     const isClientStamped = hasMetadata && !isServerV2Snapshot && (
       CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
