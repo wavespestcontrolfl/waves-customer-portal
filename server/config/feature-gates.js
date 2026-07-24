@@ -408,6 +408,16 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Pre-connect caller screen — inbound callers with NO customer match AND
+  // STIR/SHAKEN attestation B (spoofed-number robocall profile; 67% dead-air
+  // in 60d of prod signal, ~2% of lead calls) must press a key before staff
+  // phones ring. Failures land in the Waves voicemail recorder, never a
+  // hangup. Caller-facing friction: explicit opt-in in EVERY environment.
+  // Off → qualifying calls are only stamped
+  // call_log.metadata.preconnect_screen='would_gate' (shadow daily counters,
+  // zero caller impact).
+  callPreconnectScreen: process.env.GATE_CALL_PRECONNECT_SCREEN === 'true',
+
   // Payment-step-abandonment follow-up EMAIL — emails customers who reached
   // the save-a-card step of accepting an estimate (Auto Pay card on a
   // recurring accept, or the one-time card hold; estimate_checkout_events
