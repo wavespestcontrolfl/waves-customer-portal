@@ -86,6 +86,42 @@ test('unscoped product fans out to chipped areas only, not every persisted zone'
   expect(coverageIds).not.toContain('z-c');
 });
 
+test('comma-joined multi-area product scopes to every listed area, not the whole property', async () => {
+  const knex = makeKnex({
+    property_geometries: [],
+    property_zones: ZONES,
+    service_findings: [],
+    service_photos: [],
+    service_products: [{
+      id: 'prod-multi',
+      service_record_id: 'service-multi',
+      product_name: 'Taurus SC',
+      // multi-select picker: two areas joined into the one string field
+      application_area: 'Perimeter, Entry points',
+      created_at: '2026-07-05T10:00:00Z',
+    }],
+    scheduled_services: [],
+  });
+
+  const data = await buildReportV1Data({
+    id: 'service-multi',
+    customer_id: 'customer-1',
+    service_line: 'pest',
+    service_type: 'Quarterly Pest Control Service',
+    service_date: '2026-07-05',
+    first_name: 'Van',
+    last_name: 'Lee',
+    areas_serviced: JSON.stringify(['Perimeter', 'Entry points', 'Yard']),
+    structured_notes: '{}',
+    service_data: '{}',
+    pressure_index: 0,
+  }, 'token-zone-multi', knex);
+
+  const app = data.applications.find((a) => a.productName === 'Taurus SC' || a.product_name === 'Taurus SC') || data.applications[0];
+  // both listed areas resolve; the unlisted Yard zone does not
+  expect([...app.zone_ids].sort()).toEqual(['z-a', 'z-b']);
+});
+
 test('satellite overlay drops schematic-only zones once any zone is marked', async () => {
   process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'true';
   process.env.GOOGLE_STATIC_MAPS_API_KEY = 'test-key';
