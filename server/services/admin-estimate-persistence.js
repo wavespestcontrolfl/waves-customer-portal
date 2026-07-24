@@ -571,6 +571,28 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
     }
+    // REPLAY-vs-NEW curve normalization (codex #2966 r7 P1): stored
+    // engineInputs from pre-stamp estimates carry no services.pest.version,
+    // and forwarding them unchanged would silently reprice an already-SOLD
+    // bi-monthly/monthly pest quote on the v2 default at the next admin
+    // save / membership reconcile / revision. An unstamped pest INPUT is a
+    // legacy replay exactly when the STORED RESULT already has a priced pest
+    // line — normalize it to that line's curve (unstamped line = v1). A
+    // stored estimate with NO pest result line means pest was just added:
+    // genuinely new, keeps the live v2 default. ENGINE_REQUEST payloads are
+    // fresh builder pricing and are never normalized.
+    if (source === 'ENGINE_INPUTS'
+      && v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
+      && !v1Input.services.pest.version) {
+      const storedRoot = estimateResultRoot(estimateData);
+      const storedPestLine = (storedRoot?.recurring?.services || [])
+        .find((svc) => svc?.service === 'pest_control')
+        || storedRoot?.results?.pest
+        || null;
+      if (storedPestLine) {
+        v1Input.services.pest.version = storedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1';
+      }
+    }
     const v1 = generateEstimate(v1Input);
     // True setup-fee waiver: the legacy mapper counts the pest line's
     // initialFee into oneTime.total/year1, which would reintroduce the
