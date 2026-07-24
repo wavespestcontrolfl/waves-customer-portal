@@ -117,10 +117,15 @@ function storiesSourceForPricing(propertyFacts) {
   if (!positive(propertyFacts?.stories)) return 'default';
   const evidence = propertyFacts?.storiesEvidence;
   if (evidence) {
-    // AI stories-fallback provenance: a direct source read stays a lookup;
-    // an inference (or low-confidence answer) must not price silently.
-    const inferred = evidence.basis === 'inferred' || evidence.confidence === 'low';
-    return inferred ? 'estimated' : 'lookup';
+    // AI stories-fallback provenance FAILS CLOSED: only an explicitly
+    // direct, attributable (source-URL-backed), non-low-confidence answer
+    // prices as a lookup. Missing/unknown basis — including legacy-format
+    // responses that omit it — is unverified provenance and must ride the
+    // stories_estimated review rail, not auto-price termite/pest.
+    const direct = evidence.basis === 'direct'
+      && evidence.confidence !== 'low'
+      && !!evidence.sourceUrl;
+    return direct ? 'lookup' : 'estimated';
   }
   return 'lookup';
 }

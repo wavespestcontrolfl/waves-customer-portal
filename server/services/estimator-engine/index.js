@@ -469,7 +469,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // Property Facts V2 — scoped measurement selection. Shadow by default:
     // computed and stored on the draft for evaluation, never priced from
     // until GATE_PROPERTY_FACTS_V2 flips. Fail-open (returns null on error).
-    const { computePropertyFactsV2Shadow, propertyFactsV2Enabled } = require('./property-facts-shadow');
+    // Gate ON: applyV2ToPropertyFacts follows the V2 selection — including
+    // CLEARING the V1 area when V2 deliberately left an ambiguous scope
+    // unresolved (an arbitrary building must not auto-price).
+    const { computePropertyFactsV2Shadow, propertyFactsV2Enabled, applyV2ToPropertyFacts } = require('./property-facts-shadow');
     const propertyFactsV2 = computePropertyFactsV2Shadow({
       propertyRecord: effectiveSignals.propertyRecord,
       extraction: context.extraction,
@@ -479,35 +482,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     });
     result.propertyFactsV2 = propertyFactsV2;
     if (propertyFactsV2 && propertyFactsV2Enabled()) {
-      const legacy = propertyFactsV2.legacyDerived;
-      const facts = propertyFactsV2.facts;
-      if (legacy.squareFootage) {
-        propertyFacts.home = {
-          value: legacy.squareFootage,
-          source: 'property_facts_v2',
-          confidence: facts.confidenceLevel,
-          rejected: propertyFacts.home?.rejected || [],
-        };
-      }
-      // V2 may resolve the lot to NULL for a no-lot property (condo unit on
-      // a common master parcel) — that resolved null must WIN over a V1 lot
-      // that leaked in from the development's parcel.
-      if (facts.lot.applicability !== 'unknown') {
-        propertyFacts.lot = legacy.lotSize
-          ? {
-            value: legacy.lotSize,
-            source: 'property_facts_v2',
-            confidence: facts.confidenceLevel,
-            rejected: propertyFacts.lot?.rejected || [],
-          }
-          : {
-            value: null,
-            source: `no_individual_lot:${facts.lot.applicability}`,
-            confidence: 'high',
-            rejected: propertyFacts.lot?.rejected || [],
-          };
-      }
-      if (legacy.stories) propertyFacts.stories = legacy.stories;
+      applyV2ToPropertyFacts(propertyFacts, propertyFactsV2);
     }
 
     // Existing-customer pricing context: qualifying services for the combined

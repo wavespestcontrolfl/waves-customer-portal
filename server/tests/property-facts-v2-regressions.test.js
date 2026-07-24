@@ -548,6 +548,134 @@ describe('codex r1: Sarasota detail-page area keeps its uncapped actual', () => 
   });
 });
 
+// ── Codex round-2 regressions (reviewed 1a40d3a8ed) ──
+
+describe('codex r2: AI lookup preserves uncapped actuals', () => {
+  test('a 270k warehouse + oversized lot from the AI trio keep their actuals', () => {
+    const parsed = _private.parsePropertyJSON(JSON.stringify({
+      squareFootage: 270000,
+      lotSize: 500000,
+      yearBuilt: 2005,
+      stories: 1,
+      propertyType: 'Warehouse',
+      source: 'https://www.loopnet.com/Listing/500-commerce-blvd/1/',
+      confidence: 'high',
+    }));
+    expect(parsed.squareFootage).toBe(200000);
+    expect(parsed._actuals.buildingAreaSqft).toBe(270000);
+    expect(parsed._actuals.lotSqft).toBe(500000);
+  });
+
+  test('acre-labeled oversized lots convert and survive; normal lots add no actuals', () => {
+    const big = _private.parsePropertyJSON(JSON.stringify({
+      squareFootage: 2400, lotSize: '20 acres', propertyType: 'Single Family',
+      source: 'https://www.zillow.com/x', confidence: 'medium',
+    }));
+    expect(big._actuals.lotSqft).toBe(871200);
+    const normal = _private.parsePropertyJSON(JSON.stringify({
+      squareFootage: 2400, lotSize: 8400, propertyType: 'Single Family',
+      source: 'https://www.zillow.com/x', confidence: 'medium',
+    }));
+    expect(normal.lotSize).toBe(8400);
+    expect(normal._actuals).toBeUndefined();
+  });
+});
+
+describe('codex r2: story provenance fails closed', () => {
+  const facts = (storiesEvidence) => ({
+    home: { value: 2400, source: 'county_assessed' },
+    lot: { value: 8400, source: 'county_assessed' },
+    stories: 2,
+    storiesEvidence,
+  });
+  const intent = { services: { pest: { selected: true } }, is_commercial: false };
+
+  test('missing basis (legacy-format response) is estimated, not lookup', () => {
+    const input = buildEngineInput({
+      intent,
+      propertyFacts: facts({ value: 2, confidence: 'medium', basis: null, sourceUrl: 'https://www.zillow.com/x' }),
+      context: {},
+    });
+    expect(input.storiesSource).toBe('estimated');
+  });
+
+  test('direct basis without an attributable source URL is estimated', () => {
+    const input = buildEngineInput({
+      intent,
+      propertyFacts: facts({ value: 2, confidence: 'high', basis: 'direct', sourceUrl: null }),
+      context: {},
+    });
+    expect(input.storiesSource).toBe('estimated');
+  });
+});
+
+describe('codex r2: V2 unresolved clears the V1 area under the gate', () => {
+  test('an ambiguous multi-building scope must not retain V1 sqft', () => {
+    const propertyFacts = {
+      home: { value: 12000, source: 'county_assessed', rejected: [] },
+      lot: { value: 108900, source: 'county_assessed', rejected: [] },
+      stories: 1,
+    };
+    shadow.applyV2ToPropertyFacts(propertyFacts, {
+      legacyDerived: { squareFootage: null, lotSize: 108900, stories: null },
+      facts: {
+        requiresConfirmation: true,
+        confidenceLevel: 'low',
+        warnings: ['multiple distinct buildings on the parcel — confirm which building(s) the service covers'],
+        lot: { applicability: 'private_parcel' },
+      },
+    });
+    expect(propertyFacts.home.value).toBeNull();
+    expect(propertyFacts.home.source).toBe('unresolved');
+    // The discarded V1 value stays visible in the rejected trail.
+    expect(propertyFacts.home.rejected.some((r) => r.value === 12000)).toBe(true);
+  });
+});
+
+describe('codex r2: apartment customers are residential UNITS', () => {
+  test('inferServiceScope treats a non-commercial apartment like a condo', () => {
+    expect(shadow._private.inferServiceScope({ propertyType: 'Apartment', isCommercial: false, tenant: false, aggregated: false }))
+      .toBe('residential_unit');
+  });
+
+  test('complex-wide record sqft never prices the unit; caller-stated does', () => {
+    const apartmentRecord = {
+      propertyType: 'Apartment',
+      squareFootage: 85000,
+      stories: 3,
+      formattedAddress: '700 Complex Way Unit 12, Bradenton, FL',
+      _parcel: { parcelId: '777', county: 'Manatee', lotSqft: 300000, aggregated: false },
+      _fieldEvidence: {
+        squareFootage: {
+          value: 85000,
+          sourceType: 'county',
+          evidence: [{ value: 85000, sourceType: 'county', provider: 'manatee_pao', url: 'https://www.manateepao.gov/parcel/?parid=777' }],
+        },
+      },
+    };
+    const withoutCaller = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: apartmentRecord,
+      extraction: null,
+      intent: { is_commercial: false },
+      propertyFacts: { home: { value: 85000 }, lot: { value: 300000 }, stories: 3, tenant: false },
+      address: '700 Complex Way Unit 12, Bradenton, FL',
+    });
+    expect(withoutCaller.facts.serviceScope).toBe('residential_unit');
+    expect(withoutCaller.facts.structureArea.value).toBeNull();
+    expect(withoutCaller.facts.requiresConfirmation).toBe(true);
+
+    const withCaller = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: apartmentRecord,
+      extraction: { property: { approximate_living_sqft: 900 } },
+      intent: { is_commercial: false },
+      propertyFacts: { home: { value: 85000 }, lot: { value: 300000 }, stories: 3, tenant: false },
+      address: '700 Complex Way Unit 12, Bradenton, FL',
+    });
+    expect(withCaller.facts.structureArea.value).toBe(900);
+    expect(withCaller.facts.structureArea.kind).toBe('residential_unit_area_sqft');
+  });
+});
+
 // ── Estimator integration: story provenance + shadow diff ──
 
 describe('buildEngineInput story provenance', () => {
@@ -574,7 +702,7 @@ describe('buildEngineInput story provenance', () => {
         home: { value: 2400, source: 'county_assessed' },
         lot: { value: 8400, source: 'county_assessed' },
         stories: 2,
-        storiesEvidence: { value: 2, confidence: 'high', basis: 'direct', sourceType: 'listing' },
+        storiesEvidence: { value: 2, confidence: 'high', basis: 'direct', sourceType: 'listing', sourceUrl: 'https://www.zillow.com/homedetails/x' },
       },
       context: {},
     });

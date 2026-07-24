@@ -27,6 +27,7 @@ function propertyFactsV2Enabled() {
 // ── Scope / ownership inference from V1 signals ─────────────────
 
 const CONDO_TYPES = /condo/i;
+const APARTMENT_TYPES = /apartment/i;
 const ASSOCIATION_TYPES = /multifamily|apartment|hoa common area/i;
 
 function inferServiceScope({ propertyType, isCommercial, tenant, aggregated }) {
@@ -35,7 +36,11 @@ function inferServiceScope({ propertyType, isCommercial, tenant, aggregated }) {
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
     return 'entire_commercial_building';
   }
-  if (CONDO_TYPES.test(String(propertyType || ''))) return 'residential_unit';
+  // A residential apartment customer is a UNIT, like a condo — the complex-
+  // wide building measurement must not price their estimate.
+  if (CONDO_TYPES.test(String(propertyType || '')) || APARTMENT_TYPES.test(String(propertyType || ''))) {
+    return 'residential_unit';
+  }
   return 'entire_residential_structure';
 }
 
@@ -71,6 +76,10 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   // doesn't carry scope, so the record-level value describes the building
   // (or, for a tenant's county record, the WRONG building-wide figure —
   // scope 'building' keeps it out of suite-scoped selection by design).
+  // Condo county records are PER-UNIT parcels (own folio), so their sqft is
+  // unit-scoped; an APARTMENT record covers the whole complex — its sqft
+  // stays 'building' so a residential_unit selection goes unresolved unless
+  // unit-scoped evidence (caller-stated) exists.
   const unitScoped = !isCommercial && CONDO_TYPES.test(String(propertyRecord?.propertyType || ''));
   for (const item of fieldEvidenceItems(propertyRecord, 'squareFootage')) {
     if (!positive(item.value)) continue;
@@ -151,15 +160,18 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
     }
   });
 
-  // Caller-stated sizes (the ONLY unit-scoped source for a commercial tenant).
+  // Caller-stated sizes — the ONLY unit-scoped source for a commercial
+  // tenant, and for an apartment unit (whose county record is complex-wide).
   const stated = positive(extraction?.property?.approximate_living_sqft);
   if (stated) {
+    const statedScope = (isCommercial && tenant) ? 'suite'
+      : (serviceScope === 'residential_unit' ? 'unit' : 'building');
     out.push({
       id: nextId('caller'),
-      field: sqftKindFor({ isCommercial, scope: (isCommercial && tenant) || unitScoped ? (isCommercial ? 'suite' : 'unit') : 'building' }),
+      field: sqftKindFor({ isCommercial, scope: statedScope }),
       value: stated,
       units: 'sqft',
-      scope: (isCommercial && tenant) ? 'suite' : (unitScoped ? 'unit' : 'building'),
+      scope: statedScope,
       directness: 'direct',
       sourceName: 'caller-stated',
       sourceType: 'caller',
@@ -273,9 +285,69 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
   }
 }
 
+/**
+ * GATE ON only: mutate the V1 propertyFacts to follow the V2 selection.
+ *
+ * The critical rule (codex r2 P1): when V2 deliberately returned an
+ * UNRESOLVED structure area (ambiguous multi-building scope, suite with no
+ * suite-scoped evidence), the V1 value must be CLEARED, not retained — V2
+ * refused to pick a number precisely so that scope could not auto-price.
+ */
+function applyV2ToPropertyFacts(propertyFacts, v2) {
+  if (!propertyFacts || !v2) return propertyFacts;
+  const legacy = v2.legacyDerived || {};
+  const facts = v2.facts || {};
+
+  if (legacy.squareFootage) {
+    propertyFacts.home = {
+      value: legacy.squareFootage,
+      source: 'property_facts_v2',
+      confidence: facts.confidenceLevel,
+      rejected: propertyFacts.home?.rejected || [],
+    };
+  } else if (facts.requiresConfirmation) {
+    const priorValue = positive(propertyFacts.home?.value);
+    propertyFacts.home = {
+      value: null,
+      source: 'unresolved',
+      confidence: 'none',
+      rejected: [
+        ...(propertyFacts.home?.rejected || []),
+        ...(priorValue ? [{
+          value: priorValue,
+          source: propertyFacts.home?.source || 'unknown',
+          reason: `V2 scope selection unresolved — ${(facts.warnings || []).join('; ') || 'requires confirmation'}`,
+        }] : []),
+      ],
+    };
+  }
+
+  // V2 may resolve the lot to NULL for a no-lot property (condo unit on a
+  // common master parcel) — that resolved null must WIN over a V1 lot that
+  // leaked in from the development's parcel.
+  if (facts.lot && facts.lot.applicability !== 'unknown') {
+    propertyFacts.lot = legacy.lotSize
+      ? {
+        value: legacy.lotSize,
+        source: 'property_facts_v2',
+        confidence: facts.confidenceLevel,
+        rejected: propertyFacts.lot?.rejected || [],
+      }
+      : {
+        value: null,
+        source: `no_individual_lot:${facts.lot.applicability}`,
+        confidence: 'high',
+        rejected: propertyFacts.lot?.rejected || [],
+      };
+  }
+  if (legacy.stories) propertyFacts.stories = legacy.stories;
+  return propertyFacts;
+}
+
 module.exports = {
   propertyFactsV2Enabled,
   computePropertyFactsV2Shadow,
+  applyV2ToPropertyFacts,
   _private: {
     inferServiceScope,
     inferOwnershipType,

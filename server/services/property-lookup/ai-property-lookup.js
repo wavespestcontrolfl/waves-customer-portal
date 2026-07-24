@@ -3529,19 +3529,33 @@ function parsePropertyJSON(text) {
   try {
     const raw = JSON.parse(match[0]);
     const parsedType = normalizeLookupPropertyType(raw.propertyType);
+    // Detailed coercion so an AI-reported 270k warehouse (the prompt now
+    // asks for TRUE figures) keeps its actual alongside the pricing clamp
+    // instead of being silently persisted as 200k.
+    const sqftDetailed = coerceFirstBuildingSqftDetailed([
+      raw.squareFootage,
+      raw.square_footage,
+      raw.homeSqFt,
+      raw.home_sqft,
+      raw.livingArea,
+      raw.living_area,
+      raw.livingAreaSqFt,
+      raw.living_area_sqft,
+      raw.sqft,
+    ], isCommercialBuildingType(parsedType));
+    const lotSize = coerceParsedLotSize(raw);
+    const actualLot = uncappedParsedLotSqft(raw);
+    const actuals = {
+      ...(sqftDetailed.pricingAdjustment ? { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } : {}),
+      // The capped legacy lotSize (or an oversized value the legacy chain
+      // discarded entirely) must not erase the true parcel size.
+      ...(actualLot && actualLot > (lotSize || 0) && (lotSize == null || lotSize >= LOT_SQFT_MAX)
+        ? { lotSqft: actualLot } : {}),
+    };
     const out = {
-      squareFootage: coerceFirstBuildingSqft([
-        raw.squareFootage,
-        raw.square_footage,
-        raw.homeSqFt,
-        raw.home_sqft,
-        raw.livingArea,
-        raw.living_area,
-        raw.livingAreaSqFt,
-        raw.living_area_sqft,
-        raw.sqft,
-      ], isCommercialBuildingType(parsedType)),
-      lotSize: coerceParsedLotSize(raw),
+      squareFootage: sqftDetailed.pricingValue,
+      lotSize,
+      ...(Object.keys(actuals).length ? { _actuals: actuals } : {}),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
@@ -3583,6 +3597,56 @@ function coercePaoSqFootage(raw) {
   const value = typeof raw === 'number' ? raw : parseFirstLotNumber(String(raw));
   if (!Number.isFinite(value) || value <= 0) return null;
   return Math.min(Math.round(value), LOT_SQFT_MAX);
+}
+
+// Uncapped (typo-guarded) read of the AI-reported lot for _actuals
+// preservation — handles the well-formed shapes the prompt requests
+// (numeric sqft, sqft-keyed objects, acre keys/labels). Exotic shapes fall
+// back to null and the fact simply stays at the legacy cap.
+const LOT_FACT_SQFT_MAX = 10_000_000; // ≈230 acres — typo guard, not a pricing bound
+
+function uncappedParsedLotSqft(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const inFactRange = (n) => (Number.isFinite(n) && n >= LOT_SQFT_MIN && n <= LOT_FACT_SQFT_MAX ? Math.round(n) : null);
+  const candidates = [
+    raw.lotSize, raw.lot_size, raw.lotSqFt, raw.lot_sqft, raw.lotSizeSqFt, raw.lot_size_sqft,
+    raw.lotSquareFeet, raw.lot_square_feet, raw.lotAreaSqFt, raw.lot_area_sqft, raw.lotArea, raw.lot_area, raw.lot,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+    if (typeof candidate === 'object' && !Array.isArray(candidate)) {
+      const sqft = inFactRange(Number(candidate.squareFeet ?? candidate.square_feet ?? candidate.sqft
+        ?? candidate.sqFt ?? candidate.sq_ft ?? candidate.valueSqft ?? candidate.value_sqft
+        ?? candidate.areaSqft ?? candidate.area_sqft));
+      if (sqft) return sqft;
+      const acres = Number(candidate.acres ?? candidate.acreage);
+      if (Number.isFinite(acres) && acres > 0) {
+        const converted = inFactRange(acres * SQFT_PER_ACRE);
+        if (converted) return converted;
+      }
+      continue;
+    }
+    if (typeof candidate === 'number') {
+      const sqft = inFactRange(candidate);
+      if (sqft) return sqft;
+      continue;
+    }
+    const str = String(candidate);
+    const isAcres = /\bacres?\b/i.test(str);
+    const value = parseFirstLotNumber(str);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const sqft = inFactRange(isAcres ? value * SQFT_PER_ACRE : value);
+    if (sqft) return sqft;
+  }
+  const acreKeys = [raw.lotSizeAcres, raw.lot_size_acres, raw.lotAcres, raw.lot_acres, raw.acreage, raw.acres];
+  for (const candidate of acreKeys) {
+    const acres = Number(candidate);
+    if (Number.isFinite(acres) && acres > 0) {
+      const converted = inFactRange(acres * SQFT_PER_ACRE);
+      if (converted) return converted;
+    }
+  }
+  return null;
 }
 
 function coerceParsedLotSize(raw) {
