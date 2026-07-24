@@ -4670,16 +4670,27 @@ const CallRecordingProcessor = {
       }
     }
 
-    // A job-applicant call is neither spam nor a voicemail, but it must not
-    // mint a CUSTOMER: the create branch only checks name/phone/voicemail/spam,
-    // and V2-primary adoption can supply a valid name + spoken phone from an
-    // applicant call (codex r3 P2). Consulted at the Step-3 create gate below.
+    // Non-new-lead natures must not mint a CUSTOMER: the create branch only
+    // checks name/phone/voicemail/spam, and V2-primary adoption can supply a
+    // valid name + phone from a job applicant OR a billing/existing-customer
+    // call whose number matches nobody on file (codex r3 + r5 P2). For the
+    // existing-customer natures the classification itself asserts the caller
+    // already has a record — minting a duplicate contradicts it; the call
+    // stays customer-less and the enforce gate's triage cards carry the
+    // review. Only creation is held: a matched existing customer proceeds
+    // through the update path untouched.
     // Gated on the SAME switch as adoption (codex r4 P2): with V2-primary
     // killed or routing demoted, the pipeline reverts to pure legacy behavior
     // — a V2 false-positive must not suppress a valid V1 customer create.
+    const V2_NON_CUSTOMER_CALL_NATURES = new Set([
+      'job_applicant',
+      'billing_question',
+      'existing_customer_service',
+      'existing_customer_scheduling',
+    ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'
-      && v2Result.extraction?.call_nature === 'job_applicant';
+      && V2_NON_CUSTOMER_CALL_NATURES.has(v2Result.extraction?.call_nature);
 
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
@@ -5612,8 +5623,10 @@ const CallRecordingProcessor = {
         // incident: first name + mangled address became a "real" customer).
         // A workable voicemail becomes a customer-less Needs-Review lead in
         // Step 4b instead; the office completes it into a customer by hand.
-        // NEVER from a job-applicant call either (v2NonCustomerCallNature) —
-        // an applicant with a name and callback number is not a customer.
+        // NEVER from a V2 non-lead nature either (v2NonCustomerCallNature) —
+        // an applicant is not a customer, and a billing/existing-customer
+        // call from an unmatched number must hold for review, not mint a
+        // duplicate record (codex r5 P2).
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);
