@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const capMocks = vi.hoisted(() => {
   const state = { launchUrl: null, listeners: {} };
@@ -35,16 +35,20 @@ beforeEach(() => {
   capMocks.App.addListener.mockClear();
   capMocks.App.getLaunchUrl.mockClear();
   assignSpy = vi.fn();
-  Object.defineProperty(window, 'location', {
-    configurable: true,
-    value: {
-      origin: ORIGIN,
-      pathname: '/',
-      search: '',
-      hash: '',
-      assign: assignSpy,
-    },
+  // vi.stubGlobal survives jsdom versions where window.location is a
+  // non-configurable global (defineProperty throws there) and restores
+  // automatically via unstubAllGlobals below.
+  vi.stubGlobal('location', {
+    origin: ORIGIN,
+    pathname: '/',
+    search: '',
+    hash: '',
+    assign: assignSpy,
   });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('launch URL replay (redirecting short links)', () => {
