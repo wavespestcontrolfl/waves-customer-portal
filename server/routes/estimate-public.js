@@ -8240,7 +8240,22 @@ router.put('/:token/accept', async (req, res, next) => {
         const svcRow = recurringSvcList.find((s) => recurringServiceKey(s) === svcKey);
         const ladder = bundleSectionLadderForService(svcKey, acceptedEstDataForPricing, svcRow || { service: svcKey }, rDisc);
         const tierEntry = ladder && ladder.find((e) => e.key === tierKey);
-        if (!tierEntry) continue;
+        if (!tierEntry) {
+          // A NULL ladder is the legitimate single-tier section (the stored
+          // row already IS the only offered tier — nothing to restamp). A
+          // PRESENT ladder that lacks the requested tier means the combo
+          // axes and the restamp ladder disagree (retired/crafted tier):
+          // accepting would commit the combo's totals while the rows keep
+          // their stored cadence — billed ≠ scheduled. Refuse instead of
+          // silently skipping (estimator audit 2026-07-24 P2).
+          if (ladder) {
+            return res.status(409).json({
+              error: 'One of this estimate’s plan options is no longer offered — pick a current option, or call Waves and we’ll refresh your quote.',
+              reason: 'service_cadence_tier_unavailable',
+            });
+          }
+          continue;
+        }
         if (svcKey === 'lawn_care') {
           acceptedEstDataForPricing = applySelectedLawnTierToEstimateData(acceptedEstDataForPricing, tierEntry);
         } else if (svcKey === 'tree_shrub') {
@@ -15235,6 +15250,13 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
       // Retired lawn cadences (basic/Quarterly) must not be a selectable
       // combo axis on old stored estimates either.
       if (serviceKey === 'lawn_care' && isRetiredLawnTierKey(tierKey)) continue;
+      // Retired T&S Premium (12x) likewise (estimator audit 2026-07-24 P2):
+      // pre-v4.5 stored rows still carry it, and the section ladder
+      // whitelists light/standard/enhanced — a premium combo would price
+      // totals whose tier restamp can never apply, committing an accept
+      // whose billed total diverges from the scheduled program. Enhanced
+      // (9x) stays: un-retired as the every-6-weeks upsell (#2968).
+      if (serviceKey === 'tree_shrub' && tierKey === 'premium') continue;
       const v = finiteNumberOrNull(row.v ?? row.visits ?? row.visitsPerYear ?? row.frequency);
       let mo = finiteNumberOrNull(row.mo ?? row.monthly);
       let ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
