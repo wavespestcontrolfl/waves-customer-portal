@@ -184,7 +184,7 @@ describe('ServiceSection', () => {
     expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('$79.00 / application')).toBeInTheDocument();
     expect(screen.queryByText('/mo')).not.toBeInTheDocument();
-    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).not.toBeInTheDocument();
   });
 
   it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
@@ -226,11 +226,9 @@ describe('ServiceSection', () => {
 
     // Combined cadence total leads with a standalone "/mo" suffix. Were the
     // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) plus a "Billed $130.00/mo, spread across
-    // the year" note — so the note's absence is the real discriminator.
+    // pest price ("/ application" suffix) instead of the combined "/mo" total.
     expect(screen.getByText('$130.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {
