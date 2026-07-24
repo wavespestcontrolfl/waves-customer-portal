@@ -13499,6 +13499,10 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14016,6 +14020,10 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
         // Armed margin floor rides the entry so downstream repricers (the
@@ -14244,6 +14252,10 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14338,6 +14350,10 @@ function foamFrequenciesFromV1Services(services = []) {
     perTreatment,
     visitsPerYear: visits,
     billingFrequencyKey: 'monthly',
+    // Tier plans bill per application on accept (plan annual ÷ visits,
+    // estimate-converter) — suppress the "Billed $X/mo" note (owner
+    // 2026-07-23: billing is always per application).
+    ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
     estimatedDurationMinutes,
     // foam_recurring is non-discountable (cadence multiplier is its only
     // discount), so no manual-discount shaping here.
@@ -15053,24 +15069,27 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
-  // Termite bait: stations are checked quarterly (owner directive
-  // 2026-07-10) and NEW estimates persist explicit perTreatment/visitsPerYear
-  // and are BILLED per application (owner 2026-07-20) — flag those so the
-  // card drops the "Billed $X/mo" note, which would misstate the charge.
-  // OLD payloads (perTreatment/visitsPerYear null) keep the display-only
-  // derivation ($29.75/mo → $89.25/check) AND the monthly note: their
-  // accept path still bills the flat monthly, so the note stays truthful
-  // for exactly the estimates it still applies to.
+  // Rows carrying explicit per-application data (per-visit price + visit
+  // count) are BILLED per application on accept for every estimate-flow
+  // customer, not just termite bait: estimate-converter stamps
+  // billing_mode='per_application' and charges plan annual ÷ visits per
+  // completion (owner rulings 2026-07-09 / 2026-07-23: billing is always
+  // per application). Flag them so the card drops the "Billed $X/mo" note,
+  // which would misstate the charge. The lone monthly-billed acceptor is a
+  // CURRENT monthly member adding on (converter preservesExistingMembership)
+  // — their card leads with the same per-application headline either way.
+  // OLD flat-monthly payloads (perTreatment/visitsPerYear null, e.g.
+  // pre-flag termite monitoring) keep the display-only derivation
+  // ($29.75/mo → $89.25/check) AND the monthly note: without a visit count
+  // the converter's per-application division can't run, so their accept
+  // path still bills the flat monthly and the note stays truthful for
+  // exactly the estimates it still applies to.
   let effectiveVisits = visitsPerYear;
-  let billedPerApplication = false;
-  if (key === 'termite_bait') {
-    if (displayPrice && visitsPerYear) {
-      billedPerApplication = true;
-    } else if (monthly != null) {
-      const TERMITE_CHECKS_PER_YEAR = 4;
-      effectiveVisits = TERMITE_CHECKS_PER_YEAR;
-      displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
-    }
+  const billedPerApplication = !!(displayPrice && visitsPerYear);
+  if (key === 'termite_bait' && !billedPerApplication && monthly != null) {
+    const TERMITE_CHECKS_PER_YEAR = 4;
+    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -15120,6 +15139,10 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     perTreatment: perTreatment || null,
     perVisit: key === 'pest_control' ? (perTreatment || null) : null,
     visitsPerYear: visitsPerYear || null,
+    // Same rule as frequencyFromTreatmentRow: a known visit count means the
+    // converter bills per application (plan annual ÷ visits) — no visit
+    // count means the flat-monthly cadence fallback, where the note stays.
+    ...(perTreatment > 0 && visitsPerYear > 0 ? { billedPerApplication: true } : {}),
     included: includedRowsForServiceFrequency({}, key, recurringService),
     addOns: [],
     quoteRequired: false,

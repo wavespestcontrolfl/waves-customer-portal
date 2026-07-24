@@ -719,3 +719,57 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
     });
   });
 });
+
+describe('section ladders stamp billedPerApplication (owner 2026-07-23: billing is always per application; estimator audit 2026-07-24)', () => {
+  // Regression trap from PR #2965: the PriceCard "Billed $X/mo" note renders
+  // for any per-app-headline frequency WITHOUT this flag, and the server only
+  // stamped termite_bait — so every 4/6/9-visit lawn/T&S/mosquito tier
+  // (monthly ≠ per-app) shipped a monthly-billing claim the converter
+  // contradicts (billing_mode='per_application', plan annual ÷ visits).
+  const TS_RESULT_STATS = {
+    ts: [
+      { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
+      { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      { name: 'Enhanced', v: 9, mo: 68.6, ann: 823.2, pa: 91.47 },
+    ],
+  };
+
+  test('tree & shrub ladder (incl. the 9x Enhanced upsell) flags every tier', () => {
+    const ladder = bundleSectionLadderForService(
+      'tree_shrub',
+      { results: TS_RESULT_STATS },
+      { name: 'Tree & Shrub', service: 'tree_shrub' },
+      0,
+    );
+    expect(ladder.map((e) => e.key)).toEqual(['light', 'standard', 'enhanced']);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+
+  test('lawn ladder flags every tier — the 6/9-visit tiers are where a missing flag resurrects the note', () => {
+    const ladder = bundleSectionLadderForService(
+      'lawn_care',
+      { results: LAWN_RESULT_STATS },
+      { name: 'Lawn Care', service: 'lawn_care' },
+      0,
+    );
+    expect(ladder.length).toBeGreaterThan(0);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+
+  test('mosquito ladder flags both tiers (seasonal9 is the monthly ≠ per-app case)', () => {
+    const ladder = bundleSectionLadderForService(
+      'mosquito',
+      { results: { mq: LAWN_MQ_RESULT_STATS.mq } },
+      { name: 'Mosquito Control', service: 'mosquito' },
+      0,
+    );
+    expect(ladder.map((e) => e.key).sort()).toEqual(['monthly12', 'seasonal9']);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+});

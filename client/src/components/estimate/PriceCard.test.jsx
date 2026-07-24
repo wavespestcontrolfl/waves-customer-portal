@@ -300,6 +300,37 @@ describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is al
     expect(screen.queryByText(/applications per year included/)).toBeNull();
   });
 
+  it('tier-ladder shape at a 6-visit cadence (monthly ≠ per-app, the #2965 regression) shows no monthly note', () => {
+    // Mirrors the server lawn/T&S ladder contract: tier plans bill per
+    // application (converter plan annual ÷ visits), so the server stamps
+    // billedPerApplication on every tier entry (estimator audit 2026-07-24).
+    // The pre-fix bug: only the 12-visit tier was tested, where monthly ==
+    // per-app hides the note arithmetically.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'standard',
+          label: 'Bi-monthly (6 visits)',
+          serviceCategory: 'lawn_care',
+          monthly: 55.5,
+          annual: 666,
+          perTreatment: 111,
+          visitsPerYear: 6,
+          billingFrequencyKey: 'monthly',
+          billedPerApplication: true,
+          perServiceTreatments: [{
+            service: 'lawn_care', label: 'Lawn Care', perTreatment: 111, displayPrice: 111, visitsPerYear: 6,
+          }],
+        }}
+        preferPerApplicationPrice
+      />,
+    );
+    // Headline + the per-row sub-label both carry the per-app figure.
+    expect(screen.getAllByText('$111.00').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Billed \$/)).toBeNull();
+    expect(screen.queryByText(/spread across the year/)).toBeNull();
+  });
+
   it('rowless per-application cards show a muted cadence count, never the "included" headline (codex P2)', () => {
     render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.getByText(/4 applications per year/)).toBeInTheDocument();

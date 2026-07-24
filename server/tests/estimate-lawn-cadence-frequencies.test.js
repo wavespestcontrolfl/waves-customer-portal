@@ -66,6 +66,18 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(enhanced.monthly).toBe(enhanced.monthlyBase);
   });
 
+  test('stamps billedPerApplication on every tier — accept bills plan annual ÷ visits, so the card must never claim a monthly charge (owner 2026-07-23; estimator audit 2026-07-24)', () => {
+    // The 6- and 9-visit tiers are the regression trap: monthly ≠ per-app
+    // there, so a missing flag resurrects the "Billed $X/mo" note. The
+    // 12-visit tier hides the note arithmetically (monthly == per-app) —
+    // asserting the flag on ALL tiers keeps the suite honest anyway.
+    const freqs = lawnFrequenciesFromResultStats(lawnEstData());
+    expect(freqs.length).toBeGreaterThan(0);
+    for (const f of freqs) {
+      expect(f.billedPerApplication).toBe(true);
+    }
+  });
+
   test('the recommended cadence follows the engine row (default = enhanced / 9 visits)', () => {
     const freqs = lawnFrequenciesFromResultStats(lawnEstData({ recommendedVisits: 9 }));
     expect(freqs.filter((f) => f.recommended).map((f) => f.key)).toEqual(['enhanced']);
