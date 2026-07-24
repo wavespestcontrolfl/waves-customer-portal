@@ -124,7 +124,15 @@ router.post('/', limiter, globalLimiter, (req, res) => {
       // single issue. Group by the bounded (name, context, route) instead so
       // distinct failure classes stay actionable.
       fingerprint: ['client-error', name_, context_ || 'none', route_ || 'none'],
-      tags: { source: 'client' },
+      // context/route ride as tags, not just contexts: tags surface in alert
+      // emails and the issue list, so an alert names the affected page without
+      // opening the event. Safe as (indexed, bounded-cardinality) tags because
+      // both values are strict allowlists above.
+      tags: {
+        source: 'client',
+        client_context: context_ || 'none',
+        client_route: route_ || 'none',
+      },
       contexts: {
         client_error: { context: context_, route: route_ },
       },
