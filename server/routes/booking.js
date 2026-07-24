@@ -1525,7 +1525,21 @@ async function createSelfBooking(payload = {}) {
       };
       let gatePass = { valid: false };
       if (pricing_estimate_id && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-        gatePass = await bindGateEstimate(pricing_estimate_id);
+        // A valid HMAC proves the token was minted for THIS estimate id — but
+        // the wizard refreshes drafts in place, so the estimate's CURRENT
+        // shape may no longer be self-bookable (recalculated into commercial /
+        // manual / mixed-billing / bed-bug, or promoted by staff). Re-check
+        // the live row before honoring the token as a gate pass (Codex #2964
+        // r2) — a stale link falls to the standing refusal, whose quote CTA
+        // re-runs the wizard and mints a fresh, current link. The accept-token
+        // arm below is deliberately NOT shape-checked: accepted estimates are
+        // past 'draft' by definition and their booking link is the sanctioned
+        // post-accept path.
+        const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+        const handoffRow = await db('estimates').where('id', pricing_estimate_id).first().catch(() => null);
+        if (wizardDraftSelfServeBookable(handoffRow)) {
+          gatePass = await bindGateEstimate(pricing_estimate_id);
+        }
       }
       if (!gatePass.valid && source_estimate_id && accept_token
           && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
@@ -1953,12 +1967,17 @@ async function createSelfBooking(payload = {}) {
         // wizard drafts, so once staff promote the same estimate (sent/accepted/
         // declined) a not-yet-expired token must not stamp pricing from a quote
         // that is no longer the live self-serve draft.
-        const pricingEstData = pricingEstimate?.estimate_data || {};
-        const pricingEstimateEligible = !!pricingEstimate
-          && pricingEstimate.source === 'quote_wizard'
-          && pricingEstimate.status === 'draft'
-          && !pricingEstData.commercialEstimatedPricing
-          && !pricingEstData.quoteRequired;
+        // Shape eligibility of the CURRENT stored draft — shared predicate
+        // with the customers-only gate pass above (wizardDraftSelfServeBookable:
+        // wizard source, still 'draft', not commercial/manual, not mixed
+        // recurring+one-time, no bed-bug line). The wizard refreshes drafts in
+        // place, so a token minted while the quote was residential/recurring
+        // must not price a snapshot that has since changed shape — mixed
+        // billing in particular would stamp the recurring per-visit price
+        // while every one-time add-on silently vanishes from the series'
+        // billing (an undercharge).
+        const { wizardDraftSelfServeBookable: pricingShapeEligible } = require('../services/booking-pay-at-visit');
+        const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
@@ -2491,7 +2510,29 @@ async function createSelfBooking(payload = {}) {
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
     let leadConversion = null;
-    if (followUpRows.length > 0 || lead_id) {
+    // Handoff-derived trigger (Codex #2964 r3): recovery-rebuilt /book links
+    // and older quote links carry the estimate handoff but no ?lead= param,
+    // so a non-pest/one-time booking (which seeds no series) would strand the
+    // quote's lead in new_lead. A VERIFIED handoff names its wizard estimate,
+    // and the wizard stamps estimate_data.lead_id — derive the trigger from
+    // that when the client sent none. Trigger only, like lead_id itself: the
+    // conversion below stays keyed off the VERIFIED customer with
+    // enforceOriginating, so neither a forged lead_id nor a derived one can
+    // convert a lead the booker doesn't own. Best-effort — the booking is
+    // already committed.
+    let leadTrigger = !!lead_id;
+    if (!leadTrigger && followUpRows.length === 0 && pricing_estimate_id) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
+          leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
+        }
+      } catch (err) {
+        logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
+      }
+    }
+    if (followUpRows.length > 0 || leadTrigger) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         leadConversion = await convertLeadFromEvent({
