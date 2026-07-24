@@ -787,6 +787,11 @@ function offFootprintCityFinding(text) {
     }
   }
   const sentences = scanUnits.flatMap((segment) => segment.split(FOOTPRINT_SENTENCE_SPLIT_RE));
+  // Every offending (city, rendered clause) pair — not just the first —
+  // feeds the async LLM refinement pass (footprint-claim-classifier), which
+  // may dismiss the finding only if EVERY pair classifies as a non-claim.
+  const offenders = [];
+  const offenderKeys = new Set();
   for (const sentence of sentences) {
     // List semicolons are rejoined first so "We serve Sarasota; Venice; and
     // Naples" scans as one claim clause (see LIST_SEMICOLON_RE).
@@ -818,11 +823,19 @@ function offFootprintCityFinding(text) {
         // Negation scoped to THIS city ("does not include Tampa") exempts
         // only this city — a negation about some other service does not.
         if (negationRe.test(normalized)) continue;
-        return finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`);
+        const key = `${city}|${normalized.trim()}`;
+        if (!offenderKeys.has(key)) {
+          offenderKeys.add(key);
+          offenders.push({ city, clause: normalized.trim() });
+        }
       }
     }
   }
-  return null;
+  if (!offenders.length) return null;
+  return {
+    ...finding('P0', 'OFF_FOOTPRINT_CITY_CLAIM', `Draft makes a service claim naming "${offenders[0].city}", which is outside the Waves service footprint (config/locations CITY_TO_LOCATION). Educational mentions and honest out-of-area disclaimers are fine; service/CTA framing is not.`),
+    evidence: offenders,
+  };
 }
 
 // ── internal-route gate ─────────────────────────────────────────────
