@@ -89,7 +89,7 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.getByText('$1,200.00')).toBeInTheDocument();
   });
 
-  it('never derives a cadence-key visit count over multiple treatment rows', () => {
+  it('never renders an "applications per year included" headline line (owner 2026-07-23)', () => {
     render(
       <PriceCard
         frequency={{
@@ -103,14 +103,16 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
       />,
     );
 
-    // Rows differ (8 vs 12) — no single "N applications per year" line.
     expect(screen.queryByText(/applications per year included/i)).toBeNull();
+    // The count still shows per row, where it belongs.
+    expect(screen.getByText(/8 applications\/year/)).toBeInTheDocument();
+    expect(screen.getByText(/12 applications\/year/)).toBeInTheDocument();
   });
 
-  it('keeps the cadence-key visit count when there are no treatment rows', () => {
+  it('no visit-count headline even when a cadence-key count exists and there are no treatment rows', () => {
     render(<PriceCard frequency={{ key: 'quarterly', monthly: 50 }} />);
 
-    expect(screen.getByText(/4 applications per year included/i)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/i)).toBeNull();
   });
 
   it('renders the exact price (no range) when the marker is absent', () => {
@@ -291,6 +293,6 @@ describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is al
     render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.queryByText(/spread across the year/)).toBeNull();
     expect(screen.getByText('$105.00')).toBeInTheDocument();
-    expect(screen.getByText(/4 applications per year included/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).toBeNull();
   });
 });

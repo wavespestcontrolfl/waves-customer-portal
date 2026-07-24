@@ -184,7 +184,7 @@ describe('ServiceSection', () => {
     expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('$79.00 / application')).toBeInTheDocument();
     expect(screen.queryByText('/mo')).not.toBeInTheDocument();
-    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).not.toBeInTheDocument();
   });
 
   it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {

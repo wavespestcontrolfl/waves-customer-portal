@@ -226,7 +226,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
-  // Applications-per-year highlight — only when the count is unambiguous.
+  // Applications-per-year count — only when unambiguous. Feeds the anchor
+  // math below; the count itself renders only in the per-row sub-label
+  // (owner 2026-07-23: no "N applications per year included" headline line).
   const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
   const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
@@ -239,7 +241,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     : (treatmentVisitRows.length === 1
       ? Number(treatmentVisitRows[0].visitsPerYear)
       : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
-  const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
   // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
@@ -388,13 +389,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           </span>
         ) : null}
       </div>
-
-      {showVisitsLine ? (
-        <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
-          <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
-          {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year included
-        </div>
-      ) : null}
 
       {/* Standard exact prices show no annual figure (owner directive
           2026-07-03) — only the site-confirmation commercial range keeps
