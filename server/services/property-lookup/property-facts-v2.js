@@ -320,9 +320,15 @@ function selectStructureArea({ serviceScope, evidence, warnings }) {
       candidates = candidates.filter((ev) => UNIT_SCOPES.has(ev.scope) || ev.scope === 'unknown');
     }
     if (serviceScope === 'entire_commercial_building') {
-      // Multiple distinct building rows = ambiguous target: selecting the
+      // Multiple distinct building ROWS = ambiguous target: selecting the
       // largest silently under- or over-states the property. Unresolved.
-      const distinctBuildings = new Set(candidates.map((ev) => ev.sourceRecordId || ev.id));
+      // Only row-level evidence (sourceRecordId) counts a building —
+      // record-level entries (the merged squareFootage, an uncapped
+      // _actuals value) describe the parcel's primary building, not an
+      // additional one, and must not fake a multi-building parcel.
+      const distinctBuildings = new Set(
+        candidates.filter((ev) => ev.sourceRecordId).map((ev) => ev.sourceRecordId),
+      );
       if (distinctBuildings.size > 1) {
         warnings.push('multiple distinct buildings on the parcel — confirm which building(s) the service covers');
         continue;

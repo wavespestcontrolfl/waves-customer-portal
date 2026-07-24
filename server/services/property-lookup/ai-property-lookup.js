@@ -3039,10 +3039,15 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
   const propertyType = normalizeCountyPropertyType(detailFacts.propertyType || propertyUse);
   const commercialSized = isCommercialBuildingType(propertyType);
 
-  const sqftDetailed = coerceFirstBuildingSqftDetailed(
-    [detailFacts.squareFootage, primaryBuilding['Living Area'], ...(commercialSized ? [primaryBuilding['Gross Area']] : [])],
-    commercialSized,
-  );
+  // The building-detail page's Finished Area arrives as a DETAILED result
+  // (actual + pricing clamp) — re-coercing its already-capped legacy value
+  // would erase the uncapped actual for detail-only commercial parcels.
+  const sqftDetailed = (detailFacts.squareFootageDetailed?.pricingValue != null)
+    ? detailFacts.squareFootageDetailed
+    : coerceFirstBuildingSqftDetailed(
+      [primaryBuilding['Living Area'], ...(commercialSized ? [primaryBuilding['Gross Area']] : [])],
+      commercialSized,
+    );
 
   return {
     // Commercial buildings often carry only a Gross Area figure (no
@@ -3083,12 +3088,17 @@ function parseSarasotaBuildingDetail(html) {
   const halfBaths = coerceFloat(extractHtmlBulletValue(html, 'Half Baths'), 0, 15) || 0;
   const buildingType = extractHtmlBulletValue(html, 'Building Type');
   const detailCommercial = isCommercialBuildingType(normalizeCountyPropertyType(buildingType));
+  // Detailed (uncapped-actual) form — the record parser must see the raw
+  // Finished Area, not a pre-capped value, or a 270k sf building loses its
+  // actual before the _actuals preservation ever runs.
+  const squareFootageDetailed = coerceBuildingSqftDetailed(
+    extractHtmlBulletValue(html, 'Finished Area S.F'),
+    detailCommercial,
+  );
   return {
     propertyType: buildingType,
-    squareFootage: coerceBuildingSqft(
-      extractHtmlBulletValue(html, 'Finished Area S.F'),
-      detailCommercial,
-    ),
+    squareFootage: squareFootageDetailed.pricingValue,
+    squareFootageDetailed,
     yearBuilt: coerceInt(extractHtmlBulletValue(html, 'Year Built'), 1900, new Date().getFullYear() + 1),
     bedrooms: coerceInt(extractHtmlBulletValue(html, 'Bedrooms'), 1, 15),
     bathrooms: bathrooms == null ? null : bathrooms + (halfBaths * 0.5),
@@ -3942,7 +3952,9 @@ function mergePropertyRecords(records, address) {
     if (!isMissingPropertyValue(winner.value)) {
       merged[field] = winner.value;
     }
-    const disagreement = fieldValuesDisagree(field, winner, candidates);
+    // propertyType is first in PROPERTY_EVIDENCE_FIELDS, so the merged type
+    // is settled before the numeric fields compare their tolerances.
+    const disagreement = fieldValuesDisagree(field, winner, candidates, merged.propertyType || sorted[0]?.propertyType);
     mergedFieldEvidence[field] = {
       value: winner.value,
       confidence: scoreToConfidence(winner.score),
@@ -4156,11 +4168,15 @@ function normalizeEvidenceValue(value) {
 
 // Numeric fields compare with the documented equivalence tolerances (2,154
 // vs 2,155 sqft is rounding, not a dispute); everything else stays exact.
-// Stories are exact by rule.
-function fieldValuesDisagree(field, winner, candidates) {
+// Stories are exact by rule. The tolerance class comes from the property's
+// TYPE — a 5,000 sqft retail suite uses the commercial max(100, 2%), not
+// the stricter residential band its size alone would suggest; the value
+// threshold is only the fallback when no type resolved.
+function fieldValuesDisagree(field, winner, candidates, propertyType) {
   const numericKindFor = {
-    squareFootage: (value) => (Number(value) > RESIDENTIAL_BUILDING_SQFT_MAX
-      ? 'building_area_sqft' : 'residential_living_area_sqft'),
+    squareFootage: (value) => (
+      isCommercialBuildingType(propertyType) || Number(value) > RESIDENTIAL_BUILDING_SQFT_MAX
+        ? 'building_area_sqft' : 'residential_living_area_sqft'),
     lotSize: () => 'parcel_area_sqft',
   }[field];
   if (numericKindFor && Number.isFinite(Number(winner.value))) {

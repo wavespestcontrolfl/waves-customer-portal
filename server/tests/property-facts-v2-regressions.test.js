@@ -448,6 +448,106 @@ describe('Manatee parser preserves all building rows', () => {
   });
 });
 
+// ── Codex round-1 regressions (reviewed b086d51ee) ──
+
+describe('codex r1: single-building commercial is not falsely ambiguous', () => {
+  test('record-level evidence plus one building row resolves instead of unresolved', () => {
+    const facts = factsV2.selectPropertyFactsV2({
+      normalizedAddress: '500 Commerce Blvd, Sarasota, FL',
+      propertySubtype: 'warehouse',
+      ownershipType: 'fee_simple',
+      serviceScope: 'entire_commercial_building',
+      evidence: [
+        // Merged record-level squareFootage (no sourceRecordId)…
+        evidence({ id: 'record-level', field: 'building_area_sqft', value: 42000, scope: 'building' }),
+        // …plus the same building's parsed row and an uncapped actual —
+        // ONE building, three views of it.
+        evidence({ id: 'row', field: 'building_area_sqft', value: 42000, scope: 'building', sourceRecordId: 'building-1' }),
+        evidence({ id: 'actual', field: 'building_area_sqft', value: 42000, scope: 'building', sourceUrl: 'https://www.manateepao.gov/parcel/?parid=X' }),
+      ],
+    });
+    expect(facts.structureArea.value).toBe(42000);
+    expect(facts.warnings).not.toContain('multiple distinct buildings on the parcel — confirm which building(s) the service covers');
+  });
+
+  test('two genuinely distinct building rows still go unresolved', () => {
+    const facts = factsV2.selectPropertyFactsV2({
+      normalizedAddress: '500 Commerce Blvd, Sarasota, FL',
+      propertySubtype: 'warehouse',
+      ownershipType: 'fee_simple',
+      serviceScope: 'entire_commercial_building',
+      evidence: [
+        evidence({ id: 'b1', field: 'building_area_sqft', value: 12000, scope: 'building', sourceRecordId: 'building-1' }),
+        evidence({ id: 'b2', field: 'building_area_sqft', value: 9000, scope: 'building', sourceRecordId: 'building-2' }),
+      ],
+    });
+    expect(facts.structureArea.value).toBeNull();
+    expect(facts.requiresConfirmation).toBe(true);
+  });
+});
+
+describe('codex r1: merge tolerance follows the property TYPE', () => {
+  test('a 5,000 sqft retail suite uses commercial tolerance (75 sqft apart = agreement)', () => {
+    const county = {
+      squareFootage: 5000,
+      propertyType: 'Retail',
+      _provider: 'county',
+      _source: 'county',
+      _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=2',
+      _aiSourceQuality: 100,
+      _aiSourceType: 'county',
+      _aiConfidence: 'medium',
+    };
+    const listing = {
+      squareFootage: 5075,
+      propertyType: 'Retail',
+      _provider: 'claude',
+      _source: 'ai',
+      _aiSourceUrl: 'https://www.loopnet.com/Listing/500-commerce-blvd/1/',
+      _aiSourceQuality: 75,
+      _aiSourceType: 'listing',
+      _aiConfidence: 'high',
+    };
+    const merged = _private.mergePropertyRecords([county, listing], '500 Commerce Blvd');
+    expect(merged._fieldEvidence.squareFootage.disagreement).toBe(false);
+    // Same 75 sqft gap on a residential record IS a dispute (max(25, 1%) = 50).
+    const resCounty = { ...county, squareFootage: 5000, propertyType: 'Single Family' };
+    const resListing = { ...listing, squareFootage: 5075, propertyType: 'Single Family' };
+    const resMerged = _private.mergePropertyRecords([resCounty, resListing], '500 Commerce Blvd');
+    expect(resMerged._fieldEvidence.squareFootage.disagreement).toBe(true);
+  });
+});
+
+describe('codex r1: Sarasota detail-page area keeps its uncapped actual', () => {
+  test('a 270,000 sqft Finished Area survives to _actuals with the pricing clamp on squareFootage', () => {
+    const detailHtml = `
+      <li><strong>Land Area:</strong> 120,000 Sq.Ft.</li>
+      <li><strong>Property Use:</strong> 4800 - Warehouse Distribution</li>
+      <table id="Buildings" class="grid">
+        <thead><tr><th>Situs</th><th>Bldg #</th><th>Beds</th><th>Baths</th><th>Half Baths</th><th>Year Built</th><th>Eff Yr Built</th><th>Gross Area</th><th>Living Area</th><th>Stories</th></tr></thead>
+        <tbody><tr><td><a href="/propertysearch/Building/Show?strap=1&num=1">500 COMMERCE BLVD</a></td><td>1</td><td></td><td></td><td></td><td>2005</td><td>2005</td><td></td><td></td><td>1</td></tr></tbody>
+      </table>
+    `;
+    const buildingDetailHtml = `
+      <ul class="bullet">
+        <li>Building Type: Warehouse Distribution</li>
+        <li>Finished Area S.F: 270,000</li>
+        <li>Year Built: 2005</li>
+        <li>Number of Stories:<span>1 <br /></span></li>
+      </ul>
+    `;
+    const parsed = _private.parseSarasotaPaoRecord({
+      address: '500 Commerce Blvd, Sarasota, FL',
+      search: { parcelId: '0000002', situsAddress: '500 COMMERCE BLVD', city: 'SARASOTA' },
+      detailHtml,
+      buildingDetailHtml,
+    });
+    expect(parsed.squareFootage).toBe(200000);
+    expect(parsed._actuals.buildingAreaSqft).toBe(270000);
+    expect(parsed._actuals.pricingAdjustment).toBe('commercial_area_cap');
+  });
+});
+
 // ── Estimator integration: story provenance + shadow diff ──
 
 describe('buildEngineInput story provenance', () => {
