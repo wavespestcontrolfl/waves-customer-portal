@@ -35,7 +35,12 @@ describe('POST /api/client-errors', () => {
     expect(res.status).toBe(204);
     const [error, captureContext] = mockCapture.mock.calls[0];
     expect(error.name).toBe('TypeError');
-    expect(captureContext.tags).toEqual({ source: 'client' });
+    expect(captureContext.tags).toEqual({
+      source: 'client',
+      // Promoted to tags (not just contexts) so alert emails name the page.
+      client_context: 'PageErrorBoundary',
+      client_route: 'admin/banking',
+    });
     expect(ctxOf()).toEqual({ context: 'PageErrorBoundary', route: 'admin/banking' });
     // Explicit fingerprint so distinct (name, context, route) classes don't all
     // collapse into one Sentry issue via the shared synthetic stack.
@@ -114,5 +119,9 @@ describe('POST /api/client-errors', () => {
     const res = await post({});
     expect(res.status).toBe(204);
     expect(mockCapture.mock.calls[0][0].name).toBe('Error');
+    // Tag values are never undefined — missing fields collapse to 'none'.
+    expect(mockCapture.mock.calls[0][1].tags).toEqual({
+      source: 'client', client_context: 'none', client_route: 'none',
+    });
   });
 });
