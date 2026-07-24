@@ -20,7 +20,22 @@ jest.mock('../services/conversations', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { preconnectScreenDecision, buildPreconnectChallengeTwiML } = voiceRouter._test;
+const { preconnectScreenDecision, buildPreconnectChallengeTwiML, knownCallerPhoneExists } = voiceRouter._test;
+
+function makeDbLike(rows) {
+  const calls = { whereRaw: [] };
+  const builder = {
+    whereNull: jest.fn(() => builder),
+    whereRaw: jest.fn((sql, bindings) => {
+      calls.whereRaw.push({ sql, bindings });
+      return builder;
+    }),
+    limit: jest.fn(() => Promise.resolve(rows)),
+  };
+  const dbLike = jest.fn(() => builder);
+  dbLike._calls = calls;
+  return dbLike;
+}
 
 describe('preconnectScreenDecision', () => {
   const B = 'TN-Validation-Passed-B';
@@ -69,5 +84,26 @@ describe('buildPreconnectChallengeTwiML', () => {
   test('prompt says the company name and the key to press', () => {
     expect(xml).toContain('Waves Pest Control');
     expect(xml).toContain('press one');
+  });
+});
+
+describe('knownCallerPhoneExists (screen-bypass identity set)', () => {
+  test('matches across the customer phone AND all three service-contact slot phones', async () => {
+    const dbLike = makeDbLike([{ id: 'c1' }]);
+    await expect(knownCallerPhoneExists(dbLike, '+19415551234')).resolves.toBe(true);
+    const { sql } = dbLike._calls.whereRaw[0];
+    for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+      expect(sql).toContain(col);
+    }
+  });
+
+  test('no matching record → false (caller stays gate-eligible)', async () => {
+    await expect(knownCallerPhoneExists(makeDbLike([]), '+19415551234')).resolves.toBe(false);
+  });
+
+  test('unparseable caller number → false without querying', async () => {
+    const dbLike = makeDbLike([{ id: 'c1' }]);
+    await expect(knownCallerPhoneExists(dbLike, '')).resolves.toBe(false);
+    expect(dbLike).not.toHaveBeenCalled();
   });
 });

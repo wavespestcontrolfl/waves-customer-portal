@@ -94,6 +94,31 @@ async function findSingleCustomerByPhone(dbLike, phone) {
   return null;
 }
 
+// Screen-bypass identity check: does ANY customer record know this number —
+// the customer's own phone OR one of the three service-contact slot phones?
+// Mirrors CONTACT_MATCH_PHONE_COLS in call-recording-processor.js (the
+// canonical inbound identity set: the pipeline itself records spouses and
+// tenants into those slots). Used ONLY for the pre-connect screen exemption:
+// call_log linking stays primary-phone-only via findSingleCustomerByPhone,
+// and slot roles that must never auto-link (lender/agent) still bypass here
+// — whoever they are, they are a known caller, not a spoofed robocall.
+const KNOWN_CALLER_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+
+async function knownCallerPhoneExists(dbLike, phone) {
+  const key = customerPhoneLookupKey(phone);
+  if (!key) return false;
+  const keys = key.length === 10 ? [key, `1${key}`] : [key];
+  const placeholder = keys.map(() => '?').join(', ');
+  const frag = KNOWN_CALLER_PHONE_COLS
+    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
+    .join(' OR ');
+  const rows = await dbLike('customers')
+    .whereNull('deleted_at')
+    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
+    .limit(1);
+  return rows.length > 0;
+}
+
 // Builds the spoken caller name stamped into call_log at /voice time and read
 // back in the post-accept connect announcement. A matched customer/lead yields a
 // name; an unmatched caller (or a number shared by 2+ records, which
@@ -568,8 +593,22 @@ router.post('/voice', async (req, res) => {
     const screenReentry = req.query.screened === '1'
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
+    let knownCaller = customerPhoneMatches.length > 0;
+    // Service-contact slot phones (spouse/tenant — the canonical inbound
+    // identity set) also bypass the screen. Checked only when it could
+    // change the outcome (no primary match, B attestation, not a re-entry)
+    // so the extra query never runs on ordinary calls; a check failure
+    // fails OPEN — never challenge a caller because Postgres hiccupped.
+    if (!knownCaller && !screenReentry && /-B$/.test(String(req.body.StirVerstat || ''))) {
+      try {
+        knownCaller = await knownCallerPhoneExists(db, From);
+      } catch (err) {
+        logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
+        knownCaller = true;
+      }
+    }
     const screenDecision = screenReentry ? 'none' : preconnectScreenDecision({
-      knownCaller: customerPhoneMatches.length > 0,
+      knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
     });
@@ -1672,6 +1711,7 @@ router._test = {
   appendAgentHandoff,
   buildPreconnectChallengeTwiML,
   findCustomerPhoneMatches,
+  knownCallerPhoneExists,
   preconnectScreenDecision,
   connectingAnnouncement,
   customerPhoneLookupKey,
