@@ -144,6 +144,21 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     expect(adoptV2PrimaryFields(v1Stub(), single).merged.first_name).toBe('Rita');
   });
 
+  test('a PARTIAL split beside a complete name_full fills the missing part (codex r7)', () => {
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: 'Jane', last_name: null, name_full: 'Jane Garcia' };
+    const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
+    expect(merged.first_name).toBe('Jane');
+    expect(merged.last_name).toBe('Garcia');
+
+    // The present split field stays authoritative for its own slot.
+    const disagree = v2Fixture();
+    disagree.caller = { ...disagree.caller, first_name: 'Rita', last_name: null, name_full: 'Jane Garcia' };
+    const kept = adoptV2PrimaryFields(v1Stub(), disagree).merged;
+    expect(kept.first_name).toBe('Rita');
+    expect(kept.last_name).toBe('Garcia');
+  });
+
   test('a low-confidence V2 name still fills an EMPTY V1 name', () => {
     const shaky = v2Fixture();
     shaky.caller = { ...shaky.caller, name_confidence: 0.4 };

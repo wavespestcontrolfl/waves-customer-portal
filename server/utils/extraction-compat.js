@@ -267,10 +267,15 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // this promotion exists to fix).
   let v2First = flat.first_name;
   let v2Last = flat.last_name;
-  if (!has(v2First) && !has(v2Last) && has(caller.name_full)) {
+  if (has(caller.name_full) && (!has(v2First) || !has(v2Last))) {
+    // Fill ANY missing split part from name_full, not just the both-null
+    // case — the schema permits one split field null beside a complete
+    // name_full, and skipping derivation there persisted a customer without
+    // the available surname (codex r7 P2). Present split fields stay
+    // authoritative for their own slot.
     const parts = String(caller.name_full).trim().split(/\s+/);
-    v2First = parts[0] || null;
-    v2Last = parts.slice(1).join(' ') || null;
+    if (!has(v2First)) v2First = parts[0] || null;
+    if (!has(v2Last)) v2Last = parts.slice(1).join(' ') || null;
   }
   const v1HasName = has(merged.first_name) || has(merged.last_name);
   const v2HasName = has(v2First) || has(v2Last);
