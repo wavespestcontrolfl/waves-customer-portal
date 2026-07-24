@@ -328,8 +328,10 @@ describe('OneTimeBreakdownCard', () => {
     );
 
     expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
-    // Both the row amount and the one-time total render plain $99.00 — no asterisk.
-    expect(screen.getAllByText('$99.00').length).toBe(2);
+    // The row amount renders plain $99.00 — no asterisk. Single-item
+    // breakdowns no longer repeat it as a total row (owner 2026-07-23).
+    expect(screen.getAllByText('$99.00').length).toBe(1);
+    expect(screen.queryByText('One-time total')).not.toBeInTheDocument();
     expect(screen.queryByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 
@@ -826,7 +828,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).not.toContain('/ year');
   });
 
-  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+  it('renders nothing when there is no credit to itemize (owner rule re-affirmed 2026-07-23: no Plan total on customer estimates)', () => {
     const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
     expect(container).toBeEmptyDOMElement();
   });

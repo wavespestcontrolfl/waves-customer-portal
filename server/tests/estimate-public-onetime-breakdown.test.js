@@ -1714,7 +1714,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[0].frequencies).toEqual([
       expect.objectContaining({
         key: 'standard',
-        label: 'Bi-monthly',
+        label: 'Bi-monthly (6 visits)',
         monthly: 72,
         annual: 864,
         perTreatment: 144,
@@ -1724,7 +1724,7 @@ describe('public estimate one-time breakdown', () => {
       }),
       expect.objectContaining({
         key: 'enhanced',
-        label: 'Every 6 weeks',
+        label: 'Every 6 weeks (9 visits)',
         monthly: 96,
         annual: 1152,
         perTreatment: 128,
@@ -1898,7 +1898,7 @@ describe('public estimate one-time breakdown', () => {
 
     expect(standard).toEqual(expect.objectContaining({
       key: 'standard',
-      label: 'Bi-monthly',
+      label: 'Bi-monthly (6 visits)',
       billingFrequencyKey: 'monthly',
     }));
     expect(service).toEqual(expect.objectContaining({
@@ -1914,7 +1914,7 @@ describe('public estimate one-time breakdown', () => {
       visitsPerYear: 6,
       frequency: 'bi_monthly',
       tierKey: 'standard',
-      tierLabel: 'Bi-monthly',
+      tierLabel: 'Bi-monthly (6 visits)',
       billingFrequencyKey: 'monthly',
     }));
     expect(nextData.result.recurring).toEqual(expect.objectContaining({
@@ -2584,7 +2584,7 @@ describe('public estimate one-time breakdown', () => {
     expect(frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced', 'premium']);
     expect(frequencies[0]).toMatchObject({
       key: 'standard',
-      label: 'Bi-monthly',
+      label: 'Bi-monthly (6 visits)',
       serviceCategory: 'lawn_care',
       serviceTierKey: 'standard',
       monthly: 90,
@@ -4935,7 +4935,6 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Home', value: '2,100 sq ft' },
       { label: 'Lot', value: '8,400 sq ft' },
-      { label: 'Pool/Lanai', value: 'No' },
       { label: 'Ornamental beds', value: '1,800 sq ft' },
       { label: 'Trees/Shrubs', value: '6 trees, Heavy shrubs' },
       { label: 'Complexity', value: 'Complex' },
@@ -4995,7 +4994,10 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toHaveLength(5);
+    // Pool/Lanai is pest-only (owner 2026-07-23), so this lawn+termite
+    // bundle carries 4 tiles.
+    expect(payload.metrics).toHaveLength(4);
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Termite perimeter', value: '180 linear ft' },
     ]));
@@ -5090,8 +5092,9 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Mosquito treatment area', value: '7,800 sq ft' },
       { label: 'Mosquito program', value: 'Monthly (12 visits/year)' },
       { label: 'Mosquito pressure', value: '1.35x' },
-      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
     ]));
+    // Pool/Lanai is pest-only (owner 2026-07-23) — never on mosquito-only.
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Termite perimeter')).toBe(false);

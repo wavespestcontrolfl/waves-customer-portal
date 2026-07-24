@@ -57,6 +57,7 @@ import {
   glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
+  glassOneTimeHeroOverlay,
   glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
@@ -1754,13 +1755,21 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null }) {
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
+  // One-time-ONLY pages pass headlineTotal (the big price card's figure).
+  // With a single billable row matching it, the row's amount and the total
+  // row are pure repeats of the headline (owner 2026-07-23: "$257.00" read
+  // three times) — keep the row for the service NAME, drop its dollars.
+  const singleHeadlineMatch = headlineTotal != null
+    && items.length === 1
+    && items[0]?.quoteRequired !== true && items[0]?.kind !== 'quote_required'
+    && Math.abs((Number(items[0]?.amount) || 0) - Number(headlineTotal)) < 0.005;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
   // the fee is actually waivable. Legacy label-only setup rows carry no
@@ -1815,28 +1824,36 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   </div>
                 ) : null}
               </div>
-              <div style={{
-                fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
-                whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
-              }}>
-                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
-                {showPrepayWaiverNote ? '*' : ''}
-              </div>
+              {singleHeadlineMatch ? null : (
+                <div style={{
+                  fontSize: 14, fontWeight: 700,
+                  color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
+                  whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+                }}>
+                  {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                  {showPrepayWaiverNote ? '*' : ''}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', gap: 12,
-        borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
-        fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
-      }}>
-        <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
-        <span style={totalIsQuoteRequired ? { color: W.red } : null}>
-          {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
-        </span>
-      </div>
+      {/* Single-item breakdowns skip the total row (owner 2026-07-23): the
+          item line already states the price, so "$199.00 / One-time total
+          $199.00" read twice. Quote-required singles keep the status row —
+          it carries information the item line doesn't. */}
+      {items.length > 1 || totalIsQuoteRequired ? (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: 12,
+          borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
+          fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
+        }}>
+          <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
+          <span style={totalIsQuoteRequired ? { color: W.red } : null}>
+            {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
+          </span>
+        </div>
+      ) : null}
       {totalIsQuoteRequired ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
@@ -1992,9 +2009,9 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
 // price PRE credit — the credit is applied to the combined plan, not baked into
 // each row — so this is the one place the customer sees list subtotal → credit →
-// the net they actually pay. Renders ONLY when there's a credit to itemize: the
-// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
-// a no-credit multi-service plan stays summary-free and unchanged.
+// the net they actually pay. Renders ONLY when there's a credit to itemize:
+// customer-facing estimates never show a combined "Plan total" (owner rule
+// 2026-07-07, re-affirmed 2026-07-23 after a brief same-day reversal).
 export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
   if (!combined) return null;
   // The live discount object (selected row first — the server nulls
@@ -2016,6 +2033,10 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     || selectedFrequency?.manualDiscountSuppressed === true
     || Boolean(combined.manualDiscount)
     || Boolean(planDiscount);
+  // No combined total on a creditless plan — owner rule, re-affirmed
+  // 2026-07-23 after a brief same-day reversal: customer-facing estimates
+  // never show a "Plan total $X/mo"; the per-application service cards are
+  // the only prices. This card exists ONLY to itemize a plan-wide credit.
   if (!planHasCredit) return null;
   const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
   // Quote-required selection: the rest of the estimate hides exact dollars for a
@@ -3395,31 +3416,22 @@ export function ServiceSection({
             </span>
           </div>
         ) : null}
-        {servicesLength > 1 ? (
-          <h3 style={{
-            fontSize: 18,
-            color: ESTIMATE_TEXT,
-            margin: '0 0 16px',
-            // Keep clear of the absolutely-positioned corner badge — sized
-            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
-            // padding + the 16px corner inset). No clearance needed when the
-            // badge stacks in flow on phones.
-            paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
-            fontWeight: 800,
-          }}>
-            {displayServiceLabel(section.label) || 'Service'}
-          </h3>
-        ) : null}
-
         {/* Every service box leads with its own service-related headline —
             the "HOW OFTEN?" eyebrow is gone and no-selector services
-            (termite monitoring) get a headline too (owner 2026-07-10). */}
+            (termite monitoring) get a headline too (owner 2026-07-10). The
+            small service-name subheader that used to precede this on
+            multi-service estimates is gone too (owner 2026-07-23): the
+            headline already names the service, so "Tree & Shrub" over
+            "Tree & Shrub Care by Waves" read double. */}
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
           color: '#04395E', margin: '0 0 4px',
-          // Same corner-badge clearance as the h3 above; only needed when
-          // this headline is the first line in the card (single-service).
-          paddingRight: servicesLength > 1 || !showTierBadge || compactTierBadge ? 0 : 170,
+          // Corner-badge clearance — the headline is now the first line in
+          // the card on every composition, so it always needs to clear the
+          // absolutely-positioned WaveGuard chip (sized for the widest chip,
+          // "WaveGuard Platinum"). None needed when the badge stacks in
+          // flow on phones.
+          paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
@@ -3479,7 +3491,13 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
-            showGuarantee={servicesLength === 1}
+            // Guarantee line off under glass (owner 2026-07-23) — the approve
+            // CTA's glass micro line states the same 90-day guarantee
+            // immediately below, so the in-card line read twice. Non-glass
+            // single-service cards keep it: the CTA micro is glass-gated, so
+            // removing it there would drop the page's only guarantee claim
+            // (codex P2 r3).
+            showGuarantee={servicesLength === 1 && !glassCopyActive()}
           />
         ) : null}
 
@@ -4816,7 +4834,14 @@ function EstimateViewPageInner() {
   // bundle pack), and every use below still falls back to the standard copy
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
-  const glassPack = glassEstimateCopyFor(serviceCategory);
+  // One-time-only estimates overlay a terms-neutral hero on the category
+  // pack — the packs' recurring promises (unlimited callbacks, 90-day
+  // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
+  // Review-gated quotes get the confirm-with-you variant instead of
+  // "approve online and pick a day" (codex P2 r3).
+  const glassPack = estimate.isOneTimeOnly === true
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -5006,13 +5031,11 @@ function EstimateViewPageInner() {
           })}
           </div>
 
-          {/* The combined "Recurring total" card was removed (owner directive
-              2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. It returns ONLY to itemize a plan-wide
-              credit (e.g. Referral Credit) and show the net: the per-service
-              cards are pre-credit, so without this the credit + final price
-              would never appear on a split multi-service plan. Renders nothing
-              when there's no credit, so no-credit bundles stay unchanged. */}
+          {/* No combined "Plan total" on customer estimates (owner rule
+              2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and
+              the sticky book bar carry the plan's price. This renders ONLY
+              to itemize a plan-wide credit (e.g. Referral Credit) and its
+              net; creditless bundles render nothing here. */}
           {services.length > 1 ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
@@ -5035,8 +5058,14 @@ function EstimateViewPageInner() {
             />
           ) : null}
 
-          {/* One guarantee line for the whole plan — not one per box. */}
-          {services.length > 1 ? (
+          {/* The standalone "Try us risk-free — 90-day money-back guarantee."
+              line is gone under glass (owner 2026-07-23): the approve CTA's
+              glass micro line ("No long-term contract · Unlimited free
+              callbacks · 90-day money-back guarantee") already carries the
+              claim, so it read twice back to back. Non-glass keeps it — the
+              CTA micro is glass-gated, so this is the non-glass page's only
+              plan-level guarantee claim (codex P2 r3). */}
+          {!glassContent && services.length > 1 ? (
             <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
               Try us risk-free — 90-day money-back guarantee.
             </div>
@@ -5089,7 +5118,13 @@ function EstimateViewPageInner() {
           breakdown={pricing.oneTimeBreakdown}
         />
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
-        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {/* headlineTotal: a single-item breakdown matching the price card
+            above keeps the service NAME but drops its repeated dollars
+            (owner 2026-07-23). */}
+        <OneTimeBreakdownCard
+          breakdown={pricing.oneTimeBreakdown}
+          headlineTotal={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+        />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
