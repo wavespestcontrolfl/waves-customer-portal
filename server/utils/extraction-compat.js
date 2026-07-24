@@ -305,14 +305,26 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
       && !partConflicts(merged.city, flat.city)
       && !partConflicts(merged.zip, flat.zip);
     winner('address_line1', flat.address_line1);
-    if (has(flat.address_line2)) {
-      winner('address_line2', flat.address_line2);
-    } else if (!sameAddress && has(merged.address_line2)) {
-      adopt('address_line2', null);
+    if (sameAddress) {
+      // Same property — V2 components refine, V1 detail V2 didn't capture
+      // (a unit, the zip) survives.
+      if (has(flat.address_line2)) winner('address_line2', flat.address_line2);
+      winner('city', flat.city);
+      winner('state', flat.state);
+      winner('zip', flat.zip);
+    } else {
+      // DIFFERENT address — the whole thing is V2's, INCLUDING clearing
+      // components V2 did not hear: a V1 city/zip/unit under a V2 street is
+      // a service address neither extractor produced (codex r2 + r4 P2).
+      const unit = (key, value) => {
+        const next = has(value) ? value : null;
+        if (merged[key] !== next) adopt(key, next);
+      };
+      unit('address_line2', flat.address_line2);
+      unit('city', flat.city);
+      unit('state', flat.state);
+      unit('zip', flat.zip);
     }
-    winner('city', flat.city);
-    winner('state', flat.state);
-    winner('zip', flat.zip);
   }
 
   // Scheduling verdict — v2-wins in BOTH directions. Only a confirmed status
@@ -325,6 +337,13 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     if (wallClock) {
       if (merged.appointment_confirmed !== true) adopt('appointment_confirmed', true);
       if (merged.preferred_date_time !== wallClock) adopt('preferred_date_time', wallClock);
+    } else if (merged.appointment_confirmed === true) {
+      // V2 says confirmed but carries NO parseable start time — the routing
+      // gate blocks this as confirmed_without_start_time, so the canonical
+      // fields must not keep claiming a booking at the stale V1 time
+      // (codex r4 P2). The triage card carries the follow-up.
+      adopt('appointment_confirmed', false);
+      if (merged.preferred_date_time !== null) adopt('preferred_date_time', null);
     }
   } else if (has(sched.status) && sched.status !== 'ambiguous' && merged.appointment_confirmed === true) {
     adopt('appointment_confirmed', false);
@@ -413,9 +432,15 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     adopt('lead_quality', flat.lead_quality);
   }
   filler('pain_points', flat.pain_points);
-  filler('call_type', mapCallNatureToLegacy(v2Extraction.call_nature));
-  if ((merged.is_lead === null || merged.is_lead === undefined) && has(v2Extraction.call_nature)) {
-    adopt('is_lead', v2Extraction.call_nature === 'new_lead');
+  // call_type / is_lead are V2-WINS, not fill-gap: Step 4b's non-lead veto
+  // reads only these legacy fields, and a V1 'new_inquiry' surviving over a
+  // V2 billing/existing-customer/applicant classification would keep minting
+  // leads for calls the promoted extractor identified as non-sales
+  // (codex r4 P2). Null call_nature leaves V1's verdict alone.
+  if (has(v2Extraction.call_nature)) {
+    winner('call_type', mapCallNatureToLegacy(v2Extraction.call_nature));
+    const v2IsLead = v2Extraction.call_nature === 'new_lead';
+    if (merged.is_lead !== v2IsLead) adopt('is_lead', v2IsLead);
   }
 
   return { merged, adoptedFields };

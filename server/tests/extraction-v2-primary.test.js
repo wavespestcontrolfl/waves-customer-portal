@@ -205,6 +205,20 @@ describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
     expect(merged.address_line2).toBe('Apt 7');
   });
 
+  test('a DIFFERENT V2 street replaces the address AS A UNIT — V1 city/zip never survive under it', () => {
+    const v1 = { ...v1Stub(), address_line1: '999 Old Rd', address_line2: 'Unit 4', city: 'Venice', zip: '34285' };
+    const v2 = v2Fixture();
+    v2.property = {
+      ...v2.property,
+      service_address: { street_line_1: '55 New Harbor Way', street_line_2: null, city: null, state: null, postal_code: null },
+    };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.address_line1).toBe('55 New Harbor Way');
+    expect(merged.address_line2).toBeNull();
+    expect(merged.city).toBeNull();
+    expect(merged.zip).toBeNull();
+  });
+
   test('a STREETLESS V2 address adopts nothing — no V2 city/zip under a V1 street', () => {
     const v1 = { ...v1Stub(), address_line1: '999 Old Rd', address_line2: 'Unit 4', city: 'Venice', zip: '34285' };
     const v2 = v2Fixture();
@@ -236,11 +250,20 @@ describe('adoptV2PrimaryFields — scheduling verdict', () => {
     expect(merged.preferred_date_time).toBe('2026-07-24T10:00');
   });
 
-  test('confirmed without a parseable start time adopts nothing', () => {
+  test('confirmed without a parseable start time adopts nothing onto a stub', () => {
     const v2 = v2Fixture();
     v2.scheduling = { ...v2.scheduling, confirmed_start_at: null };
     const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
     expect(merged.appointment_confirmed).toBeUndefined();
+    expect(merged.preferred_date_time).toBeNull();
+  });
+
+  test('V2 confirmed WITHOUT a start time demotes a V1 confirmed booking (matches the gate verdict)', () => {
+    const v1 = { ...v1Stub(), appointment_confirmed: true, preferred_date_time: '2026-07-24T10:00' };
+    const v2 = v2Fixture();
+    v2.scheduling = { ...v2.scheduling, confirmed_start_at: null };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.appointment_confirmed).toBe(false);
     expect(merged.preferred_date_time).toBeNull();
   });
 
@@ -310,6 +333,20 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
       expect(merged.is_spam).toBe(true);
     }
     expect(adoptV2PrimaryFields(v1Stub(), v2Fixture()).merged.is_spam).toBe(false);
+  });
+
+  test('a V2 non-lead nature OVERRIDES a V1 new_inquiry — Step 4b reads only the legacy fields', () => {
+    const v1 = { ...v1Stub(), call_type: 'new_inquiry', is_lead: true };
+    const v2 = v2Fixture({ call_nature: 'billing_question' });
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.call_type).toBe('billing');
+    expect(merged.is_lead).toBe(false);
+
+    // Null call_nature leaves the V1 verdict alone.
+    const nullNature = v2Fixture({ call_nature: null });
+    const kept = adoptV2PrimaryFields({ ...v1Stub(), call_type: 'new_inquiry', is_lead: true }, nullNature).merged;
+    expect(kept.call_type).toBe('new_inquiry');
+    expect(kept.is_lead).toBe(true);
   });
 
   test('voicemail-class call_nature trips is_voicemail even when meta.is_voicemail is false', () => {

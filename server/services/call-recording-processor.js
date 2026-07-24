@@ -4674,7 +4674,11 @@ const CallRecordingProcessor = {
     // mint a CUSTOMER: the create branch only checks name/phone/voicemail/spam,
     // and V2-primary adoption can supply a valid name + spoken phone from an
     // applicant call (codex r3 P2). Consulted at the Step-3 create gate below.
-    const v2NonCustomerCallNature = v2Result?.status === 'valid'
+    // Gated on the SAME switch as adoption (codex r4 P2): with V2-primary
+    // killed or routing demoted, the pipeline reverts to pure legacy behavior
+    // — a V2 false-positive must not suppress a valid V1 customer create.
+    const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
+      && v2Result?.status === 'valid'
       && v2Result.extraction?.call_nature === 'job_applicant';
 
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
@@ -6036,7 +6040,10 @@ const CallRecordingProcessor = {
     // Keep the row claimed as 'processing' while downstream side effects run.
     // The terminal status is written only after leads/estimates/scheduling have
     // had a chance to land, so a crash cannot mark the call processed early.
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam);
+    // A job-applicant veto is an INTENTIONAL skip, not a creation failure —
+    // without excluding it here the call would close as
+    // customer_creation_failed and pollute failure reporting (codex r4 P2).
+    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
