@@ -6064,7 +6064,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const claimed = await db('scheduled_services')
             .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
             .update({ pending_setup_fee: null, updated_at: new Date() });
-          if (claimed === 1) secureSetupFee = { parentId: setupParentId, amount: Math.round(fee * 100) / 100 };
+          if (claimed === 1) {
+            secureSetupFee = { parentId: setupParentId, amount: Math.round(fee * 100) / 100 };
+            // Durable trace: a crash between this claim and the mint loses
+            // the fee (restore only covers in-process failures) — this log
+            // line is the audit trail for that bounded window.
+            logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${secureSetupFee.amount}) — minting on visit ${svc.id}`);
+          }
         }
       } catch (e) {
         // Unreadable stamp mints the plain visit invoice — the fee stays

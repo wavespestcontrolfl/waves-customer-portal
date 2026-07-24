@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
     chain.where = record('where');
     chain.whereIn = record('whereIn');
     chain.whereNull = record('whereNull');
+    chain.whereNot = record('whereNot');
     chain.whereNotNull = record('whereNotNull');
     chain.orderBy = record('orderBy');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
@@ -56,7 +57,11 @@ const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
 
 const mockInvoiceCreate = jest.fn();
-jest.mock('../services/invoice', () => ({ create: (...a) => mockInvoiceCreate(...a) }));
+const mockVoidInvoice = jest.fn(async () => ({ id: 'inv-old', status: 'void' }));
+jest.mock('../services/invoice', () => ({
+  create: (...a) => mockInvoiceCreate(...a),
+  voidInvoice: (...a) => mockVoidInvoice(...a),
+}));
 const mockCreateTerm = jest.fn(async () => ({ id: 'term-1' }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   createTermForAnnualPrepay: (...a) => mockCreateTerm(...a),
@@ -81,6 +86,7 @@ const pestVisit = {
   recurring_interval_days: null,
   recurring_parent_id: null,
   pending_setup_fee: null,
+  source_estimate_id: null,
 };
 const customer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const pendingRequest = { id: 'r1', scheduled_service_id: 'v1', customer_id: 'c1', status: 'pending', token: 'tok', selected_plan: null, prepay_invoice_id: null };
@@ -112,6 +118,7 @@ beforeEach(() => {
   mockResolveForInvoice.mockReset().mockResolvedValue(null);
   mockOverlapLock.mockReset().mockResolvedValue(undefined);
   mockCreateTerm.mockReset().mockResolvedValue({ id: 'term-1' });
+  mockVoidInvoice.mockReset().mockResolvedValue({ id: 'inv-old', status: 'void' });
   mockInvoiceCreate.mockReset().mockImplementation(async ({ lineItems }) => ({
     id: 'inv-1',
     token: 'invtok',
@@ -257,5 +264,97 @@ describe('selectSecurePlan — fail-closed states', () => {
       scheduled_services: { first: () => ({ ...pestVisit, estimated_price: null }), select: () => [] },
     });
     await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'plan_unavailable' });
+  });
+});
+
+describe('selectSecurePlan — series-anchor and switch semantics (self-review fixes)', () => {
+  test('a CHILD-attached link stamps the setup fee on the series PARENT (where the completion claim reads)', async () => {
+    setTables({
+      scheduled_services: {
+        first: () => ({ ...pestVisit, id: 'child-2', recurring_parent_id: 'parent-1' }),
+        select: () => [{ scheduled_date: FUTURE }],
+      },
+    });
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    const feeChain = mockDbCalls.find((c) => c.table === 'scheduled_services'
+      && c.calls.some(([op, patch]) => op === 'update' && patch?.pending_setup_fee === 99));
+    expect(feeChain).toBeTruthy();
+    expect(feeChain.calls).toContainEqual(['where', { id: 'parent-1' }]);
+  });
+
+  test('a CHILD-attached prepay anchors the coverage window on the parent series', async () => {
+    setTables({
+      scheduled_services: {
+        first: () => ({ ...pestVisit, id: 'child-2', recurring_parent_id: 'parent-1' }),
+        select: () => [{ scheduled_date: FUTURE }],
+      },
+    });
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    const seriesChain = mockDbCalls.find((c) => c.table === 'scheduled_services'
+      && c.calls.some(([op]) => op === 'whereIn'));
+    expect(seriesChain).toBeTruthy();
+    // The series window query anchors on the parent id, not the child.
+    const whereFn = seriesChain.calls.find(([op, arg]) => op === 'where' && typeof arg === 'function');
+    expect(whereFn).toBeTruthy();
+    const probe = { where: jest.fn(function w() { return this; }), orWhere: jest.fn(function o() { return this; }) };
+    whereFn[1].call(probe);
+    expect(probe.where).toHaveBeenCalledWith({ id: 'parent-1' });
+    expect(probe.orWhere).toHaveBeenCalledWith({ recurring_parent_id: 'parent-1' });
+  });
+
+  test('switching prepay→per_application voids the unpaid draft through the canonical guard and clears the anchors', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-old', annual_prepay_term_id: 'term-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-old', token: 'oldtok', status: 'sent' }) },
+    });
+    const result = await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(result).toEqual({ ok: true, plan: 'per_application' });
+    expect(mockVoidInvoice).toHaveBeenCalledWith('inv-old');
+    const anchorClear = updatesFor('appointment_card_requests')
+      .find((p) => p.prepay_invoice_id === null && p.annual_prepay_term_id === null);
+    expect(anchorClear).toBeTruthy();
+    const selection = updatesFor('appointment_card_requests')
+      .find((p) => p.selected_plan === 'per_application');
+    expect(selection).toBeTruthy();
+  });
+
+  test('switching away from a SETTLED prepay invoice refuses (already covered) and never voids', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-old', token: 'oldtok', status: 'paid' }) },
+    });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).rejects.toMatchObject({ code: 'already_secured' });
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a void-refused switch (payment in flight) surfaces selection_conflict, not a silent lane change', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-old', token: 'oldtok', status: 'sent' }) },
+    });
+    mockVoidInvoice.mockRejectedValueOnce(new Error('A payment is already in flight'));
+    await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).rejects.toMatchObject({ code: 'selection_conflict' });
+    expect(updatesFor('appointment_card_requests').find((p) => p.selected_plan === 'per_application')).toBeFalsy();
+  });
+
+  test('a stale anchor pointing at a VOID invoice is released and prepay re-mints fresh', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-void', annual_prepay_term_id: 'term-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-void', token: 'voidtok', status: 'void' }) },
+    });
+    const result = await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(result.payUrl).toBe('https://portal.test/pay/invtok');
+    expect(mockInvoiceCreate).toHaveBeenCalledTimes(1);
+    const release = updatesFor('appointment_card_requests')
+      .find((p) => p.prepay_invoice_id === null && p.annual_prepay_term_id === null);
+    expect(release).toBeTruthy();
   });
 });

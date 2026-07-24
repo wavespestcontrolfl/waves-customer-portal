@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
     chain.where = record('where');
     chain.whereIn = record('whereIn');
     chain.whereNull = record('whereNull');
+    chain.whereNot = record('whereNot');
     chain.whereNotNull = record('whereNotNull');
     chain.orderBy = record('orderBy');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
@@ -84,6 +85,7 @@ const baseVisit = {
   recurring_interval_days: null,
   recurring_parent_id: null,
   pending_setup_fee: null,
+  source_estimate_id: null,
 };
 const baseCustomer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const request = { id: 'r1', scheduled_service_id: 'v1', selected_plan: null };
@@ -221,5 +223,46 @@ describe('normalizedPattern', () => {
     expect(_test.normalizedPattern({ recurring_pattern: 'custom', recurring_interval_days: 30 })).toBeNull();
     expect(_test.normalizedPattern({ recurring_pattern: 'Quarterly' })).toBe('quarterly');
     expect(_test.normalizedPattern({ recurring_pattern: null })).toBeNull();
+  });
+});
+
+describe('self-review exclusions (double-billing + tax guards)', () => {
+  test.each([
+    ['business property (InvoiceService taxes it)', {}, { property_type: 'business' }],
+    ['already-per_application customer (setup fee was billed at accept)', {}, { billing_mode: 'per_application' }],
+  ])('%s → null', async (_label, visitPatch, customerPatch) => {
+    setTables({ visit: { ...baseVisit, ...visitPatch }, customer: { ...baseCustomer, ...customerPatch } });
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
+  test('estimate-origin series (source_estimate_id set) → null — accept flow already owns billing', async () => {
+    setTables({ visit: { ...baseVisit, source_estimate_id: 'est-1' }, customer: { ...baseCustomer } });
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
+  test("the request's OWN pending term is excluded from the overlap probe (prepay_selected page keeps its context)", async () => {
+    mockTableHandlers = {
+      scheduled_services: { first: () => ({ ...baseVisit }) },
+      customers: { first: () => ({ ...baseCustomer }) },
+      annual_prepay_terms: {
+        first: (chain) => {
+          // Honor the whereNot('id', <own term>) exclusion like SQL would.
+          const excluded = chain.calls.find(([op, col]) => op === 'whereNot' && col === 'id');
+          const term = { id: 'term-own', term_end: '2099-12-31' };
+          return excluded && excluded[2] === 'term-own' ? null : term;
+        },
+      },
+    };
+    const withOwnTerm = await buildSecurePlanContext({
+      request: { ...request, annual_prepay_term_id: 'term-own' },
+      visitId: 'v1',
+    });
+    expect(withOwnTerm?.mode).toBe('recurring');
+    // A DIFFERENT customer term still hides the plan page.
+    const withForeignTerm = await buildSecurePlanContext({
+      request: { ...request, annual_prepay_term_id: 'term-other' },
+      visitId: 'v1',
+    });
+    expect(withForeignTerm).toBeNull();
   });
 });

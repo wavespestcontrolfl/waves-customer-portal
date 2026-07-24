@@ -22,7 +22,7 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // Compare-and-swap: WHERE pins the exact stamped value, so concurrent
     // completions collapse to one claim.
     expect(dispatchSource).toMatch(/\.where\(\{ id: setupParentId, pending_setup_fee: parentRow\.pending_setup_fee \}\)\s*\n\s*\.update\(\{ pending_setup_fee: null/);
-    expect(dispatchSource).toMatch(/if \(claimed === 1\) secureSetupFee = \{ parentId: setupParentId, amount: Math\.round\(fee \* 100\) \/ 100 \};/);
+    expect(dispatchSource).toMatch(/if \(claimed === 1\) \{\s*\n\s*secureSetupFee = \{ parentId: setupParentId, amount: Math\.round\(fee \* 100\) \/ 100 \};/);
   });
 
   test('the claimed fee rides the SAME completion mint as its own line', () => {

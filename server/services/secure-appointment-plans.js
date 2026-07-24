@@ -95,7 +95,15 @@ async function loadPlanVisit(scheduledServiceId, conn = db) {
     .where({ id: scheduledServiceId })
     .first('id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'estimated_price',
       'is_recurring', 'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id',
-      'pending_setup_fee');
+      'pending_setup_fee', 'source_estimate_id');
+}
+
+// The series anchor row: card links can be sent from a recurring CHILD's
+// editor row, but the setup-fee stamp and the coverage window always live
+// on the parent — stamping the child would strand a disclosed fee the
+// completion claim (which always reads the parent) never finds.
+function seriesAnchorId(visit) {
+  return visit.recurring_parent_id || visit.id;
 }
 
 /**
@@ -113,14 +121,24 @@ async function buildSecurePlanContext({ request, visitId }) {
     const perVisit = visit.estimated_price != null ? Number(visit.estimated_price) : null;
     if (!(perVisit > 0)) return null;
 
+    // An estimate-origin series already made its billing choice at accept —
+    // the accept flow minted the setup+first-application invoice (incl. the
+    // $99) and stamped the per_application lane. Re-offering the plan page
+    // there would double-disclose (and double-bill) the setup fee.
+    if (visit.source_estimate_id) return null;
+
     const customer = await db('customers')
       .where({ id: visit.customer_id })
       .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'property_type');
     if (!customer) return null;
-    // Commercial properties are excluded from v1 (tax would split the page
-    // total from the invoice total); monthly members pay dues, annual-prepay
-    // customers are already covered — both would falsify the plan copy.
-    if (String(customer.property_type || '').toLowerCase() === 'commercial') return null;
+    // Commercial/business properties are excluded from v1 (InvoiceService
+    // taxes both — tax would split the page total from the invoice total);
+    // monthly members pay dues, annual-prepay customers are already
+    // covered, and an established per_application customer already paid
+    // their setup fee at estimate accept — all would falsify the plan copy
+    // or double-bill the fee.
+    if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) return null;
+    if (customer.billing_mode === 'per_application') return null;
     const lane = resolveBillingLane(customer);
     if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
 
@@ -140,11 +158,18 @@ async function buildSecurePlanContext({ request, visitId }) {
 
     // An existing overlapping term (any coverage-holding status) means
     // prepay is not sellable here — hide the whole choice rather than
-    // render an option the mint would 409.
+    // render an option the mint would 409. The request's OWN pending term
+    // (minted by an earlier prepay selection on this same link) is
+    // excluded: it must not hide the plan context on the prepay_selected
+    // page or block the customer switching back to per-application.
     const today = etDateString();
-    const overlapping = await db('annual_prepay_terms')
+    let overlapQuery = db('annual_prepay_terms')
       .where({ customer_id: visit.customer_id })
-      .where(overlapStatusClause())
+      .where(overlapStatusClause());
+    if (request?.annual_prepay_term_id) {
+      overlapQuery = overlapQuery.whereNot('id', request.annual_prepay_term_id);
+    }
+    const overlapping = await overlapQuery
       .orderBy('term_end', 'desc')
       .first('id', 'term_end');
     const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
@@ -245,6 +270,32 @@ async function selectSecurePlan({ token, plan }) {
 
   if (plan === 'per_application') {
     if (context.mode !== 'recurring') throw fail('plan_unavailable');
+    // Switching FROM an earlier prepay selection: retire that selection's
+    // artifacts first. A settled prepay invoice means the year is already
+    // covered (nothing to switch); an unpaid one is OUR OWN never-sent
+    // draft — void it through the canonical money-guarded path
+    // (InvoiceService.voidInvoice cancels any live PI and its own
+    // annual-prepay sync cancels the payment_pending term), then release
+    // the request's anchors so a later prepay re-selection can mint fresh.
+    if (request.selected_plan === 'prepay_annual' && request.prepay_invoice_id) {
+      const prior = await db('invoices')
+        .where({ id: request.prepay_invoice_id })
+        .first('id', 'status');
+      if (prior && ['paid', 'prepaid'].includes(prior.status)) throw fail('already_secured');
+      if (prior && prior.status !== 'void') {
+        try {
+          await require('./invoice').voidInvoice(prior.id);
+        } catch (err) {
+          // Money guard refused (payment in flight / recorded) — the
+          // customer is mid-payment in another tab; don't switch under it.
+          logger.warn(`[secure-plans] prepay→per_application switch blocked for request ${request.id}: ${err.message}`);
+          throw fail('selection_conflict');
+        }
+      }
+      await db('appointment_card_requests')
+        .where({ id: request.id, prepay_invoice_id: request.prepay_invoice_id })
+        .update({ prepay_invoice_id: null, annual_prepay_term_id: null, updated_at: new Date() });
+    }
     const stamp = new Date();
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })
@@ -252,11 +303,12 @@ async function selectSecurePlan({ token, plan }) {
     // Owner decision 2026-07-24: the per-application choice on a solo
     // pest/mosquito series owes the $99 setup fee on the FIRST completion
     // invoice. Snapshot the amount now (billed fee === disclosed fee) on
-    // the series parent; the completion mint's atomic claim consumes it
-    // once. Guarded so a re-selection never re-stamps a consumed fee.
+    // the SERIES PARENT — the completion mint's atomic claim always reads
+    // the parent, so a child-attached link must not stamp the child.
+    // Guarded so a re-selection never re-stamps a consumed fee.
     if (context.setupFee) {
       await db('scheduled_services')
-        .where({ id: visit.id })
+        .where({ id: seriesAnchorId(visit) })
         .whereNull('pending_setup_fee')
         .update({ pending_setup_fee: context.setupFee.amount, updated_at: stamp });
     }
@@ -265,7 +317,10 @@ async function selectSecurePlan({ token, plan }) {
 
   // prepay_annual — idempotency anchor first: a double-submit (or a
   // returning visitor re-posting) gets the SAME pay link, never a second
-  // invoice.
+  // invoice. An anchor pointing at a VOID invoice (office voided it, or a
+  // per-application switch retired it) is stale — release it (guarded CAS
+  // on the exact stale id) so prepay can be re-selected; otherwise the
+  // stamp's whereNull guard below would refuse forever.
   if (request.prepay_invoice_id) {
     const existing = await db('invoices')
       .where({ id: request.prepay_invoice_id })
@@ -273,16 +328,23 @@ async function selectSecurePlan({ token, plan }) {
     if (existing && existing.status !== 'void') {
       return { ok: true, plan: 'prepay_annual', payUrl: portalUrl(`/pay/${existing.token}`) };
     }
+    await db('appointment_card_requests')
+      .where({ id: request.id, prepay_invoice_id: request.prepay_invoice_id })
+      .update({ prepay_invoice_id: null, annual_prepay_term_id: null, updated_at: new Date() });
+    request.prepay_invoice_id = null;
+    request.annual_prepay_term_id = null;
   }
   if (context.mode !== 'recurring') throw fail('plan_unavailable');
 
-  // Term starts at the first UPCOMING live visit of the series (the parent
-  // row IS the series anchor; children point at it) — coverage must span
-  // the visits the customer is prepaying, not the send date.
+  // Term starts at the first UPCOMING live visit of the series — coverage
+  // must span the visits the customer is prepaying, not the send date.
+  // Anchor on the series PARENT: a child-attached link would otherwise see
+  // only its own row and mis-anchor the term window.
   const today = etDateString();
+  const anchorId = seriesAnchorId(visit);
   const seriesRows = await db('scheduled_services')
     .where(function series() {
-      this.where({ id: visit.id }).orWhere({ recurring_parent_id: visit.id });
+      this.where({ id: anchorId }).orWhere({ recurring_parent_id: anchorId });
     })
     .whereIn('status', LIVE_VISIT_STATUSES)
     .select('scheduled_date');
@@ -364,9 +426,9 @@ async function selectSecurePlan({ token, plan }) {
       if (stamped !== 1) throw fail('selection_conflict');
 
       // Clear a per-application setup-fee stamp from an earlier selection —
-      // prepay waives it.
+      // prepay waives it. Same series-parent anchor as the stamp itself.
       await trx('scheduled_services')
-        .where({ id: visit.id })
+        .where({ id: anchorId })
         .whereNotNull('pending_setup_fee')
         .update({ pending_setup_fee: null, updated_at: new Date() });
 

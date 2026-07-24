@@ -238,6 +238,13 @@ export default function SecureAppointmentPage() {
           window.location.assign(body.payUrl);
           return;
         }
+        if (state === 'prepay_selected') {
+          // Switching back to per-application retired the prepay invoice
+          // server-side — re-pull so the page renders the ready plan view
+          // with the selection recorded.
+          await refresh();
+          return;
+        }
         setSelectedPlan(plan);
         return;
       }
@@ -250,7 +257,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setPlanBusy(false);
     }
-  }, [planBusy, token, refresh]);
+  }, [planBusy, token, refresh, state]);
 
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
 

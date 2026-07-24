@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
     chain.where = record('where');
     chain.whereNull = record('whereNull');
     chain.whereIn = record('whereIn');
+    chain.whereNot = record('whereNot');
     chain.whereNotNull = record('whereNotNull');
     chain.orderBy = record('orderBy');
     chain.insert = record('insert');
