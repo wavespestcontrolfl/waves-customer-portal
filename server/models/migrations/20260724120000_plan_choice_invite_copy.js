@@ -11,16 +11,19 @@
  * the plan lane never offers itself to monthly-membership or annual-prepay
  * customers, so the Codex #2952 timing-line trap does not apply here).
  *
- * Dark posture mirrors the base pair exactly:
+ * Dark posture — ONE copy lever, mirroring the base pair's two-switch launch:
  *   - SMS variant seeded INACTIVE — the sender falls back to the approved
  *     base secure_appointment_card copy until the owner reviews and
  *     activates the variant in /admin templates. The BASE template remains
  *     the lane's dark lever: an inactive base still blocks every send,
  *     variant active or not.
- *   - Email variant seeded active but only ever SELECTED when the send-time
- *     plan probe returns a plan context — which requires
- *     GATE_SECURE_PLAN_CHOICE=true — and the whole email leg stays behind
- *     GATE_CARD_ENROLLMENT_EMAILS. Nothing sends from this migration alone.
+ *   - Email variant seeded active but only ever SELECTED when the plan-
+ *     choice SMS copy ACTUALLY went out (probe fired AND the SMS variant
+ *     was active) — the two legs of one invite can never contradict each
+ *     other, and activating the SMS variant is the single copy lever. The
+ *     whole email leg stays behind GATE_CARD_ENROLLMENT_EMAILS, and the
+ *     probe requires GATE_SECURE_PLAN_CHOICE=true. Nothing sends from this
+ *     migration alone.
  */
 
 // GSM-7-safe (no em-dash/curly quotes — same 3-segment budget math as the

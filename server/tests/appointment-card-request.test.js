@@ -1160,9 +1160,11 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
           .toBe('secure_appointment_card');
         await new Promise((r) => setImmediate(r));
-        // The page still opens the plan picker — the email leg's probe result
-        // is about the PAGE, not the SMS copy that happened to be active.
-        expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({ planChoice: true }));
+        // The email follows the copy that ACTUALLY sent, not the raw probe:
+        // base SMS copy → base email copy, so the two legs of one invite
+        // can never contradict each other. Activating the SMS variant is
+        // the single copy lever for both.
+        expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({ planChoice: false }));
       } finally {
         // clearAllMocks clears calls, not implementations — restore the
         // suite-wide default so later tests keep an active base template.

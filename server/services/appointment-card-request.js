@@ -564,9 +564,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         serviceType: visit.service_type || 'service',
         dateLine: dateLineFor(visit.scheduled_date),
         secureUrl,
-        // Both legs describe the same page: the email variant follows the
-        // same send-time plan probe as the SMS copy.
-        planChoice: planInvite,
+        // The email variant follows the copy that ACTUALLY went out on the
+        // SMS leg — not the raw probe — so the two legs of one invite can
+        // never contradict each other (base SMS's unconditional "only
+        // charged after service" next to a prepay pitch). Activating the
+        // SMS variant in /admin templates is the single copy lever.
+        planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY,
       }).catch((emailErr) => {
         logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
       });

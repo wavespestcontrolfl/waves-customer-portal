@@ -423,9 +423,20 @@ describe('autopay setup invitation (email leg of the card-request funnel)', () =
   });
 
   test('planChoice false never probes the variant: base copy, no email_templates read', async () => {
+    const db = require('../models/db');
     state.tables.email_templates = [{ id: 'tpl-plan' }];
     await sendAutopaySetupInvitation(ARGS);
     expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('autopay.setup_invitation');
+    expect(db.mock.calls.map(([table]) => table)).not.toContain('email_templates');
+  });
+
+  test('the variant lookup demands ACTIVE status and a published version — an owner-archived variant must fall back, never strand the send', () => {
+    // The db mock above ignores where-clauses, so pin the conditions at the
+    // source: dropping either one turns an archived variant into a thrown
+    // EMAIL_TEMPLATE_DISABLED → swallowed → NO email at all.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/card-enrollment-email'), 'utf8');
+    expect(src).toMatch(/\.where\(\{ template_key: 'autopay\.plan_choice_invitation', status: 'active' \}\)\s*\n\s*\.whereNotNull\('active_version_id'\)/);
   });
 });
 

@@ -204,7 +204,7 @@ async function buildSecurePlanContext({ request, visitId }) {
       selected: request?.selected_plan || null,
     };
   } catch (err) {
-    logger.warn(`[secure-plans] plan context failed for request ${request?.id}: ${err.message} — rendering card-only`);
+    logger.warn(`[secure-plans] plan context failed for request ${request?.id || `(send-time probe, visit ${visitId})`}: ${err.message} — rendering card-only`);
     return null;
   }
 }

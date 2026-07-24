@@ -28,9 +28,13 @@ describe('SMS variant (secure_appointment_card_plans)', () => {
     expect(body).toContain('{secure_link}');
     expect(body).toContain('We never take card numbers by phone');
     expect(body).toContain('Reply STOP to opt out');
-    // GSM-7: an em-dash or curly quote flips the send to UCS-2 and cuts the
-    // per-segment budget from 153 to 67 chars.
-    expect(body).not.toMatch(/[—’“”]/);
+    // GSM-7: ANY non-GSM character (em/en-dash, curly quotes, ellipsis,
+    // NBSP…) flips the send to UCS-2 and cuts the per-segment budget from
+    // 153 to 67 chars. Pin the whole body to printable ASCII + newline
+    // (a strict GSM-7 subset). The extension-char check lives on the
+    // RENDERED body below — the raw template's {placeholder} braces are
+    // substituted away before send.
+    expect(body).toMatch(/^[\x20-\x7E\n]*$/);
     // card_request policy is allowExactPrice: false — and page pricing is
     // live-derived, so a snapshot price in the text could go stale anyway.
     expect(body).not.toMatch(/\$\s*\d/);
@@ -42,7 +46,10 @@ describe('SMS variant (secure_appointment_card_plans)', () => {
       .replace('{service_type}', 'Quarterly Pest Control')
       .replace('{date_line}', ' on Wed, Sep 30')
       .replace('{secure_link}', `https://portal.wavespestcontrol.com/secure/${'a'.repeat(64)}`);
-    // 3 concatenated GSM-7 segments = 153 × 3 chars.
+    // No GSM EXTENSION characters (each costs 2 septets), so
+    // rendered.length === septets and the segment math is exact.
+    expect(rendered).not.toMatch(/[\\[\]{}~^|€]/);
+    // 3 concatenated GSM-7 segments = 153 × 3 septets.
     expect(rendered.length).toBeLessThanOrEqual(459);
   });
 });
