@@ -126,6 +126,19 @@ const bondTermSwitchLimiter = rateLimit({
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
 
+// Token-holder toggle endpoints (tier picker, preference switches): every
+// call is a DB write and select-tier used to ring an admin bell per call —
+// a looping client could spam bells and writes. 30/hr comfortably covers a
+// customer comparing options (estimator audit 2026-07-24).
+const estimateToggleLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
 const extensionRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
@@ -10026,7 +10039,7 @@ router.put('/:token/accept', async (req, res, next) => {
 });
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
-router.put('/:token/select-tier', async (req, res, next) => {
+router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -10115,15 +10128,20 @@ router.put('/:token/select-tier', async (req, res, next) => {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
 
-    // Notify admin of tier selection
-    try {
-      const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate',
-        `Tier upgrade: ${estimate.customer_name}`,
-        `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
-        { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
-      );
-    } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
+    // Notify admin of tier selection \u2014 only on an actual CHANGE. Re-clicking
+    // the already-selected tier is a no-op write and used to ring a fresh
+    // bell every time (estimator audit 2026-07-24); the toggle limiter
+    // bounds alternating spam.
+    if (selectedTier !== previousTier) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin('estimate',
+          `Tier upgrade: ${estimate.customer_name}`,
+          `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
+          { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+        );
+      } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
+    }
 
     logger.info(`[estimate] ${estimate.id}: selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
     res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
@@ -10406,7 +10424,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
   }
 });
 
-router.put('/:token/preferences', async (req, res, next) => {
+router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -16639,6 +16657,27 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // basis, so it is stripped from every customer-bound bundle shape (margin
 // data is surfaced to the OWNER, never to customers). Depth-bounded clone:
 // never mutates the cached bundle.
+// Internal review-lane fields ride one-time breakdown items for admin
+// surfaces and the quote-required reason note. On PRICED (non-quote-required)
+// items nothing customer-facing consumes them — dropping them at the public
+// boundary keeps the review lane server-side. Quote-required items keep the
+// full set: quoteRequiredReasonCandidates humanizes them into the customer's
+// reason note (client lib quoteDisplay.js).
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings'];
+function sanitizePublicOneTimeBreakdown(breakdown) {
+  if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
+  return {
+    ...breakdown,
+    items: breakdown.items.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      if (item.quoteRequired === true || item.kind === 'quote_required') return item;
+      const out = { ...item };
+      for (const key of ONE_TIME_ITEM_REVIEW_FIELDS) delete out[key];
+      return out;
+    }),
+  };
+}
+
 function stripInternalMarginFieldsDeep(value, depth = 0) {
   if (depth > 6 || !value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((entry) => stripInternalMarginFieldsDeep(entry, depth + 1));
@@ -17825,6 +17864,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),
+        // Review-lane enums on PRICED one-time items are pure exposure to
+        // the token holder — the client reads them only on quote-required
+        // items (quoteRequiredReasonCandidates), so keep them exactly there
+        // and drop them everywhere else (estimator audit 2026-07-24).
+        ...(pricingBundle.oneTimeBreakdown
+          ? { oneTimeBreakdown: sanitizePublicOneTimeBreakdown(stripInternalMarginFieldsDeep(pricingBundle.oneTimeBreakdown)) }
+          : {}),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
@@ -17956,6 +18002,7 @@ module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
+module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.isPestServiceName = isPestServiceName;

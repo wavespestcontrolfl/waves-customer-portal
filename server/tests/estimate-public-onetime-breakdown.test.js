@@ -7843,3 +7843,48 @@ describe('resolveEstimateQuoteRequirement — commercial risk-type gate (public 
     })).toEqual(expect.objectContaining({ quoteRequired: false }));
   });
 });
+
+describe('sanitizePublicOneTimeBreakdown — review-lane enums stay server-side on priced items (estimator audit 2026-07-24)', () => {
+  const { sanitizePublicOneTimeBreakdown } = require('../routes/estimate-public');
+
+  test('priced items drop warning/warnings/manualReviewReasons/measurementWarnings; quote-required items keep them for the reason note', () => {
+    const out = sanitizePublicOneTimeBreakdown({
+      total: 450,
+      items: [
+        {
+          service: 'flea_treatment', name: 'Flea Cleanout', amount: 450,
+          warning: 'stories_estimated',
+          warnings: ['footprint_unknown_field_measurement_required'],
+          manualReviewReasons: ['large_lot'],
+          measurementWarnings: ['trenching_lf_sum_mismatch'],
+          detail: 'Whole-home flea program',
+        },
+        {
+          service: 'flea_package', name: 'Flea Treatment Package', amount: null,
+          kind: 'quote_required', quoteRequired: true,
+          customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+          manualReviewReasons: ['large_lot'],
+        },
+      ],
+    });
+    const priced = out.items[0];
+    expect(priced.warning).toBeUndefined();
+    expect(priced.warnings).toBeUndefined();
+    expect(priced.manualReviewReasons).toBeUndefined();
+    expect(priced.measurementWarnings).toBeUndefined();
+    // Customer-facing fields survive.
+    expect(priced.detail).toBe('Whole-home flea program');
+    expect(priced.amount).toBe(450);
+    // Quote-required items keep their reason material — the client's
+    // quoteRequiredReasonCandidates humanizes it into the customer note.
+    const qr = out.items[1];
+    expect(qr.manualReviewReasons).toEqual(['large_lot']);
+    expect(qr.customQuoteReason).toBe('Exterior yard area exceeds automatic quote threshold.');
+  });
+
+  test('shapes without items pass through untouched', () => {
+    expect(sanitizePublicOneTimeBreakdown(null)).toBeNull();
+    const noItems = { total: 0 };
+    expect(sanitizePublicOneTimeBreakdown(noItems)).toBe(noItems);
+  });
+});
