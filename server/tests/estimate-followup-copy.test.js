@@ -88,14 +88,30 @@ describe('followupEmailVars', () => {
     termite: ['termite'],
     commercial: ['commercial_pest'],
     bundle: ['pest', 'lawn'],
+    // one_time is reached by estimate SHAPE (structural one-time-only),
+    // not by a lane key — the loop below swaps in the one-time fixture.
+    one_time: ['pest'],
     unknown: ['unknown'],
+  };
+  const ONE_TIME_ONLY_ESTIMATE = {
+    id: 'e1',
+    monthly_total: 0,
+    annual_total: 0,
+    onetime_total: 257,
+    estimate_data: {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 257, items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }] },
+      },
+    },
   };
 
   test('every category yields the complete, non-empty var set', () => {
     for (const category of Object.keys(PACKS)) {
       lanes(...LANES_FOR[category]);
-      expect(copyCategoryForEstimate({ id: 'e1' })).toBe(category);
-      const vars = followupEmailVars({ id: 'e1' });
+      const est = category === 'one_time' ? ONE_TIME_ONLY_ESTIMATE : { id: 'e1' };
+      expect(copyCategoryForEstimate(est)).toBe(category);
+      const vars = followupEmailVars(est);
       for (const key of EMAIL_VAR_KEYS) {
         expect(typeof vars[key]).toBe('string');
         expect(vars[key].length).toBeGreaterThan(0);
@@ -197,5 +213,73 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
         expect(pack.benefit).toBe(RECURRING_TERMS_BENEFIT);
       }
     }
+  });
+});
+
+describe('one-time-only demotion (estimator audit 2026-07-24)', () => {
+  // #2969 built the terms-neutral one-time hero because one-time quotes get
+  // a 30-day callback, not unlimited callbacks / 90-day MBG — the drip must
+  // not re-promise the recurring terms the estimate page withholds.
+  function oneTimeOnlyEstimate() {
+    return {
+      id: 'e-ot',
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 257,
+      estimate_data: {
+        result: {
+          recurring: { services: [] },
+          oneTime: { total: 257, items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }] },
+        },
+      },
+    };
+  }
+
+  test('a one-time-only pest quote demotes to the one_time pack', () => {
+    lanes('pest');
+    expect(copyCategoryForEstimate(oneTimeOnlyEstimate())).toBe('one_time');
+  });
+
+  test('a one-time-only multi-lane quote demotes too (never the bundle pack)', () => {
+    lanes('pest', 'lawn');
+    expect(copyCategoryForEstimate(oneTimeOnlyEstimate())).toBe('one_time');
+  });
+
+  test('commercial one-time quotes keep the commercial pack (already terms-neutral)', () => {
+    lanes('commercial_pest');
+    expect(copyCategoryForEstimate(oneTimeOnlyEstimate())).toBe('commercial');
+  });
+
+  test('one_time vars carry no recurring-terms claims and no report-tour video', () => {
+    lanes('pest');
+    const vars = followupEmailVars(oneTimeOnlyEstimate());
+    const allText = Object.values(vars).join(' ');
+    expect(allText).not.toMatch(/90-day/i);
+    expect(allText).not.toMatch(/unlimited free callbacks/i);
+    expect(allText).not.toMatch(/no long-term contract/i);
+    expect(vars.category_benefit).toBe(PACKS.one_time.benefit);
+    expect(vars.faq_terms).toBe('');
+    expect(vars.faq_between_visits).toBe('');
+    expect(vars.report_video_preview).toBe('');
+    expect(vars.report_video_url).toBe('');
+    expect(vars.report_video_caption).toBe('');
+  });
+
+  test('a pest quote WITH recurring dollars keeps the pest pack and its recurring terms', () => {
+    lanes('pest');
+    const est = {
+      id: 'e-rec',
+      monthly_total: 95,
+      annual_total: 1140,
+      onetime_total: 149,
+      estimate_data: {
+        result: {
+          recurring: { monthlyTotal: 95, services: [{ name: 'Pest Control', mo: 95 }] },
+          oneTime: { total: 149, items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 149 }] },
+        },
+      },
+    };
+    expect(copyCategoryForEstimate(est)).toBe('pest');
+    expect(followupEmailVars(est).category_benefit).toBe(RECURRING_TERMS_BENEFIT);
   });
 });

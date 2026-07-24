@@ -214,6 +214,24 @@ const PACKS = {
     process: 'Approve online once and we schedule everything — each service runs on its own right cadence, and every visit is documented in your report.',
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
   },
+  // One-time-only quotes (structural: no recurring dollars anywhere on the
+  // estimate) carry NONE of the recurring-terms promises — #2969 built the
+  // terms-neutral one-time hero for exactly this reason (30-day callback,
+  // not unlimited callbacks / 90-day MBG), and the report-tour videos state
+  // the recurring terms on camera, so the video slots stay empty. Claims
+  // echo the shipped one-time hero ("One visit, priced from your actual
+  // property") and the unknown pack's documentation line only.
+  one_time: {
+    label: 'service quote',
+    smsHook: 'service quote',
+    headline: 'Your service quote is ready',
+    hook: 'One visit, priced from your actual property — not somebody else’s.',
+    benefit: NEUTRAL_BENEFIT,
+    question: 'Wondering what’s included, or about pricing and scheduling? Reply and ask — real answers in minutes.',
+    included: 'One visit, priced from your actual property — with the work documented so you know exactly what was done.',
+    process: 'Approve online, pick a time, and your tech completes the treatment — documented so you know exactly what was done.',
+    faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
+  },
   // Property-generic claims only, so nothing service-specific can be wrong
   // (same rule as glassEstimateCopyFor's unknown fallback).
   unknown: {
@@ -228,6 +246,31 @@ const PACKS = {
     faq: { start: FAQ_START, terms: '', betweenVisits: '', price: FAQ_PRICE },
   },
 };
+
+// Structural one-time-only detection defers to the same predicate the
+// estimate page uses. Lazy call-time require: the route module is heavy and
+// requiring it at module init from a service risks an init-order cycle; the
+// totals fallback keeps the demotion truthful if the export ever moves.
+// Fail-open to one-time demotion is wrong (it would strip honest recurring
+// claims from plan estimates), so both legs answer only from real signals.
+function estimateIsOneTimeOnly(estimate) {
+  let estData = {};
+  try {
+    const raw = estimate?.estimate_data;
+    estData = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+  } catch { estData = {}; }
+  try {
+     
+    const { isStructuralOneTimeOnlyEstimate } = require('../routes/estimate-public');
+    if (typeof isStructuralOneTimeOnlyEstimate === 'function') {
+      return isStructuralOneTimeOnlyEstimate(estData, estimate || {}) === true;
+    }
+  } catch { /* fall through to the totals check */ }
+  const monthly = Number(estimate?.monthly_total) || 0;
+  const annual = Number(estimate?.annual_total) || 0;
+  const onetime = Number(estimate?.onetime_total) || 0;
+  return monthly <= 0 && annual <= 0 && onetime > 0;
+}
 
 function copyCategoryForEstimate(estimate) {
   let lines = [];
@@ -244,6 +287,10 @@ function copyCategoryForEstimate(estimate) {
   )];
   if (!keys.length) return 'unknown';
   if (keys.some((k) => k.startsWith('commercial_'))) return 'commercial';
+  // One-time-only wins over every service-keyed pack: a one-time pest or
+  // lawn quote must never inherit the recurring-terms benefit, FAQ answers,
+  // or report-tour video those packs carry (estimator audit 2026-07-24).
+  if (estimateIsOneTimeOnly(estimate)) return 'one_time';
   if (keys.length > 1) return 'bundle';
   return PACKS[keys[0]] ? keys[0] : 'unknown';
 }
