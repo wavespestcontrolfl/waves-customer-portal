@@ -323,6 +323,24 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     ? round2(perAppAnchor - perAppNet - manualDiscountPerApplication)
     : 0;
   const perAppSavings = perAppSavingsRaw >= SAVINGS_ROUNDING_NOISE ? perAppSavingsRaw : 0;
+  // Legacy monthly-billed rows (no billedPerApplication flag: mosquito
+  // seasonal spreads, pre-flag termite monitoring payloads) still CHARGE a
+  // flat monthly on accept (estimate-public.js frequencyFromTreatmentRow) —
+  // a bare per-application headline would misstate the charge (codex P1).
+  // Flagged per-application rows bill exactly the headline: no note. The
+  // phrasing drops the retired "spread across the year" framing (owner
+  // 2026-07-23); the fact that the charge is monthly stays.
+  const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
+    && !frequency.billedPerApplication
+    && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
+  // Rowless per-application cards (split-section entries carry visitsPerYear
+  // on the frequency itself, no treatment rows) have no per-row sub-label to
+  // show cadence — without a count line the customer can't tell 4 from 12
+  // applications/year (codex P2). Muted count only, no "included" phrasing;
+  // the bold headline stays removed (owner 2026-07-23).
+  const showRowlessCadenceLine = perAppNet != null
+    && (!Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0)
+    && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
 
   return (
     <div style={{
@@ -389,6 +407,18 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           </span>
         ) : null}
       </div>
+
+      {showBilledMonthlyNote ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
+          Billed {fmtMoney(cadencePrice)}/mo
+        </div>
+      ) : null}
+
+      {showRowlessCadenceLine ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
+          {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
+        </div>
+      ) : null}
 
       {/* Standard exact prices show no annual figure (owner directive
           2026-07-03) — only the site-confirmation commercial range keeps

@@ -283,16 +283,43 @@ describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is al
     ...overrides,
   });
 
-  it('legacy monthly-billed payloads render no "Billed $X/mo, spread across the year" note', () => {
+  it('legacy monthly-billed payloads keep a factual "Billed $X/mo" note — without the retired "spread across the year" framing (codex P1)', () => {
     render(<PriceCard frequency={termiteFrequency()} preferPerApplicationPrice />);
     expect(screen.queryByText(/spread across the year/)).toBeNull();
     expect(screen.getByText('$105.00')).toBeInTheDocument();
+    // The charge on accept is still a flat monthly for unflagged legacy rows
+    // (estimate-public frequencyFromTreatmentRow) — the card must say so.
+    expect(screen.getByText(/Billed \$35\.00\/mo/)).toBeInTheDocument();
   });
 
   it('billedPerApplication payloads render no monthly note — the headline IS the charge', () => {
     render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.queryByText(/spread across the year/)).toBeNull();
+    expect(screen.queryByText(/Billed \$/)).toBeNull();
     expect(screen.getByText('$105.00')).toBeInTheDocument();
     expect(screen.queryByText(/applications per year included/)).toBeNull();
+  });
+
+  it('rowless per-application cards show a muted cadence count, never the "included" headline (codex P2)', () => {
+    render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
+    expect(screen.getByText(/4 applications per year/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).toBeNull();
+  });
+
+  it('cards WITH treatment rows never show the rowless cadence line — the count lives on the rows', () => {
+    render(
+      <PriceCard
+        preferPerApplicationPrice
+        frequency={{
+          key: 'quarterly',
+          monthly: 31.17,
+          perServiceTreatments: [
+            { service: 'pest', label: 'Quarterly application', displayPrice: 93.5, visitsPerYear: 4 },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByText(/applications per year(?! included)/)).toBeNull();
+    expect(screen.getByText(/4 applications\/year/)).toBeInTheDocument();
   });
 });
