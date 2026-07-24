@@ -62,9 +62,15 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
-async function findSingleCustomerByPhone(dbLike, phone) {
+// Raw phone-match fetch (up to 2 rows). Callers that need to LINK a customer
+// use findSingleCustomerByPhone below (1 match or nothing); callers that only
+// need to know whether ANY customer exists on this number — like the
+// pre-connect screen's known-customer bypass — check length > 0, because a
+// number shared by 2+ records is still unmistakably a known caller even
+// though it is not safe to auto-link.
+async function findCustomerPhoneMatches(dbLike, phone) {
   const key = customerPhoneLookupKey(phone);
-  if (!key) return null;
+  if (!key) return [];
 
   const query = dbLike('customers').whereNull('deleted_at');
   if (key.length === 10) {
@@ -76,7 +82,11 @@ async function findSingleCustomerByPhone(dbLike, phone) {
     query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [key]);
   }
 
-  const matches = await query.orderBy('updated_at', 'desc').limit(2);
+  return query.orderBy('updated_at', 'desc').limit(2);
+}
+
+async function findSingleCustomerByPhone(dbLike, phone) {
+  const matches = await findCustomerPhoneMatches(dbLike, phone);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     logger.warn(`[voice] ${matches.length} customers share caller phone ${maskPhone(phone)}; not auto-linking call_log`);
@@ -328,8 +338,8 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 // metadata.preconnect_screen='would_gate' so daily volume is judgeable
 // before any caller ever hears the prompt. Lifecycle stamps: 'gated' at the
 // challenge, then 'passed' (key pressed) or 'failed' (fell to voicemail).
-function preconnectScreenDecision({ customerId, stirVerstat, gateOn }) {
-  if (customerId || !/-B$/.test(String(stirVerstat || ''))) return 'none';
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn }) {
+  if (knownCaller || !/-B$/.test(String(stirVerstat || ''))) return 'none';
   return gateOn ? 'gate' : 'would_gate';
 }
 
@@ -542,8 +552,14 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
-    // Match caller to customer
-    let customer = await findSingleCustomerByPhone(db, From);
+    // Match caller to customer. The raw matches are fetched once: a single
+    // match links the call; 2+ matches deliberately do NOT auto-link (shared
+    // number) but still count as a known caller for the screen bypass below.
+    const customerPhoneMatches = await findCustomerPhoneMatches(db, From);
+    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
+    if (customerPhoneMatches.length > 1) {
+      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
+    }
 
     // Pre-connect screen decision (see helpers above). Re-entries from the
     // challenge TwiML arrive on this same route with ?screened=1 (a key was
@@ -553,7 +569,7 @@ router.post('/voice', async (req, res) => {
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
     const screenDecision = screenReentry ? 'none' : preconnectScreenDecision({
-      customerId: customer?.id,
+      knownCaller: customerPhoneMatches.length > 0,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
     });
@@ -1655,6 +1671,7 @@ router._test = {
   agentHandoffKind,
   appendAgentHandoff,
   buildPreconnectChallengeTwiML,
+  findCustomerPhoneMatches,
   preconnectScreenDecision,
   connectingAnnouncement,
   customerPhoneLookupKey,

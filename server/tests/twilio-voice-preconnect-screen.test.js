@@ -26,25 +26,25 @@ describe('preconnectScreenDecision', () => {
   const B = 'TN-Validation-Passed-B';
 
   test('gates an unknown B-attestation caller when the gate is on', () => {
-    expect(preconnectScreenDecision({ customerId: null, stirVerstat: B, gateOn: true })).toBe('gate');
+    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: B, gateOn: true })).toBe('gate');
   });
 
   test('shadow-stamps (never challenges) when the gate is off', () => {
-    expect(preconnectScreenDecision({ customerId: null, stirVerstat: B, gateOn: false })).toBe('would_gate');
+    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: B, gateOn: false })).toBe('would_gate');
   });
 
-  test('NEVER gates a known customer, even on attestation B', () => {
-    expect(preconnectScreenDecision({ customerId: 'cust-1', stirVerstat: B, gateOn: true })).toBe('none');
+  test('NEVER gates a known caller, even on attestation B — including a number shared by 2+ customer records (knownCaller true even when not auto-linkable)', () => {
+    expect(preconnectScreenDecision({ knownCaller: true, stirVerstat: B, gateOn: true })).toBe('none');
   });
 
   test('attestation A, C, and missing all bypass — absence is not suspicion', () => {
     for (const stir of ['TN-Validation-Passed-A', 'TN-Validation-Passed-C', null, undefined, '']) {
-      expect(preconnectScreenDecision({ customerId: null, stirVerstat: stir, gateOn: true })).toBe('none');
+      expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: stir, gateOn: true })).toBe('none');
     }
   });
 
   test('a bare "B" without the attestation prefix does not match', () => {
-    expect(preconnectScreenDecision({ customerId: null, stirVerstat: 'B', gateOn: true })).toBe('none');
+    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: 'B', gateOn: true })).toBe('none');
   });
 });
 
