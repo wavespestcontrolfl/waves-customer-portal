@@ -147,6 +147,22 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     expect(merged.first_name).toBe('Jane');
     expect(merged.last_name).toBeNull();
   });
+
+  test('COMPLEMENTARY partial names merge — a V2 surname never clears a V1 first name', () => {
+    const v1 = { ...v1Stub(), first_name: 'Rita', last_name: null };
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: null, last_name: 'Galliano', name_full: 'Galliano', name_confidence: 0.99 };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.first_name).toBe('Rita');
+    expect(merged.last_name).toBe('Galliano');
+  });
+
+  test('matching overlap with a V2-only extra part merges instead of replacing', () => {
+    const v1 = { ...v1Stub(), first_name: 'Rita', last_name: null };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
+    expect(merged.first_name).toBe('Rita');
+    expect(merged.last_name).toBe('Galliano');
+  });
 });
 
 describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
@@ -158,10 +174,18 @@ describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
     expect(merged.city).toBe('Bradenton');
   });
 
-  test('the SAME street keeps a V1 unit V2 simply did not capture', () => {
-    const v1 = { ...v1Stub(), address_line1: '123 seagrass ln', address_line2: 'Unit 4' };
+  test('the SAME full address keeps a V1 unit V2 simply did not capture', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 seagrass ln', address_line2: 'Unit 4', city: 'Bradenton', zip: '34211' };
     const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
     expect(merged.address_line2).toBe('Unit 4');
+  });
+
+  test('same street but a DIFFERENT city/zip is a different property — V1 unit cleared', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 Seagrass Ln', address_line2: 'Unit 4', city: 'Venice', zip: '34285' };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
+    expect(merged.address_line2).toBeNull();
+    expect(merged.city).toBe('Bradenton');
+    expect(merged.zip).toBe('34211');
   });
 
   test('a V2-heard unit wins outright', () => {
@@ -257,6 +281,26 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
     const v1 = { ...v1Stub(), matched_service: 'Bi-Monthly Pest Control Service' };
     const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
     expect(merged.matched_service).toBe('Bi-Monthly Pest Control Service');
+  });
+
+  test('a spam-class call_nature trips is_spam, not just call_type', () => {
+    for (const nature of ['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']) {
+      const v2 = v2Fixture({ call_nature: nature });
+      const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
+      expect(merged.is_spam).toBe(true);
+    }
+    expect(adoptV2PrimaryFields(v1Stub(), v2Fixture()).merged.is_spam).toBe(false);
+  });
+
+  test('category-only V2 service uses the family primary label, not the lossy coarse map', () => {
+    const v2 = v2Fixture();
+    v2.service_request = { ...v2.service_request, specific_service_name: null, primary_service_category: 'stinging_insect' };
+    const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
+    expect(merged.matched_service).toBe('Bee / Wasp Nest Removal Service');
+
+    const excl = v2Fixture();
+    excl.service_request = { ...excl.service_request, specific_service_name: null, primary_service_category: 'exclusion' };
+    expect(adoptV2PrimaryFields(v1Stub(), excl).merged.matched_service).toBe('Rodent Exclusion');
   });
 
   test('a healthy V1 call_summary is never replaced; only the stub sentinel is', () => {

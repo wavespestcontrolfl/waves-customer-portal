@@ -250,36 +250,52 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   const winner = (key, v2Value) => { if (has(v2Value) && merged[key] !== v2Value) adopt(key, v2Value); };
   const filler = (key, v2Value) => { if (!has(merged[key]) && has(v2Value)) adopt(key, v2Value); };
 
-  // Identity — fill-gap, or v2-wins on conflict only at high name confidence.
-  // On a confident CONFLICT the V2 name replaces the V1 name AS A UNIT —
-  // including clearing a V1 part V2 did not hear. Keeping V1's surname under
-  // a V2 first name would mint a chimera identity no extractor produced and
-  // drive customer matching with it (codex P2).
+  // Identity — three regimes (codex r1 + r2):
+  //   1. V1 empty → V2 fills both parts.
+  //   2. OVERLAPPING parts genuinely disagree → at name_confidence ≥ 0.9 the
+  //      V2 name replaces the V1 name AS A UNIT, clearing a part V2 did not
+  //      hear (keeping V1's surname under a V2 first name would mint a
+  //      chimera identity no extractor produced); below 0.9 V1 wins unmerged.
+  //   3. Non-overlapping COMPLEMENTARY parts (V1 first + V2 last) merge —
+  //      treating a missing part as a conflict would clear the very
+  //      first_name customer creation gates on (codex r2 P2).
+  const norm = (v) => String(v || '').trim().toLowerCase();
   const v1HasName = has(merged.first_name) || has(merged.last_name);
   const v2HasName = has(flat.first_name) || has(flat.last_name);
   const nameConfident = typeof caller.name_confidence === 'number' && caller.name_confidence >= 0.9;
-  const namesDiffer = (String(merged.first_name || '').trim().toLowerCase() !== String(flat.first_name || '').trim().toLowerCase())
-    || (String(merged.last_name || '').trim().toLowerCase() !== String(flat.last_name || '').trim().toLowerCase());
+  const firstConflict = has(merged.first_name) && has(flat.first_name) && norm(merged.first_name) !== norm(flat.first_name);
+  const lastConflict = has(merged.last_name) && has(flat.last_name) && norm(merged.last_name) !== norm(flat.last_name);
   if (v2HasName && !v1HasName) {
     winner('first_name', flat.first_name);
     winner('last_name', flat.last_name);
-  } else if (v2HasName && v1HasName && nameConfident && namesDiffer) {
-    if (merged.first_name !== (flat.first_name || null)) adopt('first_name', flat.first_name || null);
-    if (merged.last_name !== (flat.last_name || null)) adopt('last_name', flat.last_name || null);
+  } else if (v2HasName && (firstConflict || lastConflict)) {
+    if (nameConfident) {
+      if (merged.first_name !== (flat.first_name || null)) adopt('first_name', flat.first_name || null);
+      if (merged.last_name !== (flat.last_name || null)) adopt('last_name', flat.last_name || null);
+    }
+  } else if (v2HasName) {
+    filler('first_name', flat.first_name);
+    filler('last_name', flat.last_name);
   }
 
   // Service address — v2-wins (the AV / enforce lanes downstream validate and
   // may further normalize exactly these fields). When V2 heard a DIFFERENT
-  // street, the whole address is V2's — including clearing a V1-only unit
+  // address, the whole address is V2's — including clearing a V1-only unit
   // (address_line2), which otherwise rides along onto a property V2 never
-  // placed it at (codex P2). Same street → V1's unit survives as extra
-  // detail V2 simply didn't capture.
-  const sameStreet = has(merged.address_line1) && has(flat.address_line1)
-    && String(merged.address_line1).trim().toLowerCase() === String(flat.address_line1).trim().toLowerCase();
+  // placed it at. "Same address" means street AND city AND zip agree wherever
+  // both legs captured them — a same-street-different-city call is a
+  // different property and must not inherit the old unit (codex r2 P2).
+  // Truly identical address → V1's unit survives as extra detail V2 simply
+  // didn't capture.
+  const partConflicts = (a, b) => has(a) && has(b) && norm(a) !== norm(b);
+  const sameAddress = has(merged.address_line1) && has(flat.address_line1)
+    && norm(merged.address_line1) === norm(flat.address_line1)
+    && !partConflicts(merged.city, flat.city)
+    && !partConflicts(merged.zip, flat.zip);
   winner('address_line1', flat.address_line1);
   if (has(flat.address_line2)) {
     winner('address_line2', flat.address_line2);
-  } else if (has(flat.address_line1) && !sameStreet && has(merged.address_line2)) {
+  } else if (has(flat.address_line1) && !sameAddress && has(merged.address_line2)) {
     adopt('address_line2', null);
   }
   winner('city', flat.city);
@@ -314,6 +330,13 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   if (flat.is_voicemail === true && merged.is_voicemail !== true) adopt('is_voicemail', true);
   if (flat.quote_requested === true && merged.quote_requested !== true) adopt('quote_requested', true);
   if (flat.quote_promised === true && merged.quote_promised !== true) adopt('quote_promised', true);
+  // A spam-class call_nature trips the spam flag itself, not just call_type:
+  // the terminal spam skip keys on extracted.is_spam, and customer creation
+  // only checks name/phone/non-voicemail — without this a V2-primary rescue
+  // of a robocall/wrong-number/vendor call could mint a customer row before
+  // the lead veto catches it (codex r2 P2).
+  const SPAM_CALL_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
+  if (SPAM_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_spam !== true) adopt('is_spam', true);
 
   // Fill-gap tier.
   filler('email', caller.email);
@@ -331,8 +354,20 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
       if (merged.phone !== caller.phone_e164) adopt('phone', caller.phone_e164);
     }
   }
-  filler('matched_service', flat.specific_service_name || flat.matched_service);
-  filler('requested_service', flat.specific_service_name || flat.matched_service);
+  // Category-aware service label: flatView's coarse category map drops or
+  // broadens some families (stinging_insect → null, exclusion → "Rodent
+  // Control", palm_injection → "Tree & Shrub Care"), so prefer the same
+  // per-family primary labels the V2 lead-composition path uses before
+  // falling back to the coarse map (codex r2 P2). Lazy require keeps this
+  // module load-order-free (lead-service-interest is dependency-free).
+  let v2CategoryLabel = null;
+  try {
+    v2CategoryLabel = require('./lead-service-interest')
+      .v2PrimaryLabelForCategory((v2Extraction.service_request || {}).primary_service_category);
+  } catch (_e) { /* coarse map below still applies */ }
+  const v2ServiceLabel = flat.specific_service_name || v2CategoryLabel || flat.matched_service;
+  filler('matched_service', v2ServiceLabel);
+  filler('requested_service', v2ServiceLabel);
   filler('specific_service_name', flat.specific_service_name);
   if ((!has(merged.call_summary) || merged.call_summary === EXTRACTION_INVALID_JSON_SUMMARY) && has(flat.call_summary)) {
     adopt('call_summary', flat.call_summary);
