@@ -45,6 +45,22 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
+// V2-PRIMARY (owner promotion 2026-07-23): when ON and the V2 extraction is
+// valid, adoptV2PrimaryFields() makes V2 the driver for the canonical
+// customer/lead writes (adoption site right below the shadow-extraction
+// block). Appointment auto-create and every SMS stay behind their existing
+// gates (canAutoRoute / evaluateV2AppointmentGate / TCPA). REQUIRES enforce
+// mode (DRIVES_ROUTING): demoting routing to shadow demotes adoption with it,
+// so "shadow" always means the full legacy V1 drive — V2 must never book or
+// mint records in a mode whose routing gate (canAutoRoute → v2RoutingBlocked)
+// isn't running (codex P1, PR #2972). Kill switch for adoption alone:
+// CALL_EXTRACTION_V2_PRIMARY=false. Read per call so a Railway var flip
+// demotes without waiting on anything else.
+function callExtractionV2PrimaryEnabled() {
+  return CALL_EXTRACTION_V2_ENABLED
+    && CALL_EXTRACTION_V2_DRIVES_ROUTING
+    && process.env.CALL_EXTRACTION_V2_PRIMARY !== 'false';
+}
 // Boot-time flag audit — makes three silent operational traps visible:
 // (1) enforce mode is the OR of two env vars, so unsetting
 //     CALL_EXTRACTION_V2_DRIVES_ROUTING is a no-op while the legacy
@@ -77,7 +93,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -3770,49 +3786,69 @@ IMPORTANT — customer contact rules:
 
 Return ONLY valid JSON.`;
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      signal: providerTimeoutSignal('extraction'),
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          response_mime_type: 'application/json',
-          temperature: 0, // closed-enum structured extraction — greedy decode; 0.2 was pure routing-gate noise
-        },
-      }),
+  // One generation attempt: HTTP/timeout failures THROW (the extraction_failed
+  // sweep + triage machinery owns those); only the parse verdict is retried.
+  const generateOnce = async () => {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        signal: providerTimeoutSignal('extraction'),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            response_mime_type: 'application/json',
+            temperature: 0, // closed-enum structured extraction — greedy decode; 0.2 was pure routing-gate noise
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Gemini HTTP ${res.status}: ${body.slice(0, 240)}`);
     }
-  );
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Gemini HTTP ${res.status}: ${body.slice(0, 240)}`);
-  }
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || '{}';
+    // response_mime_type:application/json usually prevents fences, but strip
+    // defensively in case the model falls back to markdown.
+    return text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
+  };
 
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || '{}';
-  // response_mime_type:application/json usually prevents fences, but strip
-  // defensively in case the model falls back to markdown.
-  const cleaned = text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
-  try {
-    return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
-  } catch (e) {
-    // Fixed message + length ONLY — the raw model output is a call
-    // extraction carrying the caller's name/phone/address, and JSON.parse
-    // error messages themselves echo a fragment of the rejected input
-    // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
-    // logged either (AGENTS.md PII-in-logs).
-    logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars)`);
-    return normalizeCallExtraction({
-      first_name: null,
-      is_spam: false,
-      is_voicemail: false,
-      call_summary: 'AI extraction returned invalid JSON',
-      lead_quality: 'cold',
-    }, { callerPhone });
+  // Invalid JSON gets ONE immediate fresh-request retry before falling back
+  // to the null-name stub (2026-07-23: a single truncated/malformed response
+  // silently no-oped a booked call's entire downstream — the stub is a last
+  // resort, not the first response to a bad sample).
+  const V1_PARSE_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= V1_PARSE_ATTEMPTS; attempt += 1) {
+    const cleaned = await generateOnce();
+    try {
+      return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
+    } catch (e) {
+      // Fixed message + length ONLY — the raw model output is a call
+      // extraction carrying the caller's name/phone/address, and JSON.parse
+      // error messages themselves echo a fragment of the rejected input
+      // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
+      // logged either (AGENTS.md PII-in-logs).
+      if (attempt < V1_PARSE_ATTEMPTS) {
+        logger.warn(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) — retrying (${attempt + 1}/${V1_PARSE_ATTEMPTS})`);
+        continue;
+      }
+      logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) after ${V1_PARSE_ATTEMPTS} attempts`);
+      return normalizeCallExtraction({
+        first_name: null,
+        is_spam: false,
+        is_voicemail: false,
+        call_summary: EXTRACTION_INVALID_JSON_SUMMARY,
+        lead_quality: 'cold',
+      }, { callerPhone });
+    }
   }
+  // Unreachable — the loop always returns — but keeps the function's
+  // contract explicit for static analysis.
+  throw new Error('extractCallData: attempt loop exited without a verdict');
 }
 
 // ── V2 Extraction (shadow pipeline — stores alongside, never replaces v1) ──
@@ -4631,6 +4667,57 @@ const CallRecordingProcessor = {
           ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         });
+      }
+    }
+
+    // Non-new-lead natures must not mint a CUSTOMER: the create branch only
+    // checks name/phone/voicemail/spam, and V2-primary adoption can supply a
+    // valid name + phone from a job applicant OR a billing/existing-customer
+    // call whose number matches nobody on file (codex r3 + r5 P2). For the
+    // existing-customer natures the classification itself asserts the caller
+    // already has a record — minting a duplicate contradicts it; the call
+    // stays customer-less and the enforce gate's triage cards carry the
+    // review. Only creation is held: a matched existing customer proceeds
+    // through the update path untouched.
+    // Gated on the SAME switch as adoption (codex r4 P2): with V2-primary
+    // killed or routing demoted, the pipeline reverts to pure legacy behavior
+    // — a V2 false-positive must not suppress a valid V1 customer create.
+    const V2_NON_CUSTOMER_CALL_NATURES = new Set([
+      'job_applicant',
+      'billing_question',
+      'existing_customer_service',
+      'existing_customer_scheduling',
+    ]);
+    const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
+      && v2Result?.status === 'valid'
+      && V2_NON_CUSTOMER_CALL_NATURES.has(v2Result.extraction?.call_nature);
+
+    // ── V2-primary field adoption (owner promotion 2026-07-23) ──
+    // A valid V2 extraction now DRIVES the canonical writes: its identity /
+    // address / scheduling fields merge into the legacy-shaped `extracted`
+    // BEFORE voicemail routing, the spam skip, the dictation/AV lanes, and
+    // the customer/lead upserts read it. Until now V2 only gated routing —
+    // when the V1 leg parse-failed to the null-name stub, a booked call
+    // produced no customer, no lead, no appointment, and no SMS even though
+    // ai_extraction_enriched held the complete picture. Adoption changes
+    // WHAT the pipeline knows, never what it may DO: auto-booking still
+    // requires the enforce gate's approval and SMS still requires consent.
+    // The merged object stays legacy-flat, so canonical ai_extraction keeps
+    // the reader-compatible shape.
+    if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+      const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
+        etWallClock: v2IsoToEtWallClock,
+        callerPhone: contactPhone,
+      });
+      extracted = adoption.merged;
+      if (adoption.adoptedFields.length) {
+        // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
+        logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);
+        // The owner recurring-intent backstop ran on the PRE-adoption V1
+        // fields (a stub call had nothing to upgrade). Re-assert it over the
+        // adopted service labels BEFORE any lead write consumes them, exactly
+        // like the enforce path's approved-booking re-assert (codex P2).
+        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
     }
 
@@ -5530,12 +5617,16 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (extracted.first_name && phone && !extracted.is_voicemail) {
+      } else if (extracted.first_name && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
         // A workable voicemail becomes a customer-less Needs-Review lead in
         // Step 4b instead; the office completes it into a customer by hand.
+        // NEVER from a V2 non-lead nature either (v2NonCustomerCallNature) —
+        // an applicant is not a customer, and a billing/existing-customer
+        // call from an unmatched number must hold for review, not mint a
+        // duplicate record (codex r5 P2).
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);
@@ -5962,7 +6053,10 @@ const CallRecordingProcessor = {
     // Keep the row claimed as 'processing' while downstream side effects run.
     // The terminal status is written only after leads/estimates/scheduling have
     // had a chance to land, so a crash cannot mark the call processed early.
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam);
+    // A job-applicant veto is an INTENTIONAL skip, not a creation failure —
+    // without excluding it here the call would close as
+    // customer_creation_failed and pollute failure reporting (codex r4 P2).
+    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
