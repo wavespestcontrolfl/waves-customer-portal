@@ -99,11 +99,17 @@ function estimateResultRoot(estimateData) {
 // Manual discounts are warn-only and their computed amount is kept as-is.
 const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
 // round(89 × v1 mult) per cadence — the exact values the client literal produces.
-// Pre-stamp client saves floor at 89 × the client mirror's cadence mult —
-// BOTH curves' literals are recognized (v1: 0.85/0.70 → 75.65/62.30; v2:
-// 0.88/0.78 → 78.32/69.42) because a cached pre-v2 client can still save
-// v1-stamped rows after the v2 mirror ships (codex #2966 P2).
-const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30, 78.32, 69.42]);
+// Pre-stamp client saves floor at 89 × the client mirror's cadence mult.
+// The v1-era literals (89/75.65/62.30) are recognized GLOBALLY — ancient
+// pre-flag client payloads predate both the isClientEngineResult flag and
+// any server v2 stamping, so they cannot collide with a server snapshot.
+// The v2 literals (78.32/69.42) are recognized ONLY on flagged client-engine
+// payloads: armed server-priced v2 estimates stamp the same default values,
+// and classifying those as client stamps would let a floor-config change
+// rewrite/reject a server snapshot instead of leaving it untouched
+// (codex #2966 r2 P2).
+const CLIENT_PEST_FLOOR_PA_LITERALS_V1 = new Set([89, 75.65, 62.30]);
+const CLIENT_PEST_FLOOR_PA_LITERALS_V2 = new Set([78.32, 69.42]);
 // The client fallback's own cadence multipliers (pestFrequencyTiers ft.disc)
 // — used to recognize CONFIGURED-floor client stamps below.
 const CLIENT_PEST_V1_MULTS = { 4: 1.0, 6: 0.85, 12: 0.7 };
@@ -179,8 +185,8 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       const stampedPa = Number(row.floorPa);
       const hasMetadata = Number.isFinite(stampedPa);
       const isClientStamped = hasMetadata && (
-        CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-        || (isClientEngineResult && clientStampsForRow(row).includes(stampedPa))
+        CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
+        || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
       );
       if (hasMetadata && !isClientStamped) continue; // server snapshot — untouched below
       if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
@@ -200,8 +206,8 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
     const isClientStamped = hasMetadata && (
-      CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-      || (isClientEngineResult && clientStampsForRow(row).includes(stampedPa))
+      CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
+      || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
     );
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
     // Metadata-less rows get stamped only on client-engine payloads, where the
@@ -566,7 +572,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     }
     const serverResult = mapResult(v1);
     const serverTotals = deriveTotalsFromEstimateData({ result: serverResult });
-    return { recomputed: true, source, serverResult, serverTotals };
+    // The curve the recompute actually priced pest with — persisted into the
+    // replayable engineInputs by the caller so a later stored-inputs replay
+    // reprices on the SAME curve (codex #2966 r2 P1).
+    const pestPricingVersion = (Array.isArray(v1?.lineItems)
+      ? v1.lineItems.find((li) => li?.service === 'pest_control')?.pricingVersion
+      : null) || null;
+    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
   } catch (error) {
     return { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
@@ -602,6 +614,19 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
+    // Stamp the priced pest curve into the replayable engineInputs: replay
+    // sites treat UNSTAMPED saved inputs as legacy v1, so every new save must
+    // carry the version it was actually priced with or a stored-inputs replay
+    // would reprice a v2 quote on the v1 curve (codex #2966 r2 P1).
+    if (result.pestPricingVersion && estimateData.engineInputs && typeof estimateData.engineInputs === 'object') {
+      estimateData.engineInputs.services = estimateData.engineInputs.services || {};
+      const pestInput = estimateData.engineInputs.services.pest;
+      if (pestInput && typeof pestInput === 'object') {
+        pestInput.version = result.pestPricingVersion;
+      } else if (pestInput) {
+        estimateData.engineInputs.services.pest = { version: result.pestPricingVersion };
+      }
+    }
     // An authoritative reprice supersedes the lapse-reconcile's fail-closed
     // quote-required flag (set when a lapsed member's row could not be
     // repriced) — otherwise a revised/re-saved estimate stays permanently

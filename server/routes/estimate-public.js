@@ -16935,6 +16935,12 @@ async function buildPricingBundle(estimate) {
       inputsForFrequency.services.pest = {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
+        // STORED-inputs replay: unstamped saved inputs predate the v2 default
+        // and must reprice on the v1 curve they were quoted with — never
+        // silently render/accept a sent bi-monthly/monthly quote at the
+        // higher v2 price (codex #2966 r2 P1). New saves stamp their priced
+        // version into engineInputs at persistence.
+        version: (inputsForFrequency.services.pest || {}).version || 'v1',
       };
       // The operator's below-floor acknowledgement covered ONE computed
       // price at the SAVED pest cadence — alternate customer-selectable

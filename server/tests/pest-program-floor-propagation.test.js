@@ -62,6 +62,23 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
     expect(byFreq.monthly).toMatchObject({ programFloorPerVisit: 62.30, programFloorAnnual: 747.60, programFloorMonthly: 62.30 });
   });
 
+  test('legacy mapper propagates the pest pricingVersion onto R.pest, pestTiers, and the recurring service row', () => {
+    const est = generateEstimate(platinumBundle());
+    const mapped = mapV1ToLegacyShape(est);
+    // v2 is the live default — every mapped surface the public floor clamps
+    // read from must carry the stamp, or the version-aware floors fall back
+    // to v1 for a v2-priced quote (codex #2966 r2 P2).
+    expect(mapped.results.pest.pricingVersion).toBe('v2');
+    for (const tier of mapped.results.pestTiers) expect(tier.pricingVersion).toBe('v2');
+    const pestSvc = (mapped.recurring?.services || []).find((s) => s.service === 'pest_control');
+    expect(pestSvc?.pricingVersion).toBe('v2');
+
+    const v1Inputs = platinumBundle();
+    v1Inputs.services.pest.version = 'v1';
+    const mappedV1 = mapV1ToLegacyShape(generateEstimate(v1Inputs));
+    expect(mappedV1.results.pest.pricingVersion).toBe('v1');
+  });
+
   test('legacy mapper copies the floor onto pestTiers rows and the selected R.pest', () => {
     // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
     // to pin the metadata machinery kept for legacy stored payloads.
@@ -303,6 +320,34 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(m).toMatchObject({ floorPa: 61.62, floorAnn: 739.44 });
     expect(q.floorMo).toBe(Math.round((316 / 12) * 100) / 100);
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
+  });
+
+  test('server-priced v2 default stamps (78.32/69.42) are NOT client stamps — snapshot untouched across a floor change', () => {
+    // An armed server-priced v2 estimate stamps floorPa 78.32/69.42 (89-floor
+    // defaults). Those rows are SERVER snapshots: a later save after the live
+    // floor moved must leave them exactly as stored — never rewrite or reject
+    // them through the client-restamp path (codex #2966 r2 P2).
+    constants.PEST.enforceFloorPostDiscount = true;
+    constants.PEST.floor = 95; // live config changed since the snapshot
+    // True server shape: no recurring.pestProgramFloorApplied key (that key
+    // is the CLIENT engine's marker), rows priced below the moved floor —
+    // exactly the case a client-classification would 409 on.
+    const estData = {
+      result: {
+        recurring: { discount: 0 },
+        results: {
+          pestTiers: [
+            { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
+            { pa: 69.42, apps: 12, ann: 833.04, mo: 69.42, label: 'Monthly', floorPa: 69.42, floorAnn: 833.04, floorMo: 69.42 },
+          ],
+          pest: { pa: 78.32, apps: 6, ann: 469.92, mo: 39.16, label: 'Bi-Monthly', floorPa: 78.32, floorAnn: 469.92, floorMo: 39.16 },
+        },
+      },
+    };
+    expect(() => normalizeClientPestFloorMetadata(estData)).not.toThrow();
+    const [b, m] = estData.result.results.pestTiers;
+    expect(b).toMatchObject({ floorPa: 78.32, floorAnn: 469.92 });
+    expect(m).toMatchObject({ floorPa: 69.42, floorAnn: 833.04 });
   });
 
   test('recognizes CONFIGURED-floor client stamps via the pricingMetadata base (codex P2 round 11 #2827)', () => {
