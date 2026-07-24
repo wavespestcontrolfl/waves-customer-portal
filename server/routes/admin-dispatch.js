@@ -6043,6 +6043,76 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return creditedResult;
     };
 
+    // Secure plan-choice setup fee (owner decision 2026-07-24): a
+    // per-application selection on a solo pest/mosquito series stamped
+    // pending_setup_fee on the series parent — the FIRST live completion
+    // mint carries it as its own line so the office never bills it
+    // manually. The claim is DURABLE across crashes (Codex #2980 r2):
+    // claiming flips the stamp NEGATIVE (in-progress marker) instead of
+    // clearing it; a successful mint clears it, an in-process failure
+    // restores it positive, and a worker that dies mid-window leaves the
+    // negative stamp for the recovery branch below — which checks whether
+    // the minted setup line actually exists on a series invoice and either
+    // heals (billed: clear, no second line) or re-adopts the claim (not
+    // billed: mint it now). Exact-value CAS (+ an updated_at lease guard on
+    // adoption) collapses concurrent completions to one fee. Never under
+    // backfill (frozen-money posture) and never for callbacks.
+    let secureSetupFee = null;
+    if (shouldInvoice && !isBackfillCompletion && !svc.is_callback) {
+      try {
+        const setupParentId = svc.recurring_parent_id || svc.id;
+        const parentRow = await db('scheduled_services')
+          .where({ id: setupParentId })
+          .first('pending_setup_fee', 'updated_at');
+        const rawFee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
+        if (rawFee) {
+          const amount = Math.round(Math.abs(rawFee) * 100) / 100;
+          if (rawFee < 0) {
+            // Orphaned claim from a dead worker. The durable truth is the
+            // invoice itself: does any non-void series invoice already
+            // carry the setup line?
+            const lineExists = await db('invoices')
+              .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
+                this.where({ id: setupParentId }).orWhere({ recurring_parent_id: setupParentId });
+              }))
+              // Only COLLECTIBLE-or-settled invoices prove the fee is
+              // billed (Codex #2980 r3): a voided/cancelled/refunded
+              // invoice collects nothing, so treating it as proof would
+              // clear the claim and the customer permanently skips the
+              // selected fee.
+              .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
+              .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
+              .first('id');
+            if (lineExists) {
+              await db('scheduled_services')
+                .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
+                .update({ pending_setup_fee: null, updated_at: new Date() });
+              logger.info(`[dispatch] orphaned setup-fee claim healed for series ${setupParentId} — fee already on invoice ${lineExists.id}`);
+            } else {
+              const adopted = await db('scheduled_services')
+                .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee, updated_at: parentRow.updated_at })
+                .update({ updated_at: new Date() });
+              if (adopted === 1) {
+                secureSetupFee = { parentId: setupParentId, amount };
+                logger.warn(`[dispatch] orphaned setup-fee claim ADOPTED for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+              }
+            }
+          } else {
+            const claimed = await db('scheduled_services')
+              .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
+              .update({ pending_setup_fee: -amount, updated_at: new Date() });
+            if (claimed === 1) {
+              secureSetupFee = { parentId: setupParentId, amount };
+              logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+            }
+          }
+        }
+      } catch (e) {
+        // Unreadable stamp mints the plain visit invoice — the fee stays
+        // stamped for the next completion rather than risking a double line.
+        logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
+      }
+    }
     if (shouldInvoice) {
       try {
         // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
@@ -6090,6 +6160,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
           dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          // Claimed plan-choice setup fee rides the SAME mint (one invoice,
+          // one auto-charge) — the claim above is the idempotency authority.
+          extraLineItems: secureSetupFee
+            ? [{
+              description: 'One-time setup fee',
+              quantity: 1,
+              unit_price: secureSetupFee.amount,
+              amount: secureSetupFee.amount,
+              category: 'Setup fee',
+            }]
+            : undefined,
           // Backfill: createFromService otherwise rolls an accepted
           // estimate's unapplied deposit forward into this invoice
           // (consumeDepositCredit + a credit line that reduces or zeroes the
@@ -6110,6 +6191,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // where it bills is the reviewer's call (breadcrumb below).
           skipAccrual: isBackfillCompletion,
         });
+        // The mint landed — retire the durable setup-fee claim (guarded on
+        // the exact negative marker). If this clear fails or the process
+        // dies first, the orphaned-claim recovery above finds the minted
+        // line on the next completion and heals without a second charge.
+        if (secureSetupFee) {
+          try {
+            await db('scheduled_services')
+              .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
+              .update({ pending_setup_fee: null, updated_at: new Date() });
+          } catch (clearErr) {
+            logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
+          }
+        }
         // Point the reviewer at the money the skip left behind — the same
         // breadcrumb the prepaid skip logs (applyPrepaidCreditToInvoice).
         if (isBackfillCompletion && svc.source_estimate_id) {
@@ -6147,6 +6241,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           codePrefix: invoiceShortCodePrefix(invoice),
         });
       } catch (invErr) {
+        // A claimed setup fee whose mint failed goes back POSITIVE on the
+        // series parent (guarded on the exact negative marker) — otherwise
+        // the failed attempt would leave the in-progress claim for the
+        // recovery path to re-adopt later instead of retrying cleanly now.
+        if (secureSetupFee) {
+          try {
+            await db('scheduled_services')
+              .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
+              .update({ pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+          } catch (restoreErr) {
+            logger.warn(`[dispatch] setup-fee restore failed for visit ${svc.id} (recovery will adopt): ${restoreErr.message}`);
+          }
+        }
         // Fail-closed leg of the backfill review-invoice promise (Codex P0,
         // PR #2897 fix rounds 7-8; broadened round 9). The typed one-time
         // pre-transaction billing gate this population skipped was
@@ -6363,9 +6470,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // first-application-only accept invoice gets NO allowance — r3);
       // everything still fails closed when no accepted amount exists.
       const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
-      const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      // Secure plan-choice setup fee: a per-application selection on the
+      // series parent legitimately adds the $99 line to the first
+      // completion invoice (owner decision 2026-07-24) — same bounded
+      // allowance, keyed on the DURABLE selection row (not a notes marker,
+      // and not the in-request claim variable, so a resumed completion that
+      // reuses an already-minted invoice still gets the allowance). Lookup
+      // failure fails toward office review, like everything else here.
+      let planChoiceSetupFeeSelected = false;
+      if (!acceptMintedInvoice) {
+        try {
+          // The selection row lives on WHICHEVER series visit the card
+          // link was sent for (parent or child — Codex #2980 r2), so the
+          // allowance must search the whole series, not just the parent.
+          const allowanceParentId = svc.recurring_parent_id || svc.id;
+          planChoiceSetupFeeSelected = !!(await db('appointment_card_requests')
+            .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
+              this.where({ id: allowanceParentId }).orWhere({ recurring_parent_id: allowanceParentId });
+            }))
+            .where({ selected_plan: 'per_application' })
+            .first('id'));
+        } catch (e) { /* fail toward review */ }
+      }
+      // The shared converter constant — the disclosure, the invoice line,
+      // and this cap must move together if the fee ever changes (Codex
+      // #2980). Fallback to the historical $99 only if the converter
+      // module can't load (never widen the cap on a require failure).
+      let WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      try {
+        const sharedFee = Number(require('../services/estimate-converter').WAVEGUARD_SETUP_FEE);
+        if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
+      } catch (e) { /* keep the conservative literal */ }
       let setupFeeAllowance = 0;
-      if (acceptMintedInvoice) {
+      if (acceptMintedInvoice || planChoiceSetupFeeSelected) {
         try {
           const rawLines = invoice.line_items;
           const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);

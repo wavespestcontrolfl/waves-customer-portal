@@ -12,9 +12,15 @@ jest.mock('../models/db', () => {
     const record = (op) => (...args) => { chain.calls.push([op, ...args]); return chain; };
     chain.where = record('where');
     chain.whereNull = record('whereNull');
+    chain.whereIn = record('whereIn');
+    chain.whereNot = record('whereNot');
+    chain.forUpdate = record('forUpdate');
+    chain.whereNotNull = record('whereNotNull');
+    chain.orderBy = record('orderBy');
     chain.insert = record('insert');
     chain.onConflict = record('onConflict');
     chain.ignore = record('ignore');
+    chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => {
       chain.calls.push(['update', patch]);
@@ -963,5 +969,177 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
     expect(res.action).toBe('link_created');
     await new Promise((r) => setImmediate(r));
     expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
+  const PLAN_VISIT = {
+    ...VISIT,
+    estimated_price: '135.00',
+    is_recurring: true,
+    recurring_pattern: 'quarterly',
+    recurring_interval_days: null,
+    recurring_parent_id: null,
+    pending_setup_fee: null,
+  };
+  const PLAN_CUSTOMER = {
+    ...CUSTOMER,
+    billing_mode: null,
+    waveguard_tier: null,
+    monthly_rate: null,
+    property_type: 'single_family',
+  };
+
+  test('gate OFF: the ready payload carries NO planContext key — byte-identical to the original shape', async () => {
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+      customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+    });
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    expect(Object.keys(res).sort()).toEqual([
+      'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+    ]);
+  });
+
+  describe('gate ON (fresh module graph with the env set)', () => {
+    let loadPageGateOn;
+    let completeGateOn;
+    beforeAll(() => {
+      process.env.GATE_SECURE_PLAN_CHOICE = 'true';
+      jest.resetModules();
+      ({ loadSecureCardPageData: loadPageGateOn, completeSecureCardCapture: completeGateOn } = require('../services/appointment-card-request'));
+    });
+    afterAll(() => {
+      delete process.env.GATE_SECURE_PLAN_CHOICE;
+      jest.resetModules();
+    });
+
+    test('priced recurring pest visit → ready + planContext (fee_waiver, live-derived numbers)', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('ready');
+      expect(res.planContext).toMatchObject({
+        mode: 'recurring',
+        planClass: 'fee_waiver',
+        perVisit: 135,
+        visitsPerYear: 4,
+        annualBase: 540,
+        prepay: { total: 540 },
+        setupFee: { amount: 99, waivedWithPrepay: true },
+      });
+    });
+
+    test('recorded prepay selection with a live unpaid invoice → prepay_selected with pay link AND a usable SetupIntent', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: {
+          first: () => ({ ...REQUEST, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-9' }),
+        },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+        invoices: { first: () => ({ id: 'inv-9', token: 'ptok', status: 'sent' }) },
+      });
+      mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('prepay_selected');
+      expect(res.payUrl).toMatch(/\/pay\/ptok$/);
+      expect(res.clientSecret).toBe('cs_1');
+    });
+
+    test('capture completion REFUSES a plan-bearing recurring request without a per_application selection (Codex #2980 r3)', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+      const res = await completeGateOn({ token: REQUEST.token, setupIntentId: 'seti_1' });
+      expect(res).toEqual({ ok: false, code: 'plan_required' });
+      // Nothing saved, nothing enrolled — the request stays pending for a
+      // retry after the customer records a selection.
+      expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    });
+
+    test('capture completion proceeds with a per_application selection and stamps the billing lane BEFORE the completed flip', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST, selected_plan: 'per_application' }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+      const res = await completeGateOn({ token: REQUEST.token, setupIntentId: 'seti_1' });
+      expect(res).toEqual({ ok: true });
+      const laneChain = touches('customers')
+        .map((t) => t.chain)
+        .find((c) => c.calls.some(([op, patch]) => op === 'update' && patch?.billing_mode === 'per_application'));
+      expect(laneChain).toBeTruthy();
+      // The stamp is a CAS on the billing_mode that was validated (NULL
+      // here) — a concurrent staff lane change makes it miss instead of
+      // being overwritten (Codex #2980 r5).
+      expect(laneChain.calls).toContainEqual(['whereNull', 'billing_mode']);
+      // The completing claim is PLAN-VALUE-GUARDED (Codex #2980 r4): a
+      // concurrent plan switch after the plan check makes the claim miss.
+      const claimChain = touches('appointment_card_requests')
+        .map((t) => t.chain)
+        .find((c) => c.calls.some(([op, patch]) => op === 'update' && patch?.status === 'completing'));
+      expect(claimChain).toBeTruthy();
+      expect(claimChain.calls).toContainEqual(['where', { selected_plan: 'per_application' }]);
+    });
+
+    test('lane stamp LOSES the CAS to a concurrent staff lane change → newer lane is never overwritten, completion still succeeds', async () => {
+      // Race: between the lane read and the guarded update, staff moves the
+      // customer onto annual prepay. The guarded update returns 0 rows; the
+      // re-read sees the new lane and REFUSES (returns lane-correct) rather
+      // than stamping per_application over it (Codex #2980 r5).
+      let laneChanged = false;
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST, selected_plan: 'per_application' }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: {
+          first: () => ({ ...PLAN_CUSTOMER, billing_mode: laneChanged ? 'annual_prepay' : null }),
+          update: (chain, patch) => {
+            if (patch?.billing_mode === 'per_application' && !laneChanged) {
+              laneChanged = true;
+              return 0; // the CAS guard missed — staff won the race
+            }
+            return 1;
+          },
+        },
+      });
+      mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+      const res = await completeGateOn({ token: REQUEST.token, setupIntentId: 'seti_1' });
+      expect(res).toEqual({ ok: true });
+      // Exactly ONE stamp attempt — after the loss the re-read sees the
+      // annual-prepay lane and stops; the newer choice survives untouched.
+      const stampAttempts = touches('customers')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch?.billing_mode === 'per_application'));
+      expect(stampAttempts).toHaveLength(1);
+    });
+
+    test('settled prepay invoice → secured and the pending row heals to satisfied', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: {
+          first: () => ({ ...REQUEST, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-9' }),
+        },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+        invoices: { first: () => ({ id: 'inv-9', token: 'ptok', status: 'paid' }) },
+      });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('secured');
+      const heal = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+        .map(([, patch]) => patch)
+        .find((p) => p.status === 'satisfied');
+      expect(heal).toBeTruthy();
+    });
   });
 });

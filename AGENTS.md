@@ -804,7 +804,7 @@ finding and warns on P1. Reviewers must return JSON matching
   exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
   never appended to a foreign host. Any change to this endpoint, its auth, or its
   frame handling is security-critical).
-  `/api/public/secure-card/:token` (+ `/:token/complete`) (GET + POST;
+  `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
   "secure your appointment" card-on-file capture page for the
   appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
   AND the `secure_appointment_card` SMS template are both enabled, and
@@ -823,8 +823,23 @@ finding and warns on P1. Reviewers must return JSON matching
   save → consent → enroll sequence under a pending → completing claim
   with a 10-min stale-claim lease (page POST and the
   `setup_intent.succeeded` webhook backstop are mutually exclusive;
-  failures revert and stay retryable). Treat the token, the verification
-  gates, and the claim mechanics as security-critical).
+  failures revert and stay retryable). `/:token/select-plan` (POST, dark
+  behind `GATE_SECURE_PLAN_CHOICE` — 404 while off) records the pay-per-
+  application vs. annual-prepay choice: the client sends ONLY `{ plan }`
+  and every amount is re-derived server-side from the booked series. A
+  prepay selection MINTS a payable draft annual-prepay invoice +
+  payment_pending term (still no charge on this surface — payment happens
+  on the invoice's own `/pay/:token` page) inside one transaction with the
+  per-customer advisory overlap lock, an in-transaction FOR UPDATE
+  visit+customer revalidation and trx-scoped payer re-resolve, and the
+  request row as the idempotency anchor (double-submit returns the same
+  pay link; terminal invoices release the anchor). A recurring
+  plan-bearing request REFUSES `/complete` until a durable
+  `per_application` selection exists, and the completion claim is
+  plan-value-guarded so a selection switch cannot cross a capture
+  mid-flight. Treat the token, the verification
+  gates, the selection/mint transaction, and the claim mechanics as
+  security-critical).
   `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
   server exposing the knowledge index (hybrid search, catalog service +
   static protocol lookups, corpus stats) to MCP clients such as Claude Code
