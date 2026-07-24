@@ -322,15 +322,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     ? round2(perAppAnchor - perAppNet - manualDiscountPerApplication)
     : 0;
   const perAppSavings = perAppSavingsRaw >= SAVINGS_ROUNDING_NOISE ? perAppSavingsRaw : 0;
-  // Programs billed monthly whose flat monthly differs from the per-app figure
-  // (mosquito seasonal: 9 visits spread over 12 payments; legacy termite
-  // monitoring payloads: quarterly checks billed monthly) — say so under the
-  // headline so the number the card leads with never contradicts the charge.
-  // billedPerApplication (new termite payloads, owner 2026-07-20) means the
-  // charge IS the per-application headline — a monthly note would misstate it.
-  const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
-    && !frequency.billedPerApplication
-    && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
 
   return (
     <div style={{
@@ -402,12 +393,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
           <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
           {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year included
-        </div>
-      ) : null}
-
-      {showBilledMonthlyNote ? (
-        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
-          Billed {fmtMoney(cadencePrice)}/mo, spread across the year
         </div>
       ) : null}
 

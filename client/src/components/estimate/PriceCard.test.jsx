@@ -270,7 +270,7 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
   });
 });
 
-describe('PriceCard — termite monitoring billing note', () => {
+describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is always per application)', () => {
   const termiteFrequency = (overrides = {}) => ({
     key: 'recurring',
     label: 'Termite Bait Monitoring',
@@ -281,12 +281,13 @@ describe('PriceCard — termite monitoring billing note', () => {
     ...overrides,
   });
 
-  it('legacy payloads (monthly-billed) keep the "Billed $X/mo" note under the per-application headline', () => {
+  it('legacy monthly-billed payloads render no "Billed $X/mo, spread across the year" note', () => {
     render(<PriceCard frequency={termiteFrequency()} preferPerApplicationPrice />);
-    expect(screen.getByText(/Billed \$35\.00\/mo, spread across the year/)).toBeInTheDocument();
+    expect(screen.queryByText(/spread across the year/)).toBeNull();
+    expect(screen.getByText('$105.00')).toBeInTheDocument();
   });
 
-  it('billedPerApplication payloads (owner 2026-07-20) drop the monthly note — the headline IS the charge', () => {
+  it('billedPerApplication payloads render no monthly note — the headline IS the charge', () => {
     render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.queryByText(/spread across the year/)).toBeNull();
     expect(screen.getByText('$105.00')).toBeInTheDocument();

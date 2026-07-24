@@ -226,11 +226,9 @@ describe('ServiceSection', () => {
 
     // Combined cadence total leads with a standalone "/mo" suffix. Were the
     // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) plus a "Billed $130.00/mo, spread across
-    // the year" note — so the note's absence is the real discriminator.
+    // pest price ("/ application" suffix) instead of the combined "/mo" total.
     expect(screen.getByText('$130.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {
