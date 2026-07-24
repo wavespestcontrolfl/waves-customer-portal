@@ -119,6 +119,22 @@ export default function SecureAppointmentPage() {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [planBusy, setPlanBusy] = useState(false);
 
+  // Re-pull the page payload (plan availability can change under us — the
+  // office edits the visit, a term appears). Server truth wins.
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      if (res.status === 404) { setState('notfound'); return; }
+      if (!res.ok) throw new Error('load_failed');
+      const payload = await res.json();
+      setData(payload);
+      setSelectedPlan(payload.planContext?.selected || null);
+      setState(payload.state === 'ready' ? 'ready' : payload.state);
+    } catch {
+      setState('unavailable');
+    }
+  }, [token]);
+
   const complete = useCallback(async (setupIntentId) => {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
@@ -197,27 +213,19 @@ export default function SecureAppointmentPage() {
         setState('secured');
         return;
       }
+      // The server requires a recorded plan selection before the capture
+      // may complete (another tab may have changed it) — re-pull so the
+      // plan choice renders with current truth.
+      if (err?.code === 'plan_required') {
+        await refresh();
+        setError('Please choose how you’d like to pay, then save your card.');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);
     }
-  }, [busy, complete]);
-
-  // Re-pull the page payload (plan availability can change under us — the
-  // office edits the visit, a term appears). Server truth wins.
-  const refresh = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
-      if (res.status === 404) { setState('notfound'); return; }
-      if (!res.ok) throw new Error('load_failed');
-      const payload = await res.json();
-      setData(payload);
-      setSelectedPlan(payload.planContext?.selected || null);
-      setState(payload.state === 'ready' ? 'ready' : payload.state);
-    } catch {
-      setState('unavailable');
-    }
-  }, [token]);
+  }, [busy, complete, refresh]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;

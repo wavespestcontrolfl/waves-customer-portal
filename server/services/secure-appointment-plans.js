@@ -397,9 +397,16 @@ async function selectSecurePlan({ token, plan }) {
       // and payer checks above ran outside this transaction — an office
       // cancel/reschedule or a payer attach in that window must abort the
       // mint, not produce a payable annual invoice for a dead or
-      // third-party-billed visit. Payer lookup failure refuses (fail
-      // toward not billing the wrong party), same as the pre-check.
-      const liveVisit = await loadPlanVisit(visit.id, trx);
+      // third-party-billed visit. The visit row is read FOR UPDATE and the
+      // payer resolve rides THIS transaction (database: trx — Codex #2980
+      // r3: the global-db default would let a payer attach slip between
+      // this refusal check and the mint), so a concurrent payer attach on
+      // the locked row serializes behind the commit. Payer lookup failure
+      // refuses (fail toward not billing the wrong party).
+      const liveVisit = await trx('scheduled_services')
+        .where({ id: visit.id })
+        .forUpdate()
+        .first('id', 'status', 'scheduled_date');
       const liveDate = liveVisit ? callBookingDateOnly(liveVisit.scheduled_date) : null;
       if (!liveVisit
         || !LIVE_VISIT_STATUSES.includes(liveVisit.status)
@@ -409,6 +416,7 @@ async function selectSecurePlan({ token, plan }) {
       let payerNow = null;
       try {
         payerNow = await PayerService.resolveForInvoice({
+          database: trx,
           customerId: String(request.customer_id),
           scheduledServiceId: String(request.scheduled_service_id),
           throwOnError: true,
@@ -533,16 +541,21 @@ async function selectSecurePlan({ token, plan }) {
  * builder already refuses membership/annual-prepay customers), and an
  * established per_application_fee is never overwritten.
  */
+// Returns true when the lane is correct after the call (stamped now,
+// already right, or deliberately untouched), false on a write failure —
+// the caller decides whether that blocks (capture completion refuses and
+// stays retryable rather than stranding the customer off the promised
+// lane behind a completed row; Codex #2980 r3). Idempotent.
 async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) {
   try {
-    if (!isEnabled('securePlanChoice')) return;
+    if (!isEnabled('securePlanChoice')) return true;
     const customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
-    if (!customer) return;
+    if (!customer) return true;
     const lane = resolveBillingLane(customer);
     if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay'
-      || customer.billing_mode === 'per_application') return;
+      || customer.billing_mode === 'per_application') return true;
     const visit = await db('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('estimated_price');
@@ -557,8 +570,10 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
         updated_at: new Date(),
       });
     logger.info(`[secure-plans] customer ${customerId} moved to per_application lane (secure plan choice)`);
+    return true;
   } catch (err) {
     logger.warn(`[secure-plans] per-application lane stamp failed for customer ${customerId}: ${err.message}`);
+    return false;
   }
 }
 

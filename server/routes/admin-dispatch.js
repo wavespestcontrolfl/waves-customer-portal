@@ -6075,7 +6075,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
                 this.where({ id: setupParentId }).orWhere({ recurring_parent_id: setupParentId });
               }))
-              .whereNot('status', 'void')
+              // Only COLLECTIBLE-or-settled invoices prove the fee is
+              // billed (Codex #2980 r3): a voided/cancelled/refunded
+              // invoice collects nothing, so treating it as proof would
+              // clear the claim and the customer permanently skips the
+              // selected fee.
+              .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
               .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
               .first('id');
             if (lineExists) {

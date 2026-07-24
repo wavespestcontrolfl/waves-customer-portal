@@ -712,6 +712,25 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     return { ok: false, code: 'completion_failed' };
   }
 
+  // Plan-choice lane (Codex #2980 r3): a plan-bearing RECURRING request
+  // must carry a durable per_application selection before a card capture
+  // may complete — otherwise a token holder could POST /complete directly
+  // (or an earlier tab's SetupIntent could land via the webhook) and
+  // bypass the required choice and its setup-fee stamp, or complete a
+  // capture against a live prepay selection. One-time and context-less
+  // requests (gate off, unsound pricing) keep today's behavior; the
+  // refusal leaves the request pending, so completing is a matter of
+  // making the selection and re-submitting (the SetupIntent stays
+  // succeeded at Stripe). buildSecurePlanContext never throws.
+  {
+    const { buildSecurePlanContext } = require('./secure-appointment-plans');
+    const planCtx = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+    if (planCtx?.mode === 'recurring' && request.selected_plan !== 'per_application') {
+      logger.warn(`[appt-card-request] capture refused for request ${request.id}: plan selection required (selected: ${request.selected_plan || 'none'})`);
+      return { ok: false, code: 'plan_required' };
+    }
+  }
+
   // Claim the request BEFORE the side effects run (Codex #2771 r3): the
   // page POST and the setup_intent.succeeded webhook can overlap — the
   // save is idempotent, but recordConsent / enrollConsentedMethod would
@@ -813,6 +832,29 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       return { ok: false, code: 'completion_failed' };
     }
 
+    // Plan-choice lane: an explicit per-application selection moves the
+    // customer onto the per_application billing lane once the card is
+    // actually enrolled — dispatch's completion auto-charge is gated on
+    // that lane, so without the stamp the plan page's "charged
+    // automatically after each completed service" would silently degrade
+    // to invoice-on-complete. Runs BEFORE the completed flip and a failure
+    // keeps the completion retryable (Codex #2980 r3): a completed row
+    // short-circuits every later retry, which would strand the customer
+    // off the promised lane forever. Idempotent — a retry that finds the
+    // lane already stamped no-ops.
+    if (request.selected_plan === 'per_application') {
+      const { applyPerApplicationLaneStamp } = require('./secure-appointment-plans');
+      const laneStamped = await applyPerApplicationLaneStamp({
+        customerId: request.customer_id,
+        scheduledServiceId: request.scheduled_service_id,
+      });
+      if (!laneStamped) {
+        logger.warn(`[appt-card-request] per-application lane stamp failed for request ${request.id} — completion stays retryable`);
+        await revertClaim();
+        return { ok: false, code: 'completion_failed' };
+      }
+    }
+
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'completing' })
       .update({
@@ -823,20 +865,6 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
         completed_at: new Date(),
         updated_at: new Date(),
       });
-    // Plan-choice lane: an explicit per-application selection moves the
-    // customer onto the per_application billing lane once the card is
-    // actually enrolled — dispatch's completion auto-charge is gated on
-    // that lane, so without the stamp the plan page's "charged
-    // automatically after each completed service" would silently degrade
-    // to invoice-on-complete. No-op while the gate is off or for any lane
-    // the stamp shouldn't touch; never blocks the capture result.
-    if (request.selected_plan === 'per_application') {
-      const { applyPerApplicationLaneStamp } = require('./secure-appointment-plans');
-      await applyPerApplicationLaneStamp({
-        customerId: request.customer_id,
-        scheduledServiceId: request.scheduled_service_id,
-      });
-    }
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
   } catch (err) {

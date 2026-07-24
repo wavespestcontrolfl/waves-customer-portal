@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
     chain.whereIn = record('whereIn');
     chain.whereNull = record('whereNull');
     chain.whereNot = record('whereNot');
+    chain.forUpdate = record('forUpdate');
     chain.whereNotNull = record('whereNotNull');
     chain.orderBy = record('orderBy');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);

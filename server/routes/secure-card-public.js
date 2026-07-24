@@ -114,6 +114,12 @@ router.post('/:token/complete', async (req, res) => {
         // client maps this to its "nothing needed" state.
         return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code: 'no_longer_needed' });
       }
+      if (result.code === 'plan_required') {
+        // Plan-choice lane: a recurring plan-bearing request must record a
+        // per_application selection before the capture may complete — the
+        // client re-renders the plan choice.
+        return res.status(409).json({ error: 'Please choose how you’d like to pay first.', code: 'plan_required' });
+      }
       if (result.code === 'completion_in_progress') {
         // The webhook (or another tab) holds the completion claim and is
         // actively saving this card — not a failure. The client shows the

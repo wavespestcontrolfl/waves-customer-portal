@@ -28,9 +28,10 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
 
   test('orphaned (negative) claims recover from the invoice truth: heal when the line exists, adopt under an updated_at lease when it does not', () => {
     expect(dispatchSource).toMatch(/if \(rawFee < 0\) \{/);
-    // Recovery consults the durable record — a non-void series invoice
-    // carrying the setup line.
-    expect(dispatchSource).toMatch(/\.whereNot\('status', 'void'\)\s*\n\s*\.whereRaw\('line_items::text ILIKE \?', \['%one-time setup fee%'\]\)/);
+    // Recovery consults the durable record — a COLLECTIBLE-or-settled
+    // series invoice carrying the setup line (a voided/cancelled/refunded
+    // invoice collects nothing and must not clear the claim).
+    expect(dispatchSource).toMatch(/\.whereNotIn\('status', \['void', 'cancelled', 'canceled', 'refunded'\]\)\s*\n\s*\.whereRaw\('line_items::text ILIKE \?', \['%one-time setup fee%'\]\)/);
     // Heal: line exists → clear the marker, never a second line.
     expect(dispatchSource).toMatch(/orphaned setup-fee claim healed/);
     // Adopt: no line → exactly one adopter via the updated_at lease CAS.
