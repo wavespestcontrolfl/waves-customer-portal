@@ -404,16 +404,22 @@ const SHADE_RULES = {
 //     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
 //     server/config/protocols.json). Light (4x) maps to the protocol four_x
 //     cadence and is an available downsell for clean, low-pest-history
-//     landscapes — it is never auto-recommended. The 9x Enhanced and 12x
-//     Premium tiers are RETIRED (v4.5): the documented protocol tops out at
-//     6 visits, so pricing 9/12 visits charged for visits we don't run.
-//     Legacy `enhanced` / `premium` requests map to `standard` with a
-//     warning. See service-pricing.js#normalizeTreeShrubTier.
+//     landscapes — it is never auto-recommended. The 9x Enhanced tier was
+//     retired in v4.5 and UN-RETIRED as an UPSELL (owner directive
+//     2026-07-23): every-6-weeks coverage for heavy-pressure/high-value
+//     landscapes, never auto-recommended — Standard stays the default and
+//     recommendation. Visits 7-9 are lighter foliar insect/disease apps, so
+//     Enhanced material runs 1.25x the Standard annual budget
+//     (enhancedFactor), not 1.5x — fert and Snapshot stay on their own
+//     calendar. The 12x Premium tier REMAINS retired; legacy `premium`
+//     requests map to `standard` with a warning. See
+//     service-pricing.js#normalizeTreeShrubTier.
 // ============================================================
 const TREE_SHRUB = {
   tiers: {
     light:     { label: 'Light', frequency: 4, monthlyFloor: r(22) },
     standard:  { label: 'Standard', frequency: 6, monthlyFloor: r(35) },
+    enhanced:  { label: 'Enhanced', frequency: 9, monthlyFloor: r(48) },
   },
   defaultTier: 'standard',
   recommendedTier: 'standard',
@@ -423,6 +429,7 @@ const TREE_SHRUB = {
     perTreeAnnual: 4,
     perSqFtAnnual: 0.055,
     lightFactor: 0.75,
+    enhancedFactor: 1.25,
   },
   treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
   marginTarget: 0.45,

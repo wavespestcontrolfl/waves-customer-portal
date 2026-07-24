@@ -153,11 +153,23 @@ describe('supportsConverterFollowUpSeeding — tree & shrub series (six-visit ma
     )).toBe(true);
   });
 
-  test('retired 9-visit 6-week tier does NOT seed — no month-interval pattern represents it', () => {
+  test('legacy 9-visit rows WITHOUT the every_6_weeks frequency still do NOT seed via bimonthly inference', () => {
     // Visit-count inference maps 9 visits to 'bimonthly'; seeding that would
     // schedule 2-month gaps for a 6-week program. Scheduling stays manual.
     expect(supportsConverterFollowUpSeeding(
       { name: 'Every 6 Weeks Tree & Shrub Care Service', visitsPerYear: 9 }, {}, 'bimonthly',
+    )).toBe(false);
+  });
+
+  test('un-retired 9x Enhanced (every_6_weeks + 9 visits) seeds its series', () => {
+    expect(supportsConverterFollowUpSeeding(
+      { name: 'Enhanced Tree & Shrub Care Service', frequency: 'every_6_weeks', visitsPerYear: 9 }, {}, 'every_6_weeks',
+    )).toBe(true);
+  });
+
+  test('every_6_weeks without the explicit 9-visit stamp does NOT seed', () => {
+    expect(supportsConverterFollowUpSeeding(
+      { name: 'Enhanced Tree & Shrub Care Service', frequency: 'every_6_weeks' }, {}, 'every_6_weeks',
     )).toBe(false);
   });
 

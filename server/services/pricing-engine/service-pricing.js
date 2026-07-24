@@ -2287,6 +2287,9 @@ function recommendTreeShrubTier(property = {}) {
 // match on a stable identifier. The legacy `premium` code is retained for
 // back-compat; both retired tiers now map to the mandated 6-visit Standard.
 const TS_PREMIUM_DEPRECATED_WARNING_CODE = 'tree_shrub_premium_deprecated_mapped_to_standard';
+// Kept for saved-payload consumers that filter on the historical code —
+// the enhanced tier was retired v4.5 and un-retired 2026-07-23 (owner
+// upsell directive), so new quotes never emit it.
 const TS_ENHANCED_DEPRECATED_WARNING_CODE = 'tree_shrub_enhanced_deprecated_mapped_to_standard';
 
 function normalizeTreeShrubTier(requestedTier, warnings = [], warningCodes = []) {
@@ -2295,11 +2298,6 @@ function normalizeTreeShrubTier(requestedTier, warnings = [], warningCodes = [])
     warnings.push('Premium Tree & Shrub has been retired; the 6-visit Standard plan was used.');
     warningCodes.push(TS_PREMIUM_DEPRECATED_WARNING_CODE);
     return { tier: 'standard', legacyTierRequested: 'premium' };
-  }
-  if (normalized === 'enhanced') {
-    warnings.push('Enhanced (9-visit) Tree & Shrub has been retired; the 6-visit Standard plan was used.');
-    warningCodes.push(TS_ENHANCED_DEPRECATED_WARNING_CODE);
-    return { tier: 'standard', legacyTierRequested: 'enhanced' };
   }
   if (!TREE_SHRUB.tiers[normalized]) throw new Error(`Unknown T&S tier: ${requestedTier}`);
   return { tier: normalized, legacyTierRequested: null };
@@ -2359,7 +2357,9 @@ function priceTreeShrub(property, options = {}) {
   // amortized across the year — do NOT multiply by frequency. See
   // constants.js TREE_SHRUB block for the per-term derivation.
   const materialModel = TREE_SHRUB.materialModel || {};
-  const tierMaterialFactor = tier === 'light' ? (materialModel.lightFactor ?? 0.75) : 1;
+  const tierMaterialFactor = tier === 'light' ? (materialModel.lightFactor ?? 0.75)
+    : tier === 'enhanced' ? (materialModel.enhancedFactor ?? 1.25)
+    : 1;
   const modeledMaterialCost = (
     (materialModel.fixedAnnual ?? 15)
     + (materialModel.perTreeAnnual ?? 4) * treeCount

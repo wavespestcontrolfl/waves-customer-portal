@@ -120,6 +120,11 @@
           "mo": 41.08,
           "recommended": true,
           "name": "Standard"
+        },
+        {
+          "mo": 54,
+          "recommended": false,
+          "name": "Enhanced"
         }
       ],
       "mq": [
@@ -538,6 +543,11 @@
           "mo": 41.08,
           "recommended": true,
           "name": "Standard"
+        },
+        {
+          "mo": 54,
+          "recommended": false,
+          "name": "Enhanced"
         }
       ],
       "mq": [],

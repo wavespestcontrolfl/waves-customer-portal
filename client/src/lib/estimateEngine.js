@@ -2006,18 +2006,21 @@ export function calculateEstimate(inputs) {
     const lpv = LABOR * ((osm + 10) / 60);
     // Tiers mirror the server engine (constants.js TREE_SHRUB): 6-visit
     // Standard is the mandated default (protocol six_x); 4-visit Light
-    // (protocol four_x) is the downsell for clean / low-pest-history beds.
-    // 9x Enhanced and 12x Premium are retired.
+    // (protocol four_x) is the downsell for clean / low-pest-history beds;
+    // 9-visit Enhanced is the every-6-weeks UPSELL (un-retired 2026-07-23,
+    // owner directive — never auto-recommended). 12x Premium stays retired.
     // v4.6 material model is ANNUAL and protocol-derived:
-    //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor (Light 0.75)
+    //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor
+    //   (Light 0.75, Enhanced 1.25)
     // and price targets a 45% admin-INCLUSIVE margin:
     //   annual = (materials + labor + $51 admin) / (1 - 0.45)
-    // Floors are backstops only (Light $22/mo, Standard $35/mo) and Light's
-    // floor must stay <= 2/3 of Standard's.
+    // Floors are backstops only (Light $22/mo, Standard $35/mo, Enhanced
+    // $48/mo) and Light's floor must stay <= 2/3 of Standard's.
     const TS_ADMIN_ANNUAL = 51;
     const tst = [
       { n: 'Light', v: 4, f: 22, mf: 0.75 },
       { n: 'Standard', v: 6, f: 35, mf: 1 },
+      { n: 'Enhanced', v: 9, f: 48, mf: 1.25 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };

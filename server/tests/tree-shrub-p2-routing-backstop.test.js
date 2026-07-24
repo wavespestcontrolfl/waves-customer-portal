@@ -60,22 +60,23 @@ describe('service-line routing — tree/shrub tokens beat fertil/weed', () => {
   });
 });
 
-describe('recurringTreeShrubRowAtRetiredCadence — v4.5 six-visit mandate backstop', () => {
+describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un-retired 2026-07-23)', () => {
   const estData = (svc) => ({ recurring: { services: [svc] } });
 
-  test('restamped Enhanced selection (tree_shrub_6week key) is retired', () => {
+  test('restamped Enhanced selection (tree_shrub_6week key) is a live cadence', () => {
     expect(recurringTreeShrubRowAtRetiredCadence(estData({
       name: 'Every 6 Weeks Tree & Shrub Care Service', serviceKey: 'tree_shrub_6week', visitsPerYear: 9,
-    }))).toBe(true);
+    }))).toBe(false);
   });
 
-  test('stored 9- and 12-visit rows are retired by visit count', () => {
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Enhanced', visitsPerYear: 9 }))).toBe(true);
+  test('9-visit rows pass; 12-visit Premium rows stay retired', () => {
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Enhanced', visitsPerYear: 9 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Premium', visitsPerYear: 12 }))).toBe(true);
   });
 
-  test('6-week wording without a visit count is retired', () => {
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Every 6 Weeks Tree & Shrub Care Service' }))).toBe(true);
+  test('6-week wording without a visit count passes; 12-visit wording stays retired', () => {
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Every 6 Weeks Tree & Shrub Care Service' }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Premium (12 visits)' }))).toBe(true);
   });
 
   test('current 6x Standard and 4x Light rows pass', () => {
@@ -107,9 +108,9 @@ describe('recurringTreeShrubRowAtRetiredCadence — v4.5 six-visit mandate backs
   });
 
   test('every converter visit-count alias is checked (codex P2 r2)', () => {
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 9 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 9 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 12 }))).toBe(true);
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
   });
@@ -120,11 +121,11 @@ describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror co
   // shared quote requirement — the retired condition must live there, not
   // only in the accept-time 409, or a stale estimate collects a deposit the
   // accept then rejects.
-  test('all-retired stored tier rows requote', () => {
+  test('an enhanced-only ladder keeps self-serve accept (9x live again 2026-07-23)', () => {
     expect(retiredTreeShrubRequoteNeeded({
       results: { ts: [{ key: 'enhanced', ann: 900 }] },
       recurring: { services: [{ name: 'Every 6 Weeks Tree & Shrub Care Service' }] },
-    })).toBe(true);
+    })).toBe(false);
   });
 
   test('a selectable current tier keeps self-serve accept', () => {

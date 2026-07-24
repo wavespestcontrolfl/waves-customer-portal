@@ -1340,12 +1340,14 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
   // a sold program produced ONE visit and no series). The 6x Standard accept
   // restamps to the bi-monthly catalog row and the 4x Light downsell to
-  // quarterly — seed those. The retired 9-visit 6-week tier has no
-  // month-interval pattern (visit-count inference would mislabel it
-  // bimonthly and seed 2-month gaps), so a legacy accept still leaves
-  // scheduling to the office — the visits check keeps it out.
+  // quarterly — seed those. The un-retired 9x Enhanced (2026-07-24) restamps
+  // frequency 'every_6_weeks' + visitsPerYear 9 and seeds 42-day gaps; the
+  // explicit-visits check keeps LEGACY 9-visit rows (no every_6_weeks
+  // frequency text — they infer bimonthly and would seed 2-month gaps) with
+  // office scheduling exactly as before.
   if (key === 'tree_shrub') {
     const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'every_6_weeks') return visits === 9;
     if (pattern === 'bimonthly') return visits == null || visits === 6;
     if (pattern === 'quarterly') return visits == null || visits === 4;
     return false;
