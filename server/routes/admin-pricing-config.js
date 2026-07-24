@@ -755,7 +755,11 @@ router.post('/margin-check', async (req, res) => {
     const SERVICE_ORDER = [
       ['pest', { frequency: 'quarterly' }],
       ['lawn', { track: 'st_augustine', tier: 'enhanced' }],
-      ['treeShrub', { tier: 'enhanced' }],
+      // Standard is the documented T&S default/recommendation — while
+      // Enhanced was retired this request silently fell back to Standard,
+      // and the margin preview must keep sampling the default now that
+      // 'enhanced' prices as the real 9x upsell (never auto-recommended).
+      ['treeShrub', { tier: 'standard' }],
       ['mosquito', { tier: 'monthly' }],
     ];
     const liveTiers = pricingEngine.constants?.WAVEGUARD?.tiers || {};

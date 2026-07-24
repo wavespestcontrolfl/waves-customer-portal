@@ -207,11 +207,13 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     return generic ? all.slice(1) : all;
   }
   if (serviceKey === 'tree_shrub') {
-    // 6-visit Standard is the mandated default; Light (4x) is the downsell.
-    // Enhanced (9x) / Premium (12x) are retired — do not offer them.
+    // 6-visit Standard is the mandated default; Light (4x) is the downsell;
+    // Enhanced (9x, un-retired 2026-07-24) is the every-6-weeks upsell —
+    // offered, never recommended. Premium (12x) stays retired.
     const all = [
       { id: 'tree-standard', serviceKey, label: 'Standard tree & shrub care', tier: 'standard', cadence: '6 visits/year' },
       { id: 'tree-light', serviceKey, label: 'Light tree & shrub care', tier: 'light', cadence: '4 visits/year' },
+      { id: 'tree-enhanced', serviceKey, label: 'Enhanced tree & shrub care', tier: 'enhanced', cadence: '9 visits/year' },
     ];
     return generic ? all.slice(0, 1) : all;
   }

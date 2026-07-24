@@ -21,6 +21,7 @@ const MONTH_RECURRENCE_INTERVALS = {
 const DEFAULT_WEEKEND_SHIFT = 'forward';
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
+  every_6_weeks: 9,
   bimonthly: 6,
   quarterly: 4,
   triannual: 3,
@@ -47,6 +48,12 @@ function normalizeRecurringPattern(value) {
   if (!raw) return null;
   const compact = raw.replace(/[^a-z0-9]/g, '');
   if (['monthly', 'month', 'everymonth', '12x', '12xperyear'].includes(compact)) return 'monthly';
+  // Tree & Shrub Enhanced (9 visits at 6-week gaps, un-retired 2026-07-24).
+  // Day-gap pattern like weekly/biweekly — NOT in MONTH_RECURRENCE_INTERVALS.
+  // Numeric 9-visit inference deliberately stays 'bimonthly' (mosquito
+  // seasonal rows carry 9 visits and must not reclassify); only the explicit
+  // frequency text selects this cadence.
+  if (['every6weeks', 'everysixweeks', '6weeks', 'sixweeks', '9x', '9xperyear'].includes(compact)) return 'every_6_weeks';
   if (['bimonthly', 'bimonth', 'bimonthlypest', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bimonthly';
   if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
   if (['triannual', 'threetimesyearly', '3x', '3xperyear'].includes(compact)) return 'triannual';
@@ -62,7 +69,7 @@ function normalizeRecurringPattern(value) {
   if (compact === 'biweekly') return 'biweekly';
   const visits = Number(raw);
   if (Number.isFinite(visits) && visits > 0) return patternFromVisitsPerYear(visits);
-  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom'].includes(raw)) return raw;
+  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks'].includes(raw)) return raw;
   return null;
 }
 
@@ -188,7 +195,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
+  const intervals = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
   const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (intervals[pattern] || 91);
   return etDateString(addETDays(base, gap * i));
 }

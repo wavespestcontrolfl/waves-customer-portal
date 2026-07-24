@@ -91,3 +91,33 @@ describe('recurring appointment seeder', () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+describe('every_6_weeks cadence (T&S 9x Enhanced, un-retired 2026-07-24)', () => {
+  test('normalizes the explicit frequency text but NOT bare 9-visit numbers', () => {
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('every_6_weeks')).toBe('every_6_weeks');
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('Every 6 Weeks')).toBe('every_6_weeks');
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('9x')).toBe('every_6_weeks');
+    // Mosquito seasonal rows carry 9 visits and must keep their historical
+    // bimonthly inference — only the explicit text selects the new cadence.
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('9')).toBe('bimonthly');
+  });
+
+  test('builds follow-ups at 42-day gaps for the rest of the program year', () => {
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-ts9',
+      customer_id: 'customer-1',
+      scheduled_date: '2026-01-05',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      service_type: 'Enhanced Tree & Shrub Care Service',
+      status: 'confirmed',
+    }, {
+      pattern: 'every_6_weeks',
+      plannedCount: 9,
+      skipWeekends: false,
+    });
+    expect(rows).toHaveLength(8);
+    expect(rows[0].scheduled_date).toBe('2026-02-16'); // +42 days
+    expect(rows[1].scheduled_date).toBe('2026-03-30'); // +84 days
+  });
+});

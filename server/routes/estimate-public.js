@@ -11823,12 +11823,13 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
     // visit count or display text (explicitServiceCadence), so a crafted
     // row like { frequency: 'monthly' } with no visit count would schedule
     // the retired 12x Premium cadence while passing the checks below
-    // (codex P2 r1). every_6_weeks normalizes to null and falls through to
-    // the visit-count check, where 9 is accepted.
+    // (codex P2 r1). every_6_weeks is now a first-class seeder pattern
+    // (9x Enhanced un-retired 2026-07-24) and passes alongside the
+    // bimonthly/quarterly cadences.
     const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
       .map((value) => normalizeRecurringPattern(value))
       .find(Boolean) || null;
-    if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
+    if (fieldPattern && !['bimonthly', 'quarterly', 'every_6_weeks'].includes(fieldPattern)) return true;
     // Same alias set the converter's visitsPerYearForRecurringService reads
     // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
     const visits = Number(
