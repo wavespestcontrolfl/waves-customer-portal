@@ -61,11 +61,17 @@ const FAQ_PRICE =
 // a category only gets a video of the report type its plan actually
 // produces — pest/lawn/tree_shrub their own, palm injection folds into the
 // tree & shrub report (its visits are documented on that report). The
-// videos state the recurring-terms benefits on camera (callbacks /
+// REPORT tours state the recurring-terms benefits on camera (callbacks /
 // no-contract / 90-day), so ONLY packs carrying RECURRING_TERMS_BENEFIT
 // may reference one — bundle/mosquito/rodent/termite/commercial/unknown
 // get empty slots and the renderer drops the blocks (v2 owner round
-// 2026-07-23: benefit-forward re-cut).
+// 2026-07-23: benefit-forward re-cut). The APP tour (static block in the
+// 20260723300000 migration, all categories) is deliberately TERMS-NEUTRAL
+// on camera — its claims are app facts (visits/reports/reschedule; Auto
+// Pay "charged only after each completed service") plus "no call centers"
+// — so it stays safe for termite/commercial/bundle recipients. Any future
+// re-cut that adds recurring-terms claims to the app tour must move it
+// behind per-pack gating like the report tours.
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
