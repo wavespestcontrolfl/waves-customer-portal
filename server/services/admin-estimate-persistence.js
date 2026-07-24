@@ -585,9 +585,14 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       && v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
       && !v1Input.services.pest.version) {
       const storedRoot = estimateResultRoot(estimateData);
+      // Agent drafts store their prior priced output as RAW engineResult
+      // lineItems (not the mapped result shape) — a pre-stamp agent draft
+      // must also read as a replay of its sold curve (codex #2966 r8 P1).
       const storedPestLine = (storedRoot?.recurring?.services || [])
         .find((svc) => svc?.service === 'pest_control')
         || storedRoot?.results?.pest
+        || (estimateData?.engineResult?.lineItems || [])
+          .find((li) => li?.service === 'pest_control')
         || null;
       if (storedPestLine) {
         v1Input.services.pest.version = storedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1';
