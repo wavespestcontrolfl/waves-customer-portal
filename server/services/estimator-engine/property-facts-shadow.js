@@ -324,6 +324,22 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
  * suite-scoped evidence), the V1 value must be CLEARED, not retained — V2
  * refused to pick a number precisely so that scope could not auto-price.
  */
+// Map a V2 selection's evidence back to the V1 source vocabulary the lane
+// classifier and engine guards already understand (codex r5 P1): only
+// measured-grade evidence (verified/county/cadastral/permit) earns the
+// non-fallback 'property_facts_v2' label; caller-stated keeps its V1 name;
+// anything weaker or mixed classifies as 'property_lookup_estimate', which
+// sits in FALLBACK_SQFT_SOURCES so the yellow/manual-review rails still fire.
+const MEASURED_EVIDENCE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit']);
+
+function v1SourceForSelection(facts, selection) {
+  const ids = new Set(selection?.selectedEvidenceIds || []);
+  const items = (facts?.evidence || []).filter((e) => ids.has(e.id));
+  if (items.length && items.every((e) => MEASURED_EVIDENCE_SOURCES.has(e.sourceType))) return 'property_facts_v2';
+  if (items.length && items.every((e) => e.sourceType === 'caller')) return 'caller_stated';
+  return 'property_lookup_estimate';
+}
+
 function applyV2ToPropertyFacts(propertyFacts, v2) {
   if (!propertyFacts || !v2) return propertyFacts;
   const legacy = v2.legacyDerived || {};
@@ -332,7 +348,7 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
   if (legacy.squareFootage) {
     propertyFacts.home = {
       value: legacy.squareFootage,
-      source: 'property_facts_v2',
+      source: v1SourceForSelection(facts, facts.structureArea),
       confidence: facts.confidenceLevel,
       // V1 arbitration's dispute verdict (caller vs county >35%) survives
       // the replacement — the same hard conflict must keep forcing review,
@@ -364,7 +380,7 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
     propertyFacts.lot = legacy.lotSize
       ? {
         value: legacy.lotSize,
-        source: 'property_facts_v2',
+        source: v1SourceForSelection(facts, facts.lot),
         confidence: facts.confidenceLevel,
         ...(propertyFacts.lot?.disputed ? { disputed: true } : {}),
         rejected: propertyFacts.lot?.rejected || [],

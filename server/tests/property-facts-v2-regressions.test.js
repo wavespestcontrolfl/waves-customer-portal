@@ -812,6 +812,50 @@ describe('codex r4: lot evidence source follows its true origin', () => {
   });
 });
 
+// ── Codex round-5 regression (reviewed 86a510f8) ──
+
+describe('codex r5: V2 replacement source follows evidence authority', () => {
+  const factsWith = (sourceType) => ({
+    requiresConfirmation: false,
+    confidenceLevel: 'medium',
+    warnings: [],
+    structureArea: { value: 2400, selectedEvidenceIds: ['sel-1'] },
+    lot: { applicability: 'private_parcel', privateLotSqft: 8400, selectedEvidenceIds: ['sel-2'] },
+    evidence: [
+      { id: 'sel-1', field: 'residential_living_area_sqft', value: 2400, sourceType },
+      { id: 'sel-2', field: 'parcel_area_sqft', value: 8400, sourceType },
+    ],
+  });
+  const apply = (sourceType) => {
+    const propertyFacts = {
+      home: { value: 2000, source: 'property_lookup_estimate', rejected: [] },
+      lot: { value: 8000, source: 'property_lookup_estimate', rejected: [] },
+      stories: 1,
+    };
+    shadow.applyV2ToPropertyFacts(propertyFacts, {
+      legacyDerived: { squareFootage: 2400, lotSize: 8400, stories: 1 },
+      facts: factsWith(sourceType),
+    });
+    return propertyFacts;
+  };
+
+  test('listing-backed selection keeps the fallback source (yellow rails fire)', () => {
+    const result = apply('listing');
+    expect(result.home.source).toBe('property_lookup_estimate');
+    expect(result.lot.source).toBe('property_lookup_estimate');
+  });
+
+  test('county-backed selection earns the measured V2 source', () => {
+    const result = apply('county');
+    expect(result.home.source).toBe('property_facts_v2');
+    expect(result.lot.source).toBe('property_facts_v2');
+  });
+
+  test('caller-only selection keeps its V1 caller_stated name', () => {
+    expect(apply('caller').home.source).toBe('caller_stated');
+  });
+});
+
 // ── Estimator integration: story provenance + shadow diff ──
 
 describe('buildEngineInput story provenance', () => {
