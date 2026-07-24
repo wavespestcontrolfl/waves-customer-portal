@@ -54,6 +54,17 @@ const WAVES_PHONE_KEYS = new Set(
   ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => phoneKey(n.number))),
 );
 
+// Transcription sentinels the recording processor writes when a voicemail
+// recording contains no usable speech (see call-recording-processor.js:
+// the [NO SPEECH]/[VOICEMAIL] transcriber outputs and the implausible-
+// transcription rejection sentinel).
+const DEAD_AIR_TRANSCRIPTS = new Set(["[NO SPEECH]", "[VOICEMAIL]"]);
+const DEAD_AIR_REJECTED_PREFIX = "[Recording had no usable speech";
+// A voicemail row with no recording AND no transcript is a hang-up at the
+// greeting — but Twilio's recording callback can lag the call row, so a
+// fresh call gets a grace window before it's treated as dead air.
+const DEAD_AIR_GRACE_MS = 10 * 60 * 1000;
+
 async function adminFetch(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -272,6 +283,9 @@ export default function CallLogTabV2() {
   // Gemini in a loop on a permanently-broken row.
   const autoAttemptedRef = useRef(new Set());
   const [autoProcessingSid, setAutoProcessingSid] = useState(null);
+  // Dead-air voicemails are hidden from the voicemail bucket by default;
+  // the disclosure chip on the voicemail card flips this to reveal them.
+  const [showDeadAir, setShowDeadAir] = useState(false);
   // Transcript expand/collapse per call id. Default to expanded so the
   // operator sees the preview the moment it lands.
   const [expandedTranscripts, setExpandedTranscripts] = useState(
@@ -553,14 +567,40 @@ export default function CallLogTabV2() {
     Number(c.duration_seconds) > 5 || !!c.recording_available || !!c.transcription;
   const isVoicemailCall = (c) =>
     c.answered_by === "voicemail" || c.call_outcome === "voicemail";
+  // Dead-air voicemail suppression: spoofed-number robocall waves leave
+  // dozens of unknown-caller voicemails a week with nothing to hear —
+  // either a hang-up at the greeting (no recording ever arrives) or a
+  // silent recording the transcriber affirmatively rejected. Hide them
+  // from the voicemail bucket; the card's disclosure chip shows the count
+  // and reveals them on demand. Known customers and outbound calls are
+  // never suppressed.
+  const isDeadAirVm = (c) => {
+    if (c.direction !== "inbound" || c.customer_id || !isVoicemailCall(c))
+      return false;
+    const t = (c.transcription || "").trim();
+    if (DEAD_AIR_TRANSCRIPTS.has(t) || t.startsWith(DEAD_AIR_REJECTED_PREFIX))
+      return true;
+    // The authenticated feed passes through installStaffCallRecordingPrivacy,
+    // which strips recording_url and exposes recording_available instead —
+    // a row with a recording awaiting transcript is NOT dead air.
+    return (
+      !c.recording_available &&
+      !c.recording_url &&
+      !t &&
+      Date.now() - new Date(c.created_at).getTime() > DEAD_AIR_GRACE_MS
+    );
+  };
   const isReallyMissed = (c) =>
     (!c.answered_by || c.answered_by === "missed") && !hadConversation(c);
   const isAiHandled = (c) => c.answered_by === "ai_agent";
   const isAnswered = (c) => c.answered_by === "human" || isAiHandled(c);
   const answered = calls.filter(isAnswered).length;
-  const voicemail = calls.filter(isVoicemailCall).length;
   const missed = calls.filter(isReallyMissed).length;
-  const voicemailCalls = calls.filter(isVoicemailCall);
+  const deadAirVoicemails = calls.filter(isDeadAirVm);
+  const voicemailCalls = calls.filter(
+    (c) => isVoicemailCall(c) && (showDeadAir || !isDeadAirVm(c)),
+  );
+  const voicemail = voicemailCalls.length;
   const voicemailWithoutTranscript = voicemailCalls.filter(
     (c) => c.recording_available && !(c.transcription && c.transcription.length > 0),
   ).length;
@@ -590,7 +630,8 @@ export default function CallLogTabV2() {
   const filteredCalls = calls.filter((c) => {
     if (callFilter === "all") return true;
     if (callFilter === "answered") return isAnswered(c);
-    if (callFilter === "voicemail") return isVoicemailCall(c);
+    if (callFilter === "voicemail")
+      return isVoicemailCall(c) && (showDeadAir || !isDeadAirVm(c));
     if (callFilter === "missed") return isReallyMissed(c);
     return true;
   });
@@ -637,7 +678,7 @@ export default function CallLogTabV2() {
         />{" "}
       </div>
       {/* Voicemail queue */}
-      {recentVoicemails.length > 0 && (
+      {(recentVoicemails.length > 0 || deadAirVoicemails.length > 0) && (
         <Card>
           <CardBody>
             <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
@@ -652,6 +693,19 @@ export default function CallLogTabV2() {
                     {voicemailWithoutTranscript > 0
                       ? ` · ${voicemailWithoutTranscript} awaiting transcript`
                       : ""}
+                    {deadAirVoicemails.length > 0 && (
+                      <>
+                        {` · ${deadAirVoicemails.length} dead-air ${showDeadAir ? "shown" : "hidden"} `}
+                        <button
+                          type="button"
+                          className="underline text-ink-secondary hover:text-ink-primary"
+                          onClick={() => setShowDeadAir((v) => !v)}
+                          title="Dead-air voicemails: unknown callers who hung up at the greeting or left a silent recording"
+                        >
+                          {showDeadAir ? "hide" : "show"}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -691,6 +745,9 @@ export default function CallLogTabV2() {
                           >
                             {c.direction === "outbound" ? "Outbound" : "Inbound"}
                           </Badge>
+                          {isDeadAirVm(c) && (
+                            <Badge tone="neutral">Dead air</Badge>
+                          )}
                         </div>
                         <div className="text-12 text-ink-tertiary">
                           {getCallPartyLine(c)} · {timeAgo(c.created_at)}
@@ -1079,6 +1136,9 @@ export default function CallLogTabV2() {
                       <div className="flex flex-shrink-0 flex-col items-end gap-1">
                         {" "}
                         <Badge tone={badgeTone}>{answeredLabel}</Badge>{" "}
+                        {isDeadAirVm(c) && (
+                          <Badge tone="neutral">Dead air</Badge>
+                        )}
                         <span className="text-12 md:text-10 text-ink-tertiary">
                           {timeAgo(c.created_at)}
                         </span>{" "}
