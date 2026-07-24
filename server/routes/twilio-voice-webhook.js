@@ -714,11 +714,16 @@ router.post('/voice', async (req, res) => {
       // Never a bare hangup: route to the Waves voicemail recorder so a real
       // human still gets through. Greeting MP3 first — it carries the
       // FL §934.03 recording disclosure and MUST precede the recorder.
+      // Both audit writes are best-effort: a transient DB failure must never
+      // bubble to the outer catch and replace the promised voicemail
+      // fallback with the generic error TwiML.
       await stampPreconnectScreen(CallSid, 'failed');
       await db('call_log').where('twilio_call_sid', CallSid).update({
         answered_by: 'voicemail',
         call_outcome: 'voicemail',
         updated_at: new Date(),
+      }).catch((err) => {
+        logger.warn(`[preconnect-screen] failed-outcome update skipped for ${maskSid(CallSid)}: ${err.message}`);
       });
       logger.info(`[preconnect-screen] no key from ${maskPhone(From)} (${maskSid(CallSid)}) — routing to Waves voicemail`);
       const failTwiml = new VoiceResponse();
