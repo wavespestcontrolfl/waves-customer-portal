@@ -569,28 +569,43 @@ async function selectSecurePlan({ token, plan }) {
 async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) {
   try {
     if (!isEnabled('securePlanChoice')) return true;
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
-    if (!customer) return true;
-    const lane = resolveBillingLane(customer);
-    if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay'
-      || customer.billing_mode === 'per_application') return true;
-    const visit = await db('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first('estimated_price');
-    const perVisit = visit?.estimated_price != null ? Number(visit.estimated_price) : null;
-    await db('customers')
-      .where({ id: customerId })
-      .update({
+    // The stamp is a value-guarded CAS on the billing_mode that was just
+    // validated: if staff moves the customer onto a membership or
+    // annual-prepay lane between the read and the write (a stale completion
+    // retry is exactly that window), the guarded update loses, the loop
+    // re-reads, and the lane check refuses instead of overwriting the newer
+    // billing choice (Codex #2980 r5).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const customer = await db('customers')
+        .where({ id: customerId })
+        .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
+      if (!customer) return true;
+      const lane = resolveBillingLane(customer);
+      if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay'
+        || customer.billing_mode === 'per_application') return true;
+      const visit = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('estimated_price');
+      const perVisit = visit?.estimated_price != null ? Number(visit.estimated_price) : null;
+      let stampQuery = db('customers').where({ id: customerId });
+      stampQuery = customer.billing_mode == null
+        ? stampQuery.whereNull('billing_mode')
+        : stampQuery.where({ billing_mode: customer.billing_mode });
+      const stamped = await stampQuery.update({
         billing_mode: 'per_application',
         ...(customer.per_application_fee == null && perVisit > 0
           ? { per_application_fee: perVisit }
           : {}),
         updated_at: new Date(),
       });
-    logger.info(`[secure-plans] customer ${customerId} moved to per_application lane (secure plan choice)`);
-    return true;
+      if (stamped === 1) {
+        logger.info(`[secure-plans] customer ${customerId} moved to per_application lane (secure plan choice)`);
+        return true;
+      }
+      logger.info(`[secure-plans] per-application lane stamp lost the CAS for customer ${customerId} (billing_mode changed concurrently); re-reading`);
+    }
+    logger.warn(`[secure-plans] per-application lane stamp gave up after repeated CAS losses for customer ${customerId}`);
+    return false;
   } catch (err) {
     logger.warn(`[secure-plans] per-application lane stamp failed for customer ${customerId}: ${err.message}`);
     return false;

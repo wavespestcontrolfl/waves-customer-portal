@@ -1077,11 +1077,14 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
       const res = await completeGateOn({ token: REQUEST.token, setupIntentId: 'seti_1' });
       expect(res).toEqual({ ok: true });
-      const laneStamp = touches('customers')
-        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
-        .map(([, patch]) => patch)
-        .find((patch) => patch.billing_mode === 'per_application');
-      expect(laneStamp).toBeTruthy();
+      const laneChain = touches('customers')
+        .map((t) => t.chain)
+        .find((c) => c.calls.some(([op, patch]) => op === 'update' && patch?.billing_mode === 'per_application'));
+      expect(laneChain).toBeTruthy();
+      // The stamp is a CAS on the billing_mode that was validated (NULL
+      // here) — a concurrent staff lane change makes it miss instead of
+      // being overwritten (Codex #2980 r5).
+      expect(laneChain.calls).toContainEqual(['whereNull', 'billing_mode']);
       // The completing claim is PLAN-VALUE-GUARDED (Codex #2980 r4): a
       // concurrent plan switch after the plan check makes the claim miss.
       const claimChain = touches('appointment_card_requests')
@@ -1089,6 +1092,36 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         .find((c) => c.calls.some(([op, patch]) => op === 'update' && patch?.status === 'completing'));
       expect(claimChain).toBeTruthy();
       expect(claimChain.calls).toContainEqual(['where', { selected_plan: 'per_application' }]);
+    });
+
+    test('lane stamp LOSES the CAS to a concurrent staff lane change → newer lane is never overwritten, completion still succeeds', async () => {
+      // Race: between the lane read and the guarded update, staff moves the
+      // customer onto annual prepay. The guarded update returns 0 rows; the
+      // re-read sees the new lane and REFUSES (returns lane-correct) rather
+      // than stamping per_application over it (Codex #2980 r5).
+      let laneChanged = false;
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST, selected_plan: 'per_application' }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: {
+          first: () => ({ ...PLAN_CUSTOMER, billing_mode: laneChanged ? 'annual_prepay' : null }),
+          update: (chain, patch) => {
+            if (patch?.billing_mode === 'per_application' && !laneChanged) {
+              laneChanged = true;
+              return 0; // the CAS guard missed — staff won the race
+            }
+            return 1;
+          },
+        },
+      });
+      mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+      const res = await completeGateOn({ token: REQUEST.token, setupIntentId: 'seti_1' });
+      expect(res).toEqual({ ok: true });
+      // Exactly ONE stamp attempt — after the loss the re-read sees the
+      // annual-prepay lane and stops; the newer choice survives untouched.
+      const stampAttempts = touches('customers')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch?.billing_mode === 'per_application'));
+      expect(stampAttempts).toHaveLength(1);
     });
 
     test('settled prepay invoice → secured and the pending row heals to satisfied', async () => {
