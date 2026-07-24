@@ -7902,6 +7902,39 @@ describe('SSR copy parity with the React page (#2969 dedupe; estimator audit 202
     expect(html).not.toMatch(/<strong>Total<\/strong>/);
   });
 
+  test('a lone service row netted by a discount row keeps its amount AND the net Total row (codex r1)', () => {
+    // Trenching $2,210 + one_time_adjustment −$110: the discount row never
+    // renders as a table row and is not manualDiscount, but accept charges
+    // the NET $2,100 — the page must state it, so the single-row dedupe
+    // must not treat this as a single undiscounted item.
+    const html = renderPage('ssr-parity-netted-token', {
+      id: 'estimate-ssr-parity-netted',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2100,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 2100,
+          items: [
+            { service: 'termite_trenching', name: 'Termite Trenching Treatment', price: 2210 },
+            { service: 'one_time_adjustment', name: 'Member adjustment', price: -110 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('$2,210.00');
+    expect(html).toMatch(/<strong>Total<\/strong>/);
+    expect(html).toContain('$2,100.00');
+  });
+
   test('one-time-only page with multiple items keeps every amount and the Total row', () => {
     const html = renderPage('ssr-parity-onetime-multi-token', {
       id: 'estimate-ssr-parity-ot-multi',

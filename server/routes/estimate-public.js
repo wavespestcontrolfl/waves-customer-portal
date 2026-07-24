@@ -4581,12 +4581,22 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const manualOneTimeDiscount = (!quoteRequired && hasRealOneTime)
     ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
     : 0;
-  const oneTimeSingleRowNoDiscount = billableOneTimeItems.length === 1
-    && manualOneTimeDiscount === 0;
+  // "Single undiscounted row" requires the card's NET total to equal the
+  // lone billable row's amount: an engine/member discount row (e.g.
+  // one_time_adjustment −$110) isn't rendered as a row and isn't
+  // manualDiscount either, but it nets separatelyBilledOneTimeTotal below
+  // the gross row price — dropping the total row there would leave the page
+  // stating only the gross while accept charges the net (codex #2979 r1).
+  const loneBillableOneTimeAmount = billableOneTimeItems.length === 1
+    ? oneTimeItemAmount(billableOneTimeItems[0])
+    : null;
+  const oneTimeSingleRowNoDiscount = loneBillableOneTimeAmount != null
+    && manualOneTimeDiscount === 0
+    && Math.abs(separatelyBilledOneTimeTotal - loneBillableOneTimeAmount) < 0.005;
   const suppressLoneOneTimeRowAmount = isOneTimeOnly
     && oneTimeSingleRowNoDiscount
     && billableOneTimeItems[0].serviceSpecificDiscountApplied !== true
-    && Math.abs(oneTimeItemAmount(billableOneTimeItems[0]) - onetimeTotal) < 0.005;
+    && Math.abs(loneBillableOneTimeAmount - onetimeTotal) < 0.005;
   const realOneTimeRows = billableOneTimeItems.map((it) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
