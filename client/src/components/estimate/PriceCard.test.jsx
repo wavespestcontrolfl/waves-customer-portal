@@ -300,6 +300,32 @@ describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is al
     expect(screen.queryByText(/applications per year included/)).toBeNull();
   });
 
+  it('lawn/T&S per-application cards never show the monthly note at ANY cadence (07-24 audit P1)', () => {
+    // 4/6/9-visit tiers where monthly ≠ per-app — the exact fixtures the
+    // audit flagged as untested (the old lawn test used a 12-visit tier
+    // where monthly == per-app and the note was silent by accident). The
+    // server stamps billedPerApplication on lawn/T&S rows because the
+    // converter bills them per application.
+    for (const [visits, per] of [[4, 111], [6, 111], [9, 91.47]]) {
+      const { unmount } = render(
+        <PriceCard
+          preferPerApplicationPrice
+          frequency={{
+            key: 'recurring',
+            billingFrequencyKey: 'monthly',
+            label: 'Standard',
+            monthly: Math.round(((per * visits) / 12) * 100) / 100,
+            perTreatment: per,
+            visitsPerYear: visits,
+            billedPerApplication: true,
+          }}
+        />,
+      );
+      expect(screen.queryByText(/Billed \$/)).toBeNull();
+      unmount();
+    }
+  });
+
   it('rowless per-application cards show a muted cadence count, never the "included" headline (codex P2)', () => {
     render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.getByText(/4 applications per year/)).toBeInTheDocument();

@@ -465,4 +465,29 @@ describe('termite-bait rows with explicit per-application fields (billed per app
     expect(entry.visitsPerYear).toBe(4);
     expect(entry.billedPerApplication).toBeUndefined();
   });
+
+  test('lawn + T&S per-application rows carry billedPerApplication; mosquito seasonal spread does not (07-24 audit P1)', async () => {
+    const estimate = pestMosquitoTermiteEstimate();
+    estimate.estimate_data.result.recurring.services.push(
+      { name: 'Lawn Care (Standard)', service: 'lawn_care', mo: 55.5, monthly: 55.5, perTreatment: 111, visitsPerYear: 6 },
+      { name: 'Tree & Shrub (Enhanced)', service: 'tree_shrub', mo: 68.6, monthly: 68.6, perTreatment: 91.47, visitsPerYear: 9 },
+    );
+    const bundle = await buildPricingBundle(estimate);
+    for (const key of ['lawn_care', 'tree_shrub']) {
+      const section = bundle.services.find((s) => s.key === key);
+      expect(section).toBeTruthy();
+      for (const entry of section.frequencies) {
+        // Converter bills new lawn/T&S signups per application — the card's
+        // per-app headline IS the charge, so the "Billed $X/mo" note must
+        // stay silent on every cadence entry (owner copy ruling 2026-07-23).
+        expect(entry.billedPerApplication).toBe(true);
+      }
+    }
+    const mosquito = bundle.services.find((s) => s.key === 'mosquito');
+    if (mosquito) {
+      for (const entry of mosquito.frequencies) {
+        expect(entry.billedPerApplication).toBeUndefined();
+      }
+    }
+  });
 });

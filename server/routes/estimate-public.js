@@ -15006,6 +15006,16 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
       effectiveVisits = TERMITE_CHECKS_PER_YEAR;
       displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
     }
+  } else if ((key === 'lawn_care' || key === 'tree_shrub') && displayPrice && visitsPerYear) {
+    // Lawn + Tree & Shrub recurring convert to PER-APPLICATION billing for
+    // every new signup (estimate-converter per_application stamp; pinned by
+    // per-application-billing.test.js) — the card's per-app headline IS the
+    // charge, so the "Billed $X/mo" note must stay silent here (owner copy
+    // ruling 2026-07-23; 07-24 audit P1: the note leaked onto every
+    // non-monthly lawn/T&S cadence card, including the 9x Enhanced tier).
+    // Mosquito is deliberately NOT flagged: its seasonal program genuinely
+    // spreads 9 visits across 12 monthly payments, so the note stays true.
+    billedPerApplication = true;
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
