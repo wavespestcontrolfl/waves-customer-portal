@@ -1600,13 +1600,20 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
   test('service-keyword city framing flags; bare pest-word mentions pass (Codex round 7)', () => {
     for (const body of [
       'Need mosquito control in Cape Coral? Start with source reduction.',
-      'Your Naples pest control guide for new homeowners.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
     }
-    const factual = guardrails.evaluate({ body: 'Our team reviewed Miami termite research before writing this guide.' }, {});
-    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    // Guide compounds are editorial throughout the gate — Codex round 32
+    // (astro) superseded the earlier round-7 expectation that guide titles
+    // flag ("Our Naples pest control guide explains local options" passes).
+    for (const body of [
+      'Your Naples pest control guide for new homeowners.',
+      'Our team reviewed Miami termite research before writing this guide.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
   });
 
   test('nearby island/town claims are covered; spoke-host absolute URLs and specialty city routes are policed (Codex round 7)', () => {
@@ -1777,7 +1784,7 @@ describe('footprint gate — round-12 hardening (Codex findings + astro r12 pari
   test('compound service keywords (tree and shrub, lawn & pest) are caught', () => {
     for (const body of [
       'Need tree and shrub care in Naples?',
-      'Lawn & pest control in Cape Coral is competitive.',
+      'Lawn & pest control services in Cape Coral',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
@@ -1867,5 +1874,99 @@ describe('footprint/tenure/citation — round-13 hardening (Codex findings)', ()
     expect(withGlyphs.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
     const bareGlyph = guardrails.evaluate({ body: 'Dry turf invites chinch bugs.' }, {});
     expect(bareGlyph.findings.some((f) => f.code === 'CITATION_TOKEN_RESIDUE')).toBe(true);
+  });
+});
+
+describe('footprint gate — astro round-13 parity (long lists, idiom, semicolons, repeats, offer/provide)', () => {
+  test('long pre-disclaimer city lists pass', () => {
+    const r = guardrails.evaluate({ body: 'Naples, Fort Myers, Cape Coral, Bonita Springs, Estero, and Marco Island are outside our service area.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('serving-up idiom passes on brand and standalone arms', () => {
+    for (const body of [
+      'Waves is serving up a Naples-vs-Sarasota comparison.',
+      'Now serving up fresh insights on Naples termite season.',
+      'We are serving up a Tampa-vs-Bradenton pressure breakdown.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('a factual clause after a semicolon is not glued onto a claim list', () => {
+    const factual = guardrails.evaluate({ body: 'We serve Sarasota; Tampa mosquito season starts earlier than ours.' }, {});
+    expect(factual.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const list = guardrails.evaluate({ body: 'We serve Sarasota; Venice; and Naples.' }, {});
+    expect(list.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('a repeated city after its disclaimer is examined as its own claim', () => {
+    const r = guardrails.evaluate({ body: 'Naples is outside our service area — our techs service Naples homes on request.' }, {});
+    expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    const honest = guardrails.evaluate({ body: "We don't serve Naples, Tampa, or Miami." }, {});
+    expect(honest.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+
+  test('offer/provide claims with a service object flag; editorial objects pass', () => {
+    for (const body of [
+      'We offer pest control services in Naples.',
+      'We provide service in Tampa year-round.',
+      'Waves offers termite inspection plans for Cape Coral homes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    const editorial = guardrails.evaluate({ body: 'We provide this checklist so Naples homeowners can compare notes.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+  });
+});
+
+describe('footprint gate — parity pre-push hardening (mid-fragment conjunctions, object binding)', () => {
+  test('semicolon fragments with mid-list conjunctions still rejoin and flag', () => {
+    for (const body of [
+      'We serve Sarasota; Naples and Tampa.',
+      'We serve Sarasota; Venice, Naples, and Tampa.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('offer/provide/deliver require a service-shaped object, not mere proximity', () => {
+    const editorial = guardrails.evaluate({ body: 'We deliver pest research to help Naples homeowners compare options.' }, {});
+    expect(editorial.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    const claim = guardrails.evaluate({ body: 'We deliver reliable pest control in Naples.' }, {});
+    expect(claim.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+  });
+
+  test('portal r36 + astro r10: HTML wrappers, punctuated titles, CTA-pivot negation stops, needed pivots, county provide claims, wh-operation claims, gov CTAs, data demand', () => {
+    for (const body of [
+      '<strong>Naples pest control services</strong> now available',
+      '<h2>Naples pest control services</h2>',
+      '## Naples pest control services.',
+      'We do not serve Sarasota (but call us for Naples pest control).',
+      'No need for an inspection: book pest control in Naples today.',
+      'Do you serve Naples? No, but we visit if needed.',
+      '| Do you serve Naples? | Do you serve Sarasota? |\n| --- | --- |\n| No, but we visit if needed | Yes |',
+      '| Do you serve Naples? |\n| --- |\n| No, but we visit as needed |',
+      'We provide pest control in Lee County when county-run mosquito control cannot help.',
+      'Pest control in Naples is where we operate.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      'Calls from Naples in Google Trends data are common for our team to review.',
+      'Call the county for mosquito control in Naples.',
+      'Text the city for mosquito control in Naples.',
+      'Competitors offer pest control services in Naples.',
+      '## Naples pest control research.',
+      '| Do you serve Naples? |\n| --- |\n| No |',
+      'Lee County runs county-run mosquito control districts.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'OFF_FOOTPRINT_CITY_CLAIM')).toBe(false);
+    }
   });
 });
