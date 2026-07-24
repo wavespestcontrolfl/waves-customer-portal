@@ -6437,7 +6437,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .first('id'));
         } catch (e) { /* fail toward review */ }
       }
-      const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      // The shared converter constant — the disclosure, the invoice line,
+      // and this cap must move together if the fee ever changes (Codex
+      // #2980). Fallback to the historical $99 only if the converter
+      // module can't load (never widen the cap on a require failure).
+      let WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      try {
+        const sharedFee = Number(require('../services/estimate-converter').WAVEGUARD_SETUP_FEE);
+        if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
+      } catch (e) { /* keep the conservative literal */ }
       let setupFeeAllowance = 0;
       if (acceptMintedInvoice || planChoiceSetupFeeSelected) {
         try {

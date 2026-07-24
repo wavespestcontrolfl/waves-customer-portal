@@ -118,8 +118,6 @@ export default function SecureAppointmentPage() {
   // must be picked before the card form appears on plan-bearing pages.
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [planBusy, setPlanBusy] = useState(false);
-  // prepay_selected fallback: "save a card and pay per visit instead".
-  const [cardFallbackOpen, setCardFallbackOpen] = useState(false);
 
   const complete = useCallback(async (setupIntentId) => {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
@@ -251,7 +249,11 @@ export default function SecureAppointmentPage() {
       if (body.code === 'no_longer_needed') { setState('closed'); return; }
       if (body.code === 'already_secured') { setState('secured'); return; }
       // plan_unavailable / conflicts: the server state moved — re-render truth.
+      const wasSwitch = state === 'prepay_selected';
       await refresh();
+      if (wasSwitch) {
+        setError('That change couldn’t be completed — if you just paid your annual invoice you’re all set; otherwise please try again in a moment.');
+      }
     } catch {
       setError('We could not save your choice. Please try again, or text us and we’ll help.');
     } finally {
@@ -332,49 +334,30 @@ export default function SecureAppointmentPage() {
           <a href={data?.payUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             Pay your annual invoice
           </a>
-          {!cardFallbackOpen ? (
-            <button
-              type="button"
-              onClick={() => { setCardFallbackOpen(true); selectPlan('per_application'); }}
-              style={{
-                ...PRIMARY_CTA,
-                marginTop: 10,
-                background: '#FFFFFF',
-                color: S.text,
-                border: `1px solid ${S.border}`,
-                fontWeight: 700,
-              }}
-            >
-              Save a card and pay per visit instead
-            </button>
-          ) : null}
-          {cardFallbackOpen && data?.clientSecret ? (
-            <>
-              <InlineAutoPayCapture
-                ref={captureRef}
-                intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey }}
-                loadStripeSdk={loadStripeSdk}
-                busy={busy}
-                onStateChange={setCaptureState}
-              />
-              {error ? (
-                <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
-              ) : null}
-              <button
-                type="button"
-                data-glass-accent=""
-                onClick={handleSave}
-                disabled={busy || !(captureState.ready && captureState.agreed)}
-                style={{
-                  ...PRIMARY_CTA,
-                  marginTop: 16,
-                  opacity: busy || !(captureState.ready && captureState.agreed) ? 0.55 : 1,
-                  cursor: busy || !(captureState.ready && captureState.agreed) ? 'default' : 'pointer',
-                }}
-              >
-                {busy ? 'Saving…' : 'Save card & pay per visit'}
-              </button>
-            </>
+          {/* The card form is deliberately NOT rendered here: switching to
+              per-visit must first succeed server-side (it voids the pending
+              annual invoice and cancels its term). On success selectPlan
+              re-pulls the payload and the page renders the ready plan view
+              with the capture form; on refusal the error shows instead —
+              never a card save recorded against a live annual selection. */}
+          <button
+            type="button"
+            onClick={() => selectPlan('per_application')}
+            disabled={planBusy}
+            style={{
+              ...PRIMARY_CTA,
+              marginTop: 10,
+              background: '#FFFFFF',
+              color: S.text,
+              border: `1px solid ${S.border}`,
+              fontWeight: 700,
+              opacity: planBusy ? 0.55 : 1,
+            }}
+          >
+            {planBusy ? 'Switching…' : 'Save a card and pay per visit instead'}
+          </button>
+          {error ? (
+            <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
           ) : null}
           <ContactRow />
         </Card>

@@ -60,6 +60,12 @@ const PLAN_CLASS_BY_SERVICE_KEY = {
 
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 
+// A prepay invoice in ANY of these states can never be paid — the selection
+// it anchored is dead and the plan choice must reopen (Codex #2980: office
+// cancel/refund lanes use cancelled/refunded, not just void; treating only
+// 'void' as terminal left the picker stuck on an unusable pay link).
+const TERMINAL_INVOICE_STATUSES = ['void', 'cancelled', 'canceled', 'refunded'];
+
 // Mirror of admin-customers.js annualPrepayOverlapStatusClause (kept
 // inline: that route exports the LOCKING assert via _private, which the
 // write path uses; this read-side probe must not take locks). A cancelled
@@ -214,7 +220,8 @@ async function prepaySelectionState(request) {
     const invoice = await db('invoices')
       .where({ id: request.prepay_invoice_id })
       .first('id', 'token', 'status');
-    if (!invoice || invoice.status === 'void') return null; // office voided — plan choice reopens
+    // Office voided/cancelled/refunded it — the plan choice reopens.
+    if (!invoice || TERMINAL_INVOICE_STATUSES.includes(invoice.status)) return null;
     if (['paid', 'prepaid'].includes(invoice.status)) return { state: 'secured' };
     return { state: 'prepay_selected', payUrl: portalUrl(`/pay/${invoice.token}`) };
   } catch (err) {
@@ -282,7 +289,7 @@ async function selectSecurePlan({ token, plan }) {
         .where({ id: request.prepay_invoice_id })
         .first('id', 'status');
       if (prior && ['paid', 'prepaid'].includes(prior.status)) throw fail('already_secured');
-      if (prior && prior.status !== 'void') {
+      if (prior && !TERMINAL_INVOICE_STATUSES.includes(prior.status)) {
         try {
           await require('./invoice').voidInvoice(prior.id);
         } catch (err) {
@@ -325,7 +332,7 @@ async function selectSecurePlan({ token, plan }) {
     const existing = await db('invoices')
       .where({ id: request.prepay_invoice_id })
       .first('id', 'token', 'status');
-    if (existing && existing.status !== 'void') {
+    if (existing && !TERMINAL_INVOICE_STATUSES.includes(existing.status)) {
       return { ok: true, plan: 'prepay_annual', payUrl: portalUrl(`/pay/${existing.token}`) };
     }
     await db('appointment_card_requests')
@@ -373,6 +380,32 @@ async function selectSecurePlan({ token, plan }) {
         trx, visit.customer_id, termStart, false,
         'Customer already has an annual prepay term through',
       );
+
+      // Revalidate IMMEDIATELY before minting (Codex #2980): the liveness
+      // and payer checks above ran outside this transaction — an office
+      // cancel/reschedule or a payer attach in that window must abort the
+      // mint, not produce a payable annual invoice for a dead or
+      // third-party-billed visit. Payer lookup failure refuses (fail
+      // toward not billing the wrong party), same as the pre-check.
+      const liveVisit = await loadPlanVisit(visit.id, trx);
+      const liveDate = liveVisit ? callBookingDateOnly(liveVisit.scheduled_date) : null;
+      if (!liveVisit
+        || !LIVE_VISIT_STATUSES.includes(liveVisit.status)
+        || (liveDate && liveDate < today)) {
+        throw fail('no_longer_needed');
+      }
+      let payerNow = null;
+      try {
+        payerNow = await PayerService.resolveForInvoice({
+          customerId: String(request.customer_id),
+          scheduledServiceId: String(request.scheduled_service_id),
+          throwOnError: true,
+        });
+      } catch (payerErr) {
+        logger.warn(`[secure-plans] in-transaction payer re-check failed — refusing mint for request ${request.id}: ${payerErr.message}`);
+        throw fail('no_longer_needed');
+      }
+      if (payerNow?.payerId) throw fail('no_longer_needed');
 
       const invoice = await InvoiceService.create({
         database: trx,

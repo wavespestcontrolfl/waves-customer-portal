@@ -266,3 +266,11 @@ describe('self-review exclusions (double-billing + tax guards)', () => {
     expect(withForeignTerm).toBeNull();
   });
 });
+
+describe('terminal prepay invoice states reopen the choice (Codex #2980)', () => {
+  const prepayRequest = { id: 'r1', selected_plan: 'prepay_annual', prepay_invoice_id: 'inv1' };
+  test.each(['void', 'cancelled', 'canceled', 'refunded'])('%s invoice → selection state null (picker reopens)', async (status) => {
+    setTables({ invoice: { id: 'inv1', token: 'tok123', status } });
+    expect(await prepaySelectionState(prepayRequest)).toBeNull();
+  });
+});

@@ -358,3 +358,56 @@ describe('selectSecurePlan — series-anchor and switch semantics (self-review f
     expect(release).toBeTruthy();
   });
 });
+
+describe('terminal-state + in-transaction revalidation (Codex #2980)', () => {
+  test('a CANCELLED prior prepay invoice is treated as stale on switch — no void call, anchors cleared, selection proceeds', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-old', token: 'oldtok', status: 'cancelled' }) },
+    });
+    const result = await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(result.ok).toBe(true);
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+    expect(updatesFor('appointment_card_requests').find((p) => p.prepay_invoice_id === null)).toBeTruthy();
+  });
+
+  test('a REFUNDED anchor releases and prepay re-mints fresh (not just void)', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: () => ({ ...pendingRequest, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-old' }),
+      },
+      invoices: { first: () => ({ id: 'inv-old', token: 'oldtok', status: 'refunded' }) },
+    });
+    const result = await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(result.payUrl).toBe('https://portal.test/pay/invtok');
+    expect(mockInvoiceCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a visit cancelled between the pre-check and the transaction aborts the mint (in-trx revalidation)', async () => {
+    let visitReads = 0;
+    setTables({
+      scheduled_services: {
+        first: () => {
+          visitReads += 1;
+          // Reads 1-2 (pre-check + context) see the live visit; the
+          // in-transaction revalidation (3rd read) sees the office cancel.
+          return visitReads >= 3 ? { ...pestVisit, status: 'cancelled' } : { ...pestVisit };
+        },
+        select: () => [{ scheduled_date: FUTURE }],
+      },
+    });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'no_longer_needed' });
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
+    expect(mockCreateTerm).not.toHaveBeenCalled();
+  });
+
+  test('a payer attached between the pre-check and the transaction aborts the mint', async () => {
+    mockResolveForInvoice
+      .mockResolvedValueOnce(null) // pre-check: no payer
+      .mockResolvedValueOnce({ payerId: 'p-late' }); // in-trx re-check
+    await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'no_longer_needed' });
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
+  });
+});
