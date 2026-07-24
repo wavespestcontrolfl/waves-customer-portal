@@ -13901,7 +13901,8 @@ function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
 // lawn inside the pest cadence. Pricing is unchanged — the 4/6/9/12 cost-floor
-// numbers, relabeled as Quarterly / Bi-monthly / 9 visits / yr / Monthly.
+// numbers, relabeled as Quarterly / Bi-monthly / Every 6 weeks / Monthly
+// (visit counts render on the pills — owner 2026-07-23).
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];

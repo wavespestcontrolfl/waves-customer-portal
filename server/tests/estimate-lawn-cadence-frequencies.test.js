@@ -28,7 +28,7 @@ function lawnEstData({ recommendedVisits = 9 } = {}) {
 }
 
 describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () => {
-  test('maps the sold tiers to Bi-monthly / 9 visits / yr / Monthly and drops the retired Quarterly cadence', () => {
+  test('maps the sold tiers to Bi-monthly / Every 6 weeks / Monthly and drops the retired Quarterly cadence', () => {
     // basic/Quarterly is retired for new sales (owner directive 2026-07-09) —
     // stored rows still carry it, but it must never be re-offered.
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());

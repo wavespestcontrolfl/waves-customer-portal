@@ -51,7 +51,10 @@ function Stars({ rating }) {
 function ReviewCard({ review }) {
   return (
     <div style={estimateInnerBox({ padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150 })}>
-      <Stars rating={review.starRating} />
+      {/* Fallback cards are profile LINKS, not reviews — a fabricated
+          five-star row (and its "Rated 5 out of 5 stars" aria-label) on
+          them misrepresents an unrated card (estimator audit 2026-07-24). */}
+      {review.fallback ? null : <Stars rating={review.starRating} />}
       <p style={{
         fontSize: 14, margin: '0 0 12px', lineHeight: 1.5, color: W.textBody,
         fontStyle: review.fallback ? 'normal' : 'italic', flex: 1,
