@@ -571,18 +571,19 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
     }
-    // REPLAY-vs-NEW curve normalization (codex #2966 r7 P1): stored
-    // engineInputs from pre-stamp estimates carry no services.pest.version,
-    // and forwarding them unchanged would silently reprice an already-SOLD
-    // bi-monthly/monthly pest quote on the v2 default at the next admin
-    // save / membership reconcile / revision. An unstamped pest INPUT is a
-    // legacy replay exactly when the STORED RESULT already has a priced pest
-    // line — normalize it to that line's curve (unstamped line = v1). A
-    // stored estimate with NO pest result line means pest was just added:
-    // genuinely new, keeps the live v2 default. ENGINE_REQUEST payloads are
-    // fresh builder pricing and are never normalized.
-    if (source === 'ENGINE_INPUTS'
-      && v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
+    // REPLAY-vs-NEW curve normalization (codex #2966 r7-r9 P1s): pre-stamp
+    // replay shapes carry no services.pest.version — stored engineInputs AND
+    // persisted Admin-V2 engineRequests (translateV2CallToV1Input emits no
+    // stamp) — and forwarding them unchanged would silently reprice an
+    // already-SOLD bi-monthly/monthly pest quote on the v2 default at the
+    // next save / membership reconcile / revision. The provenance signal is
+    // the STORED RESULT: an unstamped pest input with a priced stored pest
+    // line is a replay of that line's curve (unstamped line = v1),
+    // regardless of which replay shape carried it. No stored pest line =
+    // pest was just added: genuinely new, keeps the live v2 default. The
+    // caller's write-back then persists the resolved curve into engineInputs
+    // so future replays are stamped at the source.
+    if (v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
       && !v1Input.services.pest.version) {
       const storedRoot = estimateResultRoot(estimateData);
       // Agent drafts store their prior priced output as RAW engineResult
