@@ -3467,7 +3467,10 @@ function countCriticalPropertyFields(record) {
 // Requiring lotSize for these sent complete county records into the
 // aggressive AI search, which then "found" the development's master parcel
 // and published it as the unit's lot.
-const NO_PRIVATE_LOT_PROPERTY_TYPES = new Set(['Condo', 'Apartment', 'Multifamily', 'HOA Common Area']);
+// 'Multifamily' is deliberately ABSENT: it is also the normalization for
+// whole-property triplexes/quadplexes (normalizeCountyPropertyType), which
+// are owned fee-simple parcels whose lot the fallback must still fetch.
+const NO_PRIVATE_LOT_PROPERTY_TYPES = new Set(['Condo', 'Apartment', 'HOA Common Area']);
 
 function hasCountyPricingCore(record) {
   if (!record?.squareFootage || !record?.propertyType) return false;

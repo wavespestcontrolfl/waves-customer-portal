@@ -737,6 +737,81 @@ describe('codex r3: dispute flags survive the V2 replacement', () => {
   });
 });
 
+// ── Codex round-4 regressions (reviewed 74ec0d66) ──
+
+describe('codex r4: owned multifamily still requires a lot fact', () => {
+  test('a triplex/quadplex (normalized Multifamily) without lotSize is INCOMPLETE', () => {
+    expect(_private.hasCountyPricingCore({
+      squareFootage: 3600, lotSize: null, propertyType: 'Multifamily',
+    })).toBe(false);
+    expect(_private.hasCountyPricingCore({
+      squareFootage: 3600, lotSize: 12000, propertyType: 'Multifamily',
+    })).toBe(true);
+    // Unit-context types keep the no-lot completeness.
+    expect(_private.hasCountyPricingCore({
+      squareFootage: 1154, lotSize: null, propertyType: 'Condo',
+    })).toBe(true);
+  });
+});
+
+describe('codex r4: lot evidence source follows its true origin', () => {
+  test('an AI/listing lot on a parcel-matched record is NOT labeled county', () => {
+    const hybridRecord = {
+      propertyType: 'Single Family',
+      squareFootage: 2400,
+      lotSize: 200000,
+      _actuals: { lotSqft: 500000 },
+      formattedAddress: '900 Ranch Rd, Myakka City, FL',
+      // Parcel matched (id present) but the county roll had NO lot figure.
+      _parcel: { parcelId: '999', county: 'Manatee', lotSqft: null, aggregated: false },
+      _fieldEvidence: {
+        squareFootage: {
+          value: 2400,
+          sourceType: 'county',
+          evidence: [{ value: 2400, sourceType: 'county', provider: 'manatee_pao', url: 'https://www.manateepao.gov/parcel/?parid=999' }],
+        },
+        lotSize: {
+          value: 200000,
+          sourceType: 'listing',
+          evidence: [{ value: 200000, sourceType: 'listing', provider: 'claude', url: 'https://www.zillow.com/homedetails/900-ranch-rd/9_zpid/' }],
+        },
+      },
+    };
+    const result = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: hybridRecord,
+      extraction: null,
+      intent: { is_commercial: false },
+      propertyFacts: { home: { value: 2400 }, lot: { value: 200000 }, stories: 1, tenant: false },
+      address: '900 Ranch Rd, Myakka City, FL',
+    });
+    const lotEvidence = result.facts.evidence.find((e) => e.field === 'parcel_area_sqft');
+    expect(lotEvidence.sourceType).toBe('listing');
+    expect(lotEvidence.value).toBe(500000);
+    expect(lotEvidence.extractionConfidence).not.toBe('high');
+  });
+
+  test('a genuine county lot keeps its county label', () => {
+    const countyRecord = {
+      propertyType: 'Single Family',
+      squareFootage: 2400,
+      lotSize: 8400,
+      formattedAddress: '8920 49th Ave E, Bradenton, FL',
+      _parcel: { parcelId: '647302459', county: 'Manatee', lotSqft: 8400, aggregated: false },
+      _fieldEvidence: {},
+    };
+    const result = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: countyRecord,
+      extraction: null,
+      intent: { is_commercial: false },
+      propertyFacts: { home: { value: 2400 }, lot: { value: 8400 }, stories: 1, tenant: false },
+      address: '8920 49th Ave E, Bradenton, FL',
+    });
+    const lotEvidence = result.facts.evidence.find((e) => e.field === 'parcel_area_sqft');
+    expect(lotEvidence.sourceType).toBe('county');
+    expect(lotEvidence.value).toBe(8400);
+  });
+});
+
 // ── Estimator integration: story provenance + shadow diff ──
 
 describe('buildEngineInput story provenance', () => {

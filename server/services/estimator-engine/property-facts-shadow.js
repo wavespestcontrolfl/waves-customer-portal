@@ -199,21 +199,36 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   }
 
   // Lot / parcel. An association aggregate's parcel is the MASTER parcel.
-  const lotValue = positive(parcel.lotSqft) || positive(parcel.polygonAreaSqft)
-    || positive(propertyRecord?._actuals?.lotSqft) || positive(propertyRecord?.lotSize);
+  // The source label follows WHERE the value actually came from — a hybrid
+  // lookup can match a county parcel while the lot number itself is
+  // AI/listing evidence, which must not masquerade as an assessed parcel
+  // measurement (codex r4 P1).
+  const countyLot = positive(parcel.lotSqft) || positive(parcel.polygonAreaSqft);
+  const recordLot = positive(propertyRecord?._actuals?.lotSqft) || positive(propertyRecord?.lotSize);
+  const lotValue = countyLot || recordLot;
   if (lotValue) {
+    const lotEvidenceEntries = fieldEvidenceItems(propertyRecord, 'lotSize');
+    const recordLotSourceType = lotEvidenceEntries[0]?.sourceType || 'unknown';
+    const fromCounty = !!countyLot;
     out.push({
       id: nextId('lot'),
       field: 'parcel_area_sqft',
-      value: positive(propertyRecord?._actuals?.lotSqft) || lotValue,
+      // A county lot may itself carry an uncapped actual (cadastral clamp);
+      // only county-sourced actuals upgrade a county value.
+      value: fromCounty
+        ? ((recordLotSourceType === 'county' || recordLotSourceType === 'cadastral')
+          && positive(propertyRecord?._actuals?.lotSqft) > countyLot
+          ? positive(propertyRecord._actuals.lotSqft) : countyLot)
+        : recordLot,
       units: 'sqft',
       scope: aggregated ? 'association' : 'parcel',
       directness: 'direct',
-      sourceName: parcel.parcelId ? 'county parcel' : 'lookup',
-      sourceType: parcel.parcelId ? 'county' : 'unknown',
+      sourceName: fromCounty ? 'county parcel' : (lotEvidenceEntries[0]?.provider || 'lookup'),
+      sourceType: fromCounty ? 'county' : recordLotSourceType,
       exactAddressMatch: true,
       exactSubpremiseMatch: false,
-      extractionConfidence: 'high',
+      extractionConfidence: fromCounty ? 'high'
+        : (lotEvidenceEntries[0]?.providerConfidence || lotEvidenceEntries[0]?.confidence || 'medium'),
       warnings: [],
     });
   }
