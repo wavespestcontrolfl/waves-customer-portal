@@ -138,6 +138,39 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     const { merged } = adoptV2PrimaryFields(v1Stub(), shaky);
     expect(merged.first_name).toBe('Rita');
   });
+
+  test('a confident V2 conflict replaces the name AS A UNIT — no V1-surname chimera', () => {
+    const v1 = { ...v1Stub(), first_name: 'John', last_name: 'Smith' };
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: 'Jane', last_name: null, name_full: 'Jane', name_confidence: 0.95 };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.first_name).toBe('Jane');
+    expect(merged.last_name).toBeNull();
+  });
+});
+
+describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
+  test('a DIFFERENT V2 street clears a V1-only unit', () => {
+    const v1 = { ...v1Stub(), address_line1: '999 Old Rd', address_line2: 'Unit 4', city: 'Venice' };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
+    expect(merged.address_line1).toBe('123 Seagrass Ln');
+    expect(merged.address_line2).toBeNull();
+    expect(merged.city).toBe('Bradenton');
+  });
+
+  test('the SAME street keeps a V1 unit V2 simply did not capture', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 seagrass ln', address_line2: 'Unit 4' };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
+    expect(merged.address_line2).toBe('Unit 4');
+  });
+
+  test('a V2-heard unit wins outright', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 Seagrass Ln', address_line2: 'Unit 4' };
+    const v2 = v2Fixture();
+    v2.property = { ...v2.property, service_address: { ...v2.property.service_address, street_line_2: 'Apt 7' } };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.address_line2).toBe('Apt 7');
+  });
 });
 
 describe('adoptV2PrimaryFields — scheduling verdict', () => {
@@ -202,6 +235,22 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
     const spoken = v2Fixture();
     spoken.caller = { ...spoken.caller, phone_source: 'spoken' };
     expect(adoptV2PrimaryFields(v1Stub(), spoken).merged.phone).toBe('+15555550188');
+  });
+
+  test('a SPOKEN V2 callback replaces a V1 phone that is just the ANI backfill', () => {
+    const spoken = v2Fixture();
+    spoken.caller = { ...spoken.caller, phone_source: 'spoken', phone_e164: '+15555550188' };
+    const aniEcho = { ...v1Stub(), phone: '+15555550100' };
+    const { merged } = adoptV2PrimaryFields(aniEcho, spoken, { callerPhone: '+15555550100' });
+    expect(merged.phone).toBe('+15555550188');
+  });
+
+  test('a V1-heard callback that differs from the ANI is kept over the V2 spoken number', () => {
+    const spoken = v2Fixture();
+    spoken.caller = { ...spoken.caller, phone_source: 'spoken', phone_e164: '+15555550188' };
+    const realV1Callback = { ...v1Stub(), phone: '+15555550177' };
+    const { merged } = adoptV2PrimaryFields(realV1Callback, spoken, { callerPhone: '+15555550100' });
+    expect(merged.phone).toBe('+15555550177');
   });
 
   test('a V1 matched_service survives (recurring-intent backstop already ran on it)', () => {

@@ -49,11 +49,17 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 // valid, adoptV2PrimaryFields() makes V2 the driver for the canonical
 // customer/lead writes (adoption site right below the shadow-extraction
 // block). Appointment auto-create and every SMS stay behind their existing
-// gates (canAutoRoute / evaluateV2AppointmentGate / TCPA). Default ON with
-// V2 enabled; kill switch CALL_EXTRACTION_V2_PRIMARY=false. Read per call so
-// a Railway var flip demotes without waiting on anything else.
+// gates (canAutoRoute / evaluateV2AppointmentGate / TCPA). REQUIRES enforce
+// mode (DRIVES_ROUTING): demoting routing to shadow demotes adoption with it,
+// so "shadow" always means the full legacy V1 drive — V2 must never book or
+// mint records in a mode whose routing gate (canAutoRoute → v2RoutingBlocked)
+// isn't running (codex P1, PR #2972). Kill switch for adoption alone:
+// CALL_EXTRACTION_V2_PRIMARY=false. Read per call so a Railway var flip
+// demotes without waiting on anything else.
 function callExtractionV2PrimaryEnabled() {
-  return CALL_EXTRACTION_V2_ENABLED && process.env.CALL_EXTRACTION_V2_PRIMARY !== 'false';
+  return CALL_EXTRACTION_V2_ENABLED
+    && CALL_EXTRACTION_V2_DRIVES_ROUTING
+    && process.env.CALL_EXTRACTION_V2_PRIMARY !== 'false';
 }
 // Boot-time flag audit — makes three silent operational traps visible:
 // (1) enforce mode is the OR of two env vars, so unsetting
@@ -4677,11 +4683,19 @@ const CallRecordingProcessor = {
     // The merged object stays legacy-flat, so canonical ai_extraction keeps
     // the reader-compatible shape.
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
-      const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, { etWallClock: v2IsoToEtWallClock });
+      const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
+        etWallClock: v2IsoToEtWallClock,
+        callerPhone: contactPhone,
+      });
       extracted = adoption.merged;
       if (adoption.adoptedFields.length) {
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);
+        // The owner recurring-intent backstop ran on the PRE-adoption V1
+        // fields (a stub call had nothing to upgrade). Re-assert it over the
+        // adopted service labels BEFORE any lead write consumes them, exactly
+        // like the enforce path's approved-booking re-assert (codex P2).
+        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
     }
 

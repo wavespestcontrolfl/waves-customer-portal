@@ -223,7 +223,7 @@ function mapCallNatureToLegacy(nature) {
 //     matched_service is fill-gap ON PURPOSE — the deterministic
 //     recurring-intent backstop (owner rule) already ran on the V1 value,
 //     and the enforce path re-adopts + re-asserts it for approved bookings.
-function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock } = {}) {
+function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock, callerPhone = null } = {}) {
   const adoptedFields = [];
   if (!isV2Extraction(v2Extraction)) return { merged: extracted, adoptedFields };
 
@@ -251,18 +251,37 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   const filler = (key, v2Value) => { if (!has(merged[key]) && has(v2Value)) adopt(key, v2Value); };
 
   // Identity — fill-gap, or v2-wins on conflict only at high name confidence.
+  // On a confident CONFLICT the V2 name replaces the V1 name AS A UNIT —
+  // including clearing a V1 part V2 did not hear. Keeping V1's surname under
+  // a V2 first name would mint a chimera identity no extractor produced and
+  // drive customer matching with it (codex P2).
   const v1HasName = has(merged.first_name) || has(merged.last_name);
   const v2HasName = has(flat.first_name) || has(flat.last_name);
   const nameConfident = typeof caller.name_confidence === 'number' && caller.name_confidence >= 0.9;
-  if (v2HasName && (!v1HasName || nameConfident)) {
+  const namesDiffer = (String(merged.first_name || '').trim().toLowerCase() !== String(flat.first_name || '').trim().toLowerCase())
+    || (String(merged.last_name || '').trim().toLowerCase() !== String(flat.last_name || '').trim().toLowerCase());
+  if (v2HasName && !v1HasName) {
     winner('first_name', flat.first_name);
     winner('last_name', flat.last_name);
+  } else if (v2HasName && v1HasName && nameConfident && namesDiffer) {
+    if (merged.first_name !== (flat.first_name || null)) adopt('first_name', flat.first_name || null);
+    if (merged.last_name !== (flat.last_name || null)) adopt('last_name', flat.last_name || null);
   }
 
   // Service address — v2-wins (the AV / enforce lanes downstream validate and
-  // may further normalize exactly these fields).
+  // may further normalize exactly these fields). When V2 heard a DIFFERENT
+  // street, the whole address is V2's — including clearing a V1-only unit
+  // (address_line2), which otherwise rides along onto a property V2 never
+  // placed it at (codex P2). Same street → V1's unit survives as extra
+  // detail V2 simply didn't capture.
+  const sameStreet = has(merged.address_line1) && has(flat.address_line1)
+    && String(merged.address_line1).trim().toLowerCase() === String(flat.address_line1).trim().toLowerCase();
   winner('address_line1', flat.address_line1);
-  winner('address_line2', flat.address_line2);
+  if (has(flat.address_line2)) {
+    winner('address_line2', flat.address_line2);
+  } else if (has(flat.address_line1) && !sameStreet && has(merged.address_line2)) {
+    adopt('address_line2', null);
+  }
   winner('city', flat.city);
   winner('state', flat.state);
   winner('zip', flat.zip);
@@ -298,8 +317,19 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
 
   // Fill-gap tier.
   filler('email', caller.email);
-  if (caller.phone_source === 'spoken' || caller.phone_source === 'both') {
-    filler('phone', caller.phone_e164);
+  // A V2 SPOKEN callback number replaces an empty V1 phone OR a V1 phone that
+  // is just the caller-ID echo: normalizeCallExtraction backfills
+  // extracted.phone from the Twilio ANI even when V1 heard no callback, so a
+  // plain filler would silently discard the number the caller actually gave
+  // (codex P2). A V1 phone that differs from the ANI is a real V1-heard
+  // callback and is kept. phone_source 'both' matches the ANI by definition —
+  // nothing to replace.
+  if (caller.phone_source === 'spoken' && has(caller.phone_e164)) {
+    const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    const v1PhoneIsAniEcho = has(merged.phone) && has(callerPhone) && last10(merged.phone) === last10(callerPhone);
+    if (!has(merged.phone) || v1PhoneIsAniEcho) {
+      if (merged.phone !== caller.phone_e164) adopt('phone', caller.phone_e164);
+    }
   }
   filler('matched_service', flat.specific_service_name || flat.matched_service);
   filler('requested_service', flat.specific_service_name || flat.matched_service);
