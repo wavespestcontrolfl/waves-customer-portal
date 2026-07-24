@@ -680,24 +680,29 @@ const REQUIRED_FINDINGS_FIELDS = {
   // observed') — a truthful cleared visit has no activity area to name.
   flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
   rodent_trapping: ['species'],
-  // Owner spec §1/§2/§4 mark the full checklists required — all fast taps.
-  // Exceeds the ≤4 budget by owner instruction. Inspection adds conditional
-  // requirements (evidence + suspected type when activity was found) in
-  // validateTypedFindings.
+  // Owner spec §1/§2/§4 marked the full checklists required; the 2026-07-23
+  // simplification (same lane as the T&S closeout) retired the duplicate /
+  // label-only fields, so each list is back inside the ≤4 budget. Inspection
+  // adds conditional requirements (evidence + suspected type when activity
+  // was found) in validateTypedFindings.
   rodent_exclusion: [
-    'exclusion_areas', 'entry_points_addressed', 'exclusion_work_completed',
+    'entry_points_addressed', 'exclusion_work_completed',
     'exclusion_materials', 'remaining_concerns',
   ],
   rodent_sanitation: [
-    'sanitation_areas', 'contamination_level', 'evidence_cleaned',
+    'sanitation_areas', 'contamination_level',
     'sanitation_work_completed', 'sanitation_limitations',
   ],
   rodent_inspection: [
-    'areas_inspected', 'activity_found', 'interior_concern', 'exterior_pressure',
-    'recommended_service', 'urgency',
+    'areas_inspected', 'activity_found', 'recommended_service', 'urgency',
   ],
   wildlife_trapping: ['target_animal'],
-  bed_bug: ['evidence_level', 'treatment_method'],
+  // rooms_treated joined the required core 2026-07-23: with the generic
+  // Areas-treated picker hidden on bed bug completions, it is the ONLY
+  // location capture — a closeout without it would leave the report and
+  // product records with no record of where the treatment occurred
+  // (codex P2 on #2963).
+  bed_bug: ['rooms_treated', 'evidence_level', 'treatment_method'],
   // FS 482.226 report content (Codex P1 on the Phase-3 fields): the two
   // compliance answers are required, not optional — a blank field is
   // silently skipped from the immutable customer report, which is exactly
@@ -1187,6 +1192,19 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       errors.push('"No limitations" cannot be combined with other limitations');
     }
   }
+  // rodent_sanitation publishes "contamination was cleaned and sanitized"
+  // copy — with evidence_cleaned retired (2026-07-23), the work chips are
+  // the only proof cleanup happened. A submission whose only work chip is
+  // the recommendation entry records no performed cleanup, so the report
+  // headline would overclaim (codex P2 r3 on #2963). Every other chip —
+  // including the limited-access entry — describes work that was done.
+  if (type === 'rodent_sanitation') {
+    const work = String(values.sanitation_work_completed || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (work.length && work.every((c) => c === 'Insulation removal recommended')) {
+      errors.push('"Insulation removal recommended" alone records no cleanup work — add the cleanup performed or clear the chip');
+    }
+  }
   if (type === 'rodent_inspection' && enforceRequired && String(values.activity_found) === 'Yes') {
     // Evidence with activity_found "No" stays legal — old droppings with no
     // current activity is a real outcome; only the positive case requires
@@ -1500,8 +1518,12 @@ function trapActivitySentence(values = {}) {
   if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
   if (actions.includes('trap removed')) parts.push('removed traps');
+  // 'Exterior inspection completed' lives on trap_actions since 2026-07-23
+  // (rodent work_completed retired as a duplicate of the action chips); the
+  // work_completed read stays for completions replayed from older payloads.
+  if (actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const work = String(values.work_completed || '').toLowerCase();
-  if (work.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
+  if (work.includes('exterior inspection completed') && !actions.includes('exterior inspection completed')) parts.push('completed an exterior inspection');
   const joined = joinPhrases(parts);
   return joined ? `We ${joined} today.` : null;
 }

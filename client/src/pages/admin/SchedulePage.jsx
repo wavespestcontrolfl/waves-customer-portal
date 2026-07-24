@@ -8309,7 +8309,13 @@ export function CompletionPanel({
     const counts = stationProgram === "trapping"
       ? { traps_checked: String(activeKeys.length - inaccessible) }
       : {
-        total_stations: String(activeKeys.length),
+        // total_stations is termite-only since 2026-07-23: the rodent
+        // schema retired it (the map's pins ARE the roster), and writing it
+        // there would trip the unknown-field rejection at submit
+        // (codex P1 on #2963).
+        ...(stationProgram === "termite"
+          ? { total_stations: String(activeKeys.length) }
+          : {}),
         stations_checked: String(activeKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
@@ -8575,6 +8581,26 @@ export function CompletionPanel({
     serviceLineForCloseout === "pest" &&
     !backfillQuietCloseout;
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
+  // Areas-treated chips are structural-pest rooms/zones. They describe
+  // neither plant work (T&S — the Treatment Zone trace records where the
+  // visit treated; owner 2026-07-23), nor rodent visits (the typed forms
+  // carry their own location semantics — trap activity locations, entry
+  // points, sanitation areas, the station map; owner 2026-07-23), nor bed
+  // bug treatments (an interior service whose typed form records the rooms
+  // treated directly — the chip list doesn't even offer a bedroom; owner
+  // 2026-07-23). Keyed on the completion profile's TYPED FINDINGS TYPE,
+  // not the name-derived service line: a pest-primary bundle like
+  // "Pest & Rodent Control" classifies as the rodent LINE by name while
+  // its completion is a generic pest form (rodent work is a companion),
+  // and hiding areas there would lose where the pest treatment went
+  // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
+  // off the same flag so hidden state can't ride a restored draft into
+  // the submit.
+  const areasTreatedHidden = treeShrubCloseoutOn
+    || [
+      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
+      "rodent_inspection", "rodent_bait_station", "bed_bug",
+    ].includes(service.completionProfile?.findingsType);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -8609,24 +8635,25 @@ export function CompletionPanel({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [treeShrubCloseoutOn, servicePhotos, service.id]);
-  // T&S completions dropped the Areas-treated picker (owner 2026-07-23) —
-  // but a draft saved BEFORE the change can still restore stale room/zone
-  // chips into hidden state, where the tech can't see or clear them and the
-  // submit/recap/report paths would still consume them (codex P3 on #2950).
-  // Clear the state whenever it appears so every consumer sees empty. The
-  // same applies to each restored product's applicationArea: with the chips
-  // gone the per-product area selector never renders (it requires
-  // areasServiced.length), so a stale 'Kitchen'-style value would submit
-  // invisibly from p.applicationArea (codex P3 r2 on #2950).
+  // Lines that dropped the Areas-treated picker (T&S 2026-07-23, rodent
+  // 2026-07-23) — a draft saved BEFORE the change can still restore stale
+  // room/zone chips into hidden state, where the tech can't see or clear
+  // them and the submit/recap/report paths would still consume them (codex
+  // P3 on #2950). Clear the state whenever it appears so every consumer
+  // sees empty. The same applies to each restored product's
+  // applicationArea: with the chips gone the per-product area selector
+  // never renders (it requires areasServiced.length), so a stale
+  // 'Kitchen'-style value would submit invisibly from p.applicationArea
+  // (codex P3 r2 on #2950).
   useEffect(() => {
-    if (!treeShrubCloseoutOn) return;
+    if (!areasTreatedHidden) return;
     if (areasServiced.length) setAreasServiced([]);
     setSelectedProducts((prev) => (
       prev.some((p) => p && p.applicationArea)
         ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
         : prev
     ));
-  }, [treeShrubCloseoutOn, areasServiced, selectedProducts]);
+  }, [areasTreatedHidden, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -9456,10 +9483,10 @@ export function CompletionPanel({
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
       // dedupe, so re-selecting can't submit both strings). Other values pass through.
-      // T&S never restores areas — the picker is gone there (owner 2026-07-23) and a
-      // pre-change draft's chips would sit invisible in state (codex P3 on #2950);
-      // the treeShrubCloseoutOn clearing effect backstops any other entry path.
-      !treeShrubCloseoutOn && Array.isArray(savedDraft.areasServiced)
+      // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
+      // areas — a pre-change draft's chips would sit invisible in state (codex P3
+      // on #2950); the areasTreatedHidden clearing effect backstops any other path.
+      !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
     );
@@ -12909,11 +12936,11 @@ export function CompletionPanel({
                 </div>
               )}
             </Field>
-            {/* Areas serviced — hidden for Tree & Shrub (owner 2026-07-23):
-                the area chips are structural-pest rooms/zones that don't
-                describe plant work, and the Treatment Zone trace already
-                records where the visit treated. */}
-            {!quickComplete && !treeShrubCloseoutOn && (
+            {/* Areas serviced — hidden for Tree & Shrub and rodent lines
+                (owner 2026-07-23): the chips are structural-pest rooms/zones;
+                those visits carry their own location semantics (zone trace,
+                trap locations, entry points, station map). */}
+            {!quickComplete && !areasTreatedHidden && (
               <Field label="Areas treated">
                 {" "}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -14992,10 +15019,10 @@ export function CompletionPanel({
               ))}
             </div>
           )}
-          {/* Areas Serviced — hidden for Tree & Shrub (owner 2026-07-23): the
-              area chips don't describe plant work and the Treatment Zone trace
-              records where the visit treated. */}
-          {!quickComplete && !treeShrubCloseoutOn && (
+          {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
+              2026-07-23): the chips are structural-pest rooms/zones; those
+              visits carry their own location semantics. */}
+          {!quickComplete && !areasTreatedHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
