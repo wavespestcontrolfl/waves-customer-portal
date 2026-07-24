@@ -48,4 +48,26 @@ describe('CustomerReviews', () => {
 
     expect(await screen.findByText(/Read current Google reviews for our Lakewood Ranch location/)).toBeInTheDocument();
   });
+
+  it('fallback profile cards render NO star row — they are links, not reviews (estimator audit 2026-07-24)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+    render(<CustomerReviews />);
+
+    await screen.findByText(/Read current Google reviews for our Lakewood Ranch location/);
+    expect(screen.queryByRole('img', { name: /Rated \d out of 5 stars/ })).toBeNull();
+  });
+
+  it('real reviews still render their star row', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        reviews: [{ reviewerName: 'A. Customer', starRating: 5, text: 'Great service, thorough tech, and the report was fantastic to read.' }],
+      }),
+    }));
+
+    render(<CustomerReviews />);
+
+    expect(await screen.findByRole('img', { name: 'Rated 5 out of 5 stars' })).toBeInTheDocument();
+  });
 });
