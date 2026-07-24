@@ -935,6 +935,12 @@ async function syncConstantsFromDB(dbInstance) {
         if (Number(rates.light_factor) > 0 && Number(rates.light_factor) <= 1) {
           model.lightFactor = Number(rates.light_factor);
         }
+        // Enhanced (9x) scales material UP from the Standard budget; a value
+        // below 1 would price 9 visits on less product than 6, and anything
+        // past 3x is a fat-finger, not a program.
+        if (Number(rates.enhanced_factor) >= 1 && Number(rates.enhanced_factor) <= 3) {
+          model.enhancedFactor = Number(rates.enhanced_factor);
+        }
       }
     }
     if (config.ts_monthly_floors) {

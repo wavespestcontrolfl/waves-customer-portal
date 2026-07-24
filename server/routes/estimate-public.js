@@ -11734,7 +11734,9 @@ function retiredTreeShrubRequoteNeeded(estData = null) {
     .map((row) => treeShrubTierKey(row))
     .filter((key) => ['light', 'standard', 'enhanced', 'premium'].includes(key));
   if (tierKeys.length) {
-    if (tierKeys.some((key) => key === 'light' || key === 'standard')) return false;
+    // enhanced (9x) is a live tier again as of 2026-07-23 (owner upsell
+    // directive); only a premium-only ladder still forces a requote.
+    if (tierKeys.some((key) => key === 'light' || key === 'standard' || key === 'enhanced')) return false;
     const { recurringSvcList } = acceptanceServiceLists(estData);
     return (recurringSvcList || []).map(recurringServiceKey).includes('tree_shrub');
   }
@@ -11805,24 +11807,24 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
-// Retired T&S tiers = anything that isn't the 6x Standard mandate or the 4x
-// Light downsell (v4.5). Detection mirrors the accept restamp: a selected
-// Enhanced card restamps the row to the tree_shrub_6week key, older stored
-// rows carry a 9/12 visit count or 6-week wording.
+// Retired T&S tiers = the 12x Premium only. The 9x Enhanced (every 6 weeks,
+// tree_shrub_6week) was un-retired 2026-07-23 (owner upsell directive) and
+// is a live cadence again — the seeder/plan-sync path (every_6_weeks,
+// 42-day interval) has been live since the multiservice booking lane.
+// Detection mirrors the accept restamp: a Premium-era stored row carries a
+// 12 visit count, a monthly cadence field, or 12-visit wording.
 function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
   const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'tree_shrub') return false;
-    const key = String(svc?.serviceKey || svc?.service_key || '').trim();
-    if (key === 'tree_shrub_6week') return true;
     // Explicit cadence FIELDS first — the converter reads these before any
     // visit count or display text (explicitServiceCadence), so a crafted
     // row like { frequency: 'monthly' } with no visit count would schedule
     // the retired 12x Premium cadence while passing the checks below
-    // (codex P2 r1). Only the two live tiers' patterns are acceptable;
-    // field-less legacy rows fall through to the visit/text checks.
+    // (codex P2 r1). every_6_weeks normalizes to null and falls through to
+    // the visit-count check, where 9 is accepted.
     const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
       .map((value) => normalizeRecurringPattern(value))
       .find(Boolean) || null;
@@ -11832,9 +11834,9 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
     const visits = Number(
       svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
     );
-    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
+    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6 && visits !== 9;
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
-    return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
+    return /\b12\s*(visits?|apps?|applications?)\b/.test(text);
   });
 }
 
