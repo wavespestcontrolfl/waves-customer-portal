@@ -2285,7 +2285,8 @@ function recommendTreeShrubTier(property = {}) {
 // Structured warning codes for retired tiers. Emitted alongside the prose
 // warning so downstream consumers (admin UI, log aggregation, dashboards) can
 // match on a stable identifier. The legacy `premium` code is retained for
-// back-compat; both retired tiers now map to the mandated 6-visit Standard.
+// back-compat; premium (12x) maps to the 6-visit Standard, while enhanced
+// (9x) is live again — un-retired 2026-07-23 as the every-6-weeks upsell.
 const TS_PREMIUM_DEPRECATED_WARNING_CODE = 'tree_shrub_premium_deprecated_mapped_to_standard';
 // Kept for saved-payload consumers that filter on the historical code —
 // the enhanced tier was retired v4.5 and un-retired 2026-07-23 (owner
