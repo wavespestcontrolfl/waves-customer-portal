@@ -719,3 +719,47 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
     });
   });
 });
+
+describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)', () => {
+  // Pre-v4.5 estimates still store the 12x Premium row. The section ladder
+  // whitelists light/standard/enhanced, so a premium combo priced totals the
+  // accept-time tier restamp could never apply — the accept committed the
+  // premium combo's dollars while the recurring rows kept their stored
+  // cadence (billed ≠ scheduled). Premium must vanish from the tier map so
+  // no such combo exists; Enhanced (9x) stays — un-retired by #2968.
+  const TS_ROWS_WITH_PREMIUM = [
+    { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
+    { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+    { name: 'Enhanced', v: 9, mo: 68.6, ann: 823.2, pa: 91.47 },
+    { name: 'Premium', v: 12, mo: 80, ann: 960, pa: 80 },
+  ];
+
+  test('nonPestTierBaseMap drops premium, keeps light/standard/enhanced', () => {
+    const map = nonPestTierBaseMap({ ts: TS_ROWS_WITH_PREMIUM });
+    expect(Object.keys(map.tree_shrub).sort()).toEqual(['enhanced', 'light', 'standard']);
+  });
+
+  test('no combo carries a tree_shrub:premium selection', () => {
+    const v1 = {
+      pestTiers: [
+        { label: 'Quarterly', mo: 95, pa: 285, apps: 4 },
+        { label: 'Monthly', mo: 120, pa: 120, apps: 12 },
+      ],
+      services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 95 },
+        { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40, visitsPerYear: 6 },
+      ],
+      discount: 0.10,
+    };
+    const combos = buildServiceCadenceCombos(v1, {}, { ts: TS_ROWS_WITH_PREMIUM });
+    expect(Array.isArray(combos)).toBe(true);
+    expect(combos.length).toBeGreaterThan(0);
+    for (const combo of combos) {
+      expect(combo.selection.tree_shrub).not.toBe('premium');
+      expect(combo.key).not.toContain('tree_shrub:premium');
+    }
+    // The three live tiers all fan out.
+    const tsKeys = new Set(combos.map((c) => c.selection.tree_shrub));
+    expect([...tsKeys].sort()).toEqual(['enhanced', 'light', 'standard']);
+  });
+});
