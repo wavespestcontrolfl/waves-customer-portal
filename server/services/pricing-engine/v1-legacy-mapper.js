@@ -416,6 +416,7 @@ function mapV1ToLegacyShape(v1Result) {
       pa: t.perApp, apps: t.freq, ann: t.annual, mo: t.monthly,
       init: pestLI.initialFee || 0, rOG: pestLI.roachAddOn || 0,
       label: t.label, recommended: !!t.recommended, dimmed: !t.recommended,
+      ...(pestLI.pricingVersion ? { pricingVersion: pestLI.pricingVersion } : {}),
       ...floorFields(t),
     }));
     const sel = (pestLI.tiers || []).find(t => t.recommended) || (pestLI.tiers || [])[0] || {};
@@ -427,6 +428,7 @@ function mapV1ToLegacyShape(v1Result) {
       init: pestLI.initialFee || 0,
       rOG: pestLI.roachAddOn || 0,
       label: sel.label || 'Quarterly',
+      ...(pestLI.pricingVersion ? { pricingVersion: pestLI.pricingVersion } : {}),
       ...floorFields(sel),
       // Report-only low-margin signals (owner ruling 2026-07-17: margins
       // are surfaced, never enforced) — the estimator shows these so the
@@ -655,7 +657,11 @@ function mapV1ToLegacyShape(v1Result) {
     pricingVersion: lawnLI?.pricingVersion,
     pricingSource: lawnLI?.pricingSource,
   });
-  svcAdd('Pest Control', pestLI, { service: 'pest_control' });
+  // pricingVersion identifies the cadence curve the pest line was priced
+  // under — the public preference/floor clamps read it off the stored row
+  // (unstamped rows are treated as legacy v1, so every new mapped row must
+  // carry it; codex #2966 r2 P2).
+  svcAdd('Pest Control', pestLI, { service: 'pest_control', pricingVersion: pestLI?.pricingVersion });
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)

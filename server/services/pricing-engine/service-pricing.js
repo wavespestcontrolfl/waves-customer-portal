@@ -931,10 +931,10 @@ function normalizePestPricingVersion(value) {
   const requestedPricingVersion = value;
   const raw = normalizeToken(value);
   const allowed = { v1: 'v1', v2: 'v2' };
-  const pricingVersion = allowed[raw] || 'v1';
+  const pricingVersion = allowed[raw] || 'v2';
   const pricingVersionWasDefaulted = raw ? !allowed[raw] : true;
   const pricingVersionWarnings = raw && !allowed[raw]
-    ? ['invalid_pest_pricing_version_defaulted_to_v1']
+    ? ['invalid_pest_pricing_version_defaulted_to_v2']
     : [];
   return {
     requestedPricingVersion,
@@ -1403,7 +1403,11 @@ function normalizeMosquitoAddOnCount(value, key) {
 function pricePestControl(property, options = {}) {
   const {
     frequency: requestedFrequencyInput = 'quarterly',
-    pricingVersion: requestedPricingVersionInput = 'v1',
+    // v2 cadence curve is the live default (owner directive 2026-07-23:
+    // monthly at 0.70 underpriced the visit — cost only drops ~5 on-site
+    // minutes at monthly cadence). Pass 'v1' explicitly to reprice legacy
+    // estimates under the old curve.
+    pricingVersion: requestedPricingVersionInput = 'v2',
     roachType: requestedRoachTypeInput = 'none',
     modifiers = {},
   } = options;

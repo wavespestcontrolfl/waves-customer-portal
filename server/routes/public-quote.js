@@ -1139,6 +1139,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // sold cadence and reserve a long-enough slot (not quarterly/45-90min).
             cadence: item.cadence ?? null,
             estimatedDurationMinutes: item.estimatedDurationMinutes ?? null,
+            // Curve stamp for the version-aware pest floors: the preference/
+            // accept routes reconstruct the pest line from this mirror and
+            // treat an unstamped line as legacy v1 — dropping the stamp here
+            // would clamp a v2 quote's opt-outs at the lower v1 floor
+            // (codex #2966 r5 P1).
+            pricingVersion: item.pricingVersion ?? undefined,
             // Commercial auto-priced lines: keep the estimated-pricing metadata
             // (disclaimer/confidence/tax) so the accept/render path shows it.
             estimatedPricing: item.estimatedPricing === true ? true : undefined,

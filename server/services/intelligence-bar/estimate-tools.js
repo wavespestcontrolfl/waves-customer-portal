@@ -1562,6 +1562,18 @@ async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}
   const verifiedMarginLines = pricedLines.filter((line) => line.collected_margin != null);
   const belowTargetLines = verifiedMarginLines.filter((line) => line.margin_floor_ok === false);
 
+  // Stamp the pest curve this result was actually priced with into the
+  // replayable engine input: public/accept replays treat UNSTAMPED saved
+  // inputs as legacy v1, so an unstamped agent draft would silently reprice
+  // its bi-monthly/monthly pest tiers on the retired curve (codex #2966 r3
+  // P1). `version` is not a pricing input — it passes the forbidden-key wall.
+  const pricedPestVersion = (estimate.lineItems || [])
+    .find((line) => line?.service === 'pest_control')?.pricingVersion || null;
+  if (pricedPestVersion && engineInput?.services?.pest && typeof engineInput.services.pest === 'object'
+    && !engineInput.services.pest.version) {
+    engineInput.services.pest.version = pricedPestVersion;
+  }
+
   return {
     engine_input: engineInput,
     monthly_total: Math.round(monthlyTotal * 100) / 100,
@@ -2751,6 +2763,16 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
   // public replay re-injects it as manualDiscount, and it lives outside
   // engineInputs so revision round-trips never trip the forbidden-input wall.
   const persistedAdjustment = validateOperatorPriceAdjustment(input.operatorPriceAdjustment).adjustment || null;
+
+  // Same replay-stamp contract as the compact builder: unstamped saved pest
+  // inputs read as legacy v1 on replay (codex #2966 r3 P1).
+  const previewPestVersion = (preview.engineResult?.lineItems || [])
+    .find((line) => line?.service === 'pest_control')?.pricingVersion || null;
+  if (previewPestVersion && input.engineInputs?.services?.pest
+    && typeof input.engineInputs.services.pest === 'object'
+    && !input.engineInputs.services.pest.version) {
+    input.engineInputs.services.pest.version = previewPestVersion;
+  }
 
   return {
     data: {

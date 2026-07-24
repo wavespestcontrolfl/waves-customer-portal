@@ -35,13 +35,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -98,13 +98,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 53.55,
+          "mo": 55.44,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 88.2,
+          "mo": 98.28,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -489,10 +489,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1713.7,
-      "annualAfterDiscount": 1456.65,
-      "monthlyTotal": 121.39,
-      "savings": 257.05,
+      "annualBeforeDiscount": 1734.76,
+      "annualAfterDiscount": 1474.55,
+      "monthlyTotal": 122.88,
+      "savings": 260.21,
       "serviceCount": 3
     },
     "results": {
@@ -521,13 +521,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": true,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -560,8 +560,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1555.65,
-      "year2": 1456.65
+      "year1": 1573.55,
+      "year2": 1474.55
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
@@ -600,13 +600,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"

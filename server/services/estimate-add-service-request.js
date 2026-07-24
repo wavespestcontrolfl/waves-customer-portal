@@ -162,7 +162,10 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
 
   if (serviceKey === 'pest_control') {
     if (updatedInputs.services.pest) return { added: false, updatedInputs, reason: 'already_included' };
-    updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
+    // No version: a brand-new pest addition prices on the LIVE default curve
+    // (v2) — explicit 'v1' is reserved for replays of quotes sold under the
+    // old curve (codex #2966 r3 P2).
+    updatedInputs.services.pest = { frequency: 'quarterly', roachType: 'none' };
     return { added: true, updatedInputs };
   }
 

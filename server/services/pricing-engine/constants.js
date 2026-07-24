@@ -160,12 +160,13 @@ const PEST = {
   },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
-    // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
-    // v2's currently-live hardcoded curve (pricing-engine-v2.js:751-755) so
-    // customers see the same bimonthly/monthly prices after the engine swap.
-    // Session 6 may intentionally restore a milder curve via pricing_changelog.
+    // v2 is the LIVE DEFAULT (owner directive 2026-07-23): the old monthly
+    // 0.70 was a flat marketing multiplier that underpriced the visit — the
+    // cost model only saves ~5 on-site minutes at monthly cadence. v1 stays
+    // for explicit-version replays of estimates priced under the old curve;
+    // do not retune v1 (it's historical), retune v2.
     v1: { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 },
-    v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },  // Was 0.85/0.70. Test for one quarter.
+    v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
   initialFee: r(99), // WaveGuard membership (waived with annual prepay)
