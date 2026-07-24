@@ -311,6 +311,70 @@ function resolveCsrName(staffNumber) {
 
 const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 
+// ── Pre-connect caller screen ────────────────────────────────────────────
+// Unknown-caller calls arriving with STIR/SHAKEN attestation B (the carrier
+// can't vouch the caller owns the displayed number) are the spoofed-number
+// robocall population. 60 days of the ground truth captured on this webhook:
+// 25% of inbound calls are unknown+B, 67% of those end as dead-air
+// voicemails, and only ~2% of lead-producing calls arrive on B. Attestation
+// A, C, and MISSING all bypass — most real leads arrive with no attestation
+// at all, so absence is NOT suspicion.
+//
+// With GATE_CALL_PRECONNECT_SCREEN on, qualifying callers must press a key
+// before staff phones ring; no key → the Waves voicemail recorder, never a
+// bare hangup (a confused human still reaches voicemail; a silent robocall
+// voicemail is auto-hidden by the dead-air suppression in the admin call
+// log). Gate off = shadow: qualifying calls are stamped
+// metadata.preconnect_screen='would_gate' so daily volume is judgeable
+// before any caller ever hears the prompt. Lifecycle stamps: 'gated' at the
+// challenge, then 'passed' (key pressed) or 'failed' (fell to voicemail).
+function preconnectScreenDecision({ customerId, stirVerstat, gateOn }) {
+  if (customerId || !/-B$/.test(String(stirVerstat || ''))) return 'none';
+  return gateOn ? 'gate' : 'would_gate';
+}
+
+// Pass/fail re-enter THIS route via query params (?screened=1 / ?screenfail=1)
+// so the normal routing, idempotency claim, and voicemail flows are reused
+// verbatim — no new public webhook route exists.
+function buildPreconnectChallengeTwiML() {
+  const twiml = new VoiceResponse();
+  const gatherOpts = {
+    input: 'dtmf',
+    numDigits: 1,
+    timeout: 6,
+    action: '/api/webhooks/twilio/voice?screened=1',
+    method: 'POST',
+  };
+  twiml
+    .gather(gatherOpts)
+    .say({ voice: SAY_VOICE }, 'Thank you for calling Waves Pest Control. To be connected, please press one.');
+  twiml
+    .gather(gatherOpts)
+    .say({ voice: SAY_VOICE }, 'Please press one to be connected.');
+  twiml.redirect({ method: 'POST' }, '/api/webhooks/twilio/voice?screenfail=1');
+  return twiml.toString();
+}
+
+async function stampPreconnectScreen(callSid, value) {
+  try {
+    const row = await db('call_log')
+      .where('twilio_call_sid', callSid)
+      .orderBy('created_at', 'desc')
+      .first();
+    if (!row) return;
+    let meta = {};
+    try {
+      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    } catch { meta = {}; }
+    meta.preconnect_screen = value;
+    await db('call_log')
+      .where({ id: row.id })
+      .update({ metadata: JSON.stringify(meta), updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[preconnect-screen] stamp '${value}' failed for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
 function appendVoicemailRecording(twiml) {
   const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
   twiml.play(voicemailAudio);
@@ -481,6 +545,19 @@ router.post('/voice', async (req, res) => {
     // Match caller to customer
     let customer = await findSingleCustomerByPhone(db, From);
 
+    // Pre-connect screen decision (see helpers above). Re-entries from the
+    // challenge TwiML arrive on this same route with ?screened=1 (a key was
+    // pressed) or ?screenfail=1 (both Gathers timed out) — they are never a
+    // first delivery, so the insert/stamp below doesn't double-fire.
+    const screenReentry = req.query.screened === '1'
+      ? 'passed'
+      : (req.query.screenfail === '1' ? 'failed' : null);
+    const screenDecision = screenReentry ? 'none' : preconnectScreenDecision({
+      customerId: customer?.id,
+      stirVerstat: req.body.StirVerstat,
+      gateOn: isEnabled('callPreconnectScreen'),
+    });
+
     // #4: Caller ID Enrichment via Twilio Lookup API
     if (firstDelivery && !customer && From) {
       try {
@@ -525,6 +602,12 @@ router.post('/voice', async (req, res) => {
         // that absence is itself a finding (Marchex was silent for months).
         stir_verstat: req.body.StirVerstat || null,
         addons: parseAddOnsForAudit(req.body.AddOns),
+        // Pre-connect screen lifecycle: 'would_gate' (shadow, gate off) or
+        // 'gated' (challenge issued) → later 'passed'/'failed'. Absent for
+        // known customers and non-B attestation.
+        ...(screenDecision !== 'none'
+          ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
+          : {}),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -569,6 +652,33 @@ router.post('/voice', async (req, res) => {
     // intentional.
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
+
+    // ── Pre-connect caller screen (before any staff ring / agent leg) ──
+    if (screenReentry === 'failed') {
+      // Both Gathers timed out — dead air or a caller who can't press keys.
+      // Never a bare hangup: route to the Waves voicemail recorder so a real
+      // human still gets through. Greeting MP3 first — it carries the
+      // FL §934.03 recording disclosure and MUST precede the recorder.
+      await stampPreconnectScreen(CallSid, 'failed');
+      await db('call_log').where('twilio_call_sid', CallSid).update({
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        updated_at: new Date(),
+      });
+      logger.info(`[preconnect-screen] no key from ${maskPhone(From)} (${maskSid(CallSid)}) — routing to Waves voicemail`);
+      const failTwiml = new VoiceResponse();
+      failTwiml.play(greetingUrl);
+      appendVoicemailRecording(failTwiml);
+      return res.type('text/xml').send(failTwiml.toString());
+    }
+    if (screenReentry === 'passed') {
+      // Any keypress proves a human; continue into the normal flow below.
+      await stampPreconnectScreen(CallSid, 'passed');
+      logger.info(`[preconnect-screen] caller ${maskPhone(From)} passed (${maskSid(CallSid)}) — continuing normal routing`);
+    } else if (screenDecision === 'gate') {
+      logger.info(`[preconnect-screen] challenging unknown B-attestation caller ${maskPhone(From)} (${maskSid(CallSid)})`);
+      return res.type('text/xml').send(buildPreconnectChallengeTwiML());
+    }
 
     // ── AI voice agent routing (opt-in; default path untouched) ──
     // The agent NEVER fronts a call unless GATE_VOICE_AI_AGENT is on AND the
@@ -1544,6 +1654,8 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   agentHandoffKind,
   appendAgentHandoff,
+  buildPreconnectChallengeTwiML,
+  preconnectScreenDecision,
   connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
