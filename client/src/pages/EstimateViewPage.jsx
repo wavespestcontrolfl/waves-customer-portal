@@ -2005,14 +2005,13 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
-// Plan-level summary for a multi-service plan. With a plan-wide credit
-// (e.g. Referral Credit) it itemizes list subtotal → credit → net — the
-// per-service cards quote their WaveGuard-net price PRE credit, so this is
-// the one place that story appears. Without a credit it renders a simple
-// "Plan total $X/mo" row (owner directive 2026-07-23, reversing the
-// 2026-07-07 no-total ruling — a 3+ service plan gave the customer no
-// number anchoring the whole plan). Ranged/quote-required plans stay
-// total-free either way.
+// Plan-level discount summary for a multi-service plan carrying a plan-wide
+// credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
+// price PRE credit — the credit is applied to the combined plan, not baked into
+// each row — so this is the one place the customer sees list subtotal → credit →
+// the net they actually pay. Renders ONLY when there's a credit to itemize:
+// customer-facing estimates never show a combined "Plan total" (owner rule
+// 2026-07-07, re-affirmed 2026-07-23 after a brief same-day reversal).
 export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
   if (!combined) return null;
   // The live discount object (selected row first — the server nulls
@@ -2034,33 +2033,15 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     || selectedFrequency?.manualDiscountSuppressed === true
     || Boolean(combined.manualDiscount)
     || Boolean(planDiscount);
+  // No combined total on a creditless plan — owner rule, re-affirmed
+  // 2026-07-23 after a brief same-day reversal: customer-facing estimates
+  // never show a "Plan total $X/mo"; the per-application service cards are
+  // the only prices. This card exists ONLY to itemize a plan-wide credit.
+  if (!planHasCredit) return null;
+  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
   // Quote-required selection: the rest of the estimate hides exact dollars for a
   // quote-required row, so there's no exact subtotal/net to itemize here either.
   if (selectedFrequency?.quoteRequired === true) return null;
-  // No-credit multi-service plan: one simple "Plan total" row at the selected
-  // cadences (owner directive 2026-07-23, reversing the 2026-07-07 removal —
-  // a 3+ service plan gave the customer no number to anchor the whole plan).
-  // Low-confidence ranged plans stay total-free: the page deliberately quotes
-  // a confirmed-on-site range, and an exact total would contradict it.
-  if (!planHasCredit) {
-    const noCreditLowConfidence = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) > 0;
-    const totalMonthly = Math.round(Number(preCreditMonthly) * 100) / 100;
-    if (noCreditLowConfidence || !(totalMonthly > 0)) return null;
-    return (
-      <section style={estimateCard()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
-          <span style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT }}>Plan total</span>
-          <strong style={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', fontSize: 20, color: ESTIMATE_TEXT }}>
-            {fmtMoney(totalMonthly)}<span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> /mo</span>
-          </strong>
-        </div>
-        <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
-          All services on this plan at your selected schedules — each service bills per application.
-        </div>
-      </section>
-    );
-  }
-  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
 
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
   // A $0 net is real — a credit can fully comp the plan, and that's exactly when
@@ -5045,11 +5026,11 @@ function EstimateViewPageInner() {
           })}
           </div>
 
-          {/* Plan-level summary (owner 2026-07-23): every multi-service plan
-              shows a simple "Plan total $X/mo" row at the selected cadences —
-              reversing the 2026-07-07 removal. With a plan-wide credit it
-              itemizes credit → net instead; ranged/quote-required plans stay
-              total-free (PlanTotalSummary gates internally). */}
+          {/* No combined "Plan total" on customer estimates (owner rule
+              2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and
+              the sticky book bar carry the plan's price. This renders ONLY
+              to itemize a plan-wide credit (e.g. Referral Credit) and its
+              net; creditless bundles render nothing here. */}
           {services.length > 1 ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
