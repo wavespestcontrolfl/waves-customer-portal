@@ -6043,6 +6043,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return creditedResult;
     };
 
+    // Secure plan-choice setup fee (owner decision 2026-07-24): a
+    // per-application selection on a solo pest/mosquito series stamped
+    // pending_setup_fee on the series parent — the FIRST live completion
+    // mint carries it as its own line so the office never bills it
+    // manually. Value-guarded compare-and-swap: concurrent completions
+    // collapse to one fee; the mint catch below restores the stamp so a
+    // failed mint never eats the fee. Never under backfill (frozen-money
+    // posture: the review mint is a single line at the frozen amount) and
+    // never for callbacks.
+    let secureSetupFee = null;
+    if (shouldInvoice && !isBackfillCompletion && !svc.is_callback) {
+      try {
+        const setupParentId = svc.recurring_parent_id || svc.id;
+        const parentRow = await db('scheduled_services')
+          .where({ id: setupParentId })
+          .first('pending_setup_fee');
+        const fee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
+        if (fee > 0) {
+          const claimed = await db('scheduled_services')
+            .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
+            .update({ pending_setup_fee: null, updated_at: new Date() });
+          if (claimed === 1) secureSetupFee = { parentId: setupParentId, amount: Math.round(fee * 100) / 100 };
+        }
+      } catch (e) {
+        // Unreadable stamp mints the plain visit invoice — the fee stays
+        // stamped for the next completion rather than risking a double line.
+        logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
+      }
+    }
     if (shouldInvoice) {
       try {
         // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
@@ -6090,6 +6119,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // dunning/overdue surfaces for a quiet backlog closeout. Due today
           // instead: the exact net terms a normal same-day completion gets.
           dueDate: isBackfillCompletion ? etDateString() : serviceDateOnly(record.service_date),
+          // Claimed plan-choice setup fee rides the SAME mint (one invoice,
+          // one auto-charge) — the claim above is the idempotency authority.
+          extraLineItems: secureSetupFee
+            ? [{
+              description: 'One-time setup fee',
+              quantity: 1,
+              unit_price: secureSetupFee.amount,
+              amount: secureSetupFee.amount,
+              category: 'Setup fee',
+            }]
+            : undefined,
           // Backfill: createFromService otherwise rolls an accepted
           // estimate's unapplied deposit forward into this invoice
           // (consumeDepositCredit + a credit line that reduces or zeroes the
@@ -6147,6 +6187,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           codePrefix: invoiceShortCodePrefix(invoice),
         });
       } catch (invErr) {
+        // A claimed setup fee whose mint failed goes back on the series
+        // parent — otherwise the failed attempt silently eats the $99
+        // (guarded on still-NULL so a concurrent successful claim wins).
+        if (secureSetupFee) {
+          try {
+            await db('scheduled_services')
+              .where({ id: secureSetupFee.parentId })
+              .whereNull('pending_setup_fee')
+              .update({ pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
+          } catch (restoreErr) {
+            logger.warn(`[dispatch] setup-fee restore failed for visit ${svc.id}: ${restoreErr.message}`);
+          }
+        }
         // Fail-closed leg of the backfill review-invoice promise (Codex P0,
         // PR #2897 fix rounds 7-8; broadened round 9). The typed one-time
         // pre-transaction billing gate this population skipped was
@@ -6363,9 +6416,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // first-application-only accept invoice gets NO allowance — r3);
       // everything still fails closed when no accepted amount exists.
       const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
+      // Secure plan-choice setup fee: a per-application selection on the
+      // series parent legitimately adds the $99 line to the first
+      // completion invoice (owner decision 2026-07-24) — same bounded
+      // allowance, keyed on the DURABLE selection row (not a notes marker,
+      // and not the in-request claim variable, so a resumed completion that
+      // reuses an already-minted invoice still gets the allowance). Lookup
+      // failure fails toward office review, like everything else here.
+      let planChoiceSetupFeeSelected = false;
+      if (!acceptMintedInvoice) {
+        try {
+          planChoiceSetupFeeSelected = !!(await db('appointment_card_requests')
+            .where({ scheduled_service_id: svc.recurring_parent_id || svc.id, selected_plan: 'per_application' })
+            .first('id'));
+        } catch (e) { /* fail toward review */ }
+      }
       const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
       let setupFeeAllowance = 0;
-      if (acceptMintedInvoice) {
+      if (acceptMintedInvoice || planChoiceSetupFeeSelected) {
         try {
           const rawLines = invoice.line_items;
           const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);

@@ -2962,6 +2962,10 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
+// (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
+// invoices on standard accepts. Never hardcode 99 elsewhere.
+module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary

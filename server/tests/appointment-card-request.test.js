@@ -12,9 +12,13 @@ jest.mock('../models/db', () => {
     const record = (op) => (...args) => { chain.calls.push([op, ...args]); return chain; };
     chain.where = record('where');
     chain.whereNull = record('whereNull');
+    chain.whereIn = record('whereIn');
+    chain.whereNotNull = record('whereNotNull');
+    chain.orderBy = record('orderBy');
     chain.insert = record('insert');
     chain.onConflict = record('onConflict');
     chain.ignore = record('ignore');
+    chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => {
       chain.calls.push(['update', patch]);
@@ -963,5 +967,105 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
     expect(res.action).toBe('link_created');
     await new Promise((r) => setImmediate(r));
     expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
+  const PLAN_VISIT = {
+    ...VISIT,
+    estimated_price: '135.00',
+    is_recurring: true,
+    recurring_pattern: 'quarterly',
+    recurring_interval_days: null,
+    recurring_parent_id: null,
+    pending_setup_fee: null,
+  };
+  const PLAN_CUSTOMER = {
+    ...CUSTOMER,
+    billing_mode: null,
+    waveguard_tier: null,
+    monthly_rate: null,
+    property_type: 'single_family',
+  };
+
+  test('gate OFF: the ready payload carries NO planContext key — byte-identical to the original shape', async () => {
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+      customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+    });
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    expect(Object.keys(res).sort()).toEqual([
+      'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+    ]);
+  });
+
+  describe('gate ON (fresh module graph with the env set)', () => {
+    let loadPageGateOn;
+    beforeAll(() => {
+      process.env.GATE_SECURE_PLAN_CHOICE = 'true';
+      jest.resetModules();
+      ({ loadSecureCardPageData: loadPageGateOn } = require('../services/appointment-card-request'));
+    });
+    afterAll(() => {
+      delete process.env.GATE_SECURE_PLAN_CHOICE;
+      jest.resetModules();
+    });
+
+    test('priced recurring pest visit → ready + planContext (fee_waiver, live-derived numbers)', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: { first: () => ({ ...REQUEST }) },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('ready');
+      expect(res.planContext).toMatchObject({
+        mode: 'recurring',
+        planClass: 'fee_waiver',
+        perVisit: 135,
+        visitsPerYear: 4,
+        annualBase: 540,
+        prepay: { total: 540 },
+        setupFee: { amount: 99, waivedWithPrepay: true },
+      });
+    });
+
+    test('recorded prepay selection with a live unpaid invoice → prepay_selected with pay link AND a usable SetupIntent', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: {
+          first: () => ({ ...REQUEST, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-9' }),
+        },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+        invoices: { first: () => ({ id: 'inv-9', token: 'ptok', status: 'sent' }) },
+      });
+      mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('prepay_selected');
+      expect(res.payUrl).toMatch(/\/pay\/ptok$/);
+      expect(res.clientSecret).toBe('cs_1');
+    });
+
+    test('settled prepay invoice → secured and the pending row heals to satisfied', async () => {
+      mockTableHandlers = baseHandlers({
+        appointment_card_requests: {
+          first: () => ({ ...REQUEST, selected_plan: 'prepay_annual', prepay_invoice_id: 'inv-9' }),
+        },
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+        invoices: { first: () => ({ id: 'inv-9', token: 'ptok', status: 'paid' }) },
+      });
+      const res = await loadPageGateOn(REQUEST.token);
+      expect(res.state).toBe('secured');
+      const heal = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+        .map(([, patch]) => patch)
+        .find((p) => p.status === 'satisfied');
+      expect(heal).toBeTruthy();
+    });
   });
 });

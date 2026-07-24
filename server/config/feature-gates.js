@@ -59,6 +59,13 @@ const gates = {
   // card-only regardless (owner ruling 2026-07-13).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
 
+  // /secure/:token plan-choice step (pay per application vs. annual prepay)
+  // on the appointment card-request page. Customer-facing money surface —
+  // fail-closed ==='true' in EVERY environment. Gate off: the page payload
+  // carries no planContext and /secure renders exactly the card-only
+  // experience; the select-plan endpoint 404s (unobservable while dark).
+  securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY

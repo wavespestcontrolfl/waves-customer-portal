@@ -1,0 +1,464 @@
+/**
+ * /secure plan-choice lane (owner workflow 2026-07-24) — the pricing and
+ * plan-selection brain behind the appointment card-request page.
+ *
+ * Read side: buildSecurePlanContext derives the page's pricing context from
+ * the BOOKED SERIES (never an estimate): per-visit price from
+ * scheduled_services.estimated_price, application count from the recurring
+ * cadence (shared prepay-cadence helpers — same numbers as the admin
+ * prepay-on-book preflight), incentive class from the converter's service
+ * key (solo pest/mosquito keep the $99 WaveGuard setup-fee waiver; the
+ * discountable residential programs take ANNUAL_PREPAY_DISCOUNT_PCT).
+ * Every unsound input returns null and the page falls back to today's
+ * card-only experience — fail toward the safe surface, never toward a
+ * wrong price. NULL estimated_price means "manual quote pending", never $0.
+ *
+ * Write side: selectSecurePlan records the customer's choice.
+ *   per_application — stamps the selection (and, for fee-waiver mixes, the
+ *     $99 pending_setup_fee on the series parent so the FIRST completion
+ *     invoice carries it — owner decision 2026-07-24); the customer then
+ *     continues through the existing SetupIntent capture unchanged.
+ *   prepay_annual — mints the annual prepay draft invoice + payment_pending
+ *     term inside one transaction, mirroring the Customer360 manual mint
+ *     (admin-customers.js): per-customer advisory lock + overlap assert,
+ *     InvoiceService.create single-line invoice, createTermForAnnualPrepay
+ *     (no estimate — series-anchored coverage), request-row stamp as the
+ *     idempotency anchor. Payment happens on the existing /pay/<token>
+ *     page; the invoice-payment webhook activates the term and stamps
+ *     coverage — zero new money machinery. An unpaid term never suppresses
+ *     completion billing (payment_pending is not coverage), so the owner's
+ *     "fall back to per-visit billing" ruling is the default physics.
+ *
+ * Whole lane is inert unless GATE_SECURE_PLAN_CHOICE is on.
+ */
+
+const db = require('../models/db');
+const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
+const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require('./prepay-cadence');
+const { recurringServiceKey, WAVEGUARD_SETUP_FEE } = require('./estimate-converter');
+const { ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
+const { resolveBillingLane } = require('./billing-lane');
+const { portalUrl } = require('../utils/portal-url');
+const { etDateString } = require('../utils/datetime-et');
+const { callBookingDateOnly } = require('./call-booking-catalog');
+
+// Converter key → incentive class. Whitelist ONLY — anything unlisted
+// (commercial_* keys, foam_recurring, unclassifiable service names) gets no
+// plan context and the page stays card-only. Commercial stays excluded so
+// the displayed prepay total always equals the minted invoice total to the
+// cent (InvoiceService adds county tax to commercial invoices).
+const PLAN_CLASS_BY_SERVICE_KEY = {
+  pest_control: 'fee_waiver',
+  mosquito: 'fee_waiver',
+  lawn_care: 'discount',
+  tree_shrub: 'discount',
+  termite_bait: 'discount',
+  rodent_bait: 'discount',
+  palm_injection: 'discount',
+};
+
+const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
+
+// Mirror of admin-customers.js annualPrepayOverlapStatusClause (kept
+// inline: that route exports the LOCKING assert via _private, which the
+// write path uses; this read-side probe must not take locks). A cancelled
+// term with renewal_decision='cancel' still covers through term_end.
+function overlapStatusClause() {
+  return function overlapStatus() {
+    this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .orWhere(function lapsedRenewalStillInTerm() {
+        this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+      });
+  };
+}
+
+function cents(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
+
+// The booked cadence, normalized the way the admin prepay-on-book path
+// normalizes it: the modal encodes every-6-weeks as pattern 'custom' with a
+// 42-day interval (admin-schedule.js). Any other custom interval has no
+// supported coverage mapping and returns null (fail closed).
+function normalizedPattern(visit) {
+  const raw = String(visit.recurring_pattern || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'custom') {
+    return Number(visit.recurring_interval_days) === 42 ? 'every_6_weeks' : null;
+  }
+  return raw;
+}
+
+async function loadPlanVisit(scheduledServiceId, conn = db) {
+  return conn('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'estimated_price',
+      'is_recurring', 'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id',
+      'pending_setup_fee');
+}
+
+/**
+ * Derive the plan context for a pending secure-card request. Returns null
+ * whenever the lane is dark or ANY input is unsound — the caller renders
+ * today's card-only page. Never throws.
+ */
+async function buildSecurePlanContext({ request, visitId }) {
+  try {
+    if (!isEnabled('securePlanChoice')) return null;
+    const visit = await loadPlanVisit(visitId || request.scheduled_service_id);
+    if (!visit || !visit.customer_id) return null;
+
+    // NULL/zero price = manual quote pending — never $0, never a plan page.
+    const perVisit = visit.estimated_price != null ? Number(visit.estimated_price) : null;
+    if (!(perVisit > 0)) return null;
+
+    const customer = await db('customers')
+      .where({ id: visit.customer_id })
+      .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'property_type');
+    if (!customer) return null;
+    // Commercial properties are excluded from v1 (tax would split the page
+    // total from the invoice total); monthly members pay dues, annual-prepay
+    // customers are already covered — both would falsify the plan copy.
+    if (String(customer.property_type || '').toLowerCase() === 'commercial') return null;
+    const lane = resolveBillingLane(customer);
+    if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
+
+    const isRecurring = !!visit.is_recurring || !!visit.recurring_pattern;
+    if (!isRecurring) {
+      return { mode: 'one_time', perVisit: cents(perVisit), selected: request?.selected_plan || null };
+    }
+
+    const pattern = normalizedPattern(visit);
+    const visitsPerYear = visitsPerYearForCadence(pattern);
+    const coverageCadence = prepayCoverageCadenceForPattern(pattern);
+    if (!pattern || !visitsPerYear || !coverageCadence) return null;
+
+    const serviceKey = recurringServiceKey({ name: visit.service_type });
+    const planClass = PLAN_CLASS_BY_SERVICE_KEY[serviceKey] || null;
+    if (!planClass) return null;
+
+    // An existing overlapping term (any coverage-holding status) means
+    // prepay is not sellable here — hide the whole choice rather than
+    // render an option the mint would 409.
+    const today = etDateString();
+    const overlapping = await db('annual_prepay_terms')
+      .where({ customer_id: visit.customer_id })
+      .where(overlapStatusClause())
+      .orderBy('term_end', 'desc')
+      .first('id', 'term_end');
+    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
+    if (overlapEnd && today <= overlapEnd) return null;
+
+    const annualBase = cents(perVisit * visitsPerYear);
+    const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+    const prepayTotal = cents(annualBase * (1 - discountRate));
+
+    return {
+      mode: 'recurring',
+      planClass,
+      perVisit: cents(perVisit),
+      visitsPerYear,
+      annualBase,
+      prepay: {
+        total: prepayTotal,
+        discount: cents(annualBase - prepayTotal),
+        // Rendered label, server-derived so the client never holds a rate
+        // constant. '' for the waiver class (the waiver line is the pitch).
+        ratePctLabel: discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '',
+      },
+      setupFee: planClass === 'fee_waiver'
+        ? { amount: WAVEGUARD_SETUP_FEE, waivedWithPrepay: true }
+        : null,
+      selected: request?.selected_plan || null,
+    };
+  } catch (err) {
+    logger.warn(`[secure-plans] plan context failed for request ${request?.id}: ${err.message} — rendering card-only`);
+    return null;
+  }
+}
+
+// The prepaySelected page state: a returning visitor who already chose
+// prepay. Live unpaid invoice → hand back the pay link; settled invoice →
+// the visit is covered, render secured. Returns null when the request has
+// no prepay selection (caller proceeds normally).
+async function prepaySelectionState(request) {
+  try {
+    if (!isEnabled('securePlanChoice')) return null;
+    if (request?.selected_plan !== 'prepay_annual' || !request.prepay_invoice_id) return null;
+    const invoice = await db('invoices')
+      .where({ id: request.prepay_invoice_id })
+      .first('id', 'token', 'status');
+    if (!invoice || invoice.status === 'void') return null; // office voided — plan choice reopens
+    if (['paid', 'prepaid'].includes(invoice.status)) return { state: 'secured' };
+    return { state: 'prepay_selected', payUrl: portalUrl(`/pay/${invoice.token}`) };
+  } catch (err) {
+    logger.warn(`[secure-plans] prepay selection state failed for request ${request?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+function fail(code) {
+  const err = new Error(code);
+  err.code = code;
+  return err;
+}
+
+/**
+ * Record the customer's plan selection. Returns:
+ *   { ok:true, plan:'per_application' }                — proceed to card capture
+ *   { ok:true, plan:'prepay_annual', payUrl }          — redirect to /pay
+ * Throws err.code ∈ { gate_off, not_found, invalid_plan, already_secured,
+ * no_longer_needed, plan_unavailable, prepay_overlap, selection_conflict }.
+ * All amounts are re-derived server-side — the client sends only the plan.
+ */
+async function selectSecurePlan({ token, plan }) {
+  if (!isEnabled('securePlanChoice')) throw fail('gate_off');
+  if (!['per_application', 'prepay_annual'].includes(plan)) throw fail('invalid_plan');
+
+  const request = await db('appointment_card_requests').where({ token }).first();
+  if (!request) throw fail('not_found');
+  if (request.status === 'completed' || request.status === 'satisfied') throw fail('already_secured');
+  if (request.status !== 'pending') throw fail('selection_conflict');
+
+  // Same liveness + payer re-checks the capture completion runs — the
+  // office can cancel/reschedule or attach a third-party payer between
+  // page load and selection. Payer lookup failure refuses (fail toward
+  // not billing the wrong party).
+  const visit = await loadPlanVisit(request.scheduled_service_id);
+  const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
+  if (!visit
+    || !LIVE_VISIT_STATUSES.includes(visit.status)
+    || (dateOnly && dateOnly < etDateString(new Date()))) {
+    throw fail('no_longer_needed');
+  }
+  const PayerService = require('./payer');
+  const resolved = await PayerService.resolveForInvoice({
+    customerId: String(request.customer_id),
+    scheduledServiceId: String(request.scheduled_service_id),
+    throwOnError: true,
+  });
+  if (resolved?.payerId) throw fail('no_longer_needed');
+
+  const context = await buildSecurePlanContext({ request, visitId: visit.id });
+  if (!context) throw fail('plan_unavailable');
+
+  if (plan === 'per_application') {
+    if (context.mode !== 'recurring') throw fail('plan_unavailable');
+    const stamp = new Date();
+    await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
+    // Owner decision 2026-07-24: the per-application choice on a solo
+    // pest/mosquito series owes the $99 setup fee on the FIRST completion
+    // invoice. Snapshot the amount now (billed fee === disclosed fee) on
+    // the series parent; the completion mint's atomic claim consumes it
+    // once. Guarded so a re-selection never re-stamps a consumed fee.
+    if (context.setupFee) {
+      await db('scheduled_services')
+        .where({ id: visit.id })
+        .whereNull('pending_setup_fee')
+        .update({ pending_setup_fee: context.setupFee.amount, updated_at: stamp });
+    }
+    return { ok: true, plan: 'per_application' };
+  }
+
+  // prepay_annual — idempotency anchor first: a double-submit (or a
+  // returning visitor re-posting) gets the SAME pay link, never a second
+  // invoice.
+  if (request.prepay_invoice_id) {
+    const existing = await db('invoices')
+      .where({ id: request.prepay_invoice_id })
+      .first('id', 'token', 'status');
+    if (existing && existing.status !== 'void') {
+      return { ok: true, plan: 'prepay_annual', payUrl: portalUrl(`/pay/${existing.token}`) };
+    }
+  }
+  if (context.mode !== 'recurring') throw fail('plan_unavailable');
+
+  // Term starts at the first UPCOMING live visit of the series (the parent
+  // row IS the series anchor; children point at it) — coverage must span
+  // the visits the customer is prepaying, not the send date.
+  const today = etDateString();
+  const seriesRows = await db('scheduled_services')
+    .where(function series() {
+      this.where({ id: visit.id }).orWhere({ recurring_parent_id: visit.id });
+    })
+    .whereIn('status', LIVE_VISIT_STATUSES)
+    .select('scheduled_date');
+  const upcoming = seriesRows
+    .map((r) => callBookingDateOnly(r.scheduled_date))
+    .filter((d) => d && d >= today)
+    .sort();
+  const termStart = upcoming[0] || null;
+  if (!termStart) throw fail('no_longer_needed');
+
+  const InvoiceService = require('./invoice');
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+
+  const coverageServiceType = visit.service_type;
+  const visitCount = context.visitsPerYear;
+  const amount = context.prepay.total;
+
+  let payToken = null;
+  try {
+    await db.transaction(async (trx) => {
+      // Advisory lock + in-transaction overlap re-check — two tabs (or a
+      // concurrent office mint) collapse to one term (mirrors the
+      // Customer360 mint and the estimate accept).
+      await lockAndAssertNoAnnualPrepayOverlap(
+        trx, visit.customer_id, termStart, false,
+        'Customer already has an annual prepay term through',
+      );
+
+      const invoice = await InvoiceService.create({
+        database: trx,
+        customerId: visit.customer_id,
+        title: `${coverageServiceType} - Annual Prepay`,
+        lineItems: [{
+          description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
+          quantity: 1,
+          unit_price: amount,
+          category: 'Annual prepay',
+        }],
+        // Deliberately does NOT match the accept-minted marker regex — the
+        // dispatch auto-charge allowance keys accept invoices on that text.
+        notes: `Annual prepay selected by the customer from their secure appointment link (visit ${visit.id}).`,
+        dueDate: today,
+      });
+      // The page showed a tax-free residential total; a total that came
+      // back different (payer accrual, unexpected tax) must not reach the
+      // customer as a surprise — abort, fail toward the card-only page.
+      if (cents(invoice.total) !== cents(amount)) {
+        throw fail('plan_unavailable');
+      }
+
+      const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+        customerId: visit.customer_id,
+        prepayInvoiceId: invoice.id,
+        planLabel: `${coverageServiceType} Annual Prepay`,
+        monthlyRate: cents(amount / 12),
+        prepayAmount: cents(Number(invoice.total)),
+        termStart,
+        coverageServiceType,
+        coverageVisitCount: visitCount,
+        coverageCadence: prepayCoverageCadenceForPattern(normalizedPattern(visit)),
+        conn: trx,
+      });
+      if (!term) throw new Error('annual prepay term could not be created');
+
+      // The request row is the idempotency anchor: only the FIRST selection
+      // lands; a concurrent winner makes this update match 0 rows and the
+      // whole mint rolls back (the loser re-reads the winner's link below).
+      const stamped = await trx('appointment_card_requests')
+        .where({ id: request.id, status: 'pending' })
+        .whereNull('prepay_invoice_id')
+        .update({
+          selected_plan: 'prepay_annual',
+          plan_selected_at: new Date(),
+          prepay_invoice_id: invoice.id,
+          annual_prepay_term_id: term.id,
+          updated_at: new Date(),
+        });
+      if (stamped !== 1) throw fail('selection_conflict');
+
+      // Clear a per-application setup-fee stamp from an earlier selection —
+      // prepay waives it.
+      await trx('scheduled_services')
+        .where({ id: visit.id })
+        .whereNotNull('pending_setup_fee')
+        .update({ pending_setup_fee: null, updated_at: new Date() });
+
+      await trx('activity_log').insert({
+        customer_id: visit.customer_id,
+        action: 'annual_prepay_invoice_created',
+        description: `Annual prepay invoice ${invoice.invoice_number} created from the customer's secure appointment link for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`,
+        metadata: JSON.stringify({
+          invoice_id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          annual_prepay_term_id: term.id,
+          appointment_card_request_id: request.id,
+          scheduled_service_id: visit.id,
+          coverage_service_type: coverageServiceType,
+          coverage_visit_count: visitCount,
+          per_visit_amount: context.perVisit,
+          term_start: termStart,
+          source: 'secure_plan_choice',
+        }),
+        created_at: new Date(),
+      });
+
+      payToken = invoice.token;
+    });
+  } catch (err) {
+    if (err.annualPrepayOverlap) throw fail('prepay_overlap');
+    if (err.code === 'selection_conflict') {
+      // Concurrent winner — return their link instead of an error.
+      const fresh = await db('appointment_card_requests')
+        .where({ id: request.id })
+        .first('prepay_invoice_id');
+      if (fresh?.prepay_invoice_id) {
+        const winner = await db('invoices')
+          .where({ id: fresh.prepay_invoice_id })
+          .first('token', 'status');
+        if (winner && winner.status !== 'void') {
+          return { ok: true, plan: 'prepay_annual', payUrl: portalUrl(`/pay/${winner.token}`) };
+        }
+      }
+    }
+    throw err;
+  }
+
+  logger.info(`[secure-plans] prepay invoice minted for visit ${visit.id} (request ${request.id})`);
+  return { ok: true, plan: 'prepay_annual', payUrl: portalUrl(`/pay/${payToken}`) };
+}
+
+/**
+ * Post-enrollment lane stamp (called from finishVerifiedSecureCapture after
+ * Auto Pay enrollment succeeds, only when the customer explicitly chose
+ * per-application on the plan page): the dispatch per-application
+ * auto-charge is gated on customers.billing_mode === 'per_application'
+ * (estimate accepts stamp it; office bookings never did), so without this
+ * the page's "charged automatically after each completed service" promise
+ * would silently degrade to invoice-on-complete. Conservative by
+ * construction: only NULL/per_visit/one_time lanes are moved (the context
+ * builder already refuses membership/annual-prepay customers), and an
+ * established per_application_fee is never overwritten.
+ */
+async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) {
+  try {
+    if (!isEnabled('securePlanChoice')) return;
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
+    if (!customer) return;
+    const lane = resolveBillingLane(customer);
+    if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay'
+      || customer.billing_mode === 'per_application') return;
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('estimated_price');
+    const perVisit = visit?.estimated_price != null ? Number(visit.estimated_price) : null;
+    await db('customers')
+      .where({ id: customerId })
+      .update({
+        billing_mode: 'per_application',
+        ...(customer.per_application_fee == null && perVisit > 0
+          ? { per_application_fee: perVisit }
+          : {}),
+        updated_at: new Date(),
+      });
+    logger.info(`[secure-plans] customer ${customerId} moved to per_application lane (secure plan choice)`);
+  } catch (err) {
+    logger.warn(`[secure-plans] per-application lane stamp failed for customer ${customerId}: ${err.message}`);
+  }
+}
+
+module.exports = {
+  buildSecurePlanContext,
+  prepaySelectionState,
+  selectSecurePlan,
+  applyPerApplicationLaneStamp,
+  _test: { normalizedPattern, PLAN_CLASS_BY_SERVICE_KEY, overlapStatusClause },
+};

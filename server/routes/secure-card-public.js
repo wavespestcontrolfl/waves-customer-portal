@@ -53,14 +53,46 @@ router.get('/:token', async (req, res) => {
   try {
     const data = await loadSecureCardPageData(token);
     if (!data) return res.status(404).json({ error: 'Not found' });
-    if (data.state === 'ready') {
+    if (data.state === 'ready' || data.state === 'prepay_selected') {
       // The public page has no other authenticated key source — same
       // bootstrap shape as the estimate card-capture endpoints.
+      // prepay_selected also carries a live SetupIntent (the "save a card
+      // instead" fallback), so it needs the key too.
       data.publishableKey = require('../config/stripe-config').publishableKey;
     }
     return res.json(data);
   } catch (err) {
     logger.error(`[secure-card-public] page load failed: ${err.message}`);
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// Plan selection (GATE_SECURE_PLAN_CHOICE lane). The client sends ONLY the
+// plan name — every amount is re-derived server-side. 404 while the gate is
+// off (unobservable while dark) and for unknown tokens; state conflicts map
+// to 409s the page renders as its existing closed/secured states.
+router.post('/:token/select-plan', async (req, res) => {
+  const token = String(req.params.token || '');
+  if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  try {
+    const { selectSecurePlan } = require('../services/secure-appointment-plans');
+    const result = await selectSecurePlan({
+      token,
+      plan: typeof req.body?.plan === 'string' ? req.body.plan : null,
+    });
+    return res.json(result);
+  } catch (err) {
+    const code = err.code || null;
+    if (code === 'gate_off' || code === 'not_found') return res.status(404).json({ error: 'Not found' });
+    if (code === 'invalid_plan') return res.status(400).json({ error: 'Unknown plan.' });
+    if (code === 'already_secured') return res.status(409).json({ error: 'This appointment is already secured.', code });
+    if (code === 'no_longer_needed') return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code });
+    if (code === 'prepay_overlap' || code === 'plan_unavailable' || code === 'selection_conflict') {
+      // Not sellable right now (existing term, price changed, concurrent
+      // update) — the page refetches and renders whatever state is true.
+      return res.status(409).json({ error: 'That option is no longer available. Refresh to see current options.', code: 'plan_unavailable' });
+    }
+    logger.error(`[secure-card-public] select-plan failed: ${err.message}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });

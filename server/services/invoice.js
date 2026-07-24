@@ -1577,6 +1577,11 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // Caller-supplied lines appended AFTER the service's own lines (secure
+      // plan-choice setup fee): the caller owns the claim/idempotency for
+      // these — this method just carries them into the same mint so the fee
+      // and the visit share one invoice.
+      extraLineItems = [],
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -1604,7 +1609,7 @@ const InvoiceService = {
             fallbackDescription: description || sr.service_type,
           })
         : null;
-    const lineItems = scheduledInvoice?.lineItems?.length
+    let lineItems = scheduledInvoice?.lineItems?.length
       ? scheduledInvoice.lineItems
       : [
           {
@@ -1615,6 +1620,9 @@ const InvoiceService = {
             category: sr.service_type,
           },
         ];
+    if (Array.isArray(extraLineItems) && extraLineItems.length) {
+      lineItems = [...lineItems, ...extraLineItems];
+    }
 
     const createParams = {
       customerId: sr.customer_id,

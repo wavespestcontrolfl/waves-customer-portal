@@ -823,6 +823,20 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
         completed_at: new Date(),
         updated_at: new Date(),
       });
+    // Plan-choice lane: an explicit per-application selection moves the
+    // customer onto the per_application billing lane once the card is
+    // actually enrolled — dispatch's completion auto-charge is gated on
+    // that lane, so without the stamp the plan page's "charged
+    // automatically after each completed service" would silently degrade
+    // to invoice-on-complete. No-op while the gate is off or for any lane
+    // the stamp shouldn't touch; never blocks the capture result.
+    if (request.selected_plan === 'per_application') {
+      const { applyPerApplicationLaneStamp } = require('./secure-appointment-plans');
+      await applyPerApplicationLaneStamp({
+        customerId: request.customer_id,
+        scheduledServiceId: request.scheduled_service_id,
+      });
+    }
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
   } catch (err) {
@@ -860,6 +874,21 @@ async function loadSecureCardPageData(token) {
   // If the in-flight attempt fails and reverts, the durable webhook retry
   // converges the row to completed.
   if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
+    return { state: 'secured', ...base };
+  }
+
+  // Plan-choice lane (GATE_SECURE_PLAN_CHOICE; both helpers return null
+  // while the gate is off, keeping this payload byte-identical to today).
+  // A prepay selection whose invoice settled means the year is covered —
+  // heal the pending row to satisfied (mirrors the autopay heal below) and
+  // render secured; a live unpaid prepay invoice renders the
+  // prepay_selected state at the bottom (pay link + card fallback).
+  const { prepaySelectionState, buildSecurePlanContext } = require('./secure-appointment-plans');
+  const planState = await prepaySelectionState(request);
+  if (planState?.state === 'secured') {
+    await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
     return { state: 'secured', ...base };
   }
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
@@ -924,7 +953,29 @@ async function loadSecureCardPageData(token) {
 
   const intent = await createSecureCardSetupIntent(request);
   if (!intent) return { state: 'unavailable', ...base };
-  return { state: 'ready', ...base, clientSecret: intent.clientSecret, setupIntentId: intent.setupIntentId };
+  // planContext is attached ONLY when the plan-choice gate is on and the
+  // booked series yields sound pricing (buildSecurePlanContext returns null
+  // otherwise) — its absence is the client's signal to render the original
+  // card-only page. prepay_selected keeps the SetupIntent alive so the
+  // "save a card and pay per visit instead" fallback works on that state.
+  const planContext = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+  if (planState?.state === 'prepay_selected') {
+    return {
+      state: 'prepay_selected',
+      ...base,
+      payUrl: planState.payUrl,
+      clientSecret: intent.clientSecret,
+      setupIntentId: intent.setupIntentId,
+      ...(planContext ? { planContext } : {}),
+    };
+  }
+  return {
+    state: 'ready',
+    ...base,
+    clientSecret: intent.clientSecret,
+    setupIntentId: intent.setupIntentId,
+    ...(planContext ? { planContext } : {}),
+  };
 }
 
 module.exports = {
