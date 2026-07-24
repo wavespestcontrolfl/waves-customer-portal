@@ -110,6 +110,21 @@ function lookupFeatureModifiers(enriched) {
   };
 }
 
+// Story provenance → the pricing engine's storiesSource vocabulary.
+// 'estimated' fires the stories_estimated manual-review reason in the
+// story-sensitive pricers (pest per-story, termite bait linear feet).
+function storiesSourceForPricing(propertyFacts) {
+  if (!positive(propertyFacts?.stories)) return 'default';
+  const evidence = propertyFacts?.storiesEvidence;
+  if (evidence) {
+    // AI stories-fallback provenance: a direct source read stays a lookup;
+    // an inference (or low-confidence answer) must not price silently.
+    const inferred = evidence.basis === 'inferred' || evidence.confidence === 'low';
+    return inferred ? 'estimated' : 'lookup';
+  }
+  return 'lookup';
+}
+
 function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false, lookupEnriched = null }) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
@@ -194,8 +209,10 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     // Provenance the story-sensitive pricers key their review reasons off —
     // a defaulted count on a 2-story home must carry storiesSource so
     // termite bait (linear-feet math) flags itself instead of silently
-    // underquoting.
-    storiesSource: positive(propertyFacts?.stories) ? 'lookup' : 'default',
+    // underquoting. A low-confidence AI inference is 'estimated' (fires the
+    // same stories_estimated review reason), NOT 'lookup' — the bare
+    // positive-integer check dressed every fallback guess as a real lookup.
+    storiesSource: storiesSourceForPricing(propertyFacts),
     address: intent.address || null,
     leadSource: 'call_pipeline',
   };
@@ -568,7 +585,7 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 }
 
 // ── Draft row ─────────────────────────────────────────────────
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -674,6 +691,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           evidence: intent.evidence || [],
           constraintFlags: intent.constraint_flags || [],
           propertyFacts,
+          // Scoped V2 selection + diff vs the V1 facts the draft priced from
+          // (shadow evaluation data; pricing follows V1 until
+          // GATE_PROPERTY_FACTS_V2 flips).
+          ...(propertyFactsV2 ? { propertyFactsV2 } : {}),
           comps,
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
