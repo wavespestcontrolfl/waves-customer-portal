@@ -157,18 +157,18 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
   // Truth scope: a category only advertises the report tour its plan
   // actually produces; everything else gets empty slots so the email
   // module drops (same mechanism as the FAQ rows).
+  // Only RECURRING_TERMS_BENEFIT packs may carry a video — the tours state
+  // the callbacks / no-contract / 90-day claims on camera (v2 re-cut).
   const VIDEO_SLUGS = {
     pest: 'pest',
     lawn: 'lawn',
     tree_shrub: 'tree-shrub',
     palm_injection: 'tree-shrub',
-    bundle: 'pest',
   };
-  const NO_VIDEO = ['mosquito', 'rodent', 'termite', 'commercial', 'unknown'];
+  const NO_VIDEO = ['mosquito', 'rodent', 'termite', 'commercial', 'bundle', 'unknown'];
 
   test.each(Object.entries(VIDEO_SLUGS))('%s pack advertises the %s report tour', (category, slug) => {
-    if (category === 'bundle') lanes('pest', 'lawn');
-    else lanes(category);
+    lanes(category);
     const vars = followupEmailVars({ id: 'e1' });
     expect(vars.report_video_preview).toBe(
       `https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour-preview.gif`,
@@ -182,6 +182,7 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
   test.each(NO_VIDEO)('%s pack emits empty video slots (module drops)', (category) => {
     if (category === 'commercial') lanes('commercial_pest');
     else if (category === 'unknown') lanes();
+    else if (category === 'bundle') lanes('pest', 'lawn');
     else lanes(category);
     const vars = followupEmailVars({ id: 'e1' });
     expect(vars.report_video_preview).toBe('');
@@ -189,9 +190,12 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
     expect(vars.report_video_caption).toBe('');
   });
 
-  test('every configured video is one of the three produced tours', () => {
+  test('every configured video is one of the three produced tours, on a recurring-terms pack', () => {
     for (const pack of Object.values(PACKS)) {
-      if (pack.video) expect(['pest', 'lawn', 'tree-shrub']).toContain(pack.video.slug);
+      if (pack.video) {
+        expect(['pest', 'lawn', 'tree-shrub']).toContain(pack.video.slug);
+        expect(pack.benefit).toBe(RECURRING_TERMS_BENEFIT);
+      }
     }
   });
 });
