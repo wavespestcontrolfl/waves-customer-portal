@@ -304,9 +304,19 @@ async function selectSecurePlan({ token, plan }) {
         .update({ prepay_invoice_id: null, annual_prepay_term_id: null, updated_at: new Date() });
     }
     const stamp = new Date();
-    await db('appointment_card_requests')
+    const stamped = await db('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })
       .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
+    if (stamped !== 1) {
+      // The CAS lost (Codex #2980 r2): /complete raced this selection and
+      // the request is no longer pending — stamping the fee anyway would
+      // bill a $99 no durable selection authorizes. Report the true state.
+      const fresh = await db('appointment_card_requests')
+        .where({ id: request.id })
+        .first('status');
+      if (fresh?.status === 'completed' || fresh?.status === 'satisfied') throw fail('already_secured');
+      throw fail('selection_conflict');
+    }
     // Owner decision 2026-07-24: the per-application choice on a solo
     // pest/mosquito series owes the $99 setup fee on the FIRST completion
     // invoice. Snapshot the amount now (billed fee === disclosed fee) on
@@ -343,25 +353,8 @@ async function selectSecurePlan({ token, plan }) {
   }
   if (context.mode !== 'recurring') throw fail('plan_unavailable');
 
-  // Term starts at the first UPCOMING live visit of the series — coverage
-  // must span the visits the customer is prepaying, not the send date.
-  // Anchor on the series PARENT: a child-attached link would otherwise see
-  // only its own row and mis-anchor the term window.
   const today = etDateString();
   const anchorId = seriesAnchorId(visit);
-  const seriesRows = await db('scheduled_services')
-    .where(function series() {
-      this.where({ id: anchorId }).orWhere({ recurring_parent_id: anchorId });
-    })
-    .whereIn('status', LIVE_VISIT_STATUSES)
-    .select('scheduled_date');
-  const upcoming = seriesRows
-    .map((r) => callBookingDateOnly(r.scheduled_date))
-    .filter((d) => d && d >= today)
-    .sort();
-  const termStart = upcoming[0] || null;
-  if (!termStart) throw fail('no_longer_needed');
-
   const InvoiceService = require('./invoice');
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
@@ -373,6 +366,25 @@ async function selectSecurePlan({ token, plan }) {
   let payToken = null;
   try {
     await db.transaction(async (trx) => {
+      // Term starts at the first UPCOMING live visit of the series —
+      // coverage must span the visits the customer is prepaying, not the
+      // send date. Anchored on the series PARENT and derived INSIDE the
+      // transaction (Codex #2980 r2): a snapshot taken outside could
+      // mis-anchor the paid window when the office cancels/reschedules the
+      // earliest child mid-selection.
+      const seriesRows = await trx('scheduled_services')
+        .where(function series() {
+          this.where({ id: anchorId }).orWhere({ recurring_parent_id: anchorId });
+        })
+        .whereIn('status', LIVE_VISIT_STATUSES)
+        .select('scheduled_date');
+      const upcoming = seriesRows
+        .map((r) => callBookingDateOnly(r.scheduled_date))
+        .filter((d) => d && d >= today)
+        .sort();
+      const termStart = upcoming[0] || null;
+      if (!termStart) throw fail('no_longer_needed');
+
       // Advisory lock + in-transaction overlap re-check — two tabs (or a
       // concurrent office mint) collapse to one term (mirrors the
       // Customer360 mint and the estimate accept).

@@ -411,3 +411,20 @@ describe('terminal-state + in-transaction revalidation (Codex #2980)', () => {
     expect(mockInvoiceCreate).not.toHaveBeenCalled();
   });
 });
+
+describe('selection CAS honored (Codex #2980 r2)', () => {
+  test('a per_application selection whose CAS loses to /complete refuses and never stamps the fee', async () => {
+    setTables({
+      appointment_card_requests: {
+        first: (chain) => {
+          const reads = mockDbCalls.filter((c) => c.table === 'appointment_card_requests');
+          // First read: pending; the post-CAS re-read sees /complete won.
+          return reads.length <= 1 ? { ...pendingRequest } : { ...pendingRequest, status: 'completed' };
+        },
+        update: () => 0,
+      },
+    });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).rejects.toMatchObject({ code: 'already_secured' });
+    expect(updatesFor('scheduled_services')).toHaveLength(0);
+  });
+});

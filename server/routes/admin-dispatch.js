@@ -6047,29 +6047,59 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // per-application selection on a solo pest/mosquito series stamped
     // pending_setup_fee on the series parent — the FIRST live completion
     // mint carries it as its own line so the office never bills it
-    // manually. Value-guarded compare-and-swap: concurrent completions
-    // collapse to one fee; the mint catch below restores the stamp so a
-    // failed mint never eats the fee. Never under backfill (frozen-money
-    // posture: the review mint is a single line at the frozen amount) and
-    // never for callbacks.
+    // manually. The claim is DURABLE across crashes (Codex #2980 r2):
+    // claiming flips the stamp NEGATIVE (in-progress marker) instead of
+    // clearing it; a successful mint clears it, an in-process failure
+    // restores it positive, and a worker that dies mid-window leaves the
+    // negative stamp for the recovery branch below — which checks whether
+    // the minted setup line actually exists on a series invoice and either
+    // heals (billed: clear, no second line) or re-adopts the claim (not
+    // billed: mint it now). Exact-value CAS (+ an updated_at lease guard on
+    // adoption) collapses concurrent completions to one fee. Never under
+    // backfill (frozen-money posture) and never for callbacks.
     let secureSetupFee = null;
     if (shouldInvoice && !isBackfillCompletion && !svc.is_callback) {
       try {
         const setupParentId = svc.recurring_parent_id || svc.id;
         const parentRow = await db('scheduled_services')
           .where({ id: setupParentId })
-          .first('pending_setup_fee');
-        const fee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
-        if (fee > 0) {
-          const claimed = await db('scheduled_services')
-            .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
-            .update({ pending_setup_fee: null, updated_at: new Date() });
-          if (claimed === 1) {
-            secureSetupFee = { parentId: setupParentId, amount: Math.round(fee * 100) / 100 };
-            // Durable trace: a crash between this claim and the mint loses
-            // the fee (restore only covers in-process failures) — this log
-            // line is the audit trail for that bounded window.
-            logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${secureSetupFee.amount}) — minting on visit ${svc.id}`);
+          .first('pending_setup_fee', 'updated_at');
+        const rawFee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
+        if (rawFee) {
+          const amount = Math.round(Math.abs(rawFee) * 100) / 100;
+          if (rawFee < 0) {
+            // Orphaned claim from a dead worker. The durable truth is the
+            // invoice itself: does any non-void series invoice already
+            // carry the setup line?
+            const lineExists = await db('invoices')
+              .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
+                this.where({ id: setupParentId }).orWhere({ recurring_parent_id: setupParentId });
+              }))
+              .whereNot('status', 'void')
+              .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
+              .first('id');
+            if (lineExists) {
+              await db('scheduled_services')
+                .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
+                .update({ pending_setup_fee: null, updated_at: new Date() });
+              logger.info(`[dispatch] orphaned setup-fee claim healed for series ${setupParentId} — fee already on invoice ${lineExists.id}`);
+            } else {
+              const adopted = await db('scheduled_services')
+                .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee, updated_at: parentRow.updated_at })
+                .update({ updated_at: new Date() });
+              if (adopted === 1) {
+                secureSetupFee = { parentId: setupParentId, amount };
+                logger.warn(`[dispatch] orphaned setup-fee claim ADOPTED for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+              }
+            }
+          } else {
+            const claimed = await db('scheduled_services')
+              .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
+              .update({ pending_setup_fee: -amount, updated_at: new Date() });
+            if (claimed === 1) {
+              secureSetupFee = { parentId: setupParentId, amount };
+              logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+            }
           }
         }
       } catch (e) {
@@ -6156,6 +6186,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // where it bills is the reviewer's call (breadcrumb below).
           skipAccrual: isBackfillCompletion,
         });
+        // The mint landed — retire the durable setup-fee claim (guarded on
+        // the exact negative marker). If this clear fails or the process
+        // dies first, the orphaned-claim recovery above finds the minted
+        // line on the next completion and heals without a second charge.
+        if (secureSetupFee) {
+          try {
+            await db('scheduled_services')
+              .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
+              .update({ pending_setup_fee: null, updated_at: new Date() });
+          } catch (clearErr) {
+            logger.warn(`[dispatch] setup-fee claim clear failed for series ${secureSetupFee.parentId} (recovery will heal): ${clearErr.message}`);
+          }
+        }
         // Point the reviewer at the money the skip left behind — the same
         // breadcrumb the prepaid skip logs (applyPrepaidCreditToInvoice).
         if (isBackfillCompletion && svc.source_estimate_id) {
@@ -6193,17 +6236,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           codePrefix: invoiceShortCodePrefix(invoice),
         });
       } catch (invErr) {
-        // A claimed setup fee whose mint failed goes back on the series
-        // parent — otherwise the failed attempt silently eats the $99
-        // (guarded on still-NULL so a concurrent successful claim wins).
+        // A claimed setup fee whose mint failed goes back POSITIVE on the
+        // series parent (guarded on the exact negative marker) — otherwise
+        // the failed attempt would leave the in-progress claim for the
+        // recovery path to re-adopt later instead of retrying cleanly now.
         if (secureSetupFee) {
           try {
             await db('scheduled_services')
-              .where({ id: secureSetupFee.parentId })
-              .whereNull('pending_setup_fee')
+              .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
               .update({ pending_setup_fee: secureSetupFee.amount, updated_at: new Date() });
           } catch (restoreErr) {
-            logger.warn(`[dispatch] setup-fee restore failed for visit ${svc.id}: ${restoreErr.message}`);
+            logger.warn(`[dispatch] setup-fee restore failed for visit ${svc.id} (recovery will adopt): ${restoreErr.message}`);
           }
         }
         // Fail-closed leg of the backfill review-invoice promise (Codex P0,
@@ -6432,8 +6475,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       let planChoiceSetupFeeSelected = false;
       if (!acceptMintedInvoice) {
         try {
+          // The selection row lives on WHICHEVER series visit the card
+          // link was sent for (parent or child — Codex #2980 r2), so the
+          // allowance must search the whole series, not just the parent.
+          const allowanceParentId = svc.recurring_parent_id || svc.id;
           planChoiceSetupFeeSelected = !!(await db('appointment_card_requests')
-            .where({ scheduled_service_id: svc.recurring_parent_id || svc.id, selected_plan: 'per_application' })
+            .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
+              this.where({ id: allowanceParentId }).orWhere({ recurring_parent_id: allowanceParentId });
+            }))
+            .where({ selected_plan: 'per_application' })
             .first('id'));
         } catch (e) { /* fail toward review */ }
       }
