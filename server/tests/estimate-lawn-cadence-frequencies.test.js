@@ -33,9 +33,9 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     // stored rows still carry it, but it must never be re-offered.
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear])).toEqual([
-      ['standard', 'Bi-monthly', 6],
-      ['enhanced', '9 visits / yr', 9],
-      ['premium', 'Monthly', 12],
+      ['standard', 'Bi-monthly (6 visits)', 6],
+      ['enhanced', 'Every 6 weeks (9 visits)', 9],
+      ['premium', 'Monthly (12 visits)', 12],
     ]);
   });
 
@@ -96,7 +96,7 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     });
     expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
     const std = freqs.find((f) => f.key === 'standard');
-    expect(std.label).toBe('Bi-monthly');
+    expect(std.label).toBe('Bi-monthly (6 visits)');
     expect(std.visitsPerYear).toBe(6);
     expect(std.monthly).toBe(55.5); // the real 6-visit price, not Basic's $35
   });
@@ -512,9 +512,9 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
   test('expands the lawn line item tiers into the sold cadences, in order (Quarterly retired)', () => {
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [lawnLineItem()] });
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
-      ['standard', 'Bi-monthly', 6, 55],
-      ['enhanced', '9 visits / yr', 9, 62.25],
-      ['premium', 'Monthly', 12, 84],
+      ['standard', 'Bi-monthly (6 visits)', 6, 55],
+      ['enhanced', 'Every 6 weeks (9 visits)', 9, 62.25],
+      ['premium', 'Monthly (12 visits)', 12, 84],
     ]);
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
   });

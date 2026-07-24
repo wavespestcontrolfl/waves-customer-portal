@@ -3171,6 +3171,15 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     && serviceKeys.every((key) => key === 'tree_shrub');
   const isBoraCareOnly = oneTimeCategories.has('bora_care')
     && hasOnlyBoraCareServiceMix(recurringServices, intelligenceOneTimeItems);
+  // Pool/Lanai is a PEST pricing input (pool-cage adjustment) — owner
+  // 2026-07-23: the tile renders only when the estimate actually includes
+  // pest control (recurring or one-time), never on tree & shrub / termite /
+  // rodent-only compositions.
+  const hasPest = serviceKeys.includes('pest_control')
+    || !!inputServices.pest
+    || !!engineServices.pest
+    || inputs.svcPest === true
+    || oneTimeCategories.has('pest_control');
 
   const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
   const homeSqFt = firstPositiveNumber(
@@ -3228,23 +3237,27 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || engineServices.treeShrub
     || engineServices.tree_shrub
     || {};
-  const treeShrubBedArea = isTreeShrubOnly
+  // Tree & shrub tiles render on ANY mix that includes T&S (owner
+  // 2026-07-23: T&S estimates lead with tree/shrub density and bed area,
+  // not pool/lanai) — previously T&S-only.
+  const treeShrubBedArea = hasTreeShrub
     ? treeShrubBedAreaMetricValue({ treeShrubInputs, inputs, property, resultStats })
     : null;
-  const treeShrubProfile = isTreeShrubOnly
+  const treeShrubProfile = hasTreeShrub
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  // Lawn estimates price off the treatable turf, so Pool/Lanai (lawn-only,
-  // owner ask 2026-07-09) and landscape Complexity (ANY mix including lawn —
-  // extended to pest+lawn bundles, owner ask 2026-07-10) read as irrelevant
-  // noise there.
+  // Landscape Complexity is suppressed on ANY mix including lawn (owner ask
+  // 2026-07-10) — lawn estimates price off treatable turf, so it reads as
+  // irrelevant noise there.
   const complexity = hasLawn ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
     || inputs.landscapeComplexity
   );
-  const poolLanaiValue = isLawnOnly ? null : poolLanaiMetricValue({
+  // Pool/Lanai is a PEST pricing input (pool-cage adjustment) — pest
+  // compositions only (owner 2026-07-23; was everything-except-lawn-only).
+  const poolLanaiValue = !hasPest ? null : poolLanaiMetricValue({
     pool: firstFeaturePresence(
       inputs.pool,
       inputs.hasPool,
@@ -3274,6 +3287,23 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       || propertyFeatures.poolCageSize
       || aiAnalysis.poolCageSize,
   });
+  // Mosquito estimates surface the near-water signal instead — standing
+  // water is the pressure/pricing driver there (owner 2026-07-23). Tile
+  // renders only when the signal is actually known.
+  const nearWaterPresence = hasMosquito ? firstFeaturePresence(
+    inputs.nearWater,
+    inputs.near_water,
+    inputFeatures.nearWater,
+    property.nearWater,
+    property.near_water,
+    propertyFeatures.nearWater,
+    aiAnalysis.nearWater,
+    aiAnalysis.near_water,
+  ) : null;
+  const nearWaterValue = nearWaterPresence === 'yes' ? 'Yes'
+    : nearWaterPresence === 'possible' ? 'Possible'
+    : nearWaterPresence === 'no' ? 'No'
+    : null;
 
   const dedupeMetrics = (items) => {
     const seen = new Set();
@@ -3293,6 +3323,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     mosquitoTreatmentAreaSqFt ? { label: 'Mosquito treatment area', value: `${Math.round(mosquitoTreatmentAreaSqFt).toLocaleString()} sq ft` } : null,
     mosquitoProgram ? { label: 'Mosquito program', value: mosquitoProgram } : null,
     mosquitoPressure ? { label: 'Mosquito pressure', value: mosquitoPressure } : null,
+    nearWaterValue ? { label: 'Near water', value: nearWaterValue } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     treeShrubBedArea ? { label: 'Ornamental beds', value: `${Math.round(treeShrubBedArea).toLocaleString()} sq ft` } : null,
     treeShrubProfile ? { label: 'Trees/Shrubs', value: treeShrubProfile } : null,
@@ -5341,8 +5372,6 @@ ${shellTopBar()}
       <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
-      <span class="dot">&middot;</span>
-      <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a>
     </div>
     <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
@@ -10771,10 +10800,13 @@ router.put('/:token/decline', async (req, res, next) => {
 const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
+// Cadence pills carry their visit count in parens (owner 2026-07-23,
+// matching the mosquito "Seasonal (9 visits)" style — recurring services
+// only, never one-time labels).
 const FREQUENCY_LADDER = [
-  { key: 'quarterly',  label: 'Quarterly',   engineFrequency: 'quarterly' },
-  { key: 'bi_monthly', label: 'Bi-monthly',  engineFrequency: 'bimonthly' },
-  { key: 'monthly',    label: 'Monthly',     engineFrequency: 'monthly' },
+  { key: 'quarterly',  label: 'Quarterly (4 visits)',   engineFrequency: 'quarterly' },
+  { key: 'bi_monthly', label: 'Bi-monthly (6 visits)',  engineFrequency: 'bimonthly' },
+  { key: 'monthly',    label: 'Monthly (12 visits)',    engineFrequency: 'monthly' },
 ];
 
 function extractRequestIp(req) {
@@ -13421,13 +13453,15 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
       // House convention: T&S tiers display as cadences (4=Quarterly,
-      // 6=Bi-monthly, 9=Every 6 weeks). Light is the 4-visit Quarterly option.
+      // 6=Bi-monthly, 9=Every 6 weeks), with the visit count in parens on
+      // the pill (owner 2026-07-23). labelBase stays clean for the
+      // "<cadence> tree & shrub program" included line.
       const labelBase = tierKey === 'light' ? 'Quarterly'
         : tierKey === 'enhanced' ? 'Every 6 weeks'
         : 'Bi-monthly';
       return {
         key: tierKey,
-        label: labelBase,
+        label: visits ? `${labelBase} (${Math.round(visits)} visits)` : labelBase,
         serviceCategory: 'tree_shrub',
         serviceTierKey: tierKey,
         monthlyBase,
@@ -13489,7 +13523,8 @@ function lawnTierKey(row = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: '9 visits / yr', premium: 'Monthly' };
+// Visit counts in parens + "Every 6 weeks" for the 9x tier (owner 2026-07-23).
+const LAWN_CADENCE_LABEL = { basic: 'Quarterly (4 visits)', standard: 'Bi-monthly (6 visits)', enhanced: 'Every 6 weeks (9 visits)', premium: 'Monthly (12 visits)' };
 
 // ── Lawn program minimum + retired cadences (owner directive 2026-07-09) ─────
 // The engine floors NEW quotes (priceLawnCare), but stored estimates carry
@@ -14328,7 +14363,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_quarterly',
         name: 'Quarterly Tree & Shrub Care Service',
         frequencyKey: 'quarterly',
-        label: 'Quarterly',
+        label: 'Quarterly (4 visits)',
         visitsPerYear: 4,
       };
     case 'standard':
@@ -14337,7 +14372,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_program',
         name: 'Bi-Monthly Tree & Shrub Care Service',
         frequencyKey: 'bi_monthly',
-        label: 'Bi-monthly',
+        label: 'Bi-monthly (6 visits)',
         visitsPerYear: 6,
       };
     case 'enhanced':
@@ -14346,7 +14381,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_6week',
         name: 'Every 6 Weeks Tree & Shrub Care Service',
         frequencyKey: 'every_6_weeks',
-        label: 'Every 6 weeks',
+        label: 'Every 6 weeks (9 visits)',
         visitsPerYear: 9,
       };
     default:
@@ -14544,10 +14579,10 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 // established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
 // line rides the proven downstream scheduling + billing plumbing.
 const LAWN_CADENCE_RUNTIME = {
-  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly', visitsPerYear: 4 },
-  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
-  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: '9 visits / yr', visitsPerYear: 9 },
-  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
+  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly (4 visits)', visitsPerYear: 4 },
+  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly (6 visits)', visitsPerYear: 6 },
+  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks (9 visits)', visitsPerYear: 9 },
+  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly (12 visits)', visitsPerYear: 12 },
 };
 function lawnTierRuntimeMeta(tierKey) {
   return LAWN_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;
