@@ -13499,6 +13499,10 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14016,6 +14020,10 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
         // Armed margin floor rides the entry so downstream repricers (the
@@ -14244,6 +14252,10 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14338,6 +14350,10 @@ function foamFrequenciesFromV1Services(services = []) {
     perTreatment,
     visitsPerYear: visits,
     billingFrequencyKey: 'monthly',
+    // Tier plans bill per application on accept (plan annual ÷ visits,
+    // estimate-converter) — suppress the "Billed $X/mo" note (owner
+    // 2026-07-23: billing is always per application).
+    ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
     estimatedDurationMinutes,
     // foam_recurring is non-discountable (cadence multiplier is its only
     // discount), so no manual-discount shaping here.
@@ -15053,24 +15069,27 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
-  // Termite bait: stations are checked quarterly (owner directive
-  // 2026-07-10) and NEW estimates persist explicit perTreatment/visitsPerYear
-  // and are BILLED per application (owner 2026-07-20) — flag those so the
-  // card drops the "Billed $X/mo" note, which would misstate the charge.
-  // OLD payloads (perTreatment/visitsPerYear null) keep the display-only
-  // derivation ($29.75/mo → $89.25/check) AND the monthly note: their
-  // accept path still bills the flat monthly, so the note stays truthful
-  // for exactly the estimates it still applies to.
+  // Rows carrying explicit per-application data (per-visit price + visit
+  // count) are BILLED per application on accept for every estimate-flow
+  // customer, not just termite bait: estimate-converter stamps
+  // billing_mode='per_application' and charges plan annual ÷ visits per
+  // completion (owner rulings 2026-07-09 / 2026-07-23: billing is always
+  // per application). Flag them so the card drops the "Billed $X/mo" note,
+  // which would misstate the charge. The lone monthly-billed acceptor is a
+  // CURRENT monthly member adding on (converter preservesExistingMembership)
+  // — their card leads with the same per-application headline either way.
+  // OLD flat-monthly payloads (perTreatment/visitsPerYear null, e.g.
+  // pre-flag termite monitoring) keep the display-only derivation
+  // ($29.75/mo → $89.25/check) AND the monthly note: without a visit count
+  // the converter's per-application division can't run, so their accept
+  // path still bills the flat monthly and the note stays truthful for
+  // exactly the estimates it still applies to.
   let effectiveVisits = visitsPerYear;
-  let billedPerApplication = false;
-  if (key === 'termite_bait') {
-    if (displayPrice && visitsPerYear) {
-      billedPerApplication = true;
-    } else if (monthly != null) {
-      const TERMITE_CHECKS_PER_YEAR = 4;
-      effectiveVisits = TERMITE_CHECKS_PER_YEAR;
-      displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
-    }
+  const billedPerApplication = !!(displayPrice && visitsPerYear);
+  if (key === 'termite_bait' && !billedPerApplication && monthly != null) {
+    const TERMITE_CHECKS_PER_YEAR = 4;
+    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -15120,6 +15139,10 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     perTreatment: perTreatment || null,
     perVisit: key === 'pest_control' ? (perTreatment || null) : null,
     visitsPerYear: visitsPerYear || null,
+    // Same rule as frequencyFromTreatmentRow: a known visit count means the
+    // converter bills per application (plan annual ÷ visits) — no visit
+    // count means the flat-monthly cadence fallback, where the note stays.
+    ...(perTreatment > 0 && visitsPerYear > 0 ? { billedPerApplication: true } : {}),
     included: includedRowsForServiceFrequency({}, key, recurringService),
     addOns: [],
     quoteRequired: false,
@@ -16650,7 +16673,141 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   return out;
 }
 
+// Codex P1s (#2978 r1-r2): a CURRENT monthly member adding on keeps monthly
+// membership billing at accept (estimate-converter preservesExistingMembership),
+// so for exactly that audience the "Billed $X/mo" note IS the truthful
+// disclosure — the per-application flag must not suppress it. The lane is
+// resolved LIVE from the linked customer row via the SAME shared predicate
+// the converter uses (customerPreservesMonthlyMembership, billing-cadence.js):
+// a save-time snapshot would go stale when the customer changes lanes, and a
+// membership snapshot doesn't even exist for monthly members without
+// qualifying recurring rows. Enforcement is symmetric — preserved members
+// get every flag stripped, everyone else gets missing flags ADDED on the
+// tier-plan surfaces, so pre-flag send snapshots (sent before this change)
+// serve the same disclosure as fresh builds.
+async function estimateCustomerPreservesMonthlyBilling(estimate) {
+  if (!estimate?.customer_id && !estimate?.customer_phone) return false;
+  try {
+    let customer = null;
+    if (estimate.customer_id) {
+      customer = await db('customers').where({ id: estimate.customer_id }).first();
+    } else {
+      // UNLINKED estimates link at accept through this same matcher
+      // (matchAcceptCustomerByPhone → convertEstimate, the #2680 r3
+      // shared-resolution contract) — resolve the prospective customer
+      // identically so the disclosure matches the billing accept will
+      // actually apply (codex #2978 r4). Ambiguous matches return null,
+      // exactly like accept (no link → converts per-application).
+      ({ match: customer } = await matchAcceptCustomerByPhone(estimate));
+    }
+    if (!customer) return false;
+    return BillingCadence.customerPreservesMonthlyMembership(customer);
+  } catch (e) {
+    // Unknown lane with a customer signal present: keep the monthly
+    // disclosure. Wrongly suppressing it hides a description of a real
+    // charge; wrongly showing it merely over-discloses for one transient
+    // failure window.
+    logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
+    return true;
+  }
+}
+
+// Pre-migration compatibility (codex #2978 r3, mirrors estimate-converter):
+// on a database without migration 20260709000010's billing_mode /
+// per_application_fee columns (an explicitly supported preview /
+// deploy-window state) the converter keeps the LEGACY update shape — every
+// accept bills through the monthly cron — so per-application billing does
+// not exist and the monthly note is the truthful disclosure for everyone.
+// A migrated database never un-migrates, so a true probe is cached forever;
+// while false we re-probe per build — the window is short. Fail directions
+// differ from the probe SUCCEEDING false: a probe ERROR means the database
+// is unreachable (the page is failing anyway), not pre-migration — assume
+// migrated so the display logic keeps working; the converter's error→legacy
+// choice is about WRITE safety (never write columns that may not exist),
+// which doesn't apply to a display flag.
+let perApplicationColumnsKnownPresent = false;
+async function perApplicationBillingColumnsExist() {
+  if (perApplicationColumnsKnownPresent) return true;
+  try {
+    perApplicationColumnsKnownPresent = await db.schema.hasColumn('customers', 'billing_mode');
+    return perApplicationColumnsKnownPresent;
+  } catch {
+    return true;
+  }
+}
+// Test-only: lets suites exercise the pre-migration branch after a true
+// probe has been cached.
+function resetPerApplicationColumnsProbeForTests() {
+  perApplicationColumnsKnownPresent = false;
+}
+
+// Copying transforms, mirroring stripInternalMarginFieldsDeep — the pricing
+// cache must keep the raw bundle (the enforcement is lane-conditional).
+function stripBilledPerApplicationDeep(value, depth = 0) {
+  if (depth > 6 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => stripBilledPerApplicationDeep(entry, depth + 1));
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'billedPerApplication') continue;
+    out[key] = stripBilledPerApplicationDeep(nested, depth + 1);
+  }
+  return out;
+}
+
+// Tier-plan surfaces whose accept path bills per application (plan annual ÷
+// visits). Deliberately EXCLUDES termite_bait/pest sections: legacy
+// flat-monthly termite rows carry a derived per-visit price + visit count
+// yet genuinely bill the flat monthly — their entries must keep the note
+// (the #2965 carve-out), and only the builders can tell those payloads
+// apart, so snapshot back-fill never touches them.
+const TIER_BILLED_PER_APP_SECTION_KEYS = new Set(['lawn_care', 'tree_shrub', 'mosquito', 'foam_recurring']);
+
+function frequencyEntryLooksPerApplication(entry) {
+  return !!entry && typeof entry === 'object'
+    && entry.quoteRequired !== true
+    && Number(entry.perTreatment) > 0
+    && Number(entry.visitsPerYear) > 0;
+}
+
+function withBilledPerApplicationFlag(entry) {
+  return frequencyEntryLooksPerApplication(entry) && entry.billedPerApplication !== true
+    ? { ...entry, billedPerApplication: true }
+    : entry;
+}
+
+function addMissingBilledPerApplicationFlags(bundle) {
+  const out = { ...bundle };
+  const mapTopLevel = (freqs) => (Array.isArray(freqs)
+    ? freqs.map((entry) => (
+      TIER_BILLED_PER_APP_SECTION_KEYS.has(entry?.serviceCategory)
+        ? withBilledPerApplicationFlag(entry)
+        : entry
+    ))
+    : freqs);
+  out.frequencies = mapTopLevel(out.frequencies);
+  out.hiddenLawnFrequencies = mapTopLevel(out.hiddenLawnFrequencies);
+  if (Array.isArray(out.services)) {
+    out.services = out.services.map((section) => (
+      section && TIER_BILLED_PER_APP_SECTION_KEYS.has(section.key) && Array.isArray(section.frequencies)
+        ? { ...section, frequencies: section.frequencies.map(withBilledPerApplicationFlag) }
+        : section
+    ));
+  }
+  return out;
+}
+
 async function buildPricingBundle(estimate) {
+  const bundle = await buildPricingBundleInner(estimate);
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  if (!(await perApplicationBillingColumnsExist())) {
+    return stripBilledPerApplicationDeep(bundle);
+  }
+  return (await estimateCustomerPreservesMonthlyBilling(estimate))
+    ? stripBilledPerApplicationDeep(bundle)
+    : addMissingBilledPerApplicationFlags(bundle);
+}
+
+async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
@@ -17926,6 +18083,9 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
+module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
+module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationColumnsProbeForTests;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;

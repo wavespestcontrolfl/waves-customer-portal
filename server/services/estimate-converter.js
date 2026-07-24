@@ -12,6 +12,7 @@ const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
+  customerPreservesMonthlyMembership,
   inferFrequencyKeyFromEstimateData,
   perApplicationChargeAmount,
   resolveBillingCadence,
@@ -1669,14 +1670,10 @@ const EstimateConverter = {
     // else (new signups, leads, churned/dormant re-signups) converts to
     // per-visit billing per the owner ruling; annual-prepay accepts are
     // re-stamped at the term choke point either way.
-    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
-      && Number(customer.monthly_rate) > 0
-      // Only NULL (legacy) or an explicit monthly_membership preserves — any
-      // explicit non-monthly lane (per_application/annual_prepay/per_visit/
-      // one_time) converts per the owner ruling; lingering tier/rate fields
-      // on an explicit per-visit customer must not resurrect membership
-      // billing (Codex #2836 r3).
-      && (customer.billing_mode == null || customer.billing_mode === 'monthly_membership');
+    // Shared predicate (billing-cadence.js) — the estimate display surfaces
+    // read the same function so the "Billed $X/mo" disclosure can never
+    // drift from the billing behavior decided here.
+    const preservesExistingMembership = customerPreservesMonthlyMembership(customer);
     // Pre-migration compatibility (Codex round-8): billing_mode +
     // per_application_fee ship in migration 20260709000010 — on a database
     // that hasn't run it (preview env, deploy window) the update keys would
