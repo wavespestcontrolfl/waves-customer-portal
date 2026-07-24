@@ -16701,6 +16701,35 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
   }
 }
 
+// Pre-migration compatibility (codex #2978 r3, mirrors estimate-converter):
+// on a database without migration 20260709000010's billing_mode /
+// per_application_fee columns (an explicitly supported preview /
+// deploy-window state) the converter keeps the LEGACY update shape — every
+// accept bills through the monthly cron — so per-application billing does
+// not exist and the monthly note is the truthful disclosure for everyone.
+// A migrated database never un-migrates, so a true probe is cached forever;
+// while false we re-probe per build — the window is short. Fail directions
+// differ from the probe SUCCEEDING false: a probe ERROR means the database
+// is unreachable (the page is failing anyway), not pre-migration — assume
+// migrated so the display logic keeps working; the converter's error→legacy
+// choice is about WRITE safety (never write columns that may not exist),
+// which doesn't apply to a display flag.
+let perApplicationColumnsKnownPresent = false;
+async function perApplicationBillingColumnsExist() {
+  if (perApplicationColumnsKnownPresent) return true;
+  try {
+    perApplicationColumnsKnownPresent = await db.schema.hasColumn('customers', 'billing_mode');
+    return perApplicationColumnsKnownPresent;
+  } catch {
+    return true;
+  }
+}
+// Test-only: lets suites exercise the pre-migration branch after a true
+// probe has been cached.
+function resetPerApplicationColumnsProbeForTests() {
+  perApplicationColumnsKnownPresent = false;
+}
+
 // Copying transforms, mirroring stripInternalMarginFieldsDeep — the pricing
 // cache must keep the raw bundle (the enforcement is lane-conditional).
 function stripBilledPerApplicationDeep(value, depth = 0) {
@@ -16759,6 +16788,9 @@ function addMissingBilledPerApplicationFlags(bundle) {
 async function buildPricingBundle(estimate) {
   const bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
+  if (!(await perApplicationBillingColumnsExist())) {
+    return stripBilledPerApplicationDeep(bundle);
+  }
   return (await estimateCustomerPreservesMonthlyBilling(estimate))
     ? stripBilledPerApplicationDeep(bundle)
     : addMissingBilledPerApplicationFlags(bundle);
@@ -18042,6 +18074,7 @@ module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
 module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
+module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationColumnsProbeForTests;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;

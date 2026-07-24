@@ -11,7 +11,7 @@
  * snapshots included).
  */
 
-const mockDbState = { customer: null, calls: [] };
+const mockDbState = { customer: null, calls: [], billingModeColumnExists: true };
 
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -37,12 +37,22 @@ jest.mock('../models/db', () => {
   };
   handler.fn = { now: () => new Date() };
   handler.raw = async () => ({ rows: [] });
+  handler.schema = {
+    hasColumn: async (table, column) => {
+      if (table === 'customers' && column === 'billing_mode') {
+        if (mockDbState.billingModeColumnExists instanceof Error) throw mockDbState.billingModeColumnExists;
+        return mockDbState.billingModeColumnExists;
+      }
+      return true;
+    },
+  };
   return handler;
 });
 
 const {
   buildPricingBundle,
   addMissingBilledPerApplicationFlags,
+  _resetPerApplicationColumnsProbeForTests,
 } = require('../routes/estimate-public');
 
 function lawnEstimateRow({ customerId = null } = {}) {
@@ -87,6 +97,8 @@ function collectFlags(bundle) {
 beforeEach(() => {
   mockDbState.customer = null;
   mockDbState.calls = [];
+  mockDbState.billingModeColumnExists = true;
+  _resetPerApplicationColumnsProbeForTests();
 });
 
 describe('buildPricingBundle lane enforcement', () => {
@@ -124,6 +136,28 @@ describe('buildPricingBundle lane enforcement', () => {
     mockDbState.customer = new Error('connection refused');
     const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
     expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('pre-migration database (no billing_mode column): every flag stripped even for leads — accepts bill the legacy monthly cron (codex r3)', async () => {
+    mockDbState.billingModeColumnExists = false;
+    const bundle = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('column probe ERROR assumes migrated — unreachable db is not pre-migration', async () => {
+    mockDbState.billingModeColumnExists = new Error('information_schema unavailable');
+    const bundle = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('a migrated probe is cached — the flag path stays hot after the first true answer', async () => {
+    const first = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(first).length).toBeGreaterThan(0);
+    // Flip the mock to "column missing": the cached true probe must win
+    // (a migrated database never un-migrates).
+    mockDbState.billingModeColumnExists = false;
+    const second = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(second).length).toBeGreaterThan(0);
   });
 });
 
