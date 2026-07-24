@@ -730,7 +730,12 @@ function generateEstimate(input) {
     } else {
       const result = pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',
-        pricingVersion: services.pest.version || 'v1',
+        // No caller-provided version → defer to pricePestControl's own live
+        // default (v2 curve). The old `|| 'v1'` fallback silently pinned
+        // EVERY engine quote to the retired curve since no caller sets
+        // services.pest.version (codex #2966 P1). Explicit versions still
+        // pass through — that is the legacy-replay channel.
+        pricingVersion: services.pest.version || undefined,
         roachType: services.pest.roachType || 'none',
         modifiers,
         pestProgramFloorArmed,

@@ -1705,11 +1705,12 @@ export function calculateEstimate(inputs) {
     : 'MEDIUM';
   const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };
   // Deprecated client mirror of server/services/pricing-engine/constants.PEST.
-  // Keep these literals synced until this file is retired.
+  // Keep these literals synced until this file is retired. Synced to the v2
+  // cadence curve (live default since 2026-07-23).
   const pestFrequencyTiers = [
     { f: 4, label: 'Quarterly', disc: 1.00, rec: pestFreq === 4 },
-    { f: 6, label: 'Bi-Monthly', disc: 0.85, rec: pestFreq === 6 },
-    { f: 12, label: 'Monthly', disc: 0.70, rec: pestFreq === 12 },
+    { f: 6, label: 'Bi-Monthly', disc: 0.88, rec: pestFreq === 6 },
+    { f: 12, label: 'Monthly', disc: 0.78, rec: pestFreq === 12 },
   ];
 
   // Track active pest price modifiers and non-pricing property context.
@@ -1963,14 +1964,14 @@ export function calculateEstimate(inputs) {
             return { floorPa, floorAnn, floorMo };
           })()
         : {};
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, ...pestFloorMeta });
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, pricingVersion: 'v2', ...pestFloorMeta });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, ...pestFloorMeta };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, pricingVersion: 'v2', ...pestFloorMeta };
       }
     });
     R.pestRoachMod = roachMod;
     R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
-    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps });
+    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps, pricingVersion: 'v2' });
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */

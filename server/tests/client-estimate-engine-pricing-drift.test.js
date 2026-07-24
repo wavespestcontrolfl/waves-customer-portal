@@ -204,10 +204,15 @@ describe('deprecated client estimator pricing drift guards', () => {
   });
 
   test('mirrors live server pest frequency discounts', () => {
+    // v2 cadence curve is the live default (owner directive 2026-07-23);
+    // the mirror must carry the same multipliers or client fallback quotes
+    // drift under the real charge.
     expect(source).toContain("{ f: 4, label: 'Quarterly', disc: 1.00");
-    expect(source).toContain("{ f: 6, label: 'Bi-Monthly', disc: 0.85");
-    expect(source).toContain("{ f: 12, label: 'Monthly', disc: 0.70");
+    expect(source).toContain("{ f: 6, label: 'Bi-Monthly', disc: 0.88");
+    expect(source).toContain("{ f: 12, label: 'Monthly', disc: 0.78");
     expect(source).not.toContain('disc: 0.92');
+    expect(source).not.toContain('disc: 0.85');
+    expect(source).not.toContain('disc: 0.70');
   });
 
   test('mirrors the DISARMED pest post-discount program floor (owner ruling 2026-07-17)', () => {
