@@ -131,9 +131,12 @@ async function createOrUpdateDraftEstimate(customer, interest) {
     return existingDraft;
   }
 
-  const shortId = crypto.randomBytes(4).toString('hex');
-  const nameSlug = customerName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const token = `${nameSlug || 'lead'}-${shortId}`;
+  // 128-bit bearer token, matching every other estimate creation path
+  // (draft-builder, booking-predraft, commercial-proposal, admin
+  // persistence). The old name-derived slug + 4 hex bytes was ~32 bits of
+  // guessable entropy AND could overflow the varchar(64) token column on a
+  // long customer name — booking-predraft.js documents this exact trap.
+  const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
@@ -163,7 +166,10 @@ async function createOrUpdateDraftEstimate(customer, interest) {
       lead_source_detail: customer.lead_source_detail || null,
       token,
       expires_at: expiresAt,
-      notes: `Auto-created from SMS intake. Customer selected: ${serviceLabel}. Pricing TBD.`,
+      // estimates.notes is CUSTOMER-VISIBLE via the public endpoint — every
+      // newer draft lane leaves it NULL. service_interest already records
+      // the selection; the source column records the provenance.
+      notes: null,
     }).returning('*');
 
     return estimate;
@@ -329,7 +335,7 @@ async function handleIntakeReply(customer, body) {
     } catch (e) {
       logger.error(`[lead-intake] clarify ask failed: ${e.message}`);
     }
-    logger.info(`[lead-intake] Awaiting address from ${customer.first_name} after selecting ${cls.interest}`);
+    logger.info(`[lead-intake] Awaiting address from customer ${customer.id} after selecting ${cls.interest}`);
     return { handled: false };
   }
 

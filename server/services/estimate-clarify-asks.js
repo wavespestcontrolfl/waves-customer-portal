@@ -469,7 +469,13 @@ async function handleClarifyReply({ phone, body }) {
             .update({ address: capturedAddress });
         }
         if (fresh.customer_id) {
+          // Fill-only: the clarify ask exists because the QUOTE lacked an
+          // address — an existing CRM address (e.g. a member's home while
+          // they ask about another property) must never be clobbered by an
+          // SMS-captured string; the lead row above still records it for
+          // this quote (estimator audit 2026-07-24).
           await trx('customers').where({ id: fresh.customer_id })
+            .where((q) => q.whereNull('address_line1').orWhere('address_line1', ''))
             .update({ address_line1: capturedAddress });
         }
       }
