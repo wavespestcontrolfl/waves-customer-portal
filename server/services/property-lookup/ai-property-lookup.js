@@ -4038,8 +4038,27 @@ function mergePropertyRecords(records, address) {
 
   // Uncapped actuals and per-building rows survive the merge regardless of
   // which record won the field votes (they usually ride the county record).
-  const mergedActuals = Object.assign({}, ...sorted.slice().reverse().map((r) => r._actuals || {}));
-  if (Object.keys(mergedActuals).length) merged._actuals = mergedActuals;
+  // Each actual keeps the SOURCE TYPE of the record that supplied it — a
+  // listing/AI actual must never later masquerade as a county-measured
+  // value just because the merged record is county-backed (codex r6 P1).
+  const mergedActuals = {};
+  const actualsSourceTypes = {};
+  for (const record of sorted.slice().reverse()) {
+    if (!record._actuals) continue;
+    const recordSourceType = record._aiSourceType
+      || (record._source === 'county' ? 'county'
+        : record._source === 'cadastral' ? 'cadastral'
+          : classifyPropertySource(record._aiSourceUrl).type);
+    for (const [key, value] of Object.entries(record._actuals)) {
+      if (key === '_sourceTypes') continue;
+      mergedActuals[key] = value;
+      if (key !== 'pricingAdjustment') actualsSourceTypes[key] = record._actuals._sourceTypes?.[key] || recordSourceType;
+    }
+  }
+  if (Object.keys(mergedActuals).length) {
+    mergedActuals._sourceTypes = actualsSourceTypes;
+    merged._actuals = mergedActuals;
+  }
   const buildingsRecord = sorted.find((r) => Array.isArray(r._buildings) && r._buildings.length);
   if (buildingsRecord) merged._buildings = buildingsRecord._buildings;
 

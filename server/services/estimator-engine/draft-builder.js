@@ -118,13 +118,22 @@ function storiesSourceForPricing(propertyFacts) {
   const evidence = propertyFacts?.storiesEvidence;
   if (evidence) {
     // AI stories-fallback provenance FAILS CLOSED: only an explicitly
-    // direct, attributable (source-URL-backed), non-low-confidence answer
-    // prices as a lookup. Missing/unknown basis — including legacy-format
-    // responses that omit it — is unverified provenance and must ride the
-    // stories_estimated review rail, not auto-price termite/pest.
+    // direct, attributable, non-low-confidence answer prices as a lookup.
+    // Attributable means a VALID http(s) URL that classifies to a known
+    // source family — prose ("the county site"), "unknown", or malformed
+    // model output must ride the stories_estimated review rail, not
+    // auto-price termite/pest. Missing/unknown basis (legacy-format
+    // responses) likewise fails closed.
+    let urlOk = false;
+    try {
+      const parsed = new URL(evidence.sourceUrl);
+      urlOk = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch { /* not a URL — fail closed */ }
+    const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
     const direct = evidence.basis === 'direct'
       && evidence.confidence !== 'low'
-      && !!evidence.sourceUrl;
+      && urlOk
+      && KNOWN_STORY_SOURCE_TYPES.has(evidence.sourceType);
     return direct ? 'lookup' : 'estimated';
   }
   return 'lookup';

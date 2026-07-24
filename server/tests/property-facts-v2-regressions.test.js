@@ -678,12 +678,19 @@ describe('codex r2: apartment customers are residential UNITS', () => {
 
 // ── Codex round-3 regressions (reviewed c001ffa668) ──
 
-describe('codex r3: normalized Multifamily apartments are units', () => {
-  test('non-commercial Multifamily infers residential_unit scope', () => {
-    expect(shadow._private.inferServiceScope({ propertyType: 'Multifamily', isCommercial: false, tenant: false, aggregated: false }))
+describe('codex r3+r6: Multifamily units need positive unit evidence', () => {
+  test('a unit-signaled Multifamily is a residential unit', () => {
+    expect(shadow._private.inferServiceScope({ propertyType: 'Multifamily', isCommercial: false, tenant: true, aggregated: false, unitSignal: true }))
       .toBe('residential_unit');
-    expect(shadow._private.inferServiceScope({ propertyType: 'Multi-Family', isCommercial: false, tenant: false, aggregated: false }))
+    expect(shadow._private.inferServiceScope({ propertyType: 'Multi-Family', isCommercial: false, tenant: false, aggregated: false, unitSignal: true }))
       .toBe('residential_unit');
+  });
+
+  test('an OWNED whole triplex/quadplex (no unit signal) stays entire-structure fee simple', () => {
+    expect(shadow._private.inferServiceScope({ propertyType: 'Multifamily', isCommercial: false, tenant: false, aggregated: false, unitSignal: false }))
+      .toBe('entire_residential_structure');
+    expect(shadow._private.inferOwnershipType({ propertyType: 'Multifamily', isCommercial: false, tenant: false, aggregated: false, unitSignal: false }))
+      .toBe('fee_simple');
   });
 });
 
@@ -692,7 +699,8 @@ describe('codex r3: dedup keeps the uncapped actual, not the capped twin', () =>
     const cappedRecord = {
       propertyType: 'Warehouse',
       squareFootage: 200000,
-      _actuals: { buildingAreaSqft: 270000, pricingAdjustment: 'commercial_area_cap' },
+      // Merged shape: mergePropertyRecords stamps each actual's provenance.
+      _actuals: { buildingAreaSqft: 270000, pricingAdjustment: 'commercial_area_cap', _sourceTypes: { buildingAreaSqft: 'county' } },
       formattedAddress: '400 Distribution Ct, Punta Gorda, FL',
       _parcel: { parcelId: '888', county: 'Charlotte', lotSqft: 400000, aggregated: false },
       _fieldEvidence: {
@@ -809,6 +817,92 @@ describe('codex r4: lot evidence source follows its true origin', () => {
     const lotEvidence = result.facts.evidence.find((e) => e.field === 'parcel_area_sqft');
     expect(lotEvidence.sourceType).toBe('county');
     expect(lotEvidence.value).toBe(8400);
+  });
+});
+
+// ── Codex round-6 regressions (reviewed 50599f57) ──
+
+describe('codex r6: actuals keep their originating provenance', () => {
+  test('mergePropertyRecords stamps each actual with its record source type', () => {
+    const county = {
+      squareFootage: 42000,
+      propertyType: 'Warehouse',
+      _provider: 'county',
+      _source: 'county',
+      _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=5',
+      _aiSourceQuality: 100,
+      _aiSourceType: 'county',
+      _aiConfidence: 'high',
+    };
+    const aiListing = {
+      squareFootage: 200000,
+      propertyType: 'Warehouse',
+      _actuals: { buildingAreaSqft: 270000, pricingAdjustment: 'commercial_area_cap' },
+      _provider: 'claude',
+      _source: 'ai',
+      _aiSourceUrl: 'https://www.loopnet.com/Listing/big-warehouse/9/',
+      _aiSourceQuality: 75,
+      _aiSourceType: 'listing',
+      _aiConfidence: 'high',
+    };
+    const merged = _private.mergePropertyRecords([county, aiListing], '500 Commerce Blvd');
+    expect(merged._actuals.buildingAreaSqft).toBe(270000);
+    expect(merged._actuals._sourceTypes.buildingAreaSqft).toBe('listing');
+  });
+
+  test('an AI-provenanced actual never upgrades county evidence', () => {
+    const record = {
+      propertyType: 'Warehouse',
+      squareFootage: 42000,
+      _actuals: { buildingAreaSqft: 270000, _sourceTypes: { buildingAreaSqft: 'listing' } },
+      formattedAddress: '500 Commerce Blvd, Sarasota, FL',
+      _parcel: { parcelId: '555', county: 'Sarasota', lotSqft: 90000, aggregated: false },
+      _fieldEvidence: {
+        squareFootage: {
+          value: 42000,
+          sourceType: 'county',
+          evidence: [{ value: 42000, sourceType: 'county', provider: 'sarasota_pao', url: 'https://www.sc-pa.com/propertysearch/parcel/details/555' }],
+        },
+      },
+    };
+    const result = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: record,
+      extraction: null,
+      intent: { is_commercial: true },
+      propertyFacts: { home: { value: 42000 }, lot: { value: 90000 }, stories: 1, tenant: false },
+      address: '500 Commerce Blvd, Sarasota, FL',
+    });
+    // County's own 42k wins; the listing's 270k claim competes as LISTING
+    // evidence and loses on authority — it never wears the county label.
+    expect(result.facts.structureArea.value).toBe(42000);
+    const listingActual = result.facts.evidence.find((e) => e.value === 270000);
+    expect(listingActual.sourceType).toBe('listing');
+  });
+});
+
+describe('codex r6: story source URLs must be real, classifiable URLs', () => {
+  const intent = { services: { pest: { selected: true } }, is_commercial: false };
+  const facts = (storiesEvidence) => ({
+    home: { value: 2400, source: 'county_assessed' },
+    lot: { value: 8400, source: 'county_assessed' },
+    stories: 2,
+    storiesEvidence,
+  });
+
+  test('prose or unclassifiable source text fails closed to estimated', () => {
+    const prose = buildEngineInput({
+      intent,
+      propertyFacts: facts({ value: 2, confidence: 'high', basis: 'direct', sourceType: 'unknown', sourceUrl: 'the county property appraiser site' }),
+      context: {},
+    });
+    expect(prose.storiesSource).toBe('estimated');
+
+    const unknownHost = buildEngineInput({
+      intent,
+      propertyFacts: facts({ value: 2, confidence: 'high', basis: 'direct', sourceType: 'unknown', sourceUrl: 'https://random-blog.example.com/post' }),
+      context: {},
+    });
+    expect(unknownHost.storiesSource).toBe('estimated');
   });
 });
 

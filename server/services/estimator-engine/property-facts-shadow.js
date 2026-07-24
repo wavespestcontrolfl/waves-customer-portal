@@ -27,29 +27,59 @@ function propertyFactsV2Enabled() {
 // ── Scope / ownership inference from V1 signals ─────────────────
 
 const CONDO_TYPES = /condo/i;
-// Apartment inputs commonly normalize to 'Multifamily'
-// (normalizeLookupPropertyType) — both label a UNIT customer's complex.
-const APARTMENT_TYPES = /apartment|multi.?family/i;
+const APARTMENT_TYPES = /apartment/i;
+// 'Multifamily' is ambiguous: apartment inputs normalize to it, but so do
+// whole-property triplexes/quadplexes a caller OWNS outright.
+const MULTIFAMILY_TYPES = /multi.?family/i;
 const ASSOCIATION_TYPES = /multifamily|apartment|hoa common area/i;
 
-function inferServiceScope({ propertyType, isCommercial, tenant, aggregated }) {
+// Positive evidence the caller occupies a UNIT rather than the whole
+// structure: tenancy, or a unit/apt/suite subpremise in the service address.
+const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+|#\s*\w+)\s*$/i;
+
+function hasUnitSignal({ tenant, address, extraction }) {
+  if (tenant) return true;
+  if (address && SUBPREMISE_RE.test(String(address).replace(/,?\s*[A-Za-z .]+,\s*FL.*$/i, ''))) return true;
+  const extractionAddress = extraction?.property?.service_address;
+  const rawLine = typeof extractionAddress === 'string'
+    ? extractionAddress
+    : (extractionAddress?.raw || extractionAddress?.line1 || '');
+  if (rawLine && SUBPREMISE_RE.test(String(rawLine))) return true;
+  return String(extraction?.property?.property_type || '') === 'apartment';
+}
+
+function inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
   if (isCommercial) {
     if (tenant) return 'commercial_suite';
     if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_area';
     return 'entire_commercial_building';
   }
-  // A residential apartment customer is a UNIT, like a condo — the complex-
-  // wide building measurement must not price their estimate.
+  // A residential condo/apartment customer is a UNIT — the complex-wide
+  // building measurement must not price their estimate.
   if (CONDO_TYPES.test(String(propertyType || '')) || APARTMENT_TYPES.test(String(propertyType || ''))) {
     return 'residential_unit';
+  }
+  // 'Multifamily' is a unit ONLY on positive unit evidence (tenancy or a
+  // subpremise) — an owner quoting their whole triplex/quadplex is an
+  // entire-structure job and must not be forced unresolved (codex r6 P1).
+  if (MULTIFAMILY_TYPES.test(String(propertyType || ''))) {
+    return unitSignal ? 'residential_unit' : 'entire_residential_structure';
   }
   return 'entire_residential_structure';
 }
 
-function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated }) {
+function inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal }) {
   if (tenant) return isCommercial ? 'leased_suite' : 'leased_land';
-  if (aggregated || ASSOCIATION_TYPES.test(String(propertyType || ''))) return 'association_common_property';
-  if (CONDO_TYPES.test(String(propertyType || ''))) return 'residential_condominium';
+  if (aggregated) return 'association_common_property';
+  const type = String(propertyType || '');
+  // Multifamily without positive unit evidence is an OWNED whole-property
+  // triplex/quadplex — fee simple with a real private parcel, not
+  // association property (mirrors the serviceScope rule).
+  if (APARTMENT_TYPES.test(type) || /hoa common area/i.test(type)
+    || (MULTIFAMILY_TYPES.test(type) && unitSignal)) {
+    return 'association_common_property';
+  }
+  if (CONDO_TYPES.test(type)) return 'residential_condominium';
   return 'fee_simple';
 }
 
@@ -86,15 +116,20 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   // The uncapped actual SUPERSEDES the pricing-capped legacy value IN PLACE:
   // both describe the same underlying record, so emitting them as separate
   // evidence would dedupe-collapse on the shared source URL and the stable
-  // sort could keep the capped twin (codex r3 P2).
+  // sort could keep the capped twin (codex r3 P2). The upgrade only applies
+  // when the actual's own PROVENANCE is measured-grade — a listing/AI actual
+  // retained through the merge must not be priced as a county-measured
+  // building (codex r6 P1); provenance-less legacy actuals stay conservative.
   const actualBuilding = positive(propertyRecord?._actuals?.buildingAreaSqft);
+  const actualBuildingSourceType = propertyRecord?._actuals?._sourceTypes?.buildingAreaSqft || 'unknown';
+  const actualBuildingMeasured = ['county', 'cadastral', 'verified'].includes(actualBuildingSourceType);
   const cappedLegacy = positive(propertyRecord?.squareFootage);
   let actualApplied = false;
   for (const item of fieldEvidenceItems(propertyRecord, 'squareFootage')) {
     if (!positive(item.value)) continue;
     const scope = aggregated ? 'association' : (unitScoped ? 'unit' : 'building');
     let value = Number(item.value);
-    if (actualBuilding
+    if (actualBuilding && actualBuildingMeasured
       && (item.sourceType === 'county' || item.sourceType === 'cadastral' || item.sourceType === 'verified')
       && cappedLegacy && value === cappedLegacy) {
       value = actualBuilding;
@@ -116,8 +151,10 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
       warnings: [],
     });
   }
-  // Legacy cached records may carry _actuals with no field-evidence trail —
-  // emit the actual standalone only when no in-place upgrade happened.
+  // Actuals that couldn't upgrade in place (no matching measured item, or
+  // non-measured provenance) still enter as evidence — under their TRUE
+  // source label and authority, so a listing's 270k claim competes as a
+  // listing, never as county data.
   if (actualBuilding && !actualApplied) {
     out.push({
       id: nextId('sqft-actual'),
@@ -126,12 +163,12 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
       units: 'sqft',
       scope: aggregated ? 'association' : 'building',
       directness: 'direct',
-      sourceName: 'county (uncapped)',
-      sourceType: 'county',
+      sourceName: actualBuildingMeasured ? 'county (uncapped)' : `${actualBuildingSourceType} (uncapped)`,
+      sourceType: actualBuildingSourceType,
       sourceUrl: propertyRecord?._aiSourceUrl || null,
       exactAddressMatch: true,
       exactSubpremiseMatch: false,
-      extractionConfidence: 'high',
+      extractionConfidence: actualBuildingMeasured ? 'high' : 'medium',
       warnings: [],
     });
   }
@@ -204,21 +241,26 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   // AI/listing evidence, which must not masquerade as an assessed parcel
   // measurement (codex r4 P1).
   const countyLot = positive(parcel.lotSqft) || positive(parcel.polygonAreaSqft);
-  const recordLot = positive(propertyRecord?._actuals?.lotSqft) || positive(propertyRecord?.lotSize);
+  const actualLot = positive(propertyRecord?._actuals?.lotSqft);
+  const recordLot = actualLot || positive(propertyRecord?.lotSize);
   const lotValue = countyLot || recordLot;
   if (lotValue) {
     const lotEvidenceEntries = fieldEvidenceItems(propertyRecord, 'lotSize');
-    const recordLotSourceType = lotEvidenceEntries[0]?.sourceType || 'unknown';
+    // The actual's own provenance outranks the field-evidence trail when the
+    // value IS the actual; provenance-less actuals stay 'unknown'.
+    const actualLotSourceType = propertyRecord?._actuals?._sourceTypes?.lotSqft || null;
+    const recordLotSourceType = (actualLot ? actualLotSourceType : null)
+      || lotEvidenceEntries[0]?.sourceType || 'unknown';
     const fromCounty = !!countyLot;
     out.push({
       id: nextId('lot'),
       field: 'parcel_area_sqft',
       // A county lot may itself carry an uncapped actual (cadastral clamp);
-      // only county-sourced actuals upgrade a county value.
+      // only county/cadastral-PROVENANCED actuals upgrade a county value.
       value: fromCounty
-        ? ((recordLotSourceType === 'county' || recordLotSourceType === 'cadastral')
-          && positive(propertyRecord?._actuals?.lotSqft) > countyLot
-          ? positive(propertyRecord._actuals.lotSqft) : countyLot)
+        ? ((actualLotSourceType === 'county' || actualLotSourceType === 'cadastral')
+          && actualLot > countyLot
+          ? actualLot : countyLot)
         : recordLot,
       units: 'sqft',
       scope: aggregated ? 'association' : 'parcel',
@@ -273,8 +315,9 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
     const aggregated = parcel.aggregated === true;
     const propertyType = propertyRecord?.propertyType || extraction?.property?.property_type || null;
 
-    const serviceScope = inferServiceScope({ propertyType, isCommercial, tenant, aggregated });
-    const ownershipType = inferOwnershipType({ propertyType, isCommercial, tenant, aggregated });
+    const unitSignal = hasUnitSignal({ tenant, address: address || propertyRecord?.formattedAddress, extraction });
+    const serviceScope = inferServiceScope({ propertyType, isCommercial, tenant, aggregated, unitSignal });
+    const ownershipType = inferOwnershipType({ propertyType, isCommercial, tenant, aggregated, unitSignal });
     const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
     if (!evidence.length) return null;
 
