@@ -580,7 +580,11 @@ export default function CallLogTabV2() {
     const t = (c.transcription || "").trim();
     if (DEAD_AIR_TRANSCRIPTS.has(t) || t.startsWith(DEAD_AIR_REJECTED_PREFIX))
       return true;
+    // The authenticated feed passes through installStaffCallRecordingPrivacy,
+    // which strips recording_url and exposes recording_available instead —
+    // a row with a recording awaiting transcript is NOT dead air.
     return (
+      !c.recording_available &&
       !c.recording_url &&
       !t &&
       Date.now() - new Date(c.created_at).getTime() > DEAD_AIR_GRACE_MS
