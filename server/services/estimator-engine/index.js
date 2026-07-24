@@ -466,6 +466,25 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     });
     result.propertyFacts = propertyFacts;
 
+    // Property Facts V2 — scoped measurement selection. Shadow by default:
+    // computed and stored on the draft for evaluation, never priced from
+    // until GATE_PROPERTY_FACTS_V2 flips. Fail-open (returns null on error).
+    // Gate ON: applyV2ToPropertyFacts follows the V2 selection — including
+    // CLEARING the V1 area when V2 deliberately left an ambiguous scope
+    // unresolved (an arbitrary building must not auto-price).
+    const { computePropertyFactsV2Shadow, propertyFactsV2Enabled, applyV2ToPropertyFacts } = require('./property-facts-shadow');
+    const propertyFactsV2 = computePropertyFactsV2Shadow({
+      propertyRecord: effectiveSignals.propertyRecord,
+      extraction: context.extraction,
+      intent,
+      propertyFacts,
+      address: intent.address || result.addressUsed || address,
+    });
+    result.propertyFactsV2 = propertyFactsV2;
+    if (propertyFactsV2 && propertyFactsV2Enabled()) {
+      applyV2ToPropertyFacts(propertyFacts, propertyFactsV2);
+    }
+
     // Existing-customer pricing context: qualifying services for the combined
     // WaveGuard tier (the snapshot itself is computed AFTER pricing — it
     // derives the NEW services from the priced line items). Fail-open.
@@ -657,7 +676,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
-      propertyFacts, comps, calibration, model, call: context.call, context,
+      propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
       membershipSnapshot, priorQualifyingServices, origin,
     });
 

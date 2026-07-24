@@ -873,7 +873,10 @@ describe('codex round-7 hardening (#2721)', () => {
     // dropped by the old 50k cap.
     expect(sanitizeVerifiedValue('squareFootage', 90000)).toBe(90000);
     expect(sanitizeVerifiedValue('squareFootage', 200000)).toBe(200000);
-    expect(sanitizeVerifiedValue('squareFootage', 200001)).toBeUndefined();
+    // A verified fact above the old 200k publish cap persists — the range is
+    // a typo guard, not a pricing bound (270k warehouses are real).
+    expect(sanitizeVerifiedValue('squareFootage', 270000)).toBe(270000);
+    expect(sanitizeVerifiedValue('squareFootage', 2000001)).toBeUndefined();
     // A verified story count on a mid-rise (>4 floors) must persist — it is
     // exactly how an unknown-stories aggregate resolves.
     expect(sanitizeVerifiedValue('stories', 6)).toBe(6);

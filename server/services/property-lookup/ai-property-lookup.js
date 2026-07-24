@@ -209,7 +209,14 @@ function geoOpensCountyGate(geoContext, countyName, zipSet) {
   return Boolean(zip && zipSet.has(zip));
 }
 
+// Legacy integer form — prefer lookupStoriesEvidenceFromAI, which keeps the
+// provenance (confidence/source/basis) the bare integer discards.
 async function lookupStoriesFromAI(address, hints = {}, options = {}) {
+  const evidence = await lookupStoriesEvidenceFromAI(address, hints, options);
+  return evidence?.value ?? null;
+}
+
+async function lookupStoriesEvidenceFromAI(address, hints = {}, options = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-stories] skipped — ANTHROPIC_API_KEY not set');
     return null;
@@ -287,14 +294,23 @@ async function lookupStoriesFromAI(address, hints = {}, options = {}) {
     // policy meant new-construction homes (no public listing yet) all came
     // back null and got the wrong default of 1. Better to accept Claude's
     // best inference and let the estimator eyeball it than to silently
-    // under-price every brand-new 2-story.
+    // under-price every brand-new 2-story. The provenance rides along so a
+    // low-confidence inference can flag itself downstream instead of
+    // masquerading as a looked-up fact.
     logger.info('[ai-stories] got stories', {
       stories: parsed.stories,
       confidence: parsed.confidence,
       source: parsed.source,
+      basis: parsed.basis,
       elapsedMs,
     });
-    return parsed.stories;
+    return {
+      value: parsed.stories,
+      confidence: parsed.confidence || null,
+      sourceUrl: parsed.source || null,
+      sourceType: classifyPropertySource(parsed.source).type,
+      basis: parsed.basis || null,
+    };
   } catch (err) {
     logger.warn('[ai-stories] errored', {
       elapsedMs: Date.now() - t0,
@@ -337,11 +353,12 @@ Inference rules when direct data is unavailable:
 - If the subdivision matches a known builder (e.g., "Bella Lago" → D.R. Horton), check that builder's floorplan catalog and match by square footage.
 
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
-{"stories": <integer 1-4 or null>, "source": "<URL of primary source>", "confidence": "high" | "medium" | "low"}
+{"stories": <integer 1-4 or null>, "source": "<URL of primary source>", "confidence": "high" | "medium" | "low", "basis": "direct" | "builder_model" | "inferred"}
 
 - "high" = two independent sources agree on the same number, OR one authoritative source (county records, builder floorplan match) is unambiguous.
 - "medium" = a single listing or floorplan-by-sqft match.
 - "low" = inference from bedroom/bath/sqft profile only.
+- "basis": "direct" when a source states the story count for THIS address; "builder_model" when matched via a builder floorplan; "inferred" when derived from the bedroom/bath/sqft profile.
 
 Make your best determination. Only return {"stories": null, ...} if you have absolutely no evidence — even an inference is more useful to the operator than null.`;
 }
@@ -790,21 +807,54 @@ function parcelLooksCommercial(parcel) {
 // quote max are capped, not discarded") so a 270k sf distribution center
 // prices at the cap rather than reading as "no square footage".
 function coerceBuildingSqft(raw, commercial) {
-  if (!commercial) return coerceInt(raw, BUILDING_SQFT_MIN, RESIDENTIAL_BUILDING_SQFT_MAX);
-  if (raw == null) return null;
+  return coerceBuildingSqftDetailed(raw, commercial).pricingValue;
+}
+
+// The detailed form separates the FACT from the pricing bound: a 270k sf
+// distribution center stays 270k in `actualValue` (the property record must
+// never lie about the building) while `pricingValue` carries the public-quote
+// clamp the legacy squareFootage field always applied.
+function coerceBuildingSqftDetailed(raw, commercial) {
+  const none = { actualValue: null, pricingValue: null, pricingAdjustment: null };
+  if (!commercial) {
+    const value = coerceInt(raw, BUILDING_SQFT_MIN, RESIDENTIAL_BUILDING_SQFT_MAX);
+    // Residential keeps reject-above-cap semantics: an oversized value in a
+    // residential record is scrape garbage (lot sqft in the living-area
+    // field), not a big house — there is no real "actual" to preserve.
+    return value == null ? none : { actualValue: value, pricingValue: value, pricingAdjustment: null };
+  }
+  if (raw == null) return none;
   const n = Number(String(raw).replace(/[^\d.]/g, ''));
-  if (!Number.isFinite(n)) return null;
+  if (!Number.isFinite(n)) return none;
   const rounded = Math.round(n);
-  if (rounded < BUILDING_SQFT_MIN) return null;
-  return Math.min(rounded, COMMERCIAL_BUILDING_SQFT_MAX);
+  if (rounded < BUILDING_SQFT_MIN) return none;
+  if (rounded > COMMERCIAL_BUILDING_SQFT_MAX) {
+    return { actualValue: rounded, pricingValue: COMMERCIAL_BUILDING_SQFT_MAX, pricingAdjustment: 'commercial_area_cap' };
+  }
+  return { actualValue: rounded, pricingValue: rounded, pricingAdjustment: null };
+}
+
+// Story counts are type-aware the same way building sqft is: a "6-story"
+// single-family read is scrape garbage, but commercial / multifamily /
+// association buildings routinely exceed 4 stories and clamping discarded
+// the roll's own number.
+const RESIDENTIAL_STORIES_MAX = 4;
+const COMMERCIAL_STORIES_MAX = 60;
+
+function coerceStoriesValue(raw, { commercial } = {}) {
+  return coerceInt(raw, 1, commercial ? COMMERCIAL_STORIES_MAX : RESIDENTIAL_STORIES_MAX);
 }
 
 function coerceFirstBuildingSqft(values, commercial) {
+  return coerceFirstBuildingSqftDetailed(values, commercial).pricingValue;
+}
+
+function coerceFirstBuildingSqftDetailed(values, commercial) {
   for (const value of values) {
-    const parsed = coerceBuildingSqft(value, commercial);
-    if (parsed != null) return parsed;
+    const parsed = coerceBuildingSqftDetailed(value, commercial);
+    if (parsed.pricingValue != null) return parsed;
   }
-  return null;
+  return { actualValue: null, pricingValue: null, pricingAdjustment: null };
 }
 
 // Shapes the FDOR cadastral attributes as a merge-ready evidence record.
@@ -832,16 +882,24 @@ function buildCadastralRecord(parcel, address) {
     ? 'Multifamily'
     : (useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)));
   const commercialSized = isAggregate || isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
+  const sqftDetailed = coerceBuildingSqftDetailed(parcel.livingAreaSqft, commercialSized);
+  const rawLotSqft = Number(parcel.lotSqft);
+  const clampedLot = clampLotSqft(rawLotSqft);
+  const actuals = {
+    ...(sqftDetailed.pricingAdjustment ? { buildingAreaSqft: sqftDetailed.actualValue } : {}),
+    ...(clampedLot != null && Number.isFinite(rawLotSqft) && Math.round(rawLotSqft) > clampedLot
+      ? { lotSqft: Math.round(rawLotSqft) } : {}),
+  };
   const parsed = {
-    squareFootage: coerceBuildingSqft(parcel.livingAreaSqft, commercialSized),
-    lotSize: clampLotSqft(Number(parcel.lotSqft)),
+    squareFootage: sqftDetailed.pricingValue,
+    lotSize: clampedLot,
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
-    // Association aggregates are mid/high-rise territory — clamping a known
-    // county story count to 4 would discard it and force footprintUnknown
-    // (blank prefills + manual-review pricing) on a building whose stories
-    // the roll actually knew. Cap mirrors the verified-story range; the
-    // residential cap stays 4 (codex P2 #2721).
-    stories: coerceInt(parcel.stories, 1, isAggregate ? 50 : 4),
+    // Association aggregates and commercial buildings are mid/high-rise
+    // territory — clamping a known county story count to 4 would discard it
+    // and force footprintUnknown (blank prefills + manual-review pricing) on
+    // a building whose stories the roll actually knew. The residential cap
+    // stays 4 (codex P2 #2721).
+    stories: coerceStoriesValue(parcel.stories, { commercial: isAggregate || commercialSized }),
     propertyType: cadastralType,
     // County-assessed pool flag (tri-state). For a new build where county GIS is
     // the only public-record hit, this carries the pool into pest/mosquito
@@ -856,6 +914,7 @@ function buildCadastralRecord(parcel, address) {
     county: parcel.county,
     formattedAddress: [parcel.situsAddress, parcel.situsCity, 'FL', parcel.situsZip].filter(Boolean).join(', ') || address,
   };
+  if (Object.keys(actuals).length) parsed._actuals = actuals;
   if (!hasAnyPropertyFact(parsed)) return null;
 
   const record = shapeAsPropertyRecord(parsed, address, provider);
@@ -2927,17 +2986,19 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
   const lotSize = sumPaoLotSqFootage(landRows);
   const rooms = parseManateeRooms(primaryBuilding.Rooms);
   const propertyType = normalizeManateePropertyType(primaryBuilding.Type, primaryBuilding.Classification);
+  const commercialSized = isCommercialBuildingType(propertyType);
+  const sqftDetailed = coerceBuildingSqftDetailed(primaryBuilding.LivBus, commercialSized);
   const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
 
   return {
     // LivBus = Living/BUSINESS area — Manatee's building rows already cover
     // commercial; only the residential cap was hiding them.
-    squareFootage: coerceBuildingSqft(primaryBuilding.LivBus, isCommercialBuildingType(propertyType)),
+    squareFootage: sqftDetailed.pricingValue,
     lotSize,
     yearBuilt: coerceInt(primaryBuilding.Yrblt, 1900, new Date().getFullYear() + 1),
     bedrooms: rooms.bedrooms,
     bathrooms: rooms.bathrooms,
-    stories: coerceInt(primaryBuilding.Stories, 1, 4),
+    stories: coerceStoriesValue(primaryBuilding.Stories, { commercial: commercialSized }),
     propertyType,
     constructionMaterial: normalizeManateeConstruction(primaryBuilding['Const/ExtWall']),
     roofType: normalizeManateeRoof(primaryBuilding.RoofMaterial, primaryBuilding.RoofType),
@@ -2946,6 +3007,21 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
     county: 'Manatee',
     formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
     ...manateePoolFeatures(features),
+    // The uncapped fact when the pricing clamp changed it — the record must
+    // not lie about the building even when the quote flow prices at the cap.
+    ...(sqftDetailed.pricingAdjustment
+      ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
+      : {}),
+    // EVERY building row, raw-labeled — multi-building commercial parcels
+    // must not collapse to their largest building. Sort-key bounds only;
+    // these are preserved facts, not pricing inputs.
+    _buildings: buildingRows.map((row) => ({
+      description: row.Classification || row.Type || null,
+      livingAreaSqft: coerceInt(row.LivBus, 1, 1000000),
+      underRoofSqft: coerceInt(row.UnRoof, 1, 1000000),
+      stories: coerceStoriesValue(row.Stories, { commercial: true }),
+      yearBuilt: coerceInt(row.Yrblt, 1900, new Date().getFullYear() + 1),
+    })),
   };
 }
 
@@ -2963,18 +3039,26 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
   const propertyType = normalizeCountyPropertyType(detailFacts.propertyType || propertyUse);
   const commercialSized = isCommercialBuildingType(propertyType);
 
+  // The building-detail page's Finished Area arrives as a DETAILED result
+  // (actual + pricing clamp) — re-coercing its already-capped legacy value
+  // would erase the uncapped actual for detail-only commercial parcels.
+  const sqftDetailed = (detailFacts.squareFootageDetailed?.pricingValue != null)
+    ? detailFacts.squareFootageDetailed
+    : coerceFirstBuildingSqftDetailed(
+      [primaryBuilding['Living Area'], ...(commercialSized ? [primaryBuilding['Gross Area']] : [])],
+      commercialSized,
+    );
+
   return {
     // Commercial buildings often carry only a Gross Area figure (no
     // living-area line), so the gross column joins the candidates there.
-    squareFootage: coerceFirstBuildingSqft(
-      [detailFacts.squareFootage, primaryBuilding['Living Area'], ...(commercialSized ? [primaryBuilding['Gross Area']] : [])],
-      commercialSized,
-    ),
+    squareFootage: sqftDetailed.pricingValue,
     lotSize,
     yearBuilt: coerceFirstInt([detailFacts.yearBuilt, primaryBuilding['Year Built']], 1900, new Date().getFullYear() + 1),
     bedrooms: coerceFirstInt([detailFacts.bedrooms, primaryBuilding.Beds], 1, 15),
     bathrooms: detailFacts.bathrooms ?? (baths == null ? null : baths + (halfBaths * 0.5)),
-    stories: coerceFirstInt([detailFacts.stories, primaryBuilding.Stories], 1, 4),
+    stories: detailFacts.stories
+      ?? coerceStoriesValue(primaryBuilding.Stories, { commercial: commercialSized }),
     propertyType,
     constructionMaterial: normalizeCountyConstruction(`${detailFacts.frame || ''} ${detailFacts.exteriorWalls || ''}`),
     roofType: normalizeCountyRoof(`${detailFacts.roofMaterial || ''} ${detailFacts.roofStructure || ''}`),
@@ -2983,6 +3067,18 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
     county: 'Sarasota',
     formattedAddress: situsAddress || [city, 'FL'].filter(Boolean).join(', ') || address,
     ...sarasotaPoolFeatures(detailHtml),
+    ...(sqftDetailed.pricingAdjustment
+      ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
+      : {}),
+    // Every Buildings-table row, Living and Gross area kept as distinct
+    // measurements (never interchangeable aliases).
+    _buildings: buildingRows.map((row) => ({
+      description: row['Building Type'] || row.Description || null,
+      livingAreaSqft: coerceInt(row['Living Area'], 1, 1000000),
+      grossAreaSqft: coerceInt(row['Gross Area'], 1, 1000000),
+      stories: coerceStoriesValue(row.Stories, { commercial: true }),
+      yearBuilt: coerceInt(row['Year Built'], 1900, new Date().getFullYear() + 1),
+    })),
   };
 }
 
@@ -2991,16 +3087,22 @@ function parseSarasotaBuildingDetail(html) {
   const bathrooms = coerceFloat(extractHtmlBulletValue(html, 'Bathrooms'), 0, 15);
   const halfBaths = coerceFloat(extractHtmlBulletValue(html, 'Half Baths'), 0, 15) || 0;
   const buildingType = extractHtmlBulletValue(html, 'Building Type');
+  const detailCommercial = isCommercialBuildingType(normalizeCountyPropertyType(buildingType));
+  // Detailed (uncapped-actual) form — the record parser must see the raw
+  // Finished Area, not a pre-capped value, or a 270k sf building loses its
+  // actual before the _actuals preservation ever runs.
+  const squareFootageDetailed = coerceBuildingSqftDetailed(
+    extractHtmlBulletValue(html, 'Finished Area S.F'),
+    detailCommercial,
+  );
   return {
     propertyType: buildingType,
-    squareFootage: coerceBuildingSqft(
-      extractHtmlBulletValue(html, 'Finished Area S.F'),
-      isCommercialBuildingType(normalizeCountyPropertyType(buildingType)),
-    ),
+    squareFootage: squareFootageDetailed.pricingValue,
+    squareFootageDetailed,
     yearBuilt: coerceInt(extractHtmlBulletValue(html, 'Year Built'), 1900, new Date().getFullYear() + 1),
     bedrooms: coerceInt(extractHtmlBulletValue(html, 'Bedrooms'), 1, 15),
     bathrooms: bathrooms == null ? null : bathrooms + (halfBaths * 0.5),
-    stories: coerceInt(extractHtmlBulletValue(html, 'Number of Stories'), 1, 4),
+    stories: coerceStoriesValue(extractHtmlBulletValue(html, 'Number of Stories'), { commercial: detailCommercial }),
     roofMaterial: extractHtmlBulletValue(html, 'Roof Material'),
     roofStructure: extractHtmlBulletValue(html, 'Roof Structure'),
     frame: extractHtmlBulletValue(html, 'Frame'),
@@ -3022,13 +3124,18 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
   const propertyType = normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`);
   const commercialSized = isCommercialBuildingType(propertyType);
 
+  const sqftDetailed = coerceFirstBuildingSqftDetailed(
+    [primaryBuilding['A/C Area'], primaryBuilding.Area, primaryBuilding['Total Area']],
+    commercialSized,
+  );
+
   return {
-    squareFootage: coerceFirstBuildingSqft([primaryBuilding['A/C Area'], primaryBuilding.Area, primaryBuilding['Total Area']], commercialSized),
+    squareFootage: sqftDetailed.pricingValue,
     lotSize: coerceCharlotteOwnershipLotSize(ownership),
     yearBuilt: coerceInt(primaryBuilding['Year Built'], 1900, new Date().getFullYear() + 1),
     bedrooms: coerceInt(primaryBuilding.Bedrooms, 1, 15),
     bathrooms: null,
-    stories: coerceInt(primaryBuilding.Floors, 1, 4),
+    stories: coerceStoriesValue(primaryBuilding.Floors, { commercial: commercialSized }),
     propertyType,
     constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
     roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
@@ -3037,6 +3144,19 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     county: 'Charlotte',
     formattedAddress: [situsAddress, city, 'FL', zipCode].filter(Boolean).join(', ') || address,
     ...charlottePoolFeatures(detailHtml),
+    ...(sqftDetailed.pricingAdjustment
+      ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
+      : {}),
+    // Every Building Information row; A/C Area, Area, and Total Area kept as
+    // DISTINCT measurements — they were being read as interchangeable aliases.
+    _buildings: buildingRows.map((row) => ({
+      description: row.Description || null,
+      acAreaSqft: coerceInt(row['A/C Area'], 1, 1000000),
+      areaSqft: coerceInt(row.Area, 1, 1000000),
+      totalAreaSqft: coerceInt(row['Total Area'], 1, 1000000),
+      stories: coerceStoriesValue(row.Floors, { commercial: true }),
+      yearBuilt: coerceInt(row['Year Built'], 1900, new Date().getFullYear() + 1),
+    })),
   };
 }
 
@@ -3342,8 +3462,20 @@ function countCriticalPropertyFields(record) {
   return [record?.squareFootage, record?.lotSize, record?.stories, record?.propertyType].filter(Boolean).length;
 }
 
+// Property types with no individually assigned lot BY DESIGN — a condo/
+// apartment unit's missing lot is a resolved fact, not incomplete data.
+// Requiring lotSize for these sent complete county records into the
+// aggressive AI search, which then "found" the development's master parcel
+// and published it as the unit's lot.
+// 'Multifamily' is deliberately ABSENT: it is also the normalization for
+// whole-property triplexes/quadplexes (normalizeCountyPropertyType), which
+// are owned fee-simple parcels whose lot the fallback must still fetch.
+const NO_PRIVATE_LOT_PROPERTY_TYPES = new Set(['Condo', 'Apartment', 'HOA Common Area']);
+
 function hasCountyPricingCore(record) {
-  return !!(record?.squareFootage && record?.lotSize && record?.propertyType);
+  if (!record?.squareFootage || !record?.propertyType) return false;
+  if (NO_PRIVATE_LOT_PROPERTY_TYPES.has(String(record.propertyType))) return true;
+  return !!record.lotSize;
 }
 
 function buildPropertyPrompt(address) {
@@ -3362,10 +3494,11 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
-- "lotSize" is a CRITICAL pricing field. If the first listing says N/A or omits the lot, search the exact address again with "lot size square feet", "Lot Size Square Feet", "acre lot", and the county property appraiser before leaving it null.
+- "lotSize" is a CRITICAL pricing field for detached homes. If the first listing says N/A or omits the lot, search the exact address again with "lot size square feet", "Lot Size Square Feet", "acre lot", and the county property appraiser before leaving it null.
+- EXCEPTION — condominium and apartment units usually have NO individually assigned lot. If the property is a condo/apartment unit and listings show lot N/A, output null and STOP searching for a lot. NEVER report the condominium development's or association's master parcel as the unit's lot.
 - "lotSize" MUST be in square feet. If the exact-property source shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
 - Do NOT borrow lot size from a nearby home, comparable, neighborhood median, or builder community page unless it is explicitly for the exact address.
-- If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
+- Report the TRUE lot size even when it is very large — never round it down to a cap. Pricing bounds are applied downstream; the record must carry the real number.
 - Commercial/industrial properties: also search loopnet.com, crexi.com, and commercialcafe.com listings. "squareFootage" is the building square footage (these run larger than homes — report the true figure). When the address includes a unit/suite number, prefer THAT unit's square footage from the leasing listing over the whole building's.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
@@ -3375,8 +3508,8 @@ Output rules:
 
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
-  "squareFootage": <int 500-15000 for residential; for a commercial/industrial building output the TRUE building square footage up to 200000; or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET for the exact property (convert from acres if needed; cap verified oversized lots at 200000), or null>,
+  "squareFootage": <int 500-15000 for residential; for a commercial/industrial building output the TRUE building square footage even above 200000; or null>,
+  "lotSize": <int in SQUARE FEET for the exact property, the TRUE size (convert from acres if needed; do not cap); null for condo/apartment units with no individual lot>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -3399,19 +3532,33 @@ function parsePropertyJSON(text) {
   try {
     const raw = JSON.parse(match[0]);
     const parsedType = normalizeLookupPropertyType(raw.propertyType);
+    // Detailed coercion so an AI-reported 270k warehouse (the prompt now
+    // asks for TRUE figures) keeps its actual alongside the pricing clamp
+    // instead of being silently persisted as 200k.
+    const sqftDetailed = coerceFirstBuildingSqftDetailed([
+      raw.squareFootage,
+      raw.square_footage,
+      raw.homeSqFt,
+      raw.home_sqft,
+      raw.livingArea,
+      raw.living_area,
+      raw.livingAreaSqFt,
+      raw.living_area_sqft,
+      raw.sqft,
+    ], isCommercialBuildingType(parsedType));
+    const lotSize = coerceParsedLotSize(raw);
+    const actualLot = uncappedParsedLotSqft(raw);
+    const actuals = {
+      ...(sqftDetailed.pricingAdjustment ? { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } : {}),
+      // The capped legacy lotSize (or an oversized value the legacy chain
+      // discarded entirely) must not erase the true parcel size.
+      ...(actualLot && actualLot > (lotSize || 0) && (lotSize == null || lotSize >= LOT_SQFT_MAX)
+        ? { lotSqft: actualLot } : {}),
+    };
     const out = {
-      squareFootage: coerceFirstBuildingSqft([
-        raw.squareFootage,
-        raw.square_footage,
-        raw.homeSqFt,
-        raw.home_sqft,
-        raw.livingArea,
-        raw.living_area,
-        raw.livingAreaSqFt,
-        raw.living_area_sqft,
-        raw.sqft,
-      ], isCommercialBuildingType(parsedType)),
-      lotSize: coerceParsedLotSize(raw),
+      squareFootage: sqftDetailed.pricingValue,
+      lotSize,
+      ...(Object.keys(actuals).length ? { _actuals: actuals } : {}),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
@@ -3453,6 +3600,56 @@ function coercePaoSqFootage(raw) {
   const value = typeof raw === 'number' ? raw : parseFirstLotNumber(String(raw));
   if (!Number.isFinite(value) || value <= 0) return null;
   return Math.min(Math.round(value), LOT_SQFT_MAX);
+}
+
+// Uncapped (typo-guarded) read of the AI-reported lot for _actuals
+// preservation — handles the well-formed shapes the prompt requests
+// (numeric sqft, sqft-keyed objects, acre keys/labels). Exotic shapes fall
+// back to null and the fact simply stays at the legacy cap.
+const LOT_FACT_SQFT_MAX = 10_000_000; // ≈230 acres — typo guard, not a pricing bound
+
+function uncappedParsedLotSqft(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const inFactRange = (n) => (Number.isFinite(n) && n >= LOT_SQFT_MIN && n <= LOT_FACT_SQFT_MAX ? Math.round(n) : null);
+  const candidates = [
+    raw.lotSize, raw.lot_size, raw.lotSqFt, raw.lot_sqft, raw.lotSizeSqFt, raw.lot_size_sqft,
+    raw.lotSquareFeet, raw.lot_square_feet, raw.lotAreaSqFt, raw.lot_area_sqft, raw.lotArea, raw.lot_area, raw.lot,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+    if (typeof candidate === 'object' && !Array.isArray(candidate)) {
+      const sqft = inFactRange(Number(candidate.squareFeet ?? candidate.square_feet ?? candidate.sqft
+        ?? candidate.sqFt ?? candidate.sq_ft ?? candidate.valueSqft ?? candidate.value_sqft
+        ?? candidate.areaSqft ?? candidate.area_sqft));
+      if (sqft) return sqft;
+      const acres = Number(candidate.acres ?? candidate.acreage);
+      if (Number.isFinite(acres) && acres > 0) {
+        const converted = inFactRange(acres * SQFT_PER_ACRE);
+        if (converted) return converted;
+      }
+      continue;
+    }
+    if (typeof candidate === 'number') {
+      const sqft = inFactRange(candidate);
+      if (sqft) return sqft;
+      continue;
+    }
+    const str = String(candidate);
+    const isAcres = /\bacres?\b/i.test(str);
+    const value = parseFirstLotNumber(str);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const sqft = inFactRange(isAcres ? value * SQFT_PER_ACRE : value);
+    if (sqft) return sqft;
+  }
+  const acreKeys = [raw.lotSizeAcres, raw.lot_size_acres, raw.lotAcres, raw.lot_acres, raw.acreage, raw.acres];
+  for (const candidate of acreKeys) {
+    const acres = Number(candidate);
+    if (Number.isFinite(acres) && acres > 0) {
+      const converted = inFactRange(acres * SQFT_PER_ACRE);
+      if (converted) return converted;
+    }
+  }
+  return null;
 }
 
 function coerceParsedLotSize(raw) {
@@ -3687,7 +3884,10 @@ function normalizeLookupPropertyType(raw) {
   if (/(warehouse)/.test(key)) return 'Warehouse';
   if (/(industrial)/.test(key)) return 'Industrial';
   if (/(government|municipal)/.test(key)) return 'Government Municipal';
-  if (/(office|retail|business|plaza|storefront|shop)/.test(key)) return 'Office';
+  // Retail before office — a "Retail Store"/"Storefront" must stay Retail
+  // (it was silently normalized to Office, which mislabels the risk profile).
+  if (/(retail|storefront|shop)/.test(key)) return 'Retail';
+  if (/(office|business|plaza)/.test(key)) return 'Office';
   if (/(apartment|apartments|multi_family|multifamily)/.test(key)) return 'Multifamily';
   if (/(hoa_common|common_area)/.test(key)) return 'HOA Common Area';
   if (/(commercial)/.test(key)) {
@@ -3730,6 +3930,11 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
   const evidence = buildRecordEvidence(p, provider, sourceMeta);
   const sourceKind = DIRECT_PROPERTY_RECORD_PROVIDERS.has(provider) ? 'county' : 'ai';
   return {
+    // Uncapped facts and per-building rows survive the record shape — the
+    // legacy fields stay pricing-bounded, but the record must not lose the
+    // actual measurements.
+    ...(p._actuals ? { _actuals: p._actuals } : {}),
+    ...(Array.isArray(p._buildings) && p._buildings.length ? { _buildings: p._buildings } : {}),
     formattedAddress: p.formattedAddress || address,
     addressLine1: '',
     city: '',
@@ -3800,10 +4005,13 @@ function mergePropertyRecords(records, address) {
   const mergedFieldEvidence = {};
 
   for (const field of PROPERTY_EVIDENCE_FIELDS) {
+    // Source AUTHORITY first, blended score only as the tiebreaker — model
+    // confidence describes extraction certainty and must never let a
+    // high-confidence listing outrank (or tie) a county record.
     const candidates = sorted
       .map((record) => fieldEvidenceFromRecord(record, field))
       .filter(Boolean)
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => (b.sourceQuality - a.sourceQuality) || (b.score - a.score));
 
     if (!candidates.length) continue;
 
@@ -3811,7 +4019,9 @@ function mergePropertyRecords(records, address) {
     if (!isMissingPropertyValue(winner.value)) {
       merged[field] = winner.value;
     }
-    const uniqueValues = [...new Set(candidates.map((item) => normalizeEvidenceValue(item.value)))];
+    // propertyType is first in PROPERTY_EVIDENCE_FIELDS, so the merged type
+    // is settled before the numeric fields compare their tolerances.
+    const disagreement = fieldValuesDisagree(field, winner, candidates, merged.propertyType || sorted[0]?.propertyType);
     mergedFieldEvidence[field] = {
       value: winner.value,
       confidence: scoreToConfidence(winner.score),
@@ -3820,11 +4030,37 @@ function mergePropertyRecords(records, address) {
       winningSource: winner.url || null,
       winningProvider: winner.provider,
       score: winner.score,
-      disagreement: uniqueValues.length > 1,
-      fieldVerify: winner.score < 65 || uniqueValues.length > 1 || winner.sourceType === 'generic' || winner.sourceType === 'unknown',
+      disagreement,
+      fieldVerify: winner.score < 65 || disagreement || winner.sourceType === 'generic' || winner.sourceType === 'unknown',
       evidence: candidates.map(({ score, ...item }) => ({ ...item, confidence: scoreToConfidence(score) })),
     };
   }
+
+  // Uncapped actuals and per-building rows survive the merge regardless of
+  // which record won the field votes (they usually ride the county record).
+  // Each actual keeps the SOURCE TYPE of the record that supplied it — a
+  // listing/AI actual must never later masquerade as a county-measured
+  // value just because the merged record is county-backed (codex r6 P1).
+  const mergedActuals = {};
+  const actualsSourceTypes = {};
+  for (const record of sorted.slice().reverse()) {
+    if (!record._actuals) continue;
+    const recordSourceType = record._aiSourceType
+      || (record._source === 'county' ? 'county'
+        : record._source === 'cadastral' ? 'cadastral'
+          : classifyPropertySource(record._aiSourceUrl).type);
+    for (const [key, value] of Object.entries(record._actuals)) {
+      if (key === '_sourceTypes') continue;
+      mergedActuals[key] = value;
+      if (key !== 'pricingAdjustment') actualsSourceTypes[key] = record._actuals._sourceTypes?.[key] || recordSourceType;
+    }
+  }
+  if (Object.keys(mergedActuals).length) {
+    mergedActuals._sourceTypes = actualsSourceTypes;
+    merged._actuals = mergedActuals;
+  }
+  const buildingsRecord = sorted.find((r) => Array.isArray(r._buildings) && r._buildings.length);
+  if (buildingsRecord) merged._buildings = buildingsRecord._buildings;
 
   const providers = [...new Set(sorted.map((r) => r._provider).filter(Boolean))];
   const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
@@ -3938,6 +4174,17 @@ function refreshRecordSourceEvidence(record) {
   return record;
 }
 
+// Exact domain-or-subdomain match — never substring. A substring check reads
+// "marondahomes.com" as homes.com (builder classified as listing) and any
+// "…zillow…" vanity host as Zillow.
+function hostMatchesDomain(host, domain) {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+function hostMatchesAny(host, domains) {
+  return domains.some((domain) => hostMatchesDomain(host, domain));
+}
+
 function classifyPropertySource(url) {
   if (!url || typeof url !== 'string') return { type: 'unknown', weight: SOURCE_TYPE_WEIGHTS.unknown };
   let parsed;
@@ -3951,22 +4198,21 @@ function classifyPropertySource(url) {
 
   // County appraiser sites AND each county's own parcel GIS map service
   // (county-parcel-gis.js) — all county-grade authoritative rolls.
-  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')
-      || host.includes('scgov.net') || host.includes('charlottecountyfl.gov')) {
+  if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov'])) {
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
-  if (host.includes('arcgis.com') && path.includes('florida_statewide_cadastral')) {
+  if (hostMatchesDomain(host, 'arcgis.com') && path.includes('florida_statewide_cadastral')) {
     return { type: 'cadastral', weight: SOURCE_TYPE_WEIGHTS.cadastral };
   }
-  if (host.includes('buildzoom.com') || path.includes('permit')) {
+  if (hostMatchesDomain(host, 'buildzoom.com') || path.includes('permit')) {
     return { type: 'permit', weight: SOURCE_TYPE_WEIGHTS.permit };
   }
-  if ([
+  if (hostMatchesAny(host, [
     'drhorton.com', 'pulte.com', 'lennar.com', 'mihomes.com', 'taylormorrison.com',
     'mattamyhomes.com', 'neal-communities.com', 'kbhome.com', 'davidweekleyhomes.com',
     'meritagehomes.com', 'ryanhomes.com', 'richmondamerican.com', 'richmond-american.com',
-    'homesbywestbay.com',
-  ].some((domain) => host.includes(domain))) {
+    'homesbywestbay.com', 'marondahomes.com',
+  ])) {
     return { type: 'builder', weight: SOURCE_TYPE_WEIGHTS.builder };
   }
   // Commercial listing sites (LoopNet/Crexi/CommercialCafe) ride the same
@@ -3974,14 +4220,14 @@ function classifyPropertySource(url) {
   // warehouse/office leads, and an unknown-classified source would score the
   // record below the field-verify bar and strip its commercial signal out of
   // detectCategory (codex P2 #2718).
-  if ([
+  if (hostMatchesAny(host, [
     'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
     'loopnet.com', 'crexi.com', 'commercialcafe.com',
-  ].some((domain) => host.includes(domain))) {
+  ])) {
     if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
     return { type: 'listing', weight: SOURCE_TYPE_WEIGHTS.listing };
   }
-  if (['apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com'].some((domain) => host.includes(domain))) {
+  if (hostMatchesAny(host, ['apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com'])) {
     if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
     return { type: 'aggregator', weight: SOURCE_TYPE_WEIGHTS.aggregator };
   }
@@ -4004,6 +4250,29 @@ function normalizeEvidenceValue(value) {
   if (typeof value === 'string') return value.trim().toUpperCase();
   if (typeof value === 'number') return String(Math.round(value * 10) / 10);
   return JSON.stringify(value);
+}
+
+// Numeric fields compare with the documented equivalence tolerances (2,154
+// vs 2,155 sqft is rounding, not a dispute); everything else stays exact.
+// Stories are exact by rule. The tolerance class comes from the property's
+// TYPE — a 5,000 sqft retail suite uses the commercial max(100, 2%), not
+// the stricter residential band its size alone would suggest; the value
+// threshold is only the fallback when no type resolved.
+function fieldValuesDisagree(field, winner, candidates, propertyType) {
+  const numericKindFor = {
+    squareFootage: (value) => (
+      isCommercialBuildingType(propertyType) || Number(value) > RESIDENTIAL_BUILDING_SQFT_MAX
+        ? 'building_area_sqft' : 'residential_living_area_sqft'),
+    lotSize: () => 'parcel_area_sqft',
+  }[field];
+  if (numericKindFor && Number.isFinite(Number(winner.value))) {
+    const { valuesEquivalent } = require('./property-facts-v2');
+    const kind = numericKindFor(winner.value);
+    return candidates.some((item) => Number.isFinite(Number(item.value))
+      && !valuesEquivalent(kind, Number(item.value), Number(winner.value)));
+  }
+  const uniqueValues = [...new Set(candidates.map((item) => normalizeEvidenceValue(item.value)))];
+  return uniqueValues.length > 1;
 }
 
 function scoreToConfidence(score) {
@@ -4104,6 +4373,7 @@ module.exports = {
   detectUnassessedVacantParcel,
   canonicalLookupAddress,
   lookupStoriesFromAI,
+  lookupStoriesEvidenceFromAI,
   lookupPropertyFromAI,
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
@@ -4129,6 +4399,9 @@ module.exports = {
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
+    parseStoriesJSON,
+    coerceBuildingSqftDetailed,
+    coerceStoriesValue,
     leadingHouseNumber,
     parcelGisPrecision,
     situsHouseNumberMismatch,

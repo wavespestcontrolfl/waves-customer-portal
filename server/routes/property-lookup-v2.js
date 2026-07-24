@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -607,7 +607,7 @@ async function performPropertyLookup(address, options = {}) {
       const storyBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
       let aiStories = null;
       if (storyBudgetMs >= timing.storiesMinRemainingMs) {
-        aiStories = await lookupStoriesFromAI(canonicalLookupAddress(address, geo), hints, {
+        aiStories = await lookupStoriesEvidenceFromAI(canonicalLookupAddress(address, geo), hints, {
           timeoutMs: Math.min(storyBudgetMs, timing.storiesTimeoutMs),
         }).catch((err) => {
           result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
@@ -624,9 +624,13 @@ async function performPropertyLookup(address, options = {}) {
           message: 'Skipped stories fallback to keep property lookup responsive',
         });
       }
-      if (aiStories) {
-        result.propertyRecord.stories = aiStories;
+      if (aiStories?.value) {
+        result.propertyRecord.stories = aiStories.value;
         result.propertyRecord._storiesSource = 'ai';
+        // Full provenance (confidence/source/basis) — the estimator uses it
+        // to flag a low-confidence inference instead of pricing it as a
+        // looked-up fact.
+        result.propertyRecord._storiesEvidence = aiStories;
       } else {
         result.propertyRecord._storiesSource = 'default';
       }
