@@ -46,6 +46,10 @@ const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
+// Plan-choice copy variant (owner-approved 2026-07-24): used only when the
+// link will open the plan picker AND the variant is active — never a lever
+// for the lane itself.
+const PLAN_TEMPLATE_KEY = 'secure_appointment_card_plans';
 // Deliberately NOT 'rescheduled' (Codex #2821 P1): the customer-portal
 // reschedule request (routes/schedule.js) flips the visit to 'rescheduled'
 // while leaving the ORIGINAL date/window on the row — it is a pending-
@@ -108,17 +112,36 @@ function dateLineFor(scheduledDate) {
   return ` on ${anchored.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`;
 }
 
-async function renderTemplate(vars) {
+async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
   try {
     const smsTemplatesRouter = require('../routes/admin-sms-templates');
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(TEMPLATE_KEY, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch (err) {
-    logger.warn(`[appt-card-request] template ${TEMPLATE_KEY} lookup failed: ${err.message}`);
+    logger.warn(`[appt-card-request] template ${templateKey} lookup failed: ${err.message}`);
   }
   return null;
+}
+
+// Send-time probe for the plan-choice copy variants (owner-approved
+// 2026-07-24): true only when the /secure link will open the plan picker —
+// same derivation the page runs (gate off, one-time visits, non-whitelisted
+// services, covered lanes all return false and keep the base copy, which
+// stays accurate for them). Availability is live-derived on BOTH ends, so a
+// change between send and click degrades to the card-only page; the variant
+// copy is written to stay truthful in that case (no dollar amounts, "pick
+// how you'd like to pay" still lands on a payment-setup page).
+async function planInviteApplies(visitId) {
+  try {
+    const { buildSecurePlanContext } = require('./secure-appointment-plans');
+    const planCtx = await buildSecurePlanContext({ request: null, visitId });
+    return planCtx?.mode === 'recurring';
+  } catch (err) {
+    logger.warn(`[appt-card-request] plan-invite probe failed for visit ${visitId} — using base copy: ${err.message}`);
+    return false;
+  }
 }
 
 // Check 1 — policy exemption. Payer check fails toward EXEMPT (never risk
@@ -306,12 +329,21 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // template is inactive (template active + env gate = the documented
     // two-switch launch), and an SMS claim must never be consumed for a
     // send that can't render.
-    const body = await renderTemplate({
+    const templateVars = {
       first_name: customer?.first_name || 'there',
       service_type: visit.service_type || 'service',
       date_line: dateLineFor(visit.scheduled_date),
       secure_link: secureUrl,
-    });
+    };
+    // Plan-choice copy variant: only probed for the SMS/email delivery
+    // (inline hands back a URL, no copy), and only an OVERLAY — the base
+    // template's active/inactive state stays the lane's dark lever (the
+    // templateActive probe above already refused an inactive base), and an
+    // inactive variant silently falls back to the approved base copy.
+    const planInvite = delivery !== 'inline' && await planInviteApplies(visit.id);
+    let body = planInvite ? await renderTemplate(templateVars, PLAN_TEMPLATE_KEY) : null;
+    const usedTemplateKey = body ? PLAN_TEMPLATE_KEY : TEMPLATE_KEY;
+    if (!body) body = await renderTemplate(templateVars);
     if (!body) return skip('template_inactive');
 
     // Inline delivery: the customer is ON the booking surface — create the
@@ -485,7 +517,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         metadata: {
           scheduled_service_id: visit.id,
           trigger,
-          original_message_type: TEMPLATE_KEY,
+          original_message_type: usedTemplateKey,
         },
       });
     } catch (sendErr) {
@@ -532,6 +564,9 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         serviceType: visit.service_type || 'service',
         dateLine: dateLineFor(visit.scheduled_date),
         secureUrl,
+        // Both legs describe the same page: the email variant follows the
+        // same send-time plan probe as the SMS copy.
+        planChoice: planInvite,
       }).catch((emailErr) => {
         logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
       });

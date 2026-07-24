@@ -405,6 +405,28 @@ describe('autopay setup invitation (email leg of the card-request funnel)', () =
     mockSendTemplate.mockRejectedValueOnce(new Error('sendgrid down'));
     expect(await sendAutopaySetupInvitation(ARGS)).toBe(null);
   });
+
+  test('planChoice with an ACTIVE variant template sends the plan-choice copy — but idempotency stays on the BASE key (one invite per visit, whichever copy)', async () => {
+    state.tables.email_templates = [{ id: 'tpl-plan' }];
+    await sendAutopaySetupInvitation({ ...ARGS, planChoice: true });
+    const call = mockSendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe('autopay.plan_choice_invitation');
+    expect(call.idempotencyKey).toBe('autopay.setup_invitation:visit-9');
+    expect(call.triggerEventId).toBe('autopay.setup_invitation:visit-9');
+  });
+
+  test('planChoice with NO variant row falls back to the base copy — never a failed send', async () => {
+    // email_templates table empty → the active-variant probe finds nothing.
+    state.tables.email_templates = [];
+    await sendAutopaySetupInvitation({ ...ARGS, planChoice: true });
+    expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('autopay.setup_invitation');
+  });
+
+  test('planChoice false never probes the variant: base copy, no email_templates read', async () => {
+    state.tables.email_templates = [{ id: 'tpl-plan' }];
+    await sendAutopaySetupInvitation(ARGS);
+    expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('autopay.setup_invitation');
+  });
 });
 
 describe('seeded invitation template row (migration 20260721100010)', () => {

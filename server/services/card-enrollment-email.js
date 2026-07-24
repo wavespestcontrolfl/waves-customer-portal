@@ -230,7 +230,7 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
 // every eligibility rule stays enforced in one place. Idempotent per visit:
 // a stale-claim retry that re-enters the funnel can't double-send the
 // email any more than it can re-text.
-async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl } = {}) {
+async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl, planChoice = false } = {}) {
   try {
     if (!emailsEnabled() || !customerId || !scheduledServiceId || !secureUrl) return null;
     const { customer, email } = await loadCustomerEmail(customerId);
@@ -238,13 +238,34 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping setup invitation`);
       return null;
     }
+    // Plan-choice copy variant (owner-approved 2026-07-24): when the funnel's
+    // send-time probe says the /secure link opens the plan picker, prefer the
+    // variant template — but only if it exists and is active (a missing or
+    // archived variant falls back to the base copy, never a failed send).
+    // The idempotency key below stays the BASE key for both: one invitation
+    // per visit ever, whichever copy carried it.
+    let templateKey = 'autopay.setup_invitation';
+    if (planChoice) {
+      try {
+        const variant = await db('email_templates')
+          .where({ template_key: 'autopay.plan_choice_invitation', status: 'active' })
+          .whereNotNull('active_version_id')
+          .first('id');
+        if (variant) templateKey = 'autopay.plan_choice_invitation';
+      } catch (variantErr) {
+        logger.warn(`[card-enrollment-email] plan-choice variant lookup failed — using base copy: ${variantErr.message}`);
+      }
+    }
     // Billing-mode-aware timing copy (Codex #2952): a monthly-membership
     // customer who saves this card is charged monthly dues on their
     // billing day — a hard-coded "only charged after a completed service"
-    // sentence would misstate when they're charged.
+    // sentence would misstate when they're charged. (The plan-choice
+    // variant conditions its timing claim on the pay-per-visit choice and
+    // is only ever selected for lanes the plan page accepts, but the line
+    // is still composed and passed either way — the template decides.)
     const timingLine = await chargeTimingLine(customerId);
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'autopay.setup_invitation',
+      templateKey,
       to: email,
       payload: {
         first_name: clean(customer.first_name) || 'there',
