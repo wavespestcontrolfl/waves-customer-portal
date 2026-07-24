@@ -833,9 +833,15 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     if (!opp) return { ok: false, reason: 'opportunity row unavailable for guardrail context' };
     const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
     const guardResult = guardrailsMod.evaluate(draft, guardOptions);
-    if (!guardResult || guardResult.pass !== true) {
-      const codes = (((guardResult && guardResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => `${f.severity} ${f.code}`);
-      return { ok: false, reason: `run-context guardrails: ${codes.join('; ') || 'no result'}` };
+    if (!guardResult) return { ok: false, reason: 'run-context guardrails: no result' };
+    if (guardResult.pass !== true) {
+      // Same footprint refinement validateFixedBlogFile applies — the
+      // run-context revalidation must not re-park a fix on a false positive
+      // the classifier already clears; classifier failure keeps the
+      // deterministic findings (fail closed).
+      const refined = await refineFootprintFindings(guardResult.findings || []);
+      const codes = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => `${f.severity} ${f.code}`);
+      if (codes.length) return { ok: false, reason: `run-context guardrails: ${codes.join('; ')}` };
     }
     let namedCompetitorEnabled = false;
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }

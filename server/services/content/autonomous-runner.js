@@ -77,6 +77,7 @@ const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
+const getFootprintClassifier = lazy('footprint-claim-classifier', './footprint-claim-classifier');
 const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table-gate');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
@@ -625,6 +626,18 @@ class AutonomousRunner {
         return finalized;
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
+      if (!guardResult.pass) {
+        // Publish-time footprint refinement (footprint-claim-classifier): an
+        // LLM-dismissible OFF_FOOTPRINT_CITY_CLAIM false positive must not
+        // burn the job's retry — classifier failure or module-load failure
+        // keeps the deterministic findings (fail closed). Recorded result
+        // reflects the refinement.
+        const classifier = getFootprintClassifier();
+        if (classifier) {
+          guardResult.findings = await classifier.refineFootprintFindings(guardResult.findings);
+          guardResult.pass = !guardResult.findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+        }
+      }
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
