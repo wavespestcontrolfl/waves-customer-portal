@@ -1725,9 +1725,10 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                 )}
               </div>
             ))}
-            <div className="text-13 text-[#04395E] mt-3">
-              Try us risk-free — 90-day money-back guarantee.
-            </div>
+            {/* Standalone risk-free / 90-day line removed to match the
+                customer page — #2969 deduped it there (the CTA micro is the
+                one sanctioned spot), so the "matches the customer page"
+                promise above holds again. */}
           </div>
         ) : oneTimeStandaloneTotal > 0 ? (
           <div className="pt-5 pb-3">

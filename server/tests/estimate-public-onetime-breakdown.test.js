@@ -6539,7 +6539,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Prepay discount (5%)');
     expect(html).toContain('One-time items (billed separately)');
     expect(html).toContain('Termite bait installation');
-    expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420.00</strong>');
+    // The install is the card's only visible row (the WaveGuard setup item is
+    // filtered out for termite) — single-item breakdowns skip the total row
+    // (#2969 React parity; the item line already states the price).
+    expect(html).toContain('$420.00');
+    expect(html).not.toContain('One-time total</strong>');
     expect(html).toContain('What your termite protection plan includes');
     expect(html).toContain('Ready to start termite protection?');
     expect(html).toContain('How does the bait work?');
@@ -7841,5 +7845,123 @@ describe('resolveEstimateQuoteRequirement — commercial risk-type gate (public 
     expect(resolveEstimateQuoteRequirement(null, {
       result: { lineItems: [{ service: 'commercial_lawn', annual: 1200 }] },
     })).toEqual(expect.objectContaining({ quoteRequired: false }));
+  });
+});
+
+describe('SSR copy parity with the React page (#2969 dedupe; estimator audit 2026-07-24)', () => {
+  test('recurring pest hero: factual assurance line, standalone risk-free/90-day duplicate gone page-wide', () => {
+    const html = renderPage('ssr-parity-recurring-token', {
+      id: 'estimate-ssr-parity-rec',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 95,
+      annualTotal: 1140,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 95 }] },
+        oneTime: { items: [] },
+        results: { pestTiers: [{ label: 'Quarterly', mo: 95, pa: 285, apps: 4 }] },
+      },
+    });
+    // The assurance slot survives with factual copy…
+    expect(html).toContain('class="mini-guarantee"');
+    expect(html).toContain('Your plan includes scheduled pest treatments');
+    // …but the standalone guarantee line is gone everywhere: the plan-terms
+    // strip is the page's one money-back-guarantee claim, matching the React
+    // page after #2969's dedupe.
+    expect(html).not.toContain('risk-free');
+  });
+
+  test('one-time-only single-item page: row keeps the name, drops the repeated dollars, no Total row (#2969 parity)', () => {
+    const html = renderPage('ssr-parity-onetime-token', {
+      id: 'estimate-ssr-parity-ot',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 257,
+          items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Flea Cleanout');
+    // Empty price cell — the lone row's amount is a pure repeat of the hero.
+    expect(html).toContain('<td style="text-align:right"></td>');
+    expect(html).not.toMatch(/<strong>Total<\/strong>/);
+  });
+
+  test('a lone service row netted by a discount row keeps its amount AND the net Total row (codex r1)', () => {
+    // Trenching $2,210 + one_time_adjustment −$110: the discount row never
+    // renders as a table row and is not manualDiscount, but accept charges
+    // the NET $2,100 — the page must state it, so the single-row dedupe
+    // must not treat this as a single undiscounted item.
+    const html = renderPage('ssr-parity-netted-token', {
+      id: 'estimate-ssr-parity-netted',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2100,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 2100,
+          items: [
+            { service: 'termite_trenching', name: 'Termite Trenching Treatment', price: 2210 },
+            { service: 'one_time_adjustment', name: 'Member adjustment', price: -110 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('$2,210.00');
+    expect(html).toMatch(/<strong>Total<\/strong>/);
+    expect(html).toContain('$2,100.00');
+  });
+
+  test('one-time-only page with multiple items keeps every amount and the Total row', () => {
+    const html = renderPage('ssr-parity-onetime-multi-token', {
+      id: 'estimate-ssr-parity-ot-multi',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 457,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 457,
+          items: [
+            { service: 'flea_treatment', name: 'Flea Cleanout', price: 257 },
+            { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('$257.00');
+    expect(html).toContain('$200.00');
+    expect(html).toMatch(/<strong>Total<\/strong>/);
+    expect(html).toContain('$457.00');
   });
 });
