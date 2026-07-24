@@ -676,6 +676,67 @@ describe('codex r2: apartment customers are residential UNITS', () => {
   });
 });
 
+// ── Codex round-3 regressions (reviewed c001ffa668) ──
+
+describe('codex r3: normalized Multifamily apartments are units', () => {
+  test('non-commercial Multifamily infers residential_unit scope', () => {
+    expect(shadow._private.inferServiceScope({ propertyType: 'Multifamily', isCommercial: false, tenant: false, aggregated: false }))
+      .toBe('residential_unit');
+    expect(shadow._private.inferServiceScope({ propertyType: 'Multi-Family', isCommercial: false, tenant: false, aggregated: false }))
+      .toBe('residential_unit');
+  });
+});
+
+describe('codex r3: dedup keeps the uncapped actual, not the capped twin', () => {
+  test('county evidence upgraded in place — 270k survives selection', () => {
+    const cappedRecord = {
+      propertyType: 'Warehouse',
+      squareFootage: 200000,
+      _actuals: { buildingAreaSqft: 270000, pricingAdjustment: 'commercial_area_cap' },
+      formattedAddress: '400 Distribution Ct, Punta Gorda, FL',
+      _parcel: { parcelId: '888', county: 'Charlotte', lotSqft: 400000, aggregated: false },
+      _fieldEvidence: {
+        squareFootage: {
+          value: 200000,
+          sourceType: 'county',
+          evidence: [{ value: 200000, sourceType: 'county', provider: 'charlotte_pao', url: 'https://www.ccappraiser.com/Show_Parcel.asp?p=888' }],
+        },
+      },
+    };
+    const result = shadow.computePropertyFactsV2Shadow({
+      propertyRecord: cappedRecord,
+      extraction: null,
+      intent: { is_commercial: true },
+      propertyFacts: { home: { value: 200000 }, lot: { value: 400000 }, stories: 1, tenant: false },
+      address: '400 Distribution Ct, Punta Gorda, FL',
+    });
+    expect(result.facts.structureArea.value).toBe(270000);
+    expect(result.facts.structureArea.pricingDisposition).toBe('relationship_quote');
+  });
+});
+
+describe('codex r3: dispute flags survive the V2 replacement', () => {
+  test('a >35% caller-vs-county conflict stays disputed under the gate', () => {
+    const propertyFacts = {
+      home: { value: 2400, source: 'county_assessed', disputed: true, rejected: [{ value: 4000, source: 'caller_stated', reason: 'disagrees >35%' }] },
+      lot: { value: 8400, source: 'county_assessed', disputed: true, rejected: [] },
+      stories: 1,
+    };
+    shadow.applyV2ToPropertyFacts(propertyFacts, {
+      legacyDerived: { squareFootage: 2400, lotSize: 8400, stories: 1 },
+      facts: {
+        requiresConfirmation: false,
+        confidenceLevel: 'high',
+        warnings: [],
+        lot: { applicability: 'private_parcel' },
+      },
+    });
+    expect(propertyFacts.home.disputed).toBe(true);
+    expect(propertyFacts.lot.disputed).toBe(true);
+    expect(propertyFacts.home.rejected).toHaveLength(1);
+  });
+});
+
 // ── Estimator integration: story provenance + shadow diff ──
 
 describe('buildEngineInput story provenance', () => {

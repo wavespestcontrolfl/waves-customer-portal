@@ -27,7 +27,9 @@ function propertyFactsV2Enabled() {
 // ── Scope / ownership inference from V1 signals ─────────────────
 
 const CONDO_TYPES = /condo/i;
-const APARTMENT_TYPES = /apartment/i;
+// Apartment inputs commonly normalize to 'Multifamily'
+// (normalizeLookupPropertyType) — both label a UNIT customer's complex.
+const APARTMENT_TYPES = /apartment|multi.?family/i;
 const ASSOCIATION_TYPES = /multifamily|apartment|hoa common area/i;
 
 function inferServiceScope({ propertyType, isCommercial, tenant, aggregated }) {
@@ -81,13 +83,27 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
   // stays 'building' so a residential_unit selection goes unresolved unless
   // unit-scoped evidence (caller-stated) exists.
   const unitScoped = !isCommercial && CONDO_TYPES.test(String(propertyRecord?.propertyType || ''));
+  // The uncapped actual SUPERSEDES the pricing-capped legacy value IN PLACE:
+  // both describe the same underlying record, so emitting them as separate
+  // evidence would dedupe-collapse on the shared source URL and the stable
+  // sort could keep the capped twin (codex r3 P2).
+  const actualBuilding = positive(propertyRecord?._actuals?.buildingAreaSqft);
+  const cappedLegacy = positive(propertyRecord?.squareFootage);
+  let actualApplied = false;
   for (const item of fieldEvidenceItems(propertyRecord, 'squareFootage')) {
     if (!positive(item.value)) continue;
     const scope = aggregated ? 'association' : (unitScoped ? 'unit' : 'building');
+    let value = Number(item.value);
+    if (actualBuilding
+      && (item.sourceType === 'county' || item.sourceType === 'cadastral' || item.sourceType === 'verified')
+      && cappedLegacy && value === cappedLegacy) {
+      value = actualBuilding;
+      actualApplied = true;
+    }
     out.push({
       id: nextId('sqft'),
       field: sqftKindFor({ isCommercial, scope }),
-      value: Number(item.value),
+      value,
       units: 'sqft',
       scope,
       directness: 'direct',
@@ -100,9 +116,9 @@ function buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, te
       warnings: [],
     });
   }
-  // Uncapped actual supersedes the pricing-capped legacy value for the fact.
-  const actualBuilding = positive(propertyRecord?._actuals?.buildingAreaSqft);
-  if (actualBuilding) {
+  // Legacy cached records may carry _actuals with no field-evidence trail —
+  // emit the actual standalone only when no in-place upgrade happened.
+  if (actualBuilding && !actualApplied) {
     out.push({
       id: nextId('sqft-actual'),
       field: 'building_area_sqft',
@@ -303,6 +319,10 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
       value: legacy.squareFootage,
       source: 'property_facts_v2',
       confidence: facts.confidenceLevel,
+      // V1 arbitration's dispute verdict (caller vs county >35%) survives
+      // the replacement — the same hard conflict must keep forcing review,
+      // not green-lane because the source string changed (codex r3 P1).
+      ...(propertyFacts.home?.disputed ? { disputed: true } : {}),
       rejected: propertyFacts.home?.rejected || [],
     };
   } else if (facts.requiresConfirmation) {
@@ -331,6 +351,7 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
         value: legacy.lotSize,
         source: 'property_facts_v2',
         confidence: facts.confidenceLevel,
+        ...(propertyFacts.lot?.disputed ? { disputed: true } : {}),
         rejected: propertyFacts.lot?.rejected || [],
       }
       : {
