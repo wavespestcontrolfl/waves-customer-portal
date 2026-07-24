@@ -312,12 +312,12 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     const estData = clientStampedEstData();
     normalizeClientPestFloorMetadata(estData);
     const [q, b, m] = estData.result.results.pestTiers;
-    // Per-visit basis rounded first: round(79 × fm) × visits — restamps use
-    // the LIVE default curve (v2, codex #2966 P2): a regenerate would price
-    // at these floors, so the restamp must match them.
+    // Per-visit basis rounded first: round(79 × fm) × visits — restamps are
+    // ROW-CURVE-AWARE (codex r10): unstamped legacy client rows restamp on
+    // their sold v1 curve, exactly what a replay regenerate would price.
     expect(q).toMatchObject({ floorPa: 79, floorAnn: 316 });
-    expect(b).toMatchObject({ floorPa: 69.52, floorAnn: 417.12 });
-    expect(m).toMatchObject({ floorPa: 61.62, floorAnn: 739.44 });
+    expect(b).toMatchObject({ floorPa: 67.15, floorAnn: 402.90 });
+    expect(m).toMatchObject({ floorPa: 55.30, floorAnn: 663.60 });
     expect(q.floorMo).toBe(Math.round((316 / 12) * 100) / 100);
     expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
   });
@@ -393,7 +393,7 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     normalizeClientPestFloorMetadata(estData);
     const [q, b] = estData.result.results.pestTiers;
     expect(q).toMatchObject({ floorPa: 95, floorAnn: 380 });
-    expect(b).toMatchObject({ floorPa: 83.60, floorAnn: 501.60 });
+    expect(b).toMatchObject({ floorPa: 80.75, floorAnn: 484.50 });
     expect(estData.result.results.pest).toMatchObject({ floorPa: 95, floorAnn: 380 });
     // The replay stamps sync ATOMICALLY with the restamped rows — a save
     // normalized to the live $95 floor must not keep a $79 stamp, or the

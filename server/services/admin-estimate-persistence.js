@@ -201,7 +201,12 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
       const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
       if (!frequencyKey) continue; // stripped below, never stamped
-      const freqMult = (PEST.frequencyDiscounts?.v2 || {})[frequencyKey] || 1.0; // live default curve — restamp/reject against what a regenerate would price (codex #2966 P2)
+      // Row-curve-aware (codex r10 P1): a legacy v1 row at its own v1 floor
+      // must not 409 against the v2 multiplier when config never changed —
+      // a regenerate of a REPLAY prices on the sold curve (r7-r9), so
+      // validation and restamps compare against the row's own curve.
+      const rowCurve = row.pricingVersion === 'v2' ? 'v2' : 'v1';
+      const freqMult = (PEST.frequencyDiscounts?.[rowCurve] || {})[frequencyKey] || 1.0;
       const liveFloorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
       if (liveFloorPa !== null && Number.isFinite(Number(row.pa))
         && Number(row.pa) < liveFloorPa - 0.005) {
@@ -235,7 +240,9 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!PEST.enforceFloorPostDiscount) continue;
     const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
     if (!frequencyKey) continue;
-    const freqMult = (PEST.frequencyDiscounts?.v2 || {})[frequencyKey] || 1.0; // live default curve — restamp/reject against what a regenerate would price (codex #2966 P2)
+    // Row-curve-aware restamp (codex r10 P1) — same rule as the gate above.
+    const rowCurve = row.pricingVersion === 'v2' ? 'v2' : 'v1';
+    const freqMult = (PEST.frequencyDiscounts?.[rowCurve] || {})[frequencyKey] || 1.0;
     const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
     if (floorAnn === null) continue;
     row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
