@@ -269,9 +269,16 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     winner('first_name', flat.first_name);
     winner('last_name', flat.last_name);
   } else if (v2HasName && (firstConflict || lastConflict)) {
-    if (nameConfident) {
+    if (nameConfident && has(flat.first_name)) {
+      // V2 heard the FIRST name — it owns the identity as a unit, clearing a
+      // surname V2 did not hear (r2 anti-chimera).
       if (merged.first_name !== (flat.first_name || null)) adopt('first_name', flat.first_name || null);
       if (merged.last_name !== (flat.last_name || null)) adopt('last_name', flat.last_name || null);
+    } else if (nameConfident && has(flat.last_name)) {
+      // V2 heard ONLY a conflicting surname — adopt it, but NEVER null the
+      // V1 first name: customer creation gates on first_name, and one
+      // extractor did capture it (codex r3 P2).
+      adopt('last_name', flat.last_name);
     }
   } else if (v2HasName) {
     filler('first_name', flat.first_name);
@@ -287,20 +294,26 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // different property and must not inherit the old unit (codex r2 P2).
   // Truly identical address → V1's unit survives as extra detail V2 simply
   // didn't capture.
-  const partConflicts = (a, b) => has(a) && has(b) && norm(a) !== norm(b);
-  const sameAddress = has(merged.address_line1) && has(flat.address_line1)
-    && norm(merged.address_line1) === norm(flat.address_line1)
-    && !partConflicts(merged.city, flat.city)
-    && !partConflicts(merged.zip, flat.zip);
-  winner('address_line1', flat.address_line1);
-  if (has(flat.address_line2)) {
-    winner('address_line2', flat.address_line2);
-  } else if (has(flat.address_line1) && !sameAddress && has(merged.address_line2)) {
-    adopt('address_line2', null);
+  // The whole block is gated on V2 having heard a STREET: a partial V2
+  // address (city/zip only) must not overwrite the V1 city/zip under a V1
+  // street — that mints a service address neither extractor produced
+  // (codex r3 P2). No V2 street → V1's address stands untouched.
+  if (has(flat.address_line1)) {
+    const partConflicts = (a, b) => has(a) && has(b) && norm(a) !== norm(b);
+    const sameAddress = has(merged.address_line1)
+      && norm(merged.address_line1) === norm(flat.address_line1)
+      && !partConflicts(merged.city, flat.city)
+      && !partConflicts(merged.zip, flat.zip);
+    winner('address_line1', flat.address_line1);
+    if (has(flat.address_line2)) {
+      winner('address_line2', flat.address_line2);
+    } else if (!sameAddress && has(merged.address_line2)) {
+      adopt('address_line2', null);
+    }
+    winner('city', flat.city);
+    winner('state', flat.state);
+    winner('zip', flat.zip);
   }
-  winner('city', flat.city);
-  winner('state', flat.state);
-  winner('zip', flat.zip);
 
   // Scheduling verdict — v2-wins in BOTH directions. Only a confirmed status
   // WITH a parseable ET wall clock books; an affirmative non-confirmed V2
@@ -337,6 +350,13 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // the lead veto catches it (codex r2 P2).
   const SPAM_CALL_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
   if (SPAM_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_spam !== true) adopt('is_spam', true);
+  // Voicemail-class natures likewise trip the voicemail flag itself: the
+  // voicemail skip path keys on extracted.is_voicemail, and a schema-valid
+  // extraction can carry call_nature='voicemail_message' with meta.is_voicemail
+  // false — without this a one-sided noise recording could mint a customer
+  // (codex r3 P2).
+  const VOICEMAIL_CALL_NATURES = new Set(['voicemail_message', 'silent_or_noise']);
+  if (VOICEMAIL_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_voicemail !== true) adopt('is_voicemail', true);
 
   // Fill-gap tier.
   filler('email', caller.email);
@@ -360,15 +380,31 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // per-family primary labels the V2 lead-composition path uses before
   // falling back to the coarse map (codex r2 P2). Lazy require keeps this
   // module load-order-free (lead-service-interest is dependency-free).
+  const v2Category = (v2Extraction.service_request || {}).primary_service_category || null;
   let v2CategoryLabel = null;
   try {
-    v2CategoryLabel = require('./lead-service-interest')
-      .v2PrimaryLabelForCategory((v2Extraction.service_request || {}).primary_service_category);
+    v2CategoryLabel = require('./lead-service-interest').v2PrimaryLabelForCategory(v2Category);
   } catch (_e) { /* coarse map below still applies */ }
   const v2ServiceLabel = flat.specific_service_name || v2CategoryLabel || flat.matched_service;
   filler('matched_service', v2ServiceLabel);
   filler('requested_service', v2ServiceLabel);
   filler('specific_service_name', flat.specific_service_name);
+  // A precise family label also REPLACES the coarse legacy label its own
+  // category degrades to — fill-gap alone let a V1 'General Pest Control'
+  // outrank the actual wasp-nest family (codex r3 P2). Scoped to the exact
+  // coarse alias per category so a cross-family V1 label (or the recurring
+  // program from the owner backstop) is never overridden.
+  const V2_CATEGORY_COARSE_ALIASES = {
+    stinging_insect: 'General Pest Control',
+    exclusion: 'Rodent Control',
+    palm_injection: 'Tree & Shrub Care',
+  };
+  const coarseAlias = V2_CATEGORY_COARSE_ALIASES[v2Category] || null;
+  if (!has(flat.specific_service_name) && v2CategoryLabel && coarseAlias) {
+    for (const key of ['matched_service', 'requested_service']) {
+      if (merged[key] === coarseAlias) adopt(key, v2CategoryLabel);
+    }
+  }
   if ((!has(merged.call_summary) || merged.call_summary === EXTRACTION_INVALID_JSON_SUMMARY) && has(flat.call_summary)) {
     adopt('call_summary', flat.call_summary);
   }

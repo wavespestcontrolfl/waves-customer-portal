@@ -4670,6 +4670,13 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A job-applicant call is neither spam nor a voicemail, but it must not
+    // mint a CUSTOMER: the create branch only checks name/phone/voicemail/spam,
+    // and V2-primary adoption can supply a valid name + spoken phone from an
+    // applicant call (codex r3 P2). Consulted at the Step-3 create gate below.
+    const v2NonCustomerCallNature = v2Result?.status === 'valid'
+      && v2Result.extraction?.call_nature === 'job_applicant';
+
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
     // address / scheduling fields merge into the legacy-shaped `extracted`
@@ -5595,12 +5602,14 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (extracted.first_name && phone && !extracted.is_voicemail) {
+      } else if (extracted.first_name && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
         // A workable voicemail becomes a customer-less Needs-Review lead in
         // Step 4b instead; the office completes it into a customer by hand.
+        // NEVER from a job-applicant call either (v2NonCustomerCallNature) —
+        // an applicant with a name and callback number is not a customer.
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);

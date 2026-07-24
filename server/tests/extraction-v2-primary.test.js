@@ -163,6 +163,15 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     expect(merged.first_name).toBe('Rita');
     expect(merged.last_name).toBe('Galliano');
   });
+
+  test('a confident SURNAME-ONLY conflict adopts the surname but never nulls the V1 first name', () => {
+    const v1 = { ...v1Stub(), first_name: 'John', last_name: 'Smith' };
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: null, last_name: 'Garcia', name_full: 'Garcia', name_confidence: 0.95 };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.first_name).toBe('John');
+    expect(merged.last_name).toBe('Garcia');
+  });
 });
 
 describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
@@ -194,6 +203,17 @@ describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
     v2.property = { ...v2.property, service_address: { ...v2.property.service_address, street_line_2: 'Apt 7' } };
     const { merged } = adoptV2PrimaryFields(v1, v2);
     expect(merged.address_line2).toBe('Apt 7');
+  });
+
+  test('a STREETLESS V2 address adopts nothing — no V2 city/zip under a V1 street', () => {
+    const v1 = { ...v1Stub(), address_line1: '999 Old Rd', address_line2: 'Unit 4', city: 'Venice', zip: '34285' };
+    const v2 = v2Fixture();
+    v2.property = { ...v2.property, service_address: { ...v2.property.service_address, street_line_1: null } };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.address_line1).toBe('999 Old Rd');
+    expect(merged.address_line2).toBe('Unit 4');
+    expect(merged.city).toBe('Venice');
+    expect(merged.zip).toBe('34285');
   });
 });
 
@@ -290,6 +310,31 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
       expect(merged.is_spam).toBe(true);
     }
     expect(adoptV2PrimaryFields(v1Stub(), v2Fixture()).merged.is_spam).toBe(false);
+  });
+
+  test('voicemail-class call_nature trips is_voicemail even when meta.is_voicemail is false', () => {
+    for (const nature of ['voicemail_message', 'silent_or_noise']) {
+      const v2 = v2Fixture({ call_nature: nature });
+      expect(adoptV2PrimaryFields(v1Stub(), v2).merged.is_voicemail).toBe(true);
+    }
+    expect(adoptV2PrimaryFields(v1Stub(), v2Fixture()).merged.is_voicemail).toBe(false);
+  });
+
+  test('a precise family label replaces its own coarse alias but never a cross-family or program label', () => {
+    const wasp = v2Fixture();
+    wasp.service_request = { ...wasp.service_request, specific_service_name: null, primary_service_category: 'stinging_insect' };
+    const coarse = { ...v1Stub(), matched_service: 'General Pest Control', requested_service: 'General Pest Control' };
+    const upgraded = adoptV2PrimaryFields(coarse, wasp).merged;
+    expect(upgraded.matched_service).toBe('Bee / Wasp Nest Removal Service');
+    expect(upgraded.requested_service).toBe('Bee / Wasp Nest Removal Service');
+
+    // The recurring program label (owner backstop output) is never overridden.
+    const program = { ...v1Stub(), matched_service: 'Quarterly Pest Control Service' };
+    expect(adoptV2PrimaryFields(program, wasp).merged.matched_service).toBe('Quarterly Pest Control Service');
+
+    // A cross-family V1 label is not stomped either.
+    const crossFamily = { ...v1Stub(), matched_service: 'Lawn Care' };
+    expect(adoptV2PrimaryFields(crossFamily, wasp).merged.matched_service).toBe('Lawn Care');
   });
 
   test('category-only V2 service uses the family primary label, not the lossy coarse map', () => {
