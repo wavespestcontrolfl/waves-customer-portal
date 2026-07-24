@@ -620,6 +620,16 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // the live plan-customer check in estimate-deposits.js, which keys off
       // the same loadExistingRecurringQualifyingRows rows.
       isExistingCustomer: existingKeys.length > 0,
+      // Billing lane at save time: a CURRENT monthly member keeps monthly
+      // membership billing when accepting an add-on (estimate-converter
+      // preservesExistingMembership — same predicate, evaluated on the live
+      // customer row at freeze time). Display surfaces read this to keep the
+      // "Billed $X/mo" disclosure for exactly that audience; accept-time
+      // divergence is already handled by the snapshot reconcile requote.
+      // Internal field — publicMembershipView's whitelist never exposes it.
+      preservesMonthlyBilling: ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+        && Number(customer.monthly_rate) > 0
+        && (customer.billing_mode == null || customer.billing_mode === 'monthly_membership'),
       firstName: customer.first_name || null,
       tier: combinedTier.tier,
       tierLabel: TIER_LABEL[combinedTier.tier] || 'Bronze',

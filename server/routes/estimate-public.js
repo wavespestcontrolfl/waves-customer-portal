@@ -16673,7 +16673,51 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   return out;
 }
 
+// Codex P1 (#2978): a CURRENT monthly member adding on keeps monthly
+// membership billing at accept (estimate-converter preservesExistingMembership),
+// so for exactly that audience the "Billed $X/mo" note IS the truthful
+// disclosure — the per-application flag must not suppress it. The frozen
+// membershipSnapshot records the billing lane at save time (the same
+// freeze-at-save contract the membership card uses; accept-time divergence
+// forces a requote via reconcileFrozenMembershipSnapshot). Pre-field
+// snapshots (isExistingCustomer with no recorded lane) strip conservatively:
+// for an existing member the monthly note is the safe disclosure, and fresh
+// saves record the lane going forward. Lead estimates carry no snapshot and
+// keep the flag — they are the per-application audience.
+function snapshotKeepsMonthlyBillingNote(estData) {
+  const snapshot = estData && typeof estData === 'object' ? estData.membershipSnapshot : null;
+  if (!snapshot || snapshot.isExistingCustomer !== true) return false;
+  return snapshot.preservesMonthlyBilling !== false;
+}
+
+// Copying transform, mirroring stripInternalMarginFieldsDeep — the pricing
+// cache must keep the unstripped bundle (the strip is snapshot-conditional).
+function stripBilledPerApplicationDeep(value, depth = 0) {
+  if (depth > 6 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => stripBilledPerApplicationDeep(entry, depth + 1));
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'billedPerApplication') continue;
+    out[key] = stripBilledPerApplicationDeep(nested, depth + 1);
+  }
+  return out;
+}
+
 async function buildPricingBundle(estimate) {
+  const bundle = await buildPricingBundleInner(estimate);
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  let estData = null;
+  try {
+    estData = typeof estimate.estimate_data === 'string'
+      ? JSON.parse(estimate.estimate_data)
+      : estimate.estimate_data;
+  } catch { /* unparseable estimate_data — treat as no snapshot */ }
+  return snapshotKeepsMonthlyBillingNote(estData)
+    ? stripBilledPerApplicationDeep(bundle)
+    : bundle;
+}
+
+async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
