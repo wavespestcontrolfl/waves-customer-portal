@@ -3491,10 +3491,13 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
-            // Guarantee line off everywhere (owner 2026-07-23) — the approve
-            // CTA's micro line states the same 90-day guarantee immediately
-            // below, so the in-card line read twice.
-            showGuarantee={false}
+            // Guarantee line off under glass (owner 2026-07-23) — the approve
+            // CTA's glass micro line states the same 90-day guarantee
+            // immediately below, so the in-card line read twice. Non-glass
+            // single-service cards keep it: the CTA micro is glass-gated, so
+            // removing it there would drop the page's only guarantee claim
+            // (codex P2 r3).
+            showGuarantee={servicesLength === 1 && !glassCopyActive()}
           />
         ) : null}
 
@@ -4834,8 +4837,10 @@ function EstimateViewPageInner() {
   // One-time-only estimates overlay a terms-neutral hero on the category
   // pack — the packs' recurring promises (unlimited callbacks, 90-day
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
+  // Review-gated quotes get the confirm-with-you variant instead of
+  // "approve online and pick a day" (codex P2 r3).
   const glassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory))
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
     : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
@@ -5054,10 +5059,18 @@ function EstimateViewPageInner() {
           ) : null}
 
           {/* The standalone "Try us risk-free — 90-day money-back guarantee."
-              line is gone (owner 2026-07-23): the approve CTA's micro line
-              ("No long-term contract · Unlimited free callbacks · 90-day
-              money-back guarantee") already carries the claim, so it read
-              twice back to back. */}
+              line is gone under glass (owner 2026-07-23): the approve CTA's
+              glass micro line ("No long-term contract · Unlimited free
+              callbacks · 90-day money-back guarantee") already carries the
+              claim, so it read twice back to back. Non-glass keeps it — the
+              CTA micro is glass-gated, so this is the non-glass page's only
+              plan-level guarantee claim (codex P2 r3). */}
+          {!glassContent && services.length > 1 ? (
+            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
+              Try us risk-free — 90-day money-back guarantee.
+            </div>
+          ) : null}
+
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (

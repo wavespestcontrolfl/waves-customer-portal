@@ -284,10 +284,18 @@ const GLASS_ONE_TIME_HERO = {
   heroH1: 'Hello {first}, your {city} service quote is ready!',
   heroSub: 'One visit, priced from your actual property — approve online and pick a day that works. Licensed & insured, satisfaction guaranteed.',
 };
+// Review-gated one-time quotes (cta.reviewBeforeBooking — e.g. priced
+// termite trenching) can't self-book or accept online, so the "approve
+// online and pick a day" clause would contradict the enforced review gate
+// (codex P2 on #2969 r3) — they get the neutral confirm-with-you line.
+const GLASS_ONE_TIME_HERO_REVIEW = {
+  heroH1: GLASS_ONE_TIME_HERO.heroH1,
+  heroSub: 'One visit, priced from your actual property — our team reviews it and confirms scheduling with you. Licensed & insured, satisfaction guaranteed.',
+};
 
-export function glassOneTimeHeroOverlay(pack) {
+export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false } = {}) {
   if (!glassCopyActive()) return null;
-  return { ...(pack || GLASS_PACKS.bundle), ...GLASS_ONE_TIME_HERO };
+  return { ...(pack || GLASS_PACKS.bundle), ...(reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW : GLASS_ONE_TIME_HERO) };
 }
 
 // CTA micro line under the primary booking CTA. Recurring plans keep the

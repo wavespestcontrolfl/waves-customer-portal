@@ -3289,17 +3289,43 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   });
   // Mosquito estimates surface the near-water signal instead — standing
   // water is the pressure/pricing driver there (owner 2026-07-23). Tile
-  // renders only when the signal is actually known.
-  const nearWaterPresence = hasMosquito ? firstFeaturePresence(
+  // renders only when the signal is actually known. Real parcel/AI inputs
+  // often store ENUM strings (POND_ON_PROPERTY / CANAL_ADJACENT / CLOSE /
+  // waterProximity values), not yes/no booleans (codex P2 r3) — any
+  // non-empty value that isn't an explicit negative counts as present.
+  const nearWaterEnumPresence = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const norm = raw.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+    if (/^(UNKNOWN|N_A|NULL|UNDEFINED)$/.test(norm)) return null;
+    if (/^(NONE|NO|FALSE|0|NOT_NEAR|NOT_NEAR_WATER|NO_WATER|FAR)$/.test(norm)) return 'no';
+    return 'yes';
+  };
+  const nearWaterCandidates = hasMosquito ? [
     inputs.nearWater,
     inputs.near_water,
+    inputs.waterProximity,
+    inputs.water_proximity,
     inputFeatures.nearWater,
+    inputFeatures.waterProximity,
     property.nearWater,
     property.near_water,
+    property.waterProximity,
+    property.water_proximity,
     propertyFeatures.nearWater,
+    propertyFeatures.waterProximity,
     aiAnalysis.nearWater,
     aiAnalysis.near_water,
-  ) : null;
+    aiAnalysis.waterProximity,
+    aiAnalysis.water_proximity,
+  ] : [];
+  // Boolean/yes-no shapes first (they're unambiguous); enum strings fall
+  // back to the presence mapping above — first decisive answer wins.
+  const nearWaterPresence = hasMosquito
+    ? (firstFeaturePresence(...nearWaterCandidates)
+      || nearWaterCandidates.map(nearWaterEnumPresence).find(Boolean)
+      || null)
+    : null;
   const nearWaterValue = nearWaterPresence === 'yes' ? 'Yes'
     : nearWaterPresence === 'possible' ? 'Possible'
     : nearWaterPresence === 'no' ? 'No'
