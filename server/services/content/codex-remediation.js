@@ -56,6 +56,7 @@ const fm = require('../content-astro/frontmatter');
 const { assertValidBlogFrontmatter } = require('../content-astro/schema-validator');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 const contentGuardrails = require('./content-guardrails');
+const { refineFootprintFindings } = require('./footprint-claim-classifier');
 const comparisonTableGate = require('./comparison-table-gate');
 const factCheckGate = require('./fact-check-gate');
 const { etDateString } = require('../../utils/datetime-et');
@@ -421,7 +422,11 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     },
   );
   if (!guardrails.pass) {
-    const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    // Same refinement the publisher applies: a false-positive footprint
+    // claim must not park a remediation the classifier can clear; any
+    // classifier failure keeps the deterministic verdict (fail closed).
+    const refined = await refineFootprintFindings(guardrails.findings || []);
+    const blocking = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1');
     if (blocking.length) return { ok: false, reason: `guardrails ${blocking.map((f) => f.code).join(',')}` };
   }
 
