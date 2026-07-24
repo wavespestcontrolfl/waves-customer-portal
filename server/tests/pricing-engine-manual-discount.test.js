@@ -163,17 +163,9 @@ describe('pricing engine manual recurring discount', () => {
     expect(md.oneTimeDiscountableBase).toBeCloseTo(720, 2);
   });
 
-  test('member discounts (requiresWaveGuardTier) require eligibility confirmation', () => {
-    expect(() => generateEstimate(baseInput({
-      manualDiscount: {
-        source: 'catalog_preset',
-        catalogName: 'WaveGuard Member Discount',
-        type: 'PERCENT',
-        value: 15,
-        eligibility: { requiresWaveGuardTier: 'Bronze' },
-      },
-    }))).toThrow('Manual discount eligibility must be confirmed');
-
+  test('member discounts (requiresWaveGuardTier) apply without confirmation and keep the informational warning', () => {
+    // Owner directive 2026-07-24: eligibility requirements never block a
+    // discount — the requires_* lanes are informational annotations only.
     const estimate = generateEstimate(baseInput({
       manualDiscount: {
         source: 'catalog_preset',
@@ -181,12 +173,11 @@ describe('pricing engine manual recurring discount', () => {
         type: 'PERCENT',
         value: 15,
         eligibility: { requiresWaveGuardTier: 'Bronze' },
-        eligibilityConfirmed: true,
-        eligibilityOverrideReason: 'Active WaveGuard member',
       },
     }));
     expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
     expect(estimate.summary.manualDiscount.warnings).toContain('manual_discount_requires_waveguard_tier');
+    expect(estimate.summary.manualDiscount.warnings).not.toContain('manual_discount_eligibility_not_confirmed');
   });
 
   test('manual percentage above 100 is rejected server-side', () => {
@@ -319,8 +310,9 @@ describe('pricing engine manual recurring discount', () => {
     expect(credit.warnings).not.toContain('service_specific_discount_service_not_discountable');
   });
 
-  test('manual eligibility-gated discounts require confirmation', () => {
-    expect(() => generateEstimate(baseInput({
+  test('eligibility-gated discounts (military) apply without confirmation', () => {
+    // Owner directive 2026-07-24: no confirmation/approval step on discounts.
+    const estimate = generateEstimate(baseInput({
       manualDiscount: {
         source: 'catalog_preset',
         catalogName: 'Military Discount',
@@ -328,9 +320,13 @@ describe('pricing engine manual recurring discount', () => {
         value: 5,
         eligibility: { requiresMilitary: true },
       },
-    }))).toThrow('Manual discount eligibility must be confirmed');
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
+    expect(estimate.summary.manualDiscount.warnings).toContain('manual_discount_requires_customer_status');
 
-    const estimate = generateEstimate(baseInput({
+    // Legacy stored inputs that carried eligibilityConfirmed still replay and
+    // keep recording the flag in the summary.
+    const confirmed = generateEstimate(baseInput({
       manualDiscount: {
         source: 'catalog_preset',
         catalogName: 'Military Discount',
@@ -341,8 +337,8 @@ describe('pricing engine manual recurring discount', () => {
         eligibilityOverrideReason: 'Verified military ID',
       },
     }));
-    expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
-    expect(estimate.summary.manualDiscount.eligibilityConfirmed).toBe(true);
+    expect(confirmed.summary.manualDiscount.amount).toBeGreaterThan(0);
+    expect(confirmed.summary.manualDiscount.eligibilityConfirmed).toBe(true);
   });
 });
 

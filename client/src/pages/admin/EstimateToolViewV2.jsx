@@ -2061,8 +2061,6 @@ export default function EstimateToolViewV2({
     manualDiscountValue: "",
     manualDiscountLabel: "",
     manualDiscountInternalReason: "",
-    manualDiscountEligibilityConfirmed: false,
-    manualDiscountEligibilityOverrideReason: "",
     serviceSpecificDiscountKeys: [],
     grassType: "st_augustine",
     mosquitoProgram: "monthly12",
@@ -2961,8 +2959,6 @@ export default function EstimateToolViewV2({
         manualDiscountValue: "",
         manualDiscountLabel: "",
         manualDiscountInternalReason: "",
-        manualDiscountEligibilityConfirmed: false,
-        manualDiscountEligibilityOverrideReason: "",
       }));
       return;
     }
@@ -2970,8 +2966,6 @@ export default function EstimateToolViewV2({
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
-        manualDiscountEligibilityConfirmed: false,
-        manualDiscountEligibilityOverrideReason: "",
       }));
       return;
     }
@@ -2984,8 +2978,6 @@ export default function EstimateToolViewV2({
       manualDiscountType: manualType,
       manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
-      manualDiscountEligibilityConfirmed: false,
-      manualDiscountEligibilityOverrideReason: "",
     }));
   }
 
@@ -3441,15 +3433,6 @@ export default function EstimateToolViewV2({
         !String(form.manualDiscountInternalReason || "").trim()
       ) {
         alert("Enter an internal reason for custom discounts.");
-        return null;
-      }
-      if (
-        manualDiscountType !== "NONE" &&
-        manualDiscountValue > 0 &&
-        selectedManualPreset?.warnings?.some((warning) => String(warning).startsWith("manual_discount_requires_")) &&
-        form.manualDiscountEligibilityConfirmed !== true
-      ) {
-        alert("Confirm eligibility or enter an approved override before applying this discount.");
         return null;
       }
       const manualDiscount = buildManualDiscountPayload({
@@ -6860,35 +6843,11 @@ export default function EstimateToolViewV2({
                     {" "}
                     <InputV2
                       k="manualDiscountInternalReason"
-                      placeholder="Required for custom or eligibility override"
+                      placeholder="Required for custom discounts"
                     />{" "}
                   </FieldV2>{" "}
                 </div>{" "}
               </div>{" "}
-              <label className="flex items-center gap-2 text-12 text-zinc-900 mt-1">
-                <input
-                  type="checkbox"
-                  checked={form.manualDiscountEligibilityConfirmed === true}
-                  onChange={(e) =>
-                    setForm((f) => ({
-                      ...f,
-                      manualDiscountEligibilityConfirmed: e.target.checked,
-                    }))
-                  }
-                  className="h-3.5 w-3.5 accent-zinc-900"
-                />
-                Eligibility confirmed or approved override
-              </label>
-              {form.manualDiscountEligibilityConfirmed && (
-                <div className="mt-2">
-                  <FieldV2 label="Override reason">
-                    <InputV2
-                      k="manualDiscountEligibilityOverrideReason"
-                      placeholder="e.g. verified ID, referral noted, annual prepay confirmed"
-                    />
-                  </FieldV2>
-                </div>
-              )}
               <div className="text-11 text-ink-tertiary mt-2">
                 Applies after bundle/WaveGuard discounts to both recurring and
                 one-time services. Re-click Generate Estimate to recalculate.
