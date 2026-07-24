@@ -260,29 +260,41 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   //      treating a missing part as a conflict would clear the very
   //      first_name customer creation gates on (codex r2 P2).
   const norm = (v) => String(v || '').trim().toLowerCase();
+  // The V2 schema permits both split name fields to be null while name_full
+  // is present — derive the split (same rule as mapSecondaryContactToLegacy)
+  // so a name_full-only caller still rescues the customer-create gate
+  // (codex r6 P2: leaving it unsplit re-creates the very no-name dead end
+  // this promotion exists to fix).
+  let v2First = flat.first_name;
+  let v2Last = flat.last_name;
+  if (!has(v2First) && !has(v2Last) && has(caller.name_full)) {
+    const parts = String(caller.name_full).trim().split(/\s+/);
+    v2First = parts[0] || null;
+    v2Last = parts.slice(1).join(' ') || null;
+  }
   const v1HasName = has(merged.first_name) || has(merged.last_name);
-  const v2HasName = has(flat.first_name) || has(flat.last_name);
+  const v2HasName = has(v2First) || has(v2Last);
   const nameConfident = typeof caller.name_confidence === 'number' && caller.name_confidence >= 0.9;
-  const firstConflict = has(merged.first_name) && has(flat.first_name) && norm(merged.first_name) !== norm(flat.first_name);
-  const lastConflict = has(merged.last_name) && has(flat.last_name) && norm(merged.last_name) !== norm(flat.last_name);
+  const firstConflict = has(merged.first_name) && has(v2First) && norm(merged.first_name) !== norm(v2First);
+  const lastConflict = has(merged.last_name) && has(v2Last) && norm(merged.last_name) !== norm(v2Last);
   if (v2HasName && !v1HasName) {
-    winner('first_name', flat.first_name);
-    winner('last_name', flat.last_name);
+    winner('first_name', v2First);
+    winner('last_name', v2Last);
   } else if (v2HasName && (firstConflict || lastConflict)) {
-    if (nameConfident && has(flat.first_name)) {
+    if (nameConfident && has(v2First)) {
       // V2 heard the FIRST name — it owns the identity as a unit, clearing a
       // surname V2 did not hear (r2 anti-chimera).
-      if (merged.first_name !== (flat.first_name || null)) adopt('first_name', flat.first_name || null);
-      if (merged.last_name !== (flat.last_name || null)) adopt('last_name', flat.last_name || null);
-    } else if (nameConfident && has(flat.last_name)) {
+      if (merged.first_name !== (v2First || null)) adopt('first_name', v2First || null);
+      if (merged.last_name !== (v2Last || null)) adopt('last_name', v2Last || null);
+    } else if (nameConfident && has(v2Last)) {
       // V2 heard ONLY a conflicting surname — adopt it, but NEVER null the
       // V1 first name: customer creation gates on first_name, and one
       // extractor did capture it (codex r3 P2).
-      adopt('last_name', flat.last_name);
+      adopt('last_name', v2Last);
     }
   } else if (v2HasName) {
-    filler('first_name', flat.first_name);
-    filler('last_name', flat.last_name);
+    filler('first_name', v2First);
+    filler('last_name', v2Last);
   }
 
   // Service address — v2-wins (the AV / enforce lanes downstream validate and

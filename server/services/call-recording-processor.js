@@ -4687,6 +4687,11 @@ const CallRecordingProcessor = {
       'billing_question',
       'existing_customer_service',
       'existing_customer_scheduling',
+      // 'other' is an explicitly non-new-lead classification — indeterminate
+      // non-sales calls must not mint customer records either (codex r6 P2).
+      // A NULL call_nature stays out of the hold: the schema reserves null
+      // for truly indeterminate calls, where legacy creation behavior stands.
+      'other',
     ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'

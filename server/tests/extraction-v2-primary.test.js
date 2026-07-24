@@ -132,6 +132,18 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     expect(kept.last_name).toBe('Galiano');
   });
 
+  test('a name_full-only V2 caller still rescues a null-name stub (split like the secondary-contact mapper)', () => {
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: null, last_name: null, name_full: 'Rita Galliano' };
+    const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
+    expect(merged.first_name).toBe('Rita');
+    expect(merged.last_name).toBe('Galliano');
+
+    const single = v2Fixture();
+    single.caller = { ...single.caller, first_name: null, last_name: null, name_full: 'Rita' };
+    expect(adoptV2PrimaryFields(v1Stub(), single).merged.first_name).toBe('Rita');
+  });
+
   test('a low-confidence V2 name still fills an EMPTY V1 name', () => {
     const shaky = v2Fixture();
     shaky.caller = { ...shaky.caller, name_confidence: 0.4 };
