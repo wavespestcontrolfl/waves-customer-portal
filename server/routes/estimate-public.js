@@ -16673,25 +16673,36 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   return out;
 }
 
-// Codex P1 (#2978): a CURRENT monthly member adding on keeps monthly
+// Codex P1s (#2978 r1-r2): a CURRENT monthly member adding on keeps monthly
 // membership billing at accept (estimate-converter preservesExistingMembership),
 // so for exactly that audience the "Billed $X/mo" note IS the truthful
-// disclosure — the per-application flag must not suppress it. The frozen
-// membershipSnapshot records the billing lane at save time (the same
-// freeze-at-save contract the membership card uses; accept-time divergence
-// forces a requote via reconcileFrozenMembershipSnapshot). Pre-field
-// snapshots (isExistingCustomer with no recorded lane) strip conservatively:
-// for an existing member the monthly note is the safe disclosure, and fresh
-// saves record the lane going forward. Lead estimates carry no snapshot and
-// keep the flag — they are the per-application audience.
-function snapshotKeepsMonthlyBillingNote(estData) {
-  const snapshot = estData && typeof estData === 'object' ? estData.membershipSnapshot : null;
-  if (!snapshot || snapshot.isExistingCustomer !== true) return false;
-  return snapshot.preservesMonthlyBilling !== false;
+// disclosure — the per-application flag must not suppress it. The lane is
+// resolved LIVE from the linked customer row via the SAME shared predicate
+// the converter uses (customerPreservesMonthlyMembership, billing-cadence.js):
+// a save-time snapshot would go stale when the customer changes lanes, and a
+// membership snapshot doesn't even exist for monthly members without
+// qualifying recurring rows. Enforcement is symmetric — preserved members
+// get every flag stripped, everyone else gets missing flags ADDED on the
+// tier-plan surfaces, so pre-flag send snapshots (sent before this change)
+// serve the same disclosure as fresh builds.
+async function estimateCustomerPreservesMonthlyBilling(estimate) {
+  const customerId = estimate?.customer_id;
+  if (!customerId) return false;
+  try {
+    const customer = await db('customers').where({ id: customerId }).first();
+    if (!customer) return false;
+    return BillingCadence.customerPreservesMonthlyMembership(customer);
+  } catch (e) {
+    // Unknown lane on a LINKED estimate: keep the monthly disclosure.
+    // Wrongly suppressing it hides a description of a real charge; wrongly
+    // showing it merely over-discloses for one transient failure window.
+    logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
+    return true;
+  }
 }
 
-// Copying transform, mirroring stripInternalMarginFieldsDeep — the pricing
-// cache must keep the unstripped bundle (the strip is snapshot-conditional).
+// Copying transforms, mirroring stripInternalMarginFieldsDeep — the pricing
+// cache must keep the raw bundle (the enforcement is lane-conditional).
 function stripBilledPerApplicationDeep(value, depth = 0) {
   if (depth > 6 || !value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((entry) => stripBilledPerApplicationDeep(entry, depth + 1));
@@ -16703,18 +16714,54 @@ function stripBilledPerApplicationDeep(value, depth = 0) {
   return out;
 }
 
+// Tier-plan surfaces whose accept path bills per application (plan annual ÷
+// visits). Deliberately EXCLUDES termite_bait/pest sections: legacy
+// flat-monthly termite rows carry a derived per-visit price + visit count
+// yet genuinely bill the flat monthly — their entries must keep the note
+// (the #2965 carve-out), and only the builders can tell those payloads
+// apart, so snapshot back-fill never touches them.
+const TIER_BILLED_PER_APP_SECTION_KEYS = new Set(['lawn_care', 'tree_shrub', 'mosquito', 'foam_recurring']);
+
+function frequencyEntryLooksPerApplication(entry) {
+  return !!entry && typeof entry === 'object'
+    && entry.quoteRequired !== true
+    && Number(entry.perTreatment) > 0
+    && Number(entry.visitsPerYear) > 0;
+}
+
+function withBilledPerApplicationFlag(entry) {
+  return frequencyEntryLooksPerApplication(entry) && entry.billedPerApplication !== true
+    ? { ...entry, billedPerApplication: true }
+    : entry;
+}
+
+function addMissingBilledPerApplicationFlags(bundle) {
+  const out = { ...bundle };
+  const mapTopLevel = (freqs) => (Array.isArray(freqs)
+    ? freqs.map((entry) => (
+      TIER_BILLED_PER_APP_SECTION_KEYS.has(entry?.serviceCategory)
+        ? withBilledPerApplicationFlag(entry)
+        : entry
+    ))
+    : freqs);
+  out.frequencies = mapTopLevel(out.frequencies);
+  out.hiddenLawnFrequencies = mapTopLevel(out.hiddenLawnFrequencies);
+  if (Array.isArray(out.services)) {
+    out.services = out.services.map((section) => (
+      section && TIER_BILLED_PER_APP_SECTION_KEYS.has(section.key) && Array.isArray(section.frequencies)
+        ? { ...section, frequencies: section.frequencies.map(withBilledPerApplicationFlag) }
+        : section
+    ));
+  }
+  return out;
+}
+
 async function buildPricingBundle(estimate) {
   const bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
-  let estData = null;
-  try {
-    estData = typeof estimate.estimate_data === 'string'
-      ? JSON.parse(estimate.estimate_data)
-      : estimate.estimate_data;
-  } catch { /* unparseable estimate_data — treat as no snapshot */ }
-  return snapshotKeepsMonthlyBillingNote(estData)
+  return (await estimateCustomerPreservesMonthlyBilling(estimate))
     ? stripBilledPerApplicationDeep(bundle)
-    : bundle;
+    : addMissingBilledPerApplicationFlags(bundle);
 }
 
 async function buildPricingBundleInner(estimate) {
@@ -17993,6 +18040,8 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
+module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
