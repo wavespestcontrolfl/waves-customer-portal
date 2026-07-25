@@ -6729,7 +6729,11 @@ const CallRecordingProcessor = {
         || v2ApprovedExtraction?.service_request?.primary_service_category || null;
       const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
       if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
-        extracted.matched_service = v2Flat.matched_service;
+        // The PRECISE catalog pick outranks flatView's coarse category map —
+        // overwriting with the coarse label here undid the adoption layer's
+        // precise label and mislabeled CSR-facing subjects/metadata (e.g.
+        // 'Wildlife Exclusion' → 'Rodent Control'; codex #2972 r10 P2).
+        extracted.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
       }
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
       // Catalog-anchored booking fields: the gate validated this extraction, so

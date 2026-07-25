@@ -374,6 +374,21 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
     expect(merged.matched_service).toBe('Bi-Monthly Pest Control Service');
   });
 
+  test('an explicit V2 null quoted_price clears a stale V1 number (codex r10)', () => {
+    const v1 = { ...v1Stub(), quoted_price: 350 };
+    expect(adoptV2PrimaryFields(v1, v2Fixture()).merged.quoted_price).toBeNull();
+    const priced = v2Fixture();
+    priced.service_request = { ...priced.service_request, quoted_price_usd: 105 };
+    expect(adoptV2PrimaryFields(v1, priced).merged.quoted_price).toBe(105);
+  });
+
+  test('same street+city but a DIFFERENT state is a different property — V1 unit cleared (codex r10)', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 Seagrass Ln', address_line2: 'Unit 4', city: 'Bradenton', state: 'GA', zip: null };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture()); // v2 state FL
+    expect(merged.address_line2).toBeNull();
+    expect(merged.state).toBe('FL');
+  });
+
   test('a spam-class call_nature trips is_spam, not just call_type', () => {
     for (const nature of ['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']) {
       const v2 = v2Fixture({ call_nature: nature });

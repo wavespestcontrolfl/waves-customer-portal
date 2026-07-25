@@ -359,6 +359,10 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     const sameAddress = has(merged.address_line1)
       && canonStreet(merged.address_line1) === canonStreet(flat.address_line1)
       && !partConflicts(merged.city, flat.city)
+      // Same street + city with a STATE disagreement is a different property
+      // (Springfield FL vs Springfield VA) — the V1 unit must not ride along
+      // (codex r10 P2).
+      && !partConflicts(merged.state, flat.state)
       && !(has(merged.zip) && has(flat.zip) && zip5(merged.zip) !== zip5(flat.zip));
     winner('address_line1', flat.address_line1);
     if (sameAddress) {
@@ -411,7 +415,16 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     if (followUp && merged.follow_up_date_time !== followUp) adopt('follow_up_date_time', followUp);
   }
 
-  winner('quoted_price', typeof flat.quoted_price === 'number' ? flat.quoted_price : null);
+  // quoted_price is v2-wins in BOTH directions: an explicit V2 null means
+  // "no price was quoted AND accepted" — a stale V1 number surviving it
+  // would persist a hallucinated price into canonical ai_extraction on
+  // soft-blocked routes (codex r10 P2).
+  {
+    const v2Quote = typeof flat.quoted_price === 'number' ? flat.quoted_price : null;
+    if (merged.quoted_price !== v2Quote && (v2Quote !== null || merged.quoted_price != null)) {
+      adopt('quoted_price', v2Quote);
+    }
+  }
 
   // OR flags — true from either leg wins.
   if (flat.is_spam === true && merged.is_spam !== true) adopt('is_spam', true);
