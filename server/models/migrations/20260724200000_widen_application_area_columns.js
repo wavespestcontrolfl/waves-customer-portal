@@ -34,9 +34,13 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // A plain shrink would throw on any stored multi-area list. Project the
-  // list down to its first area (the pre-multi-select shape) before
-  // narrowing, so the alter can't fail.
+  // Project every multi-area list down to its first area (the
+  // pre-multi-select shape) before narrowing — not just oversized values.
+  // A short list like "Kitchen, Bathrooms" fits in 50 chars but the
+  // single-select world can't represent it: the old report matcher would
+  // treat it as one unmatched area and fan the product out to unrelated
+  // visit zones (codex P2 on #2989). The length guard still covers a
+  // comma-free value that somehow exceeds 50, so the alter can't throw.
   if (
     (await knex.schema.hasTable('service_products'))
     && (await knex.schema.hasColumn('service_products', 'application_area'))
@@ -44,7 +48,8 @@ exports.down = async function down(knex) {
     await knex.raw(`
       UPDATE service_products
       SET application_area = left(trim(split_part(application_area, ',', 1)), 50)
-      WHERE application_area IS NOT NULL AND length(application_area) > 50
+      WHERE application_area IS NOT NULL
+        AND (position(',' in application_area) > 0 OR length(application_area) > 50)
     `);
     await knex.schema.alterTable('service_products', (t) => {
       t.string('application_area', 50).alter();
@@ -57,7 +62,8 @@ exports.down = async function down(knex) {
     await knex.raw(`
       UPDATE property_application_history
       SET application_site = left(trim(split_part(application_site, ',', 1)), 50)
-      WHERE application_site IS NOT NULL AND length(application_site) > 50
+      WHERE application_site IS NOT NULL
+        AND (position(',' in application_site) > 0 OR length(application_site) > 50)
     `);
     await knex.schema.alterTable('property_application_history', (t) => {
       t.string('application_site', 50).alter();
