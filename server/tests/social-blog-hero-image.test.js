@@ -110,7 +110,10 @@ describe('blogHeroSocialImageUrl', () => {
   });
 
   test('BLOG_HERO_SOURCES covers exactly the blog-share lanes (poller, RSS backstop, scheduler, admin share button, content agent)', () => {
-    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'content_agent']));
+    // 'blog_auto' = the automatic live-flip share (split from the admin Share
+    // button's 'blog' so the daily auto-share cap can count it). It is still a
+    // blog-share lane, so it keeps the hero image.
+    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'blog_auto', 'content_agent']));
     // newsletter/studio/manual-url shares keep the brand card
     expect(social.BLOG_HERO_SOURCES.has('newsletter')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('scheduled')).toBe(false);
