@@ -52,8 +52,6 @@ export function buildManualDiscountPayload({ form = {}, selectedPreset = null, v
       label,
       internalReason: form.manualDiscountInternalReason || '',
       eligibility: selectedPreset.eligibility,
-      eligibilityConfirmed: form.manualDiscountEligibilityConfirmed === true,
-      eligibilityOverrideReason: form.manualDiscountEligibilityOverrideReason || form.manualDiscountInternalReason || '',
       stack: selectedPreset.stack_group || selectedPreset.stack,
       warnings: selectedPreset.warnings || [],
     };

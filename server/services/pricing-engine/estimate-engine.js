@@ -362,10 +362,13 @@ function isAnnualPrepayBilling(input = {}) {
   return candidates.some((value) => value === 'prepay_annual' || value === 'annual' || value === 'prepay' || value === 'annual_prepay');
 }
 
+// Eligibility requirements on a discount are informational only — the
+// requires_* warning lanes annotate the estimate for the operator, but they
+// never block applying the discount (owner directive 2026-07-24: no
+// confirmation/approval step on discounts).
 function manualDiscountEligibilityWarnings(md = {}, input = {}) {
   const eligibility = md.eligibility || {};
   const warnings = [...(md.warnings || [])];
-  const confirmed = md.eligibilityConfirmed === true;
   const annualPrepay = isAnnualPrepayBilling(input);
   const add = (warning) => warnings.push(warning);
 
@@ -378,29 +381,14 @@ function manualDiscountEligibilityWarnings(md = {}, input = {}) {
     eligibility.requiresSenior ||
     eligibility.requiresNewCustomer
   );
-  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome
-    || requiresCustomerStatus || requiresWaveGuardTier;
 
   if (requiresPrepay && !annualPrepay) add('manual_discount_requires_prepay');
   if (requiresReferral) add('manual_discount_requires_referral');
   if (requiresMultiHome) add('manual_discount_requires_multi_home');
   if (requiresCustomerStatus) add('manual_discount_requires_customer_status');
   if (requiresWaveGuardTier) add('manual_discount_requires_waveguard_tier');
-  if (requiresAny && !confirmed) add('manual_discount_eligibility_not_confirmed');
 
   return uniqueStrings(warnings);
-}
-
-function assertManualDiscountEligibility(md = {}, input = {}) {
-  const warnings = manualDiscountEligibilityWarnings(md, input);
-  const requiresConfirmation = warnings.includes('manual_discount_eligibility_not_confirmed');
-  if (requiresConfirmation) {
-    const err = new Error('Manual discount eligibility must be confirmed before applying this discount');
-    err.code = 'MANUAL_DISCOUNT_ELIGIBILITY_REQUIRED';
-    err.warnings = warnings;
-    throw err;
-  }
-  return warnings;
 }
 
 function normalizeCommercialFlag(value) {
@@ -1826,7 +1814,7 @@ function generateEstimate(input) {
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
-    const manualWarnings = assertManualDiscountEligibility(md, input);
+    const manualWarnings = manualDiscountEligibilityWarnings(md, input);
     let requestedAmount;
     if (md.type === 'PERCENT') {
       if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');
