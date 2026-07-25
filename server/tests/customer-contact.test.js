@@ -112,15 +112,25 @@ describe('customer contact recipient routing', () => {
     ]);
   });
 
-  test('appointment contacts keep service contact primary unless owner SMS copy is enabled', () => {
+  test('appointment contacts include the account holder BY DEFAULT alongside the service contact', () => {
+    // Opt-OUT semantics: no stored preference means the holder is included.
+    // The old opt-in default silently dropped them the moment a contact was
+    // named — see 20260725000001_notify_primary_default_on.
     expect(getAppointmentContacts(customer, {})).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
     ]);
 
     expect(getAppointmentContacts(customer, { appointment_notify_primary: true }))
       .toEqual([
         expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
         expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+      ]);
+
+    // Only an EXPLICIT false opts the holder out.
+    expect(getAppointmentContacts(customer, { appointment_notify_primary: false }))
+      .toEqual([
+        expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       ]);
   });
 
@@ -135,7 +145,7 @@ describe('customer contact recipient routing', () => {
   };
 
   test('appointment contacts fan out across all distinct service contact slots', () => {
-    expect(getAppointmentContacts(multiContactCustomer, {})).toEqual([
+    expect(getAppointmentContacts(multiContactCustomer, { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
       expect.objectContaining({ phone: '+15554440000', role: 'service_contact_3' }),
@@ -158,8 +168,15 @@ describe('customer contact recipient routing', () => {
       service_contact3_name: 'Dup Of Tenant',
       service_contact3_phone: '+15552220000',
     };
+    expect(getAppointmentContacts(withDupes, { appointment_notify_primary: false })).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+    // Robert Meelan's shape (2026-07-24): the holder's OWN number sitting in a
+    // contact slot is de-duped away, so with the holder opted IN they appear
+    // exactly once, as primary — never twice.
     expect(getAppointmentContacts(withDupes, {})).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
     ]);
   });
 
@@ -190,7 +207,7 @@ describe('customer contact recipient routing', () => {
       service_contact2_email: 'sam@example.com',
       service_contacts_consent_at: '2026-07-22T00:00:00Z',
     };
-    expect(getAppointmentContacts(onlySlot2, {})).toEqual([
+    expect(getAppointmentContacts(onlySlot2, { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
     ]);
     expect(getServiceReportEmailRecipients(onlySlot2, {})).toEqual([
@@ -237,7 +254,9 @@ describe('customer contact recipient routing', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';
     try {
-      expect(getAppointmentContacts(unstamped, {})).toEqual([
+      // Holder explicitly opted out so this asserts the CONSENT gate alone —
+      // with the default (opt-in) they would also appear as primary.
+      expect(getAppointmentContacts(unstamped, { appointment_notify_primary: false })).toEqual([
         expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       ]);
     } finally {

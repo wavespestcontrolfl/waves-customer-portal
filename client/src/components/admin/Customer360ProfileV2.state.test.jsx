@@ -67,6 +67,31 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it('shows the account-owner appointment-SMS box CHECKED when no preference is stored', async () => {
+    // Opt-OUT semantics (20260725000001): an absent preference means the
+    // account holder IS included, so a strict `=== true` here would render the
+    // box unchecked while the send path actually texts them.
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Comms' }));
+
+    const box = await screen.findByRole('checkbox', {
+      name: /Also send appointment SMS to the account owner/i,
+    });
+    expect(box).toBeChecked();
+    // Caption must describe the new default, not the retired opt-in behavior.
+    expect(screen.getByText(/On by default/i)).toBeInTheDocument();
+  });
+
   it('never renders stale customer actions when a customer switch fails', async () => {
     let failSecond = false;
     vi.stubGlobal('fetch', vi.fn((url) => {

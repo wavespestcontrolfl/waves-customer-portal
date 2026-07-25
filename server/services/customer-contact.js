@@ -166,7 +166,13 @@ function getAppointmentContacts(customer, prefs = {}, { skipConsentGate = false 
     }
   }
 
-  const notifyPrimary = !contacts.length || prefs.appointment_notify_primary === true;
+  // Opt-OUT, not opt-in: the account holder is always a legitimate recipient of
+  // their own appointment info (own number, own consent validated at send time),
+  // so only an EXPLICIT false removes them. Default-on because opt-in default
+  // failed silently — naming a spouse switched off the `!contacts.length`
+  // safety net and the holder stopped getting texts with no signal to them or
+  // the owner (5 accounts hit this by 2026-07-24; all repaired by hand).
+  const notifyPrimary = !contacts.length || prefs.appointment_notify_primary !== false;
   if (notifyPrimary && primary.phone && !contacts.some(c => samePhone(c.phone, primary.phone))) {
     contacts.push({ ...primary, role: 'primary' });
   }
