@@ -1311,6 +1311,18 @@ const SocialMediaService = {
     const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
       && hasImageHosting && (metaReady || gbpReady) && !(await isPausedByAdmin());
 
+    // Remaining auto-share slots for today, resolved ONCE before the loop.
+    // publishToAll re-checks the cap authoritatively; this exists so capped
+    // items do no fetch/render/upload work first — otherwise every unshared
+    // feed item past the first would upload a hero JPEG or brand card to S3 on
+    // each 4-hour tick and then be immediately skipped, orphaning the object.
+    // A manual admin run overrides the cap entirely (see publishToAll).
+    const rssDailyCap = autoshareDailyCap();
+    let autosharesLeft = Infinity;
+    if (!manual && rssDailyCap > 0) {
+      autosharesLeft = Math.max(0, rssDailyCap - await autoshareCountToday());
+    }
+
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
     const results = [];
@@ -1349,6 +1361,17 @@ const SocialMediaService = {
           .first();
 
         if (existing) continue;
+
+        // Cap exhausted: stop BEFORE any media work. No later item can publish
+        // either, so break rather than continue — the remaining items stay
+        // unshared and are picked up on a following day's tick.
+        if (autosharesLeft <= 0) {
+          logger.info(
+            `[social] RSS run stopped — daily auto-share cap (${rssDailyCap}) reached; `
+            + `"${item.title}" and any remaining items deferred`,
+          );
+          break;
+        }
 
         try {
           // Share the blog post with the on-brand card (title + excerpt + read-
@@ -1394,7 +1417,11 @@ const SocialMediaService = {
             // the AI image generator (irrelevant literal images). A manual admin
             // /check-rss keeps the existing AI fallback (admin is supervising).
             noAiImage: !manual,
+            // An admin-triggered run already bypasses the automatic RSS gates;
+            // it must bypass the auto-share cap and GBP narrowing too.
+            bypassAutoshareThrottle: manual,
           });
+          if (result?.success) autosharesLeft -= 1;
           results.push({ item: item.title, ...result });
         } catch (err) {
           logger.error(`[social] Failed to process RSS item "${item.title}": ${err.message}`);
@@ -1466,7 +1493,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1475,8 +1502,11 @@ const SocialMediaService = {
     }
 
     // Blog auto-share lanes are capped per ET day (see AUTOSHARE_SOURCES above).
+    // bypassAutoshareThrottle is set by an admin-triggered run (POST /check-rss
+    // with manual:true), which deliberately overrides the automatic RSS gates —
+    // an explicitly requested share must not be silently swallowed by the cap.
     const dailyCap = autoshareDailyCap();
-    if (dailyCap > 0 && AUTOSHARE_SOURCES.has(source)) {
+    if (dailyCap > 0 && AUTOSHARE_SOURCES.has(source) && !bypassAutoshareThrottle) {
       const postedToday = await autoshareCountToday();
       if (postedToday >= dailyCap) {
         logger.info(
@@ -1800,6 +1830,7 @@ const SocialMediaService = {
       && !requestedGbpLocations
       && AUTOSHARE_SOURCES.has(source)
       && autoshareGbpSingleLocation()
+      && !bypassAutoshareThrottle
     ) {
       // Rotate only among profiles that can actually publish. Narrowing to one
       // profile removes the old fanout's accidental redundancy: if the day's
