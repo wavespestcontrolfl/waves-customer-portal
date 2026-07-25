@@ -206,8 +206,14 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
       {/* Terms microcopy is opt-in per call site, and the line itself is
           category-aware (glassCtaMicroFor): recurring plans carry the
           contract/callback/guarantee terms, one-time projects carry the
-          license + satisfaction-guarantee line instead. */}
-      {glass && showGuaranteeMicro ? (
+          license + satisfaction-guarantee line instead. Renders in BOTH
+          copy modes (owner 2026-07-24 + codex on #2993): with the retired
+          PriceCard/standalone fallbacks gone, this micro line is the page's
+          single sanctioned guarantee claim — a category-gated non-glass
+          page must not lose the terms entirely. The terms are claims, not
+          tone; the demotion logic in glassCtaMicroForKeys already keeps
+          them truthful per category. */}
+      {showGuaranteeMicro ? (
         <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
