@@ -93,6 +93,61 @@ async function isPausedByAdmin() {
   } catch { return false; }
 }
 
+// ── Blog auto-share throttle (2026-07-24 social audit) ──
+// The blog→social lane publishes off blog cadence, not off the curated social
+// calendar, and knows nothing about it. In the 30 days to 2026-07-24 it put out
+// 44 feed posts + 88 GBP posts (every blog fanned to all 4 city profiles), and
+// on 07-23 alone it fired 5 posts including two near-duplicate LinkedIn posts
+// hours apart. These two guards bound it. They apply ONLY to the automated
+// blog lanes — manual admin posts, the content studio, and newsletter shares
+// are untouched.
+const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog']);
+
+// Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
+// Deliberately defaults ON (1/day) rather than the usual dark-ship default-OFF:
+// a default-OFF throttle would leave the spam live on deploy, which is the bug.
+function autoshareDailyCap() {
+  const raw = process.env.SOCIAL_AUTOSHARE_DAILY_CAP;
+  if (raw === undefined || raw === '') return 1;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1;
+}
+
+// Kill switch: SOCIAL_AUTOSHARE_GBP_SINGLE_LOCATION=false restores the 4× fanout.
+function autoshareGbpSingleLocation() {
+  const raw = process.env.SOCIAL_AUTOSHARE_GBP_SINGLE_LOCATION;
+  return String(raw === undefined || raw === '' ? 'true' : raw).toLowerCase() !== 'false';
+}
+
+// Count today's already-published auto-share posts, in ET (the business day the
+// cadence is reasoned about). Compared as a date IN the ET zone rather than
+// against a UTC window so posts near midnight aren't attributed to the wrong day.
+// Only 'published' counts: dry runs post nothing and must not consume the cap.
+async function autoshareCountToday() {
+  try {
+    const row = await db('social_media_posts')
+      .whereIn('source_type', [...AUTOSHARE_SOURCES])
+      .where('status', 'published')
+      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date")
+      .count({ n: '*' })
+      .first();
+    return Number(row?.n || 0);
+  } catch (err) {
+    // Fail OPEN: a counting failure must not silently stop all blog sharing.
+    logger.warn(`[social] auto-share cap check failed, allowing post: ${err.message}`);
+    return 0;
+  }
+}
+
+// Pick ONE city profile per auto-shared post instead of fanning to all four.
+// Deterministic day-based rotation: no extra state, and the 4 profiles cycle
+// evenly instead of each receiving every blog post.
+function rotateGbpLocation(locations, now = new Date()) {
+  if (locations.length <= 1) return locations;
+  const dayIndex = Math.floor(now.getTime() / 86400000);
+  return [locations[dayIndex % locations.length]];
+}
+
 // ── Per-platform consecutive-failure alerting ──
 // A post's `status` is 'published' when ANY platform succeeds, so a single
 // broken platform (e.g. Instagram failing auth while Facebook + GBP post fine)
@@ -1399,6 +1454,23 @@ const SocialMediaService = {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] };
     }
 
+    // Blog auto-share lanes are capped per ET day (see AUTOSHARE_SOURCES above).
+    const dailyCap = autoshareDailyCap();
+    if (dailyCap > 0 && AUTOSHARE_SOURCES.has(source)) {
+      const postedToday = await autoshareCountToday();
+      if (postedToday >= dailyCap) {
+        logger.info(
+          `[social] auto-share skipped — daily cap ${dailyCap} reached `
+          + `(${postedToday} today, source=${source}, link=${link})`,
+        );
+        return {
+          success: false,
+          skippedByDailyCap: true,
+          platforms: [{ platform: 'all', skipped: `Daily auto-share cap (${dailyCap}) reached` }],
+        };
+      }
+    }
+
     const platformResults = [];
     const requestedPlatforms = normalizePublishChannels(channels);
     const requestedGbpLocations = normalizeGbpLocationIds(gbpLocationIds);
@@ -1697,9 +1769,21 @@ const SocialMediaService = {
       platformResults.push({ platform: 'gbp', skipped: 'Disabled' });
     }
     // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
-    const gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+    let gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
       ? WAVES_LOCATIONS.filter((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id))
       : [];
+    // Auto-shared blog posts go to ONE rotating city profile, not all four.
+    // Only when the caller didn't pin locations — an explicit admin selection
+    // (or the studio's per-city targeting) is always honored as-is.
+    if (
+      gbpLocations.length > 1
+      && !requestedGbpLocations
+      && AUTOSHARE_SOURCES.has(source)
+      && autoshareGbpSingleLocation()
+    ) {
+      gbpLocations = rotateGbpLocation(gbpLocations);
+      logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
+    }
     for (const loc of gbpLocations) {
       try {
         const gbpCustom = customContent?.gbp;
@@ -1935,3 +2019,8 @@ module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
 module.exports.PUBLISH_PLATFORMS = PUBLISH_PLATFORMS;
 module.exports.DEFAULT_PUBLISH_PLATFORMS = DEFAULT_PUBLISH_PLATFORMS;
 module.exports.linkedinWantsBlogHero = linkedinWantsBlogHero;
+// Blog auto-share throttle (2026-07-24 audit) — exported for tests.
+module.exports.AUTOSHARE_SOURCES = AUTOSHARE_SOURCES;
+module.exports.autoshareDailyCap = autoshareDailyCap;
+module.exports.autoshareGbpSingleLocation = autoshareGbpSingleLocation;
+module.exports.rotateGbpLocation = rotateGbpLocation;
