@@ -23,6 +23,8 @@ describe('pricing engine DB bridge', () => {
   const originalRecurringCustomerPerk = constants.WAVEGUARD.recurringCustomerOneTimePerk;
   const originalMosquitoBasePrices = JSON.parse(JSON.stringify(constants.MOSQUITO.basePrices));
   const originalMosquitoTierVisits = { ...constants.MOSQUITO.tierVisits };
+  // Shallow-clone, not JSON — the ACRE bucket's maxSqFt is Infinity.
+  const originalMosquitoLotCategories = constants.MOSQUITO.lotCategories.map((c) => ({ ...c }));
   const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
   const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
   const originalFlea = JSON.parse(JSON.stringify(constants.SPECIALTY.flea));
@@ -56,6 +58,7 @@ describe('pricing engine DB bridge', () => {
     constants.WAVEGUARD.recurringCustomerOneTimePerk = originalRecurringCustomerPerk;
     constants.MOSQUITO.basePrices = JSON.parse(JSON.stringify(originalMosquitoBasePrices));
     constants.MOSQUITO.tierVisits = { ...originalMosquitoTierVisits };
+    constants.MOSQUITO.lotCategories = originalMosquitoLotCategories.map((c) => ({ ...c }));
     constants.PALM.treatments = JSON.parse(JSON.stringify(originalPalmTreatments));
     constants.PALM.treatmentTypes = constants.PALM.treatments;
     for (const key of Object.keys(constants.BED_BUG)) delete constants.BED_BUG[key];
@@ -245,6 +248,61 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.MOSQUITO.basePrices.SMALL).toEqual([105, 90]);
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+  });
+
+  test('applies treatable-sf mosquito lot brackets from pricing_config', async () => {
+    const db = pricingConfigDb([
+      {
+        config_key: 'mosquito_lot_sizes',
+        data: {
+          SMALL: { max_sqft: 7999, label: '< 8k treatable sf' },
+          QUARTER: { max_sqft: 11999, label: '8k-12k treatable sf' },
+          THIRD: { max_sqft: 17999, label: '12k-18k treatable sf' },
+          HALF: { max_sqft: 34999, label: '18k-35k treatable sf' },
+          ACRE: { max_sqft: 999999, label: '35k+ treatable sf' },
+        },
+      },
+    ]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    // Migration 20260724130000 restated the row in treatable sf, so applying it
+    // must be a no-op against the in-code brackets — no silent bracket movement.
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
+  });
+
+  test('ignores the legacy gross-lot-acreage mosquito lot-size seed', async () => {
+    const db = pricingConfigDb([
+      {
+        config_key: 'mosquito_lot_sizes',
+        data: {
+          SMALL: { max_sqft: 10889, label: '< 1/4 acre' },
+          QUARTER: { max_sqft: 14519, label: '1/4 acre' },
+          THIRD: { max_sqft: 21779, label: '1/3 acre' },
+          HALF: { max_sqft: 43559, label: '1/2 acre' },
+          ACRE: { label: '1+ acre' },
+        },
+      },
+    ]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    // Gross lot acreage widens every bracket ~36% and drops most homes a
+    // bracket. The values are ascending and finite, so validation passes them —
+    // db-bridge has to reject the seed by value.
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
   });
 
   test('validates active mosquito recurring and one-time config defaults', () => {

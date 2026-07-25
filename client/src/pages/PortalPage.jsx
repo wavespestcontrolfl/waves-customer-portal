@@ -7580,9 +7580,12 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
-    frequencies: ['Monthly (Apr–Oct)', 'Year-Round (12x)'],
-    basePrice: 45, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
-    products: ['Cyzmic CS', 'Tekko Pro IGR'],
+    frequencies: ['Seasonal (Feb–Oct, 9 visits)', 'Monthly (12 visits)'],
+    // basePrice is the floor of the live rate card (SMALL lot, 12-visit
+    // program = $60/visit); real quotes scale up by treatable area and
+    // mosquito pressure. Was $45, a price the engine can never produce.
+    basePrice: 60, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
+    products: ['Bifen I/T', 'Tekko Pro IGR'],
   },
   {
     id: 'tree_shrub', name: 'Tree & Shrub Program', icon: 'palm',

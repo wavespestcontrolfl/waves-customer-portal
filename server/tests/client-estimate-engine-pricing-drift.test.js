@@ -3,7 +3,7 @@ const path = require('path');
 const esbuild = require('esbuild');
 
 const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../services/pricing-engine/service-pricing');
-const { ONE_TIME } = require('../services/pricing-engine/constants');
+const { ONE_TIME, MOSQUITO } = require('../services/pricing-engine/constants');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
@@ -564,6 +564,49 @@ describe('deprecated client estimator pricing drift guards', () => {
     const line = estimate.oneTime.items.find((item) => item.name === 'OT Mosquito');
     expect(line).toBeDefined();
     expect(line.price).toBe(ONE_TIME.mosquito.SMALL + 2 * 75 + 1 * 15);
+  });
+
+  test('recurring mosquito per-visit table mirrors the server rate card', () => {
+    // The admin builder renders R.mq straight from this table ("$X/visit x N"
+    // and "$Y/mo"), so a stale copy shows the operator a price the server will
+    // not save. It sat on the pre-2026-06 band (SMALL [105, 90] ... ACRE
+    // [195, 175]) after the reprice and displayed ~1.6x the real price.
+    const table = source.match(/const bp = \{([\s\S]*?)\};/);
+    expect(table).not.toBeNull();
+    const clientBasePrices = {};
+    for (const [, key, seasonal, monthly] of table[1].matchAll(/(SMALL|QUARTER|THIRD|HALF|ACRE):\s*\[(\d+),\s*(\d+)\]/g)) {
+      clientBasePrices[key] = [Number(seasonal), Number(monthly)];
+    }
+    expect(clientBasePrices).toEqual({
+      SMALL: MOSQUITO.basePrices.SMALL,
+      QUARTER: MOSQUITO.basePrices.QUARTER,
+      THIRD: MOSQUITO.basePrices.THIRD,
+      HALF: MOSQUITO.basePrices.HALF,
+      ACRE: MOSQUITO.basePrices.ACRE,
+    });
+
+    // Behavioral check: a small lot with no pressure drivers must price at the
+    // bare SMALL rate card on both programs.
+    const estimate = calculateEstimate({
+      homeSqFt: 1400,
+      stories: 1,
+      lotSqFt: 7000,
+      propertyType: 'single_family',
+      svcMosquito: true,
+      treeDensity: 'LIGHT',
+      landscapeComplexity: 'SIMPLE',
+      hasPool: false,
+      nearWater: false,
+      hasIrrigation: false,
+      urgency: 'NONE',
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    });
+    expect(estimate.results.mqMeta.pr).toBe(1);
+    expect(estimate.results.mq.map((tier) => [tier.n, tier.pv, tier.v])).toEqual([
+      [MOSQUITO.programLabels.seasonal9, MOSQUITO.basePrices.SMALL[0], MOSQUITO.tierVisits.seasonal9],
+      [MOSQUITO.programLabels.monthly12, MOSQUITO.basePrices.SMALL[1], MOSQUITO.tierVisits.monthly12],
+    ]);
   });
 
   test('admin customer preview adds preserved pest specialty rows to one-time pest choice', () => {

@@ -1241,6 +1241,14 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (config.mosquito_lot_sizes) {
+      // MOSQUITO.lotCategories brackets TREATABLE sf (footprint + hardscape
+      // already subtracted), but the original April 2026 seed stored GROSS lot
+      // acreage (1/4 acre = 10889 ... 1 acre = 43559). Applying those widens
+      // every bracket ~36% and drops most homes a bracket. Migration
+      // 20260724130000 rewrote the row to treatable-sf values, so this guard is
+      // inert on any migrated DB — it stays only to protect a DB that somehow
+      // still carries the acreage seed. `validatePestPricingConfig` cannot
+      // catch it: the acreage values are ascending and finite, so they pass.
       const smallMax = Number(config.mosquito_lot_sizes.SMALL?.maxSqFt ?? config.mosquito_lot_sizes.SMALL?.max_sqft);
       const halfMax = Number(config.mosquito_lot_sizes.HALF?.maxSqFt ?? config.mosquito_lot_sizes.HALF?.max_sqft);
       const isLegacyGrossLotSeed = smallMax === 10889 && halfMax === 43559;

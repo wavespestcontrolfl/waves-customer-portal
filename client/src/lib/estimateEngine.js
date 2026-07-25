@@ -2109,12 +2109,18 @@ export function calculateEstimate(inputs) {
     if (sz === 'ACRE') pr += 0.15;
     else if (sz === 'HALF') pr += 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
+    // Mirrors the server-authoritative per-visit rate card
+    // (server/services/pricing-engine/constants.js MOSQUITO.basePrices, itself
+    // overridden by pricing_config.mosquito_base_prices). Repriced 2026-06 to
+    // the SW-FL recurring market; the pre-reprice table (SMALL [105, 90] ...
+    // ACRE [195, 175]) lived on here and showed the builder ~1.6x what the
+    // server actually saved. Any reprice must update this table in the same PR.
     const bp = {
-      SMALL: [105, 90],
-      QUARTER: [115, 100],
-      THIRD: [130, 115],
-      HALF: [155, 135],
-      ACRE: [195, 175],
+      SMALL: [66, 60],
+      QUARTER: [69, 63],
+      THIRD: [72, 66],
+      HALF: [78, 70],
+      ACRE: [88, 78],
     };
     const b = bp[sz] || bp.SMALL;
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
