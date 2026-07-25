@@ -26,6 +26,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const config = require('../config');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { etParts } = require('../utils/datetime-et');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -123,12 +124,24 @@ function autoshareGbpSingleLocation() {
 // cadence is reasoned about). Compared as a date IN the ET zone rather than
 // against a UTC window so posts near midnight aren't attributed to the wrong day.
 // Only 'published' counts: dry runs post nothing and must not consume the cap.
+//
+// Counts on COALESCE(published_at, created_at), not created_at alone: the
+// auto-source dedupe path REUSES an existing row when a failed share is retried
+// later, preserving the original created_at. Counting by created_at would
+// attribute that success to the original attempt's day, leaving it out of the
+// real publication day's count and letting a second post exceed the cap.
+// published_at is now stamped on every successful publish (insert and update),
+// so it is the accurate publication timestamp; created_at is the fallback for
+// rows written before that.
 async function autoshareCountToday() {
   try {
     const row = await db('social_media_posts')
       .whereIn('source_type', [...AUTOSHARE_SOURCES])
       .where('status', 'published')
-      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date")
+      .whereRaw(
+        "(COALESCE(published_at, created_at) AT TIME ZONE 'America/New_York')::date"
+        + " = (now() AT TIME ZONE 'America/New_York')::date",
+      )
       .count({ n: '*' })
       .first();
     return Number(row?.n || 0);
@@ -142,10 +155,17 @@ async function autoshareCountToday() {
 // Pick ONE city profile per auto-shared post instead of fanning to all four.
 // Deterministic day-based rotation: no extra state, and the 4 profiles cycle
 // evenly instead of each receiving every blog post.
+//
+// The index MUST come from the EASTERN calendar day, not a UTC epoch day.
+// Railway runs TZ=UTC, so after 8pm EDT the UTC day has already rolled over
+// while the daily cap is still on the prior ET business day — the two would
+// disagree, and consecutive ET-day posts straddling that cutoff would skip a
+// profile or repeat one instead of cycling evenly.
 function rotateGbpLocation(locations, now = new Date()) {
   if (locations.length <= 1) return locations;
-  const dayIndex = Math.floor(now.getTime() / 86400000);
-  return [locations[dayIndex % locations.length]];
+  const { year, month, day } = etParts(now);
+  const etDayIndex = Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+  return [locations[etDayIndex % locations.length]];
 }
 
 // ── Per-platform consecutive-failure alerting ──
@@ -1781,7 +1801,23 @@ const SocialMediaService = {
       && AUTOSHARE_SOURCES.has(source)
       && autoshareGbpSingleLocation()
     ) {
-      gbpLocations = rotateGbpLocation(gbpLocations);
+      // Rotate only among profiles that can actually publish. Narrowing to one
+      // profile removes the old fanout's accidental redundancy: if the day's
+      // slot landed on a profile missing its OAuth credentials, postToGBP would
+      // return "No GBP credentials" and that day would get NO GBP post at all,
+      // even with three working profiles available.
+      let candidates = gbpLocations;
+      try {
+        const configured = await gbpService.getConfiguredLocations();
+        const ready = new Set(configured.map((loc) => loc.id));
+        const publishable = gbpLocations.filter((loc) => ready.has(loc.id));
+        if (publishable.length) candidates = publishable;
+      } catch (err) {
+        // Fail OPEN to the unfiltered list — a credential-lookup failure should
+        // not stop the GBP post; postToGBP still reports a real failure.
+        logger.warn(`[social] GBP configured-location lookup failed, rotating over all: ${err.message}`);
+      }
+      gbpLocations = rotateGbpLocation(candidates);
       logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
     }
     for (const loc of gbpLocations) {
@@ -1852,8 +1888,20 @@ const SocialMediaService = {
       ai_model: MODELS.VOICE,
       published_content: Object.keys(publishedContent).length > 0
         ? JSON.stringify(publishedContent) : null,
+      // Stamp the real publication moment. The auto-source dedupe path below
+      // reuses an existing row on a later retry and keeps its original
+      // created_at, so created_at is NOT a reliable "when did this go out".
+      // The daily auto-share cap counts on this column.
+      ...(postStatus === 'published' ? { published_at: new Date() } : {}),
     };
-    const updateCols = { platforms_posted: postRow.platforms_posted, status: postRow.status, published_content: postRow.published_content };
+    const updateCols = {
+      platforms_posted: postRow.platforms_posted,
+      status: postRow.status,
+      published_content: postRow.published_content,
+      // Same reason: a retry that finally succeeds must record TODAY as its
+      // publication day, otherwise it never counts against today's cap.
+      ...(postStatus === 'published' ? { published_at: new Date() } : {}),
+    };
 
     const autoSources = ['rss', 'blog_scheduled', 'newsletter'];
     const isAutoSource = autoSources.includes(postRow.source_type);
@@ -1869,7 +1917,6 @@ const SocialMediaService = {
           .update({
             ...updateCols,
             image_url: postRow.image_url,
-            ...(postStatus === 'published' ? { published_at: new Date() } : {}),
           });
         if (!updated) await db('social_media_posts').insert(postRow);
       } else if (isAutoSource) {

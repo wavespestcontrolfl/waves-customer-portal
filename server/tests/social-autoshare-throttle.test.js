@@ -102,14 +102,34 @@ describe('rotateGbpLocation', () => {
     expect(picked.size).toBe(4);
   });
 
-  test('is deterministic within the same day', () => {
-    const a = rotateGbpLocation(locs, new Date('2026-07-24T00:30:00Z'))[0].id;
-    const b = rotateGbpLocation(locs, new Date('2026-07-24T23:30:00Z'))[0].id;
-    expect(a).toBe(b);
-  });
-
   test('passes through 0- and 1-length lists untouched', () => {
     expect(rotateGbpLocation([])).toEqual([]);
     expect(rotateGbpLocation([{ id: 'only' }])).toEqual([{ id: 'only' }]);
+  });
+
+  // Codex P1 (2026-07-24): the index must key off the EASTERN calendar day.
+  // Railway runs TZ=UTC, so a UTC epoch-day index rolls over at 8pm EDT while
+  // the ET daily cap is still on the prior business day — the two disagree and
+  // posts straddling that cutoff skip or repeat a profile.
+  describe('ET calendar day, not UTC epoch day', () => {
+    test('20:00 and 23:00 EDT on the same ET day pick the SAME profile', () => {
+      // 2026-07-24 20:00 EDT = 07-25 00:00Z — UTC day has already rolled over.
+      const evening = new Date('2026-07-25T00:00:00Z');
+      const later = new Date('2026-07-25T03:00:00Z'); // 23:00 EDT, same ET day
+      expect(rotateGbpLocation(locs, evening)[0].id).toBe(rotateGbpLocation(locs, later)[0].id);
+    });
+
+    test('the same ET day picks one profile from morning through late evening', () => {
+      const morning = new Date('2026-07-24T13:00:00Z'); // 09:00 EDT 07-24
+      const evening = new Date('2026-07-25T02:00:00Z'); // 22:00 EDT 07-24
+      expect(rotateGbpLocation(locs, morning)[0].id).toBe(rotateGbpLocation(locs, evening)[0].id);
+    });
+
+    test('crossing into the next ET day advances the profile', () => {
+      const lateJul24 = new Date('2026-07-25T03:00:00Z'); // 23:00 EDT 07-24
+      const earlyJul25 = new Date('2026-07-25T05:00:00Z'); // 01:00 EDT 07-25
+      expect(rotateGbpLocation(locs, lateJul24)[0].id)
+        .not.toBe(rotateGbpLocation(locs, earlyJul25)[0].id);
+    });
   });
 });
