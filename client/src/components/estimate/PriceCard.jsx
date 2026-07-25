@@ -89,9 +89,10 @@ function isSeparateServiceCadence(frequency = {}) {
     && !!frequency.label;
 }
 
+// The standalone guarantee line is retired (owner 2026-07-24): the approve
+// CTA's micro line is the one sanctioned plan-level guarantee claim.
 const DEFAULT_WORDING = {
   dayLine: "That's just {amount}/day for complete home protection.",
-  guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
 // The glass day-lines (wording.dayLineByKey) anchor on concrete cheap items
@@ -197,7 +198,7 @@ export function perApplicationNetForFrequency(frequency) {
   return pt > 0 && Number.isFinite(visits) && visits > 0 ? round2(pt) : null;
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -469,12 +470,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             || wording?.dayLine
             || DEFAULT_WORDING.dayLine
           ).replace('{amount}', fmtMoney(dayPrice))}
-        </div>
-      ) : null}
-
-      {showGuarantee ? (
-        <div style={{ fontSize: 15, color: W.blueDeeper, marginTop: 12, lineHeight: 1.5 }}>
-          {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
         </div>
       ) : null}
 

@@ -375,7 +375,7 @@ export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
 // Glass rewrites of PriceCard's SERVICE_INCLUSIONS, keyed by the same
 // serviceKey() slugs. Same facts as the baseline lists (what each program
 // actually does) plus guarantee lines already shipped elsewhere on the page
-// (PriceCard guaranteeLine, GuaranteeStrip) — tone changes, claims don't.
+// (GuaranteeStrip on the report pages) — tone changes, claims don't.
 const GLASS_SERVICE_INCLUSIONS = {
   lawn_care: [
     'Seasonal treatments matched to YOUR turf and program — never a one-size-fits-all spray',

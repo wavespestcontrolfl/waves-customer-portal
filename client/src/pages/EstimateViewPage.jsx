@@ -206,8 +206,14 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
       {/* Terms microcopy is opt-in per call site, and the line itself is
           category-aware (glassCtaMicroFor): recurring plans carry the
           contract/callback/guarantee terms, one-time projects carry the
-          license + satisfaction-guarantee line instead. */}
-      {glass && showGuaranteeMicro ? (
+          license + satisfaction-guarantee line instead. Renders in BOTH
+          copy modes (owner 2026-07-24 + codex on #2993): with the retired
+          PriceCard/standalone fallbacks gone, this micro line is the page's
+          single sanctioned guarantee claim — a category-gated non-glass
+          page must not lose the terms entirely. The terms are claims, not
+          tone; the demotion logic in glassCtaMicroForKeys already keeps
+          them truthful per category. */}
+      {showGuaranteeMicro ? (
         <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
@@ -1120,9 +1126,12 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 +{s.extraDiscountPct}% off
-                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)}/visit` : ''}
+                {/* "per application", matching the This-estimate rows below —
+                    owner ruling 2026-07-24: one pricing noun on every
+                    customer surface, existing-member rows included. */}
+                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)} per application` : ''}
                 {(Number(s.perVisitSavings) > 0 && s.remainingVisits > 0)
-                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
                   : ''}
               </span>
             </div>
@@ -3497,7 +3506,6 @@ export function ServiceSection({
             // single-service cards keep it: the CTA micro is glass-gated, so
             // removing it there would drop the page's only guarantee claim
             // (codex P2 r3).
-            showGuarantee={servicesLength === 1 && !glassCopyActive()}
           />
         ) : null}
 
@@ -5059,17 +5067,11 @@ function EstimateViewPageInner() {
           ) : null}
 
           {/* The standalone "Try us risk-free — 90-day money-back guarantee."
-              line is gone under glass (owner 2026-07-23): the approve CTA's
-              glass micro line ("No long-term contract · Unlimited free
-              callbacks · 90-day money-back guarantee") already carries the
-              claim, so it read twice back to back. Non-glass keeps it — the
-              CTA micro is glass-gated, so this is the non-glass page's only
-              plan-level guarantee claim (codex P2 r3). */}
-          {!glassContent && services.length > 1 ? (
-            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
-              Try us risk-free — 90-day money-back guarantee.
-            </div>
-          ) : null}
+              line is fully retired (owner 2026-07-24, extending the 2026-07-23
+              glass dedupe): the approve CTA's micro line is the one sanctioned
+              plan-level guarantee claim. The non-glass fallback rendered dead
+              code in prod (glass active for all categories) and contradicted
+              the standing dedupe ruling. */}
 
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 

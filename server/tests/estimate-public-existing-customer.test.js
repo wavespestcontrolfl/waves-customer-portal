@@ -426,3 +426,19 @@ describe('public boundary: staff account context never escapes the token link', 
     }
   });
 });
+
+describe('existing-services rows speak per application (owner ruling 2026-07-24)', () => {
+  test('savings noun and remaining-count noun are both "application" — never "/visit"', () => {
+    const membership = donMembership({
+      existingServices: [{
+        key: 'pest_control', label: 'Pest Control', extraDiscountPct: 10,
+        perVisitSavings: 11.70, remainingVisits: 3, totalRemainingSavings: 35.10, prepaid: true,
+      }],
+    });
+    const html = renderPage('perapp-noun-token', lawnEstimate(), lawnEstimateData(), membership);
+
+    expect(html).toContain('save $11.70 per application');
+    expect(html).toContain('on your 3 remaining prepaid applications');
+    expect(html).not.toContain('/visit');
+  });
+});
