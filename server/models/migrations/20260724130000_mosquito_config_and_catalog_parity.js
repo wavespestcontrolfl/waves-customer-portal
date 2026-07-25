@@ -1,7 +1,7 @@
 /**
  * Bring the mosquito DB rows back in line with the live pricing engine.
  *
- * Three independent drifts, all found by auditing prod against the engine:
+ * Two drifts, both found by auditing prod against the engine:
  *
  * 1. `pricing_config.mosquito_lot_sizes` still held the original April 2026
  *    seed, which stored GROSS lot acreage (1/4 acre = 10889 ... 1 acre = 43559).
@@ -23,25 +23,22 @@
  *    rows already carry NULL. Blank, never $0 (a literal 0 becomes a real $0
  *    charge via the admin-schedule base_price fallback).
  *
- * 3. `services.mosquito_seasonal` was `is_active = false`, but priceMosquito
- *    RECOMMENDS `seasonal9` for every low-pressure property and labels the tier
- *    "Seasonal Mosquito Program (9 visits)". An accepted seasonal quote had no
- *    active catalog service to book against.
+ * NOT DONE HERE — activating `services.mosquito_seasonal`. It is `is_active =
+ * false` while priceMosquito RECOMMENDS `seasonal9` for every low-pressure
+ * property, so an accepted seasonal quote has no active catalog service to book
+ * against. An earlier revision of this migration activated it. That was WRONG to
+ * ship: `supportsConverterFollowUpSeeding` handles pest / foam / rodent /
+ * termite-bait / tree-shrub and returns false for mosquito
+ * (`server/services/estimate-converter.js:1319-1357`), so an accepted 9-visit
+ * program books its FIRST visit and never seeds the other eight — the customer
+ * is billed for a series they do not get. That is the same failure the T&S audit
+ * hit ("a sold program produced ONE visit and no series", comment at :1341).
+ * Activation also interacts with `loadBookableCallServices`, which selects every
+ * `is_active && booking_enabled` row.
  *
- *    Booking exposure: `loadBookableCallServices` selects every
- *    `is_active && booking_enabled` service
- *    (`server/services/call-booking-catalog.js`), so activation alone could open
- *    automated call booking. This migration therefore clears `booking_enabled`
- *    in the SAME update that activates the row — it never opens booking. Prod
- *    carries `is_active=false, booking_enabled=false`, so the outcome there is
- *    active + booking closed.
- *
- *    NOT handled here: a row that is ALREADY active with `booking_enabled` true
- *    (what the `20260507000002` seed produces, i.e. fresh/staging envs). That
- *    row is already bookable before this migration runs and this migration does
- *    not change it. Forcing booking closed on an env where it was deliberately
- *    open is an owner decision, not a pricing-parity migration's — flagged for
- *    the owner rather than silently applied.
+ * Seasonal mosquito therefore needs converter series support (with its Feb-Oct
+ * month constraint) BEFORE the catalog row is activated. Left for the owner as a
+ * separate lane; this migration stays pure pricing parity.
  *
  * ROLLBACK CONTRACT — `down()` restores from the provenance snapshot written by
  * `up()`, and only for fields `up()` actually changed AND that still hold the
@@ -65,10 +62,8 @@ const TREATABLE_SF_SEED = {
 };
 
 // The April 2026 acreage seed, per bucket. A bucket is only rewritten when its
-// CURRENT threshold still equals the value below — an admin who tuned
-// QUARTER/THIRD/ACRE while leaving the SMALL/HALF endpoints alone still trips
-// the row-level signature, and a blind merge would discard that tuning.
-// ACRE carried no threshold in the legacy seed, hence undefined.
+// CURRENT threshold still equals the value below, so a bucket an admin tuned is
+// left alone. ACRE carried no threshold in the legacy seed, hence undefined.
 const LEGACY_MAX_BY_BUCKET = {
   SMALL: 10889, QUARTER: 14519, THIRD: 21779, HALF: 43559, ACRE: undefined,
 };
@@ -85,18 +80,26 @@ const LEGACY_MAX_BY_BUCKET = {
 const MIN_LEGACY_BUCKETS_TO_REWRITE = 2;
 
 const ONE_TIME_KEY = 'mosquito_one_time';
-const SEASONAL_KEY = 'mosquito_seasonal';
 const STALE_ONE_TIME_BASE_PRICE = 250;
 // Provenance marker for the `services` edits. `pricing_config_audit` is the only
 // migration-audit table available, and down() needs to know which catalog fields
 // this migration actually changed — not just their current values.
 const CATALOG_AUDIT_KEY = 'mosquito_catalog_parity';
-const CATALOG_UP_REASON = 'Mosquito catalog parity: cleared stale one-time base_price and/or activated the seasonal program (booking_enabled held closed)';
+const CATALOG_UP_REASON = 'Mosquito catalog parity: cleared stale pre-2026-06 one-time base_price';
 
 function bucketMax(bucket) {
   if (!bucket || typeof bucket !== 'object') return undefined;
   const raw = bucket.maxSqFt ?? bucket.max_sqft;
   return raw == null ? undefined : Number(raw);
+}
+
+// jsonb does not preserve object-key order, so a stringify comparison against a
+// value serialized before the DB round-trip can differ for identical content.
+function sameShallowObject(a, b) {
+  if (!a || !b) return a === b;
+  const ka = Object.keys(a); const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && String(a[k]) === String(b[k]));
 }
 
 function parseJson(value) {
@@ -163,45 +166,25 @@ exports.up = async function (knex) {
   }
 
   if (await knex.schema.hasTable('services')) {
-    const prior = {};
-    for (const key of [ONE_TIME_KEY, SEASONAL_KEY]) {
-      const row = await knex('services')
-        .where({ service_key: key })
-        .first('base_price', 'is_active', 'booking_enabled');
-      if (row) {
-        prior[key] = {
-          base_price: row.base_price,
-          is_active: row.is_active,
-          booking_enabled: row.booking_enabled,
-        };
-      }
-    }
-
+    // Snapshot the VALUE, not the row object: the update below runs before the
+    // audit insert, and holding a row reference across it is a trap.
+    const priorBasePrice = (
+      await knex('services').where({ service_key: ONE_TIME_KEY }).first('base_price')
+    )?.base_price ?? null;
     // Only clear the specific stale value, so a deliberate later edit survives.
     const clearedOneTime = await knex('services')
       .where({ service_key: ONE_TIME_KEY })
       .where('base_price', STALE_ONE_TIME_BASE_PRICE)
       .update({ base_price: null, updated_at: knex.fn.now() });
 
-    // booking_enabled is cleared in the SAME update as the activation: an
-    // is_active row with booking_enabled true enters loadBookableCallServices.
-    const activatedSeasonal = await knex('services')
-      .where({ service_key: SEASONAL_KEY, is_active: false })
-      .update({ is_active: true, booking_enabled: false, updated_at: knex.fn.now() });
-
-    // Record what this migration actually changed. down() restores ONLY these
-    // fields, and only while they still hold the applied value: on an env where
-    // the catalog already had base_price NULL or seasonal active (a clean schema
-    // seeds is_active true), an ungated rollback would stamp a stale $250 onto a
-    // correct row and deactivate a service this migration never activated.
-    if ((clearedOneTime || activatedSeasonal) && await knex.schema.hasTable('pricing_config_audit')) {
+    // Record what this migration actually changed. down() restores it only while
+    // it still holds the applied value: on an env where base_price was already
+    // NULL, an ungated rollback would stamp a stale $250 onto a correct row.
+    if (clearedOneTime && await knex.schema.hasTable('pricing_config_audit')) {
       await knex('pricing_config_audit').insert({
         config_key: CATALOG_AUDIT_KEY,
-        old_value: JSON.stringify(prior),
-        new_value: JSON.stringify({
-          ...(clearedOneTime ? { [ONE_TIME_KEY]: { base_price: null } } : {}),
-          ...(activatedSeasonal ? { [SEASONAL_KEY]: { is_active: true, booking_enabled: false } } : {}),
-        }),
+        old_value: JSON.stringify({ [ONE_TIME_KEY]: { base_price: priorBasePrice } }),
+        new_value: JSON.stringify({ [ONE_TIME_KEY]: { base_price: null } }),
         changed_by: MIGRATION_TAG,
         reason: CATALOG_UP_REASON,
       });
@@ -234,8 +217,10 @@ exports.down = async function (knex) {
         const appliedBucket = applied[bucket];
         if (!currentBucket || !appliedBucket) continue;
         if (priorData[bucket] === undefined) {
-          // up() created the bucket; only remove it if untouched since.
-          if (JSON.stringify(currentBucket) !== JSON.stringify(appliedBucket)) continue;
+          // up() created the bucket; only remove it if untouched since. The row
+          // came back from a jsonb column, which does NOT preserve key order, so
+          // compare canonically rather than by JSON.stringify.
+          if (!sameShallowObject(currentBucket, appliedBucket)) continue;
           delete next[bucket];
           reverted.push(bucket);
           continue;
@@ -243,6 +228,7 @@ exports.down = async function (knex) {
         // Restore FIELD BY FIELD, and only fields still holding what up() wrote.
         // Replacing the whole bucket would erase a label (or any other property)
         // edited after the migration while max_sqft happened to be untouched.
+        const thresholdUntouched = bucketMax(currentBucket) === bucketMax(appliedBucket);
         const restored = { ...currentBucket };
         let changed = false;
         for (const [field, appliedValue] of Object.entries(appliedBucket)) {
@@ -254,8 +240,12 @@ exports.down = async function (knex) {
           }
           changed = true;
         }
-        // The camel-case key up() deleted comes back only if it was there before.
-        if (Object.prototype.hasOwnProperty.call(priorData[bucket], 'maxSqFt')
+        // The camel-case key up() deleted comes back only if it was there before
+        // AND the threshold has not been edited since. db-bridge reads maxSqFt
+        // BEFORE max_sqft, so restoring it over a newer max_sqft would let the
+        // legacy acreage value silently shadow the admin's current threshold.
+        if (thresholdUntouched
+          && Object.prototype.hasOwnProperty.call(priorData[bucket], 'maxSqFt')
           && !Object.prototype.hasOwnProperty.call(restored, 'maxSqFt')) {
           restored.maxSqFt = priorData[bucket].maxSqFt;
           changed = true;
@@ -281,12 +271,12 @@ exports.down = async function (knex) {
     if (catalogUp) {
       const prior = parseJson(catalogUp.old_value) || {};
       const applied = parseJson(catalogUp.new_value) || {};
-      for (const key of [ONE_TIME_KEY, SEASONAL_KEY]) {
+      for (const key of [ONE_TIME_KEY]) {
         const appliedFields = applied[key];
         if (!appliedFields || !prior[key]) continue;
         const row = await knex('services')
           .where({ service_key: key })
-          .first('base_price', 'is_active', 'booking_enabled');
+          .first('base_price');
         if (!row) continue;
         // Restore field-by-field, and only where the current value is still the
         // one up() applied — an owner edit made after the migration wins.
