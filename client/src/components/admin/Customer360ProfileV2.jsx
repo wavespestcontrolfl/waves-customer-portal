@@ -6557,7 +6557,7 @@ export default function Customer360ProfileV2({
                     type="checkbox"
                     disabled={!isAdmin}
                     className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_primary === true}
+                    checked={notificationPrefs.service_report_notify_primary !== false}
                     onChange={(e) =>
                       updateNotificationPrefs({
                         serviceReportNotifyPrimary: e.target.checked,
@@ -6571,8 +6571,9 @@ export default function Customer360ProfileV2({
                       Also email service reports to the account owner
                     </div>{" "}
                     <div className="text-12 text-ink-secondary">
-                      If off, a distinct service-contact email receives the
-                      report and the payer stays on billing-only messages.
+                      On by default. Turn this off only if the account owner
+                      should stop receiving reports — a distinct
+                      service-contact email then receives them instead.
                     </div>{" "}
                   </div>{" "}
                 </label>{" "}

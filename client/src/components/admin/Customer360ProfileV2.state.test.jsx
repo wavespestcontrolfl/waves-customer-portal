@@ -88,8 +88,16 @@ describe('Customer360ProfileV2 profile state', () => {
       name: /Also send appointment SMS to the account owner/i,
     });
     expect(box).toBeChecked();
-    // Caption must describe the new default, not the retired opt-in behavior.
-    expect(screen.getByText(/On by default/i)).toBeInTheDocument();
+
+    // Same for the service-report sibling (20260725000003) — 3 real accounts
+    // were receiving none of their own reports under the old opt-in default.
+    const reportBox = screen.getByRole('checkbox', {
+      name: /Also email service reports to the account owner/i,
+    });
+    expect(reportBox).toBeChecked();
+
+    // Captions must describe the new default, not the retired opt-in behavior.
+    expect(screen.getAllByText(/On by default/i).length).toBeGreaterThanOrEqual(2);
   });
 
   it('never renders stale customer actions when a customer switch fails', async () => {

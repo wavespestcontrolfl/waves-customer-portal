@@ -215,7 +215,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
     });
   }
 
-  const notifyPrimary = !recipients.length || prefs.service_report_notify_primary === true;
+  // Opt-OUT, same as getAppointmentContacts: only an EXPLICIT false drops the
+  // account holder from their own service reports. The opt-in default failed
+  // the same silent way — adding a contact EMAIL switched off the
+  // `!recipients.length` safety net. This path is MORE exposed than the
+  // appointment one because it is not behind the consent artifact, so an
+  // unstamped row dropped the holder too (3 accounts were live in that state
+  // on 2026-07-24).
+  const notifyPrimary = !recipients.length || prefs.service_report_notify_primary !== false;
   // Billing-recipient copy is only meaningful when a billing_email is set —
   // without one the billing contact IS the primary, which the notify-primary
   // toggle already covers.
