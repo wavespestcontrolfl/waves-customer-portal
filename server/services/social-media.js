@@ -1385,17 +1385,23 @@ const SocialMediaService = {
         takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
         takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
       }
-      // OLDEST-FIRST drain. fetchRSSFeed preserves feed order, which is
-      // newest-first, and every tick rebuilds this list from scratch. Draining
-      // newest-first means that once the feed produces more entries per day
-      // than the cap allows, each day's newest arrival takes the only slot
-      // while older deferred entries slide further back and eventually fall
-      // out of the feed unshared. Reversing makes the backlog FIFO, so a
-      // deferred post is guaranteed its turn.
-      const unshared = feedEntries.filter((e) => !(
+      // OLDEST-FIRST drain, for the AUTOMATIC lane only. fetchRSSFeed preserves
+      // feed order, which is newest-first, and every tick rebuilds this list
+      // from scratch. Draining newest-first means that once the feed produces
+      // more entries per day than the cap allows, each day's newest arrival
+      // takes the only slot while older deferred entries slide further back
+      // and eventually fall out of the feed unshared. FIFO guarantees a
+      // deferred post its turn.
+      //
+      // A manual admin run bypasses the cap, so it has no starvation to fix —
+      // and reversing it would change "Check & Auto-Publish New" from
+      // publishing the newest five entries to releasing the five oldest
+      // still in the feed, i.e. stale backlog instead of current posts.
+      const unsharedFeedOrder = feedEntries.filter((e) => !(
         (e.normalizedUrl && takenUrls.has(e.normalizedUrl))
         || (e.normalizedGuid && takenGuids.has(e.normalizedGuid))
-      )).reverse();
+      ));
+      const unshared = manual ? unsharedFeedOrder : [...unsharedFeedOrder].reverse();
 
       for (const { item, normalizedUrl, normalizedGuid } of unshared.slice(0, 5)) {
 
