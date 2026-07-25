@@ -1366,10 +1366,23 @@ const SocialMediaService = {
       // an approval-queue draft whose suggestedLink pointed at this blog URL
       // must not permanently suppress the RSS share of the post itself when
       // an admin rejects that draft.
-      const feedEntries = items.map((item) => {
+      // Collapse duplicate entries WITHIN one feed response first. The taken
+      // sets below are a snapshot taken before the loop, so unlike the old
+      // per-item lookup they cannot observe a row this run just inserted — a
+      // feed listing the same URL/GUID twice would otherwise post it twice,
+      // since the row is written only after the external posts complete.
+      const seenUrls = new Set();
+      const seenGuids = new Set();
+      const feedEntries = [];
+      for (const item of items) {
         const normalizedUrl = normalizeUrl(item.link) || null;
-        return { item, normalizedUrl, normalizedGuid: item.guid || normalizedUrl };
-      });
+        const normalizedGuid = item.guid || normalizedUrl;
+        if ((normalizedUrl && seenUrls.has(normalizedUrl))
+          || (normalizedGuid && seenGuids.has(normalizedGuid))) continue;
+        if (normalizedUrl) seenUrls.add(normalizedUrl);
+        if (normalizedGuid) seenGuids.add(normalizedGuid);
+        feedEntries.push({ item, normalizedUrl, normalizedGuid });
+      }
       const feedUrls = [...new Set(feedEntries.map((e) => e.normalizedUrl).filter(Boolean))];
       const feedGuids = [...new Set(feedEntries.map((e) => e.normalizedGuid).filter(Boolean))];
       let takenUrls = new Set();
