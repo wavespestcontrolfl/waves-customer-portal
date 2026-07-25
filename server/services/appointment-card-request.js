@@ -129,15 +129,26 @@ async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
 // 2026-07-24): true only when the /secure link will open the plan picker —
 // same derivation the page runs (gate off, one-time visits, non-whitelisted
 // services, covered lanes all return false and keep the base copy, which
-// stays accurate for them). Availability is live-derived on BOTH ends, so a
-// change between send and click degrades to the card-only page; the variant
-// copy is written to stay truthful in that case (no dollar amounts, "pick
-// how you'd like to pay" still lands on a payment-setup page).
-async function planInviteApplies(visitId) {
+// stays accurate for them). The EXISTING pending request (an inline /book
+// row being reused for the one allowed SMS) rides along so its own
+// selection state is honored: a request that already picked prepay carries
+// its payment_pending term, and without the request the overlap check
+// would read that term as external coverage and fall back to the base
+// "only charged after service" copy — the one message that is FALSE on the
+// prepay_selected page the link opens (Codex #2987). The variant is also
+// withheld when the plan carries NO incentive (discount class with
+// ANNUAL_PREPAY_DISCOUNT_PCT configured to 0 and no fee waiver) — "prepay
+// the year and save" must never promise savings the page won't show
+// (Codex #2987). Availability stays live-derived on BOTH ends, so a change
+// between send and click degrades to the card-only page; the variant copy
+// is written to stay truthful in that case (no dollar amounts, and adding
+// a card with nothing charged today remains exactly what the page offers).
+async function planInviteApplies(visitId, request = null) {
   try {
     const { buildSecurePlanContext } = require('./secure-appointment-plans');
-    const planCtx = await buildSecurePlanContext({ request: null, visitId });
-    return planCtx?.mode === 'recurring';
+    const planCtx = await buildSecurePlanContext({ request, visitId });
+    return planCtx?.mode === 'recurring'
+      && !!(planCtx.setupFee?.waivedWithPrepay || Number(planCtx.prepay?.discount) > 0);
   } catch (err) {
     logger.warn(`[appt-card-request] plan-invite probe failed for visit ${visitId} — using base copy: ${err.message}`);
     return false;
@@ -287,7 +298,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // link back — idempotent, never a second row.
     const existing = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
-      .first('id', 'status', 'token');
+      .first('id', 'status', 'token', 'selected_plan', 'annual_prepay_term_id');
     let reuseToken = null;
     if (existing) {
       if (existing.status === 'pending' && existing.token) {
@@ -335,16 +346,27 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       date_line: dateLineFor(visit.scheduled_date),
       secure_link: secureUrl,
     };
-    // Plan-choice copy variant: only probed for the SMS/email delivery
-    // (inline hands back a URL, no copy), and only an OVERLAY — the base
-    // template's active/inactive state stays the lane's dark lever (the
-    // templateActive probe above already refused an inactive base), and an
-    // inactive variant silently falls back to the approved base copy.
-    const planInvite = delivery !== 'inline' && await planInviteApplies(visit.id);
-    let body = planInvite ? await renderTemplate(templateVars, PLAN_TEMPLATE_KEY) : null;
-    const usedTemplateKey = body ? PLAN_TEMPLATE_KEY : TEMPLATE_KEY;
-    if (!body) body = await renderTemplate(templateVars);
-    if (!body) return skip('template_inactive');
+    // The BASE render is the live kill-switch check at the send boundary
+    // (Codex #2987 P1): it must run — and pass — before a variant body can
+    // be accepted, so deactivating secure_appointment_card between the
+    // early probe and this point still blocks the send, variant active or
+    // not. Only then is the plan-choice OVERLAY considered: probed for the
+    // SMS/email delivery only (inline hands back a URL, no copy), with the
+    // EXISTING pending request passed through so a reused link that
+    // already selected a plan gets copy matching the page it opens (Codex
+    // #2987: the request's own pending term must not read as an external
+    // overlap). An inactive variant silently keeps the approved base copy.
+    const body0 = await renderTemplate(templateVars);
+    if (!body0) return skip('template_inactive');
+    let body = body0;
+    let usedTemplateKey = TEMPLATE_KEY;
+    if (delivery !== 'inline' && await planInviteApplies(visit.id, existing || null)) {
+      const variantBody = await renderTemplate(templateVars, PLAN_TEMPLATE_KEY);
+      if (variantBody) {
+        body = variantBody;
+        usedTemplateKey = PLAN_TEMPLATE_KEY;
+      }
+    }
 
     // Inline delivery: the customer is ON the booking surface — create the
     // tokenized capture and hand the URL back for the wizard's card step.

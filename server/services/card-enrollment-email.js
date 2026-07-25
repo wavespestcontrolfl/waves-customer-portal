@@ -238,23 +238,33 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping setup invitation`);
       return null;
     }
-    // Plan-choice copy variant (owner-approved 2026-07-24): when the funnel's
-    // send-time probe says the /secure link opens the plan picker, prefer the
-    // variant template — but only if it exists and is active (a missing or
-    // archived variant falls back to the base copy, never a failed send).
-    // The idempotency key below stays the BASE key for both: one invitation
-    // per visit ever, whichever copy carried it.
+    // Plan-choice copy variant (owner-approved 2026-07-24): planChoice=true
+    // means the SMS leg ALREADY carried the plan-choice copy, so this email
+    // must match it or not go at all — the base email's "add a card" +
+    // per-service timing copy contradicts the prepay pitch the same
+    // customer just received (Codex #2987: archiving the variant is a
+    // supported admin action, so a fallback to base copy would silently
+    // split the invite). Missing/archived variant, or a failed lookup →
+    // SUPPRESS the email leg; the SMS remains the invite of record, and
+    // the email leg is best-effort by contract. The idempotency key stays
+    // the BASE key: one invitation per visit ever, whichever copy carries
+    // it.
     let templateKey = 'autopay.setup_invitation';
     if (planChoice) {
+      let variant = null;
       try {
-        const variant = await db('email_templates')
+        variant = await db('email_templates')
           .where({ template_key: 'autopay.plan_choice_invitation', status: 'active' })
           .whereNotNull('active_version_id')
           .first('id');
-        if (variant) templateKey = 'autopay.plan_choice_invitation';
       } catch (variantErr) {
-        logger.warn(`[card-enrollment-email] plan-choice variant lookup failed — using base copy: ${variantErr.message}`);
+        logger.warn(`[card-enrollment-email] plan-choice variant lookup failed — suppressing email leg: ${variantErr.message}`);
       }
+      if (!variant) {
+        logger.info(`[card-enrollment-email] plan-choice variant unavailable — email leg suppressed for visit ${scheduledServiceId} (base copy would contradict the plan-choice SMS)`);
+        return null;
+      }
+      templateKey = 'autopay.plan_choice_invitation';
     }
     // Billing-mode-aware timing copy (Codex #2952): a monthly-membership
     // customer who saves this card is charged monthly dues on their

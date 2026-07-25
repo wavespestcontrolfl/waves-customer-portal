@@ -54,6 +54,14 @@ describe('SMS variant (secure_appointment_card_plans)', () => {
   });
 });
 
+describe('sender truth gates (source contracts)', () => {
+  test('the variant is withheld when the plan carries NO incentive — "prepay and save" never promises savings a 0% discount config will not show (Codex #2987)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/appointment-card-request'), 'utf8');
+    expect(src).toMatch(/planCtx\?\.mode === 'recurring'\s*\n?\s*&& !!\(planCtx\.setupFee\?\.waivedWithPrepay \|\| Number\(planCtx\.prepay\?\.discount\) > 0\)/);
+  });
+});
+
 describe('email variant (autopay.plan_choice_invitation)', () => {
   const variant = _TEMPLATES.find((t) => t.key === 'autopay.plan_choice_invitation');
 

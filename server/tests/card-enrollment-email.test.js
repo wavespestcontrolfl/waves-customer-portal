@@ -415,11 +415,14 @@ describe('autopay setup invitation (email leg of the card-request funnel)', () =
     expect(call.triggerEventId).toBe('autopay.setup_invitation:visit-9');
   });
 
-  test('planChoice with NO variant row falls back to the base copy — never a failed send', async () => {
-    // email_templates table empty → the active-variant probe finds nothing.
+  test('planChoice with NO variant row SUPPRESSES the email — base copy would contradict the plan-choice SMS already sent (Codex #2987)', async () => {
+    // email_templates table empty → the active-variant probe finds nothing
+    // (owner archived it, or the migration has not run). The SMS leg has
+    // already carried the plan pitch; a base "add a card / charged after
+    // completed service" email to the same customer would split the invite.
     state.tables.email_templates = [];
-    await sendAutopaySetupInvitation({ ...ARGS, planChoice: true });
-    expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('autopay.setup_invitation');
+    expect(await sendAutopaySetupInvitation({ ...ARGS, planChoice: true })).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
   test('planChoice false never probes the variant: base copy, no email_templates read', async () => {
