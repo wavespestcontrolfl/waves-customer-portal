@@ -1007,10 +1007,15 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
   describe('gate ON (fresh module graph with the env set)', () => {
     let loadPageGateOn;
     let completeGateOn;
+    let requestGateOn;
     beforeAll(() => {
       process.env.GATE_SECURE_PLAN_CHOICE = 'true';
       jest.resetModules();
-      ({ loadSecureCardPageData: loadPageGateOn, completeSecureCardCapture: completeGateOn } = require('../services/appointment-card-request'));
+      ({
+        loadSecureCardPageData: loadPageGateOn,
+        completeSecureCardCapture: completeGateOn,
+        requestCardForAppointment: requestGateOn,
+      } = require('../services/appointment-card-request'));
     });
     afterAll(() => {
       delete process.env.GATE_SECURE_PLAN_CHOICE;
@@ -1122,6 +1127,130 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       const stampAttempts = touches('customers')
         .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch?.billing_mode === 'per_application'));
       expect(stampAttempts).toHaveLength(1);
+    });
+
+    test('plan-qualifying send uses the VARIANT copy when active, and the email leg follows the same probe', async () => {
+      mockTableHandlers = baseHandlers({
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
+      expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+      expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card_plans', expect.objectContaining({
+        secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
+      }));
+      // Observability records which copy actually went out.
+      expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+        .toBe('secure_appointment_card_plans');
+      await new Promise((r) => setImmediate(r));
+      expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({ planChoice: true }));
+    });
+
+    test('an INACTIVE variant silently falls back to the approved base copy — the variant is an overlay, never a lever', async () => {
+      mockTableHandlers = baseHandlers({
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      mockGetTemplate.mockImplementation(async (key) => (
+        key === 'secure_appointment_card' ? 'Hi Pat! Secure your visit: link' : null
+      ));
+      try {
+        const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
+        expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+        expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+          .toBe('secure_appointment_card');
+        await new Promise((r) => setImmediate(r));
+        // The email follows the copy that ACTUALLY sent, not the raw probe:
+        // base SMS copy → base email copy, so the two legs of one invite
+        // can never contradict each other. Activating the SMS variant is
+        // the single copy lever for both.
+        expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({ planChoice: false }));
+      } finally {
+        // clearAllMocks clears calls, not implementations — restore the
+        // suite-wide default so later tests keep an active base template.
+        mockGetTemplate.mockImplementation(async () => 'Hi Pat! Secure your visit: https://wvs.link/sec1');
+      }
+    });
+
+    test('base template deactivated mid-flight → NO send, even with an active variant (base render is the live kill switch — Codex #2987 P1)', async () => {
+      mockTableHandlers = baseHandlers({
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      // The operator flips secure_appointment_card inactive between the
+      // early probe and the send boundary: first base render (the probe)
+      // succeeds, every later base render returns null; the variant stays
+      // active throughout.
+      let baseCalls = 0;
+      mockGetTemplate.mockImplementation(async (key) => {
+        if (key === 'secure_appointment_card') {
+          baseCalls += 1;
+          return baseCalls === 1 ? 'base body' : null;
+        }
+        return 'variant body';
+      });
+      try {
+        const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
+        expect(res).toEqual({ requested: false, action: 'skipped', reason: 'template_inactive' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        await new Promise((r) => setImmediate(r));
+        expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+      } finally {
+        mockGetTemplate.mockImplementation(async () => 'Hi Pat! Secure your visit: https://wvs.link/sec1');
+      }
+    });
+
+    test('a reused pending request that already selected prepay passes ITS OWN row to the probe — its payment_pending term is not read as external coverage (Codex #2987)', async () => {
+      // Inline /book request picked annual prepay (term minted, unpaid);
+      // the office later triggers the one allowed SMS. Without the request
+      // row, the probe would see the request's own term as an overlapping
+      // external prepay and fall back to the base "only charged after
+      // service is completed" copy — false on the prepay_selected page the
+      // link opens.
+      const REUSED = {
+        id: 'req-7',
+        status: 'pending',
+        token: 'c'.repeat(64),
+        selected_plan: 'prepay_annual',
+        annual_prepay_term_id: 'term-9',
+      };
+      mockTableHandlers = baseHandlers({
+        scheduled_services: { first: () => ({ ...PLAN_VISIT }) },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+        appointment_card_requests: { first: () => ({ ...REUSED }) },
+        annual_prepay_terms: {
+          // The term is the REQUEST'S OWN: visible unless the probe
+          // excluded it via whereNot(id, term-9) — exactly what passing
+          // the request row through enables.
+          first: (chain) => (chain.calls.some(([op]) => op === 'whereNot')
+            ? null
+            : { id: 'term-9', term_end: '2099-12-31' }),
+        },
+      });
+      const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
+      expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+      expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+        .toBe('secure_appointment_card_plans');
+      // The reused token rides the link — no second bearer credential.
+      expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card_plans', expect.objectContaining({
+        secure_link: expect.stringContaining('c'.repeat(64)),
+      }));
+    });
+
+    test('a one-time visit (no plan picker) keeps the base copy on both legs even with the gate on', async () => {
+      mockTableHandlers = baseHandlers({
+        scheduled_services: {
+          first: () => ({ ...PLAN_VISIT, is_recurring: false, recurring_pattern: null }),
+        },
+        customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+      });
+      const res = await requestGateOn({ scheduledServiceId: 'svc-1' });
+      expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+      expect(mockGetTemplate).not.toHaveBeenCalledWith('secure_appointment_card_plans', expect.anything());
+      expect(mockSendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+        .toBe('secure_appointment_card');
+      await new Promise((r) => setImmediate(r));
+      expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({ planChoice: false }));
     });
 
     test('settled prepay invoice → secured and the pending row heals to satisfied', async () => {
