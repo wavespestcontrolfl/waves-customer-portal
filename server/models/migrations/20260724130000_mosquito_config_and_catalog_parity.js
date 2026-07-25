@@ -57,6 +57,11 @@ const LEGACY_GROSS_LOT_SEED = {
 const ONE_TIME_KEY = 'mosquito_one_time';
 const SEASONAL_KEY = 'mosquito_seasonal';
 const STALE_ONE_TIME_BASE_PRICE = 250;
+// Provenance marker for the `services` edits. `pricing_config_audit` is the only
+// migration-audit table available, and down() needs to know which catalog fields
+// this migration actually changed — not just their current values.
+const CATALOG_AUDIT_KEY = 'mosquito_catalog_parity';
+const CATALOG_UP_REASON = 'Mosquito catalog parity: cleared stale one-time base_price and/or activated the seasonal program';
 
 async function readConfig(knex, configKey) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
@@ -82,68 +87,141 @@ async function writeConfig(knex, configKey, oldData, newData, reason) {
   }
 }
 
+function bucketMax(bucket) {
+  if (!bucket || typeof bucket !== 'object') return undefined;
+  const raw = bucket.maxSqFt ?? bucket.max_sqft;
+  return raw == null ? undefined : Number(raw);
+}
+
 // Read-modify-write per bucket so an admin edit to an unrelated field in the
 // same JSON blob survives.
-function mergeSeed(oldData, seed) {
+//
+// `onlyWhenMax` restricts the rewrite to buckets whose CURRENT threshold still
+// matches the value we expect to replace. An admin who tuned QUARTER/THIRD/ACRE
+// while leaving the SMALL and HALF endpoints alone still trips the legacy-seed
+// signature, and a blind merge would silently discard that tuning.
+//
+// Both key spellings are cleared before writing the canonical `max_sqft`:
+// db-bridge reads `cfg?.maxSqFt ?? cfg?.max_sqft`, so a leftover camel-case key
+// takes PRECEDENCE and would keep the bridge on the old value — the row would
+// look corrected while behaving exactly as before.
+function mergeSeed(oldData, seed, onlyWhenMax = null) {
   const next = { ...oldData };
+  const skipped = [];
   for (const [bucket, values] of Object.entries(seed)) {
-    next[bucket] = { ...(oldData[bucket] || {}), ...values };
+    const current = oldData[bucket] || {};
+    if (onlyWhenMax) {
+      const expected = onlyWhenMax[bucket];
+      const actual = bucketMax(current);
+      const matches = expected === undefined ? actual === undefined : actual === expected;
+      if (!matches) { skipped.push(bucket); continue; }
+    }
+    const merged = { ...current, ...values };
+    if (values.max_sqft !== undefined) delete merged.maxSqFt;
+    next[bucket] = merged;
   }
-  return next;
+  return { next, skipped };
 }
 
 exports.up = async function (knex) {
   const oldData = await readConfig(knex, LOT_SIZES_KEY);
   if (oldData) {
-    const smallMax = Number(oldData.SMALL?.max_sqft ?? oldData.SMALL?.maxSqFt);
-    const halfMax = Number(oldData.HALF?.max_sqft ?? oldData.HALF?.maxSqFt);
     // Only rewrite the known-legacy acreage seed. A row already on treatable sf
     // (or deliberately tuned by the owner) is left alone; down() keys off the
     // audit row this branch skips writing.
-    if (smallMax === 10889 && halfMax === 43559) {
-      const newData = mergeSeed(oldData, TREATABLE_SF_SEED);
-      // ACRE carried no max_sqft in the legacy seed; the terminal sentinel is
-      // added by TREATABLE_SF_SEED above.
-      await writeConfig(knex, LOT_SIZES_KEY, oldData, newData, UP_REASON);
+    if (bucketMax(oldData.SMALL) === 10889 && bucketMax(oldData.HALF) === 43559) {
+      // ACRE carried no threshold in the legacy seed (undefined), so its
+      // per-bucket guard expects undefined; the terminal 999999 sentinel comes
+      // from TREATABLE_SF_SEED.
+      const legacyMaxByBucket = {
+        SMALL: 10889, QUARTER: 14519, THIRD: 21779, HALF: 43559, ACRE: undefined,
+      };
+      const { next, skipped } = mergeSeed(oldData, TREATABLE_SF_SEED, legacyMaxByBucket);
+      const reason = skipped.length
+        ? `${UP_REASON} — left tuned bucket(s) alone: ${skipped.join(', ')}`
+        : UP_REASON;
+      await writeConfig(knex, LOT_SIZES_KEY, oldData, next, reason);
     }
   }
 
   if (await knex.schema.hasTable('services')) {
+    const prior = {};
+    for (const key of [ONE_TIME_KEY, SEASONAL_KEY]) {
+      const row = await knex('services').where({ service_key: key }).first('base_price', 'is_active');
+      if (row) prior[key] = { base_price: row.base_price, is_active: row.is_active };
+    }
+
     // Only clear the specific stale value, so a deliberate later edit survives.
-    await knex('services')
+    const clearedOneTime = await knex('services')
       .where({ service_key: ONE_TIME_KEY })
       .where('base_price', STALE_ONE_TIME_BASE_PRICE)
       .update({ base_price: null, updated_at: knex.fn.now() });
 
     // booking_enabled intentionally untouched — public booking stays owner-gated.
-    await knex('services')
+    const activatedSeasonal = await knex('services')
       .where({ service_key: SEASONAL_KEY, is_active: false })
       .update({ is_active: true, updated_at: knex.fn.now() });
+
+    // Record what this migration actually changed. down() restores ONLY those
+    // fields: on an env where the catalog already had base_price NULL or
+    // seasonal active (a clean schema seeds is_active true), an ungated
+    // rollback would stamp a stale $250 onto a correct row and deactivate a
+    // service this migration never activated.
+    if ((clearedOneTime || activatedSeasonal) && await knex.schema.hasTable('pricing_config_audit')) {
+      await knex('pricing_config_audit').insert({
+        config_key: CATALOG_AUDIT_KEY,
+        old_value: JSON.stringify(prior),
+        new_value: JSON.stringify({
+          [ONE_TIME_KEY]: clearedOneTime ? { base_price: null } : 'unchanged',
+          [SEASONAL_KEY]: activatedSeasonal ? { is_active: true } : 'unchanged',
+        }),
+        changed_by: MIGRATION_TAG,
+        reason: CATALOG_UP_REASON,
+      });
+    }
   }
 };
 
 exports.down = async function (knex) {
-  if (await knex.schema.hasTable('pricing_config_audit')) {
+  const hasAudit = await knex.schema.hasTable('pricing_config_audit');
+  if (hasAudit) {
     const ownUp = await knex('pricing_config_audit')
-      .where({ config_key: LOT_SIZES_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
+      .where({ config_key: LOT_SIZES_KEY, changed_by: MIGRATION_TAG })
+      .whereLike('reason', `${UP_REASON}%`)
       .first('id');
     if (ownUp) {
       const oldData = await readConfig(knex, LOT_SIZES_KEY);
       if (oldData) {
-        const reverted = mergeSeed(oldData, LEGACY_GROSS_LOT_SEED);
-        delete reverted.ACRE.max_sqft;
-        await writeConfig(knex, LOT_SIZES_KEY, oldData, reverted, DOWN_REASON);
+        const treatableMaxByBucket = {
+          SMALL: 7999, QUARTER: 11999, THIRD: 17999, HALF: 34999, ACRE: 999999,
+        };
+        const { next } = mergeSeed(oldData, LEGACY_GROSS_LOT_SEED, treatableMaxByBucket);
+        if (next.ACRE) delete next.ACRE.max_sqft;
+        await writeConfig(knex, LOT_SIZES_KEY, oldData, next, DOWN_REASON);
       }
     }
   }
 
-  if (await knex.schema.hasTable('services')) {
-    await knex('services')
-      .where({ service_key: ONE_TIME_KEY })
-      .whereNull('base_price')
-      .update({ base_price: STALE_ONE_TIME_BASE_PRICE, updated_at: knex.fn.now() });
-    await knex('services')
-      .where({ service_key: SEASONAL_KEY, is_active: true })
-      .update({ is_active: false, updated_at: knex.fn.now() });
+  // No audit table means no proof of what up() changed — leave the catalog alone
+  // rather than guess.
+  if (hasAudit && await knex.schema.hasTable('services')) {
+    const ownUp = await knex('pricing_config_audit')
+      .where({ config_key: CATALOG_AUDIT_KEY, changed_by: MIGRATION_TAG, reason: CATALOG_UP_REASON })
+      .orderBy('id', 'desc')
+      .first('old_value', 'new_value');
+    if (ownUp) {
+      const prior = typeof ownUp.old_value === 'string' ? JSON.parse(ownUp.old_value) : ownUp.old_value;
+      const applied = typeof ownUp.new_value === 'string' ? JSON.parse(ownUp.new_value) : ownUp.new_value;
+      if (applied?.[ONE_TIME_KEY] !== 'unchanged' && prior?.[ONE_TIME_KEY]) {
+        await knex('services')
+          .where({ service_key: ONE_TIME_KEY })
+          .update({ base_price: prior[ONE_TIME_KEY].base_price, updated_at: knex.fn.now() });
+      }
+      if (applied?.[SEASONAL_KEY] !== 'unchanged' && prior?.[SEASONAL_KEY]) {
+        await knex('services')
+          .where({ service_key: SEASONAL_KEY })
+          .update({ is_active: prior[SEASONAL_KEY].is_active, updated_at: knex.fn.now() });
+      }
+    }
   }
 };

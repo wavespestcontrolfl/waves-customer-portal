@@ -7580,7 +7580,11 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
-    frequencies: ['Seasonal (Feb–Oct, 9 visits)', 'Monthly (12 visits)'],
+    // frequencies[0] is what My Plan renders as the cadence line (:9003), so the
+    // 12-visit program leads to stay consistent with basePrice below, which is
+    // the monthly12 floor. Was 'Monthly (Apr–Oct)' — 7 visits, matching neither
+    // program.
+    frequencies: ['Monthly (12 visits)', 'Seasonal (Feb–Oct, 9 visits)'],
     // basePrice is the floor of the live rate card (SMALL lot, 12-visit
     // program = $60/visit); real quotes scale up by treatable area and
     // mosquito pressure. Was $45, a price the engine can never produce.
