@@ -353,6 +353,12 @@ async function pollLivePost(post) {
           link: url,
           source: 'blog',
           noAiImage: true,
+          // This is the AUTOMATIC live-flip share, not the admin Share button —
+          // both post under source 'blog', so the automatic one opts into the
+          // daily auto-share cap + single-location GBP rotation explicitly.
+          // Without this, a day where several manual-lane posts go live would
+          // still produce the burst and 4x fanout this throttle exists to stop.
+          forceAutoshareThrottle: true,
         });
         const status = r?.skipped ? `skipped (${r.skipped}${r.blocking_status ? `:${r.blocking_status}` : ''})`
           : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');

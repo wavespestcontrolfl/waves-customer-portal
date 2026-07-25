@@ -1341,26 +1341,46 @@ const SocialMediaService = {
         return;
       }
 
-      for (const item of items.slice(0, 5)) {
+      // Resolve which feed entries are already shared across the WHOLE feed
+      // BEFORE applying the five-item work limit. Filtering inside a
+      // slice(0, 5) loop means five already-shared entries can occupy the
+      // prefix and starve newer unshared ones indefinitely — and the daily cap
+      // makes that reachable, since capped items are deferred to a later day
+      // while new entries keep arriving ahead of them. One batched query keeps
+      // this to a single round trip regardless of feed length.
+      //
+      // Blocks on a row that went out or is queued ('scheduled'), but NOT on a
+      // prior 'failed' row — a transient outage (here or in the merge-time
+      // shareUrlOnce path) should stay retryable on the next 4h tick, not be
+      // permanently suppressed. 'rejected' is excluded for the same reason:
+      // an approval-queue draft whose suggestedLink pointed at this blog URL
+      // must not permanently suppress the RSS share of the post itself when
+      // an admin rejects that draft.
+      const feedEntries = items.map((item) => {
         const normalizedUrl = normalizeUrl(item.link) || null;
-        const normalizedGuid = item.guid || normalizedUrl;
-
-        // Block on a row that went out or is queued ('scheduled'), but NOT on a
-        // prior 'failed' row — a transient outage (here or in the merge-time
-        // shareUrlOnce path) should stay retryable on the next 4h tick, not be
-        // permanently suppressed. 'rejected' is excluded for the same reason:
-        // an approval-queue draft whose suggestedLink pointed at this blog URL
-        // must not permanently suppress the RSS share of the post itself when
-        // an admin rejects that draft.
-        const existing = await trx('social_media_posts')
+        return { item, normalizedUrl, normalizedGuid: item.guid || normalizedUrl };
+      });
+      const feedUrls = [...new Set(feedEntries.map((e) => e.normalizedUrl).filter(Boolean))];
+      const feedGuids = [...new Set(feedEntries.map((e) => e.normalizedGuid).filter(Boolean))];
+      let takenUrls = new Set();
+      let takenGuids = new Set();
+      if (feedUrls.length || feedGuids.length) {
+        const takenRows = await trx('social_media_posts')
           .where(function() {
-            this.where({ source_url: normalizedUrl })
-              .orWhere({ source_guid: normalizedGuid });
+            if (feedUrls.length) this.whereIn('source_url', feedUrls);
+            if (feedGuids.length) this.orWhereIn('source_guid', feedGuids);
           })
           .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
-          .first();
+          .select('source_url', 'source_guid');
+        takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
+        takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
+      }
+      const unshared = feedEntries.filter((e) => !(
+        (e.normalizedUrl && takenUrls.has(e.normalizedUrl))
+        || (e.normalizedGuid && takenGuids.has(e.normalizedGuid))
+      ));
 
-        if (existing) continue;
+      for (const { item, normalizedUrl, normalizedGuid } of unshared.slice(0, 5)) {
 
         // Cap exhausted: stop BEFORE any media work. No later item can publish
         // either, so break rather than continue — the remaining items stay
@@ -1448,7 +1468,7 @@ const SocialMediaService = {
    * a subsequent RSS run sees the row and skips. The caller owns policy gating
    * (feature flags, post type); this owns concurrency + dedup.
    */
-  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true }) {
+  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true, forceAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) return { skipped: 'automation_disabled' };
     const normalized = normalizeUrl(link) || null;
     if (!normalized) return { skipped: 'no_url' };
@@ -1476,6 +1496,8 @@ const SocialMediaService = {
       if (existing) return { skipped: 'already_posted', blocking_status: existing.status || null };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
+        // Automatic lanes sharing under an admin-shared source opt in explicitly.
+        forceAutoshareThrottle,
         // Autonomous blog-share lane: opt into every platform incl. Twitter
         // (the omitted-channels default excludes it).
         channels: PUBLISH_PLATFORMS,
@@ -1493,7 +1515,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, forceAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1505,8 +1527,15 @@ const SocialMediaService = {
     // bypassAutoshareThrottle is set by an admin-triggered run (POST /check-rss
     // with manual:true), which deliberately overrides the automatic RSS gates —
     // an explicitly requested share must not be silently swallowed by the cap.
+    // forceAutoshareThrottle covers automatic lanes that share under a source
+    // an admin ALSO uses by hand. The live-flip poller
+    // (content-astro/pages-poll.js) auto-shares every post the moment it goes
+    // live with source 'blog' — the same source as the admin Share button — so
+    // source alone can't separate them. The poller opts in explicitly; the
+    // button stays unthrottled.
     const dailyCap = autoshareDailyCap();
-    if (dailyCap > 0 && AUTOSHARE_SOURCES.has(source) && !bypassAutoshareThrottle) {
+    const throttledLane = AUTOSHARE_SOURCES.has(source) || forceAutoshareThrottle;
+    if (dailyCap > 0 && throttledLane && !bypassAutoshareThrottle) {
       const postedToday = await autoshareCountToday();
       if (postedToday >= dailyCap) {
         logger.info(
@@ -1828,7 +1857,7 @@ const SocialMediaService = {
     if (
       gbpLocations.length > 1
       && !requestedGbpLocations
-      && AUTOSHARE_SOURCES.has(source)
+      && throttledLane
       && autoshareGbpSingleLocation()
       && !bypassAutoshareThrottle
     ) {
