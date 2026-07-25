@@ -143,6 +143,22 @@ finding and warns on P1. Reviewers must return JSON matching
 
 ### Treat as P1
 
+- **Blind `content[0].text` on a raw Anthropic response.** Reasoning-capable
+  models may lead with a `thinking` / `redacted_thinking` block, which has no
+  `.text` — so `response.content[0].text` reads `''` and the real answer sits
+  in `content[1]`. Whether a thinking block appears is INPUT-dependent, not
+  tier-dependent: a trivial probe prompt returns a single text block on every
+  tier, so this does not reproduce in a smoke test. It fails silently — the
+  caller sees empty output and takes its "model returned nothing" branch.
+  When #2814 moved `WORKHORSE`/`FAST` from opus-4-8 to sonnet-5 (2026-07-18)
+  this killed all 10 Claude-backed event sources for 7 days (newsletter
+  autopilot starved to 1 eligible event and skipped a week) and silently
+  disabled AI lead triage, with no error anywhere but a generic
+  "did not return parseable JSON". Flag (P1) any new raw
+  `client.messages.create` whose result is read via `content[0]` without
+  `stripThinkingBlocks` (`server/services/llm/deep.js`) — or, better, that
+  does not go through the `llm/` helpers at all. A model-tier swap is a
+  breaking change for every raw call site.
 - **America/New_York timezone discipline.** Railway runs `TZ=UTC`; the
   portal is single-timezone Eastern. `server/utils/datetime-et.js` exposes
   `parseETDateTime`, `etParts`, `formatETDay/Date/Time`. Naive

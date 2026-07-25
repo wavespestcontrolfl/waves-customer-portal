@@ -118,6 +118,7 @@ try {
 }
 
 const MODELS = require('../config/models');
+const { stripThinkingBlocks } = require('./llm/deep');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -497,7 +498,13 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     system: systemPrompt,
     messages: [{ role: 'user', content: wrapped }],
   });
-  const text = response.content?.[0]?.text || '';
+  // WORKHORSE resolves to a model that can lead with a thinking block on
+  // real feed-sized inputs (#2814 moved it opus-4-8 → sonnet-5 on 2026-07-18).
+  // A thinking block has no .text, so reading content[0] blind yielded '' and
+  // threw "did not return parseable JSON" while a perfectly good extraction
+  // sat in content[1] — that silently killed every Claude-backed event source
+  // for 7 straight days. Strip first, then index.
+  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
   // Happy path: a complete {...} object. The regex needs a closing brace,
   // so a response truncated before ANY object closed won't match here —
   // that case falls through to recovery below rather than throwing blind.
@@ -1020,6 +1027,7 @@ module.exports = {
   // Exported for unit tests — pure pieces of the shared extraction path.
   buildArticleBundle,
   buildExtractionSystemPrompt,
+  extractEventsWithClaude, // exported for the thinking-block regression test
   normalizeExtractedEvent,
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,

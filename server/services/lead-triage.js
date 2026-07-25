@@ -1,6 +1,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
+const { stripThinkingBlocks } = require('./llm/deep');
 
 function mapTriage(parsed) {
   return {
@@ -58,7 +59,11 @@ Return ONLY valid JSON, no markdown.`;
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
-    const text = response.content[0]?.text || '';
+    // Thinking-block guard: FAST resolves to a model that can lead with a
+    // thinking block (no .text). A blind content[0] read returned '', and
+    // JSON.parse('') threw straight into the catch below — AI lead triage
+    // silently returned null on every lead. See event-ingestion.js.
+    const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     return mapTriage(JSON.parse(text));
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);

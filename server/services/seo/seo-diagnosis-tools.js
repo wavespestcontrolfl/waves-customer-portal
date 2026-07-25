@@ -28,6 +28,7 @@ const path = require('path');
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { stripThinkingBlocks } = require('../llm/deep');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -276,7 +277,10 @@ async function classifyQueryIntent({ queries = [] } = {}) {
       max_tokens: Math.min(2048, batch.length * 20),
       messages: [{ role: 'user', content: prompt }],
     });
-    const text = msg.content[0]?.text || '';
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+    const text = stripThinkingBlocks(msg).content?.[0]?.text || '';
     const parsed = text.split('\n').map((line) => {
       const m = line.trim().match(/^(.+?)\t(transactional|informational|commercial-investigation)\t(\d+(?:\.\d+)?)/);
       if (!m) return null;
