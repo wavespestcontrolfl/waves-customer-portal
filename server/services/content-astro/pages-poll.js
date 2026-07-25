@@ -351,14 +351,15 @@ async function pollLivePost(post) {
           title: fresh.title,
           description: fresh.meta_description || '',
           link: url,
-          source: 'blog',
+          // 'blog_auto', NOT 'blog': this is the AUTOMATIC live-flip share,
+          // while the admin Share button posts as 'blog'. The daily auto-share
+          // cap counts by source_type, so the two lanes have to be
+          // distinguishable in the persisted row — sharing one source_type
+          // meant forced shares were throttled but never counted, and every
+          // live-flip on a given day still passed the 1/day cap. The admin
+          // button stays unthrottled and uncounted.
+          source: 'blog_auto',
           noAiImage: true,
-          // This is the AUTOMATIC live-flip share, not the admin Share button —
-          // both post under source 'blog', so the automatic one opts into the
-          // daily auto-share cap + single-location GBP rotation explicitly.
-          // Without this, a day where several manual-lane posts go live would
-          // still produce the burst and 4x fanout this throttle exists to stop.
-          forceAutoshareThrottle: true,
         });
         const status = r?.skipped ? `skipped (${r.skipped}${r.blocking_status ? `:${r.blocking_status}` : ''})`
           : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');

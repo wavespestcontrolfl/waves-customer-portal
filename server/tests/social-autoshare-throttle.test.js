@@ -31,13 +31,30 @@ afterEach(() => {
 
 describe('AUTOSHARE_SOURCES scope', () => {
   test('covers exactly the automated blog lanes', () => {
-    expect([...AUTOSHARE_SOURCES].sort()).toEqual(['autonomous_blog', 'blog_scheduled', 'rss']);
+    expect([...AUTOSHARE_SOURCES].sort())
+      .toEqual(['autonomous_blog', 'blog_auto', 'blog_scheduled', 'rss']);
   });
 
   test('does NOT capture manual, studio, or newsletter sources', () => {
     for (const src of ['manual', 'autonomous_studio', 'newsletter', 'tech_field']) {
       expect(AUTOSHARE_SOURCES.has(src)).toBe(false);
     }
+  });
+
+  // Codex P1: the automatic live-flip and the admin Share button both used
+  // source 'blog'. Throttling applied but the cap COUNTS by source_type, so
+  // forced shares were never counted and every live-flip that day still passed
+  // a 1/day cap. They must be distinguishable in the persisted row.
+  test('the automatic live-flip lane is throttled, the admin Share button is not', () => {
+    expect(AUTOSHARE_SOURCES.has('blog_auto')).toBe(true);
+    expect(AUTOSHARE_SOURCES.has('blog')).toBe(false);
+  });
+
+  test('the live-flip lane still resolves a blog hero image', () => {
+    // Splitting the source must not cost blog_auto its hero — otherwise the
+    // automatic share silently downgrades to a brand card.
+    expect(social.BLOG_HERO_SOURCES.has('blog_auto')).toBe(true);
+    expect(social.BLOG_HERO_SOURCES.has('blog')).toBe(true);
   });
 });
 
@@ -63,6 +80,22 @@ describe('autoshareDailyCap', () => {
       process.env.SOCIAL_AUTOSHARE_DAILY_CAP = bad;
       expect(autoshareDailyCap()).toBe(1);
     }
+  });
+
+  // Codex P2: parseInt('0.5') and parseInt('0oops') both yield 0 — which is the
+  // explicit kill switch. A typo must never silently disable the throttle.
+  test('a numeric-prefix typo does NOT reach the 0 kill switch', () => {
+    for (const typo of ['0.5', '0oops', '1.9', '2x', ' 0 5']) {
+      process.env.SOCIAL_AUTOSHARE_DAILY_CAP = typo;
+      expect(autoshareDailyCap()).toBe(1);
+    }
+  });
+
+  test('only a clean integer is accepted (surrounding whitespace tolerated)', () => {
+    process.env.SOCIAL_AUTOSHARE_DAILY_CAP = ' 2 ';
+    expect(autoshareDailyCap()).toBe(2);
+    process.env.SOCIAL_AUTOSHARE_DAILY_CAP = ' 0 ';
+    expect(autoshareDailyCap()).toBe(0);
   });
 });
 

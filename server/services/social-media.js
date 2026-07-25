@@ -102,7 +102,12 @@ async function isPausedByAdmin() {
 // hours apart. These two guards bound it. They apply ONLY to the automated
 // blog lanes — manual admin posts, the content studio, and newsletter shares
 // are untouched.
-const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog']);
+// 'blog_auto' is the AUTOMATIC live-flip share (content-astro/pages-poll.js).
+// It is deliberately a DIFFERENT source_type from the admin Share button's
+// 'blog': both are throttled lanes only if they are distinguishable in the
+// row we persist, and the cap counts by source_type. An admin-triggered
+// 'blog' share stays unthrottled and uncounted.
+const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog', 'blog_auto']);
 
 // Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
 // Deliberately defaults ON (1/day) rather than the usual dark-ship default-OFF:
@@ -110,8 +115,13 @@ const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog']);
 function autoshareDailyCap() {
   const raw = process.env.SOCIAL_AUTOSHARE_DAILY_CAP;
   if (raw === undefined || raw === '') return 1;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1;
+  // Validate the WHOLE value. parseInt('0.5') and parseInt('0oops') both yield
+  // 0, which would silently disable the throttle on a typo — and 0 is the
+  // explicit kill switch, so it must never be reached by accident.
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : 1;
 }
 
 // Kill switch: SOCIAL_AUTOSHARE_GBP_SINGLE_LOCATION=false restores the 4× fanout.
@@ -922,7 +932,7 @@ async function uploadVideoToS3(buffer, filename) {
 // agent's distribute_to_social tool — live blog_posts only, gated by
 // blogPostShareability). Gates the og:image hero fetch, the Facebook /feed
 // link-post format, and the IG caption URL append.
-const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'content_agent']);
+const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'blog_auto', 'content_agent']);
 async function blogHeroSocialImageUrl(link) {
   try {
     const pageUrl = new URL(String(link || ''));
@@ -1375,10 +1385,17 @@ const SocialMediaService = {
         takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
         takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
       }
+      // OLDEST-FIRST drain. fetchRSSFeed preserves feed order, which is
+      // newest-first, and every tick rebuilds this list from scratch. Draining
+      // newest-first means that once the feed produces more entries per day
+      // than the cap allows, each day's newest arrival takes the only slot
+      // while older deferred entries slide further back and eventually fall
+      // out of the feed unshared. Reversing makes the backlog FIFO, so a
+      // deferred post is guaranteed its turn.
       const unshared = feedEntries.filter((e) => !(
         (e.normalizedUrl && takenUrls.has(e.normalizedUrl))
         || (e.normalizedGuid && takenGuids.has(e.normalizedGuid))
-      ));
+      )).reverse();
 
       for (const { item, normalizedUrl, normalizedGuid } of unshared.slice(0, 5)) {
 
@@ -1468,7 +1485,7 @@ const SocialMediaService = {
    * a subsequent RSS run sees the row and skips. The caller owns policy gating
    * (feature flags, post type); this owns concurrency + dedup.
    */
-  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true, forceAutoshareThrottle = false }) {
+  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true }) {
     if (!SOCIAL_FLAGS.automationEnabled) return { skipped: 'automation_disabled' };
     const normalized = normalizeUrl(link) || null;
     if (!normalized) return { skipped: 'no_url' };
@@ -1496,8 +1513,6 @@ const SocialMediaService = {
       if (existing) return { skipped: 'already_posted', blocking_status: existing.status || null };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
-        // Automatic lanes sharing under an admin-shared source opt in explicitly.
-        forceAutoshareThrottle,
         // Autonomous blog-share lane: opt into every platform incl. Twitter
         // (the omitted-channels default excludes it).
         channels: PUBLISH_PLATFORMS,
@@ -1515,7 +1530,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, forceAutoshareThrottle = false }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1527,14 +1542,8 @@ const SocialMediaService = {
     // bypassAutoshareThrottle is set by an admin-triggered run (POST /check-rss
     // with manual:true), which deliberately overrides the automatic RSS gates —
     // an explicitly requested share must not be silently swallowed by the cap.
-    // forceAutoshareThrottle covers automatic lanes that share under a source
-    // an admin ALSO uses by hand. The live-flip poller
-    // (content-astro/pages-poll.js) auto-shares every post the moment it goes
-    // live with source 'blog' — the same source as the admin Share button — so
-    // source alone can't separate them. The poller opts in explicitly; the
-    // button stays unthrottled.
     const dailyCap = autoshareDailyCap();
-    const throttledLane = AUTOSHARE_SOURCES.has(source) || forceAutoshareThrottle;
+    const throttledLane = AUTOSHARE_SOURCES.has(source);
     if (dailyCap > 0 && throttledLane && !bypassAutoshareThrottle) {
       const postedToday = await autoshareCountToday();
       if (postedToday >= dailyCap) {
