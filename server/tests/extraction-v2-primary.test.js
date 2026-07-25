@@ -151,12 +151,26 @@ describe('adoptV2PrimaryFields — identity conflict rules', () => {
     expect(merged.first_name).toBe('Jane');
     expect(merged.last_name).toBe('Garcia');
 
-    // The present split field stays authoritative for its own slot.
+    // A DISAGREEING name_full fills nothing — combining two identities
+    // would corrupt the customer name (codex r9).
     const disagree = v2Fixture();
     disagree.caller = { ...disagree.caller, first_name: 'Rita', last_name: null, name_full: 'Jane Garcia' };
     const kept = adoptV2PrimaryFields(v1Stub(), disagree).merged;
     expect(kept.first_name).toBe('Rita');
-    expect(kept.last_name).toBe('Garcia');
+    expect(kept.last_name).toBeNull();
+  });
+
+  test('prefix tokens never slice: Ann beside "Anna Smith" derives NO surname (codex r9)', () => {
+    const v2 = v2Fixture();
+    v2.caller = { ...v2.caller, first_name: 'Ann', last_name: null, name_full: 'Anna Smith' };
+    const { merged } = adoptV2PrimaryFields(v1Stub(), v2);
+    expect(merged.first_name).toBe('Ann');
+    expect(merged.last_name).toBeNull();
+
+    // Whole-token leading match still derives the surname.
+    const clean = v2Fixture();
+    clean.caller = { ...clean.caller, first_name: 'Anna', last_name: null, name_full: 'Anna Smith' };
+    expect(adoptV2PrimaryFields(v1Stub(), clean).merged.last_name).toBe('Smith');
   });
 
   test('a low-confidence V2 name still fills an EMPTY V1 name', () => {
@@ -214,6 +228,13 @@ describe('adoptV2PrimaryFields — address unit (line2) ownership', () => {
     const v1 = { ...v1Stub(), address_line1: '123 seagrass ln', address_line2: 'Unit 4', city: 'Bradenton', zip: '34211' };
     const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
     expect(merged.address_line2).toBe('Unit 4');
+  });
+
+  test('equivalent formatting is the SAME property — suffix and ZIP+4 variants keep the unit (codex r9)', () => {
+    const v1 = { ...v1Stub(), address_line1: '123 Seagrass Lane', address_line2: 'Unit 4', city: 'Bradenton', zip: '34211-1234' };
+    const { merged } = adoptV2PrimaryFields(v1, v2Fixture()); // v2: "123 Seagrass Ln", zip 34211
+    expect(merged.address_line2).toBe('Unit 4');
+    expect(merged.address_line1).toBe('123 Seagrass Ln');
   });
 
   test('same street but a DIFFERENT city/zip is a different property — V1 unit cleared', () => {
@@ -397,6 +418,19 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
     expect(adoptV2PrimaryFields(program, wasp).merged.matched_service).toBe('Quarterly Pest Control Service');
 
     // A cross-family V1 label is not stomped either.
+    const crossFamily = { ...v1Stub(), matched_service: 'Lawn Care' };
+    expect(adoptV2PrimaryFields(crossFamily, wasp).merged.matched_service).toBe('Lawn Care');
+  });
+
+  test('an explicit V2 catalog pick also replaces its category coarse alias (codex r9)', () => {
+    const wasp = v2Fixture();
+    wasp.service_request = { ...wasp.service_request, specific_service_name: 'Bee / Wasp Nest Removal Service', primary_service_category: 'stinging_insect' };
+    const coarse = { ...v1Stub(), matched_service: 'General Pest Control', requested_service: 'General Pest Control' };
+    const upgraded = adoptV2PrimaryFields(coarse, wasp).merged;
+    expect(upgraded.matched_service).toBe('Bee / Wasp Nest Removal Service');
+    expect(upgraded.requested_service).toBe('Bee / Wasp Nest Removal Service');
+
+    // Cross-family V1 labels still never overridden.
     const crossFamily = { ...v1Stub(), matched_service: 'Lawn Care' };
     expect(adoptV2PrimaryFields(crossFamily, wasp).merged.matched_service).toBe('Lawn Care');
   });

@@ -277,24 +277,27 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     // last_name:"Galliano") contains NO first name — naively taking
     // parts[0] minted the surname as a first name and broke the
     // surname-only conflict regime (caught by CI).
-    const full = String(caller.name_full).trim();
-    const lower = full.toLowerCase();
+    // WHOLE-TOKEN derivation only (codex r9 P2): 'Ann' beside 'Anna Smith'
+    // must never slice out 'a Smith', and a name_full that DISAGREES with
+    // the present part ('Rita' vs 'Jane Garcia') fills nothing — combining
+    // two disagreeing identities would corrupt the customer name.
+    const tokens = String(caller.name_full).trim().split(/\s+/);
+    const joinLower = (arr) => arr.join(' ').toLowerCase();
     if (has(v2First) && !has(v2Last)) {
-      const first = String(v2First).trim();
-      const rest = lower.startsWith(first.toLowerCase())
-        ? full.slice(first.length).trim()
-        : full.split(/\s+/).slice(1).join(' ');
-      if (rest && rest.toLowerCase() !== first.toLowerCase()) v2Last = rest;
+      const firstTokens = String(v2First).trim().split(/\s+/);
+      if (tokens.length > firstTokens.length
+        && joinLower(tokens.slice(0, firstTokens.length)) === joinLower(firstTokens)) {
+        v2Last = tokens.slice(firstTokens.length).join(' ');
+      }
     } else if (!has(v2First) && has(v2Last)) {
-      const last = String(v2Last).trim();
-      const rest = lower.endsWith(last.toLowerCase())
-        ? full.slice(0, full.length - last.length).trim()
-        : (full.split(/\s+/).length > 1 ? full.split(/\s+/)[0] : '');
-      if (rest && rest.toLowerCase() !== last.toLowerCase()) v2First = rest;
+      const lastTokens = String(v2Last).trim().split(/\s+/);
+      if (tokens.length > lastTokens.length
+        && joinLower(tokens.slice(-lastTokens.length)) === joinLower(lastTokens)) {
+        v2First = tokens.slice(0, tokens.length - lastTokens.length).join(' ');
+      }
     } else {
-      const parts = full.split(/\s+/);
-      v2First = parts[0] || null;
-      v2Last = parts.slice(1).join(' ') || null;
+      v2First = tokens[0] || null;
+      v2Last = tokens.slice(1).join(' ') || null;
     }
   }
   const v1HasName = has(merged.first_name) || has(merged.last_name);
@@ -336,11 +339,27 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // street — that mints a service address neither extractor produced
   // (codex r3 P2). No V2 street → V1's address stands untouched.
   if (has(flat.address_line1)) {
+    // CANONICAL comparison (codex r9 P2): '123 Main St' and '123 Main
+    // Street' (or a 5-digit ZIP vs ZIP+4) are the SAME property — a raw
+    // string compare read them as different and cleared a V1-only unit that
+    // nothing downstream restores. Suffix map mirrors the common USPS forms.
+    const STREET_SUFFIXES = {
+      st: 'street', ave: 'avenue', av: 'avenue', rd: 'road', dr: 'drive',
+      ln: 'lane', blvd: 'boulevard', ct: 'court', cir: 'circle',
+      ter: 'terrace', hwy: 'highway', pkwy: 'parkway', trl: 'trail',
+      pl: 'place', way: 'way', loop: 'loop',
+    };
+    const canonStreet = (v) => String(v || '').toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/).filter(Boolean)
+      .map((tok) => STREET_SUFFIXES[tok] || tok)
+      .join(' ');
+    const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
     const partConflicts = (a, b) => has(a) && has(b) && norm(a) !== norm(b);
     const sameAddress = has(merged.address_line1)
-      && norm(merged.address_line1) === norm(flat.address_line1)
+      && canonStreet(merged.address_line1) === canonStreet(flat.address_line1)
       && !partConflicts(merged.city, flat.city)
-      && !partConflicts(merged.zip, flat.zip);
+      && !(has(merged.zip) && has(flat.zip) && zip5(merged.zip) !== zip5(flat.zip));
     winner('address_line1', flat.address_line1);
     if (sameAddress) {
       // Same property — V2 components refine, V1 detail V2 didn't capture
@@ -456,9 +475,14 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     palm_injection: 'Tree & Shrub Care',
   };
   const coarseAlias = V2_CATEGORY_COARSE_ALIASES[v2Category] || null;
-  if (!has(flat.specific_service_name) && v2CategoryLabel && coarseAlias) {
+  // An explicit V2 catalog pick outranks the family label, and BOTH replace
+  // the category's own coarse alias — with a catalog pick present, the
+  // fillers alone left a V1 'General Pest Control' canonically mislabeled
+  // (codex r9 P2). Cross-family V1 labels are still never overridden.
+  const preciseV2Label = flat.specific_service_name || v2CategoryLabel || null;
+  if (preciseV2Label && coarseAlias) {
     for (const key of ['matched_service', 'requested_service']) {
-      if (merged[key] === coarseAlias) adopt(key, v2CategoryLabel);
+      if (merged[key] === coarseAlias) adopt(key, preciseV2Label);
     }
   }
   if ((!has(merged.call_summary) || merged.call_summary === EXTRACTION_INVALID_JSON_SUMMARY) && has(flat.call_summary)) {
