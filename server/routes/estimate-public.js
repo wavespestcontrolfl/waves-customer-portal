@@ -3662,8 +3662,8 @@ function renderMembershipBlockHtml(membership) {
           <span class="wg-row-label">${escapeHtml(s.label)}</span>
           <span class="wg-row-val">
             +${s.extraDiscountPct}% off${Number(s.perVisitSavings) > 0
-              ? ` &middot; save ${money(s.perVisitSavings)}/visit${s.remainingVisits > 0
-                ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+              ? ` &middot; save ${money(s.perVisitSavings)} per application${s.remainingVisits > 0
+                ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
                 : ''}`
               : ''}
           </span>

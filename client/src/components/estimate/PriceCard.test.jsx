@@ -354,3 +354,16 @@ describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is al
     expect(screen.getByText(/4 applications\/year/)).toBeInTheDocument();
   });
 });
+
+describe('guarantee line fully retired (owner 2026-07-24)', () => {
+  it('never renders the risk-free line — the CTA micro is the one sanctioned guarantee claim', () => {
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', label: 'Quarterly', monthly: 39, annual: 468, perTreatment: 117, visitsPerYear: 4 }}
+        preferPerApplicationPrice
+      />,
+    );
+    expect(screen.queryByText(/risk-free/i)).toBeNull();
+    expect(screen.queryByText(/money-back/i)).toBeNull();
+  });
+});
