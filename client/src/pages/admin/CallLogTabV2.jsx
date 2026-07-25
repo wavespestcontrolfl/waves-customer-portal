@@ -590,8 +590,28 @@ export default function CallLogTabV2() {
       Date.now() - new Date(c.created_at).getTime() > DEAD_AIR_GRACE_MS
     );
   };
+  // Screen-abandoned calls: the pre-connect caller screen challenged this
+  // caller (metadata.preconnect_screen === 'gated') and they hung up without
+  // pressing a key or reaching voicemail — no recording, no outcome.
+  // Robocall noise: keep them out of the Missed/Discussion buckets and show
+  // them as "Screened out" under Total. A 'passed'/'failed' stamp means the
+  // call continued and is judged by its real outcome instead.
+  const isScreenAbandoned = (c) => {
+    if (c.direction !== "inbound") return false;
+    let meta = c.metadata;
+    if (typeof meta === "string") {
+      try {
+        meta = JSON.parse(meta);
+      } catch {
+        meta = null;
+      }
+    }
+    return meta?.preconnect_screen === "gated";
+  };
   const isReallyMissed = (c) =>
-    (!c.answered_by || c.answered_by === "missed") && !hadConversation(c);
+    (!c.answered_by || c.answered_by === "missed") &&
+    !hadConversation(c) &&
+    !isScreenAbandoned(c);
   const isAiHandled = (c) => c.answered_by === "ai_agent";
   const isAnswered = (c) => c.answered_by === "human" || isAiHandled(c);
   const answered = calls.filter(isAnswered).length;
@@ -1067,8 +1087,11 @@ export default function CallLogTabV2() {
             <div className="md:max-h-[600px] md:overflow-y-auto">
               {filteredCalls.map((c) => {
                 const conversed = hadConversation(c);
+                const abandoned = isScreenAbandoned(c);
                 const isMissed =
-                  (!c.answered_by || c.answered_by === "missed") && !conversed;
+                  (!c.answered_by || c.answered_by === "missed") &&
+                  !conversed &&
+                  !abandoned;
                 const answeredLabel =
                   c.answered_by === "human"
                     ? "Answered"
@@ -1078,14 +1101,16 @@ export default function CallLogTabV2() {
                         ? c.direction === "outbound"
                           ? "Their voicemail"
                           : "Voicemail"
-                        : conversed
-                          ? "Discussion"
-                          : "Missed";
+                        : abandoned
+                          ? "Screened out"
+                          : conversed
+                            ? "Discussion"
+                            : "Missed";
                 const badgeTone = isMissed
                   ? "alert"
                   : c.answered_by === "human" || c.answered_by === "ai_agent"
                     ? "strong"
-                    : conversed
+                    : conversed && !abandoned
                       ? "strong"
                       : "neutral";
                 const dur = c.duration_seconds
