@@ -26,14 +26,22 @@
  * 3. `services.mosquito_seasonal` was `is_active = false`, but priceMosquito
  *    RECOMMENDS `seasonal9` for every low-pressure property and labels the tier
  *    "Seasonal Mosquito Program (9 visits)". An accepted seasonal quote had no
- *    active catalog service to book against. Activated for internal/admin use
- *    only: `booking_enabled` is explicitly CLEARED in the same update, because
- *    `loadBookableCallServices` selects every `is_active && booking_enabled`
- *    service (`server/services/call-booking-catalog.js`) and the original seed
- *    (`20260507000002`) set `booking_enabled` true. Prod already carries false,
- *    but merely leaving the flag alone would put the seasonal program into
- *    automated call booking on any env where the seed value survived. Opening
- *    booking is an owner flip, never a migration's.
+ *    active catalog service to book against.
+ *
+ *    Booking exposure: `loadBookableCallServices` selects every
+ *    `is_active && booking_enabled` service
+ *    (`server/services/call-booking-catalog.js`), so activation alone could open
+ *    automated call booking. This migration therefore clears `booking_enabled`
+ *    in the SAME update that activates the row — it never opens booking. Prod
+ *    carries `is_active=false, booking_enabled=false`, so the outcome there is
+ *    active + booking closed.
+ *
+ *    NOT handled here: a row that is ALREADY active with `booking_enabled` true
+ *    (what the `20260507000002` seed produces, i.e. fresh/staging envs). That
+ *    row is already bookable before this migration runs and this migration does
+ *    not change it. Forcing booking closed on an env where it was deliberately
+ *    open is an owner decision, not a pricing-parity migration's — flagged for
+ *    the owner rather than silently applied.
  *
  * ROLLBACK CONTRACT — `down()` restores from the provenance snapshot written by
  * `up()`, and only for fields `up()` actually changed AND that still hold the
@@ -64,7 +72,17 @@ const TREATABLE_SF_SEED = {
 const LEGACY_MAX_BY_BUCKET = {
   SMALL: 10889, QUARTER: 14519, THIRD: 21779, HALF: 43559, ACRE: undefined,
 };
-const LEGACY_SIGNATURE_BUCKETS = ['SMALL', 'HALF'];
+// Detection is PER BUCKET, not a row-level SMALL+HALF signature. If one endpoint
+// was corrected by hand while the others kept the acreage seed (SMALL = 7999,
+// QUARTER/THIRD/HALF still 14519/21779/43559), a row-level signature skips the
+// migration — and db-bridge's identical SMALL+HALF guard then also evaluates
+// false, so it APPLIES those remaining gross-lot thresholds as live brackets.
+// That is the exact bug this migration exists to remove.
+//
+// Two matching buckets are required so a single coincidence can't trigger a
+// rewrite: 10889 is an odd number to hand-enter as a treatable-sf threshold, but
+// one bucket alone is not evidence that the row is the acreage seed.
+const MIN_LEGACY_BUCKETS_TO_REWRITE = 2;
 
 const ONE_TIME_KEY = 'mosquito_one_time';
 const SEASONAL_KEY = 'mosquito_seasonal';
@@ -113,16 +131,19 @@ async function writeConfig(knex, configKey, oldData, newData, reason, appliedNot
 exports.up = async function (knex) {
   const oldData = await readConfig(knex, LOT_SIZES_KEY);
   if (oldData) {
-    const isLegacySeed = LEGACY_SIGNATURE_BUCKETS
-      .every((bucket) => bucketMax(oldData[bucket]) === LEGACY_MAX_BY_BUCKET[bucket]);
-    if (isLegacySeed) {
+    const legacyBuckets = Object.keys(TREATABLE_SF_SEED)
+      .filter((bucket) => bucketMax(oldData[bucket]) === LEGACY_MAX_BY_BUCKET[bucket]);
+    // ACRE carries no threshold in the acreage seed, so it matches `undefined`
+    // and would count on a row that simply omits the bucket. Require the
+    // evidence to include at least one real acreage number.
+    const numericLegacy = legacyBuckets.filter((b) => LEGACY_MAX_BY_BUCKET[b] !== undefined);
+    if (numericLegacy.length >= MIN_LEGACY_BUCKETS_TO_REWRITE) {
       const next = { ...oldData };
       const rewritten = [];
       const skipped = [];
       for (const [bucket, values] of Object.entries(TREATABLE_SF_SEED)) {
-        const current = oldData[bucket] || {};
-        if (bucketMax(current) !== LEGACY_MAX_BY_BUCKET[bucket]) { skipped.push(bucket); continue; }
-        const merged = { ...current, ...values };
+        if (!legacyBuckets.includes(bucket)) { skipped.push(bucket); continue; }
+        const merged = { ...(oldData[bucket] || {}), ...values };
         // db-bridge reads `cfg?.maxSqFt ?? cfg?.max_sqft`, so a leftover
         // camel-case key takes PRECEDENCE and would keep the bridge on the old
         // acreage value — the row would look corrected while behaving as before.
@@ -132,7 +153,7 @@ exports.up = async function (knex) {
       }
       if (rewritten.length) {
         const reason = skipped.length
-          ? `${UP_REASON} — left tuned bucket(s) alone: ${skipped.join(', ')}`
+          ? `${UP_REASON} — left non-legacy bucket(s) alone: ${skipped.join(', ')}`
           : UP_REASON;
         // `rewrittenBuckets` is the rollback key: down() restores ONLY these,
         // so a bucket up() skipped is never clobbered on the way back out.
@@ -209,11 +230,38 @@ exports.down = async function (knex) {
       const next = { ...current };
       const reverted = [];
       for (const bucket of rewritten) {
-        // Only revert a bucket still holding exactly what up() wrote; a value
-        // tuned after the migration is the owner's, not ours to undo.
-        if (bucketMax(next[bucket]) !== bucketMax(applied[bucket])) continue;
-        if (priorData[bucket] === undefined) delete next[bucket];
-        else next[bucket] = priorData[bucket];
+        const currentBucket = next[bucket];
+        const appliedBucket = applied[bucket];
+        if (!currentBucket || !appliedBucket) continue;
+        if (priorData[bucket] === undefined) {
+          // up() created the bucket; only remove it if untouched since.
+          if (JSON.stringify(currentBucket) !== JSON.stringify(appliedBucket)) continue;
+          delete next[bucket];
+          reverted.push(bucket);
+          continue;
+        }
+        // Restore FIELD BY FIELD, and only fields still holding what up() wrote.
+        // Replacing the whole bucket would erase a label (or any other property)
+        // edited after the migration while max_sqft happened to be untouched.
+        const restored = { ...currentBucket };
+        let changed = false;
+        for (const [field, appliedValue] of Object.entries(appliedBucket)) {
+          if (String(restored[field]) !== String(appliedValue)) continue;
+          if (Object.prototype.hasOwnProperty.call(priorData[bucket], field)) {
+            restored[field] = priorData[bucket][field];
+          } else {
+            delete restored[field];
+          }
+          changed = true;
+        }
+        // The camel-case key up() deleted comes back only if it was there before.
+        if (Object.prototype.hasOwnProperty.call(priorData[bucket], 'maxSqFt')
+          && !Object.prototype.hasOwnProperty.call(restored, 'maxSqFt')) {
+          restored.maxSqFt = priorData[bucket].maxSqFt;
+          changed = true;
+        }
+        if (!changed) continue;
+        next[bucket] = restored;
         reverted.push(bucket);
       }
       if (reverted.length) {
