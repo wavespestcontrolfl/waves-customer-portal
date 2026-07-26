@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
+const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -115,7 +115,7 @@ async function loadCustomer(customerId) {
 // no appointment phone contacts at all (e.g. email-only customer), falls back to
 // the primary customer email so they still get the notice.
 async function resolveRecipients(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const seen = new Set();
   const recipients = [];
   const add = (email, name) => {

@@ -15,7 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
-const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require('./customer-contact');
+const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
@@ -87,7 +87,7 @@ function looksLikeEmail(value) {
 // owner's phone being reachable doesn't reach the person the appointment
 // notifies. Best-effort — DB misses fail open per leg but never throw.
 async function hasTextReachableApptRecipient(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   // sms_enabled=false blocks every SMS to this customer at send time, so a
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
@@ -778,7 +778,7 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 }
 
 async function getReminderPrefs(customerId) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -1925,7 +1925,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
           const day = formatDay(newApptTime);
           const date = formatDate(newApptTime);
           const time = formatTime(newApptTime);
@@ -2050,7 +2050,7 @@ const AppointmentReminders = {
       // Send cancellation notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const apptTime = new Date(record.appointment_time);
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
@@ -2128,7 +2128,7 @@ const AppointmentReminders = {
       const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
       if (!customer) return null;
 
-      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => null);
+      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
 
       // scheduled_date is a DATE, window_start a TIME — compose into the
       // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
@@ -2237,7 +2237,7 @@ const AppointmentReminders = {
 
       const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {

@@ -262,6 +262,40 @@ describe('customer contact recipient routing', () => {
     }));
   });
 
+  test('an EXPLICIT opt-out wins even when there is no other recipient (codex #2992 P1)', () => {
+    // The old `!contacts.length ||` safety net overrode a stored false, so
+    // unchecking the toggle did nothing for an account with no distinct
+    // consented contact — the UI promised an opt-out the send path ignored.
+    const noContacts = {
+      id: 'cust-9', first_name: 'Solo', phone: '+15551110000', email: 'solo@example.com',
+    };
+    expect(getAppointmentContacts(noContacts, {})).toEqual([
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+    ]);
+    expect(getAppointmentContacts(noContacts, { appointment_notify_primary: false })).toEqual([]);
+    expect(getServiceReportEmailRecipients(noContacts, { service_report_notify_primary: false })).toEqual([]);
+
+    // Consent artifact missing => service contacts drop, but an explicit
+    // opt-out must still not resurrect the holder.
+    const unstamped = { ...customer, service_contacts_consent_at: null };
+    expect(getAppointmentContacts(unstamped, { appointment_notify_primary: false })).toEqual([]);
+  });
+
+  test('a FAILED preference lookup fails closed, not default-on (codex #2992 P1)', () => {
+    const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+    // A transient DB error must not be read as "no preference stored" and
+    // silently override a customer's opt-out.
+    expect(getAppointmentContacts(customer, PREFS_UNAVAILABLE)).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+    expect(getServiceReportEmailRecipients(customer, PREFS_UNAVAILABLE)).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+    ]);
+    // Every OTHER field still reads exactly like the `{}` callers passed before,
+    // so nothing beyond the notify-primary decision changes.
+    expect(PREFS_UNAVAILABLE.sms_enabled).toBeUndefined();
+  });
+
   test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';

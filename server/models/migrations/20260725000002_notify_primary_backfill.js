@@ -20,9 +20,16 @@
 // Reversible: `up` records the exact customer_ids it flipped in audit_log, and
 // `down` restores only those rows — so an unrelated later opt-out is not
 // clobbered by a rollback.
-const { randomUUID } = require('crypto');
-
+// updated_at is deliberately NOT restamped (codex #2992 P2):
+// `marketingSmsConsentBasisForContract` (server/services/document-contract-delivery.js)
+// publishes notification_prefs.updated_at as the marketing-SMS consent
+// `capturedAt`. Restamping 1139 rows for an unrelated system correction would
+// make every later marketing contract falsely claim consent was captured at
+// deploy time. Leaving it untouched also gives `down` a reliable marker: a row
+// this migration flipped keeps its ORIGINAL updated_at, while any later change
+// through the app stamps a newer one.
 const AUDIT_ACTION = 'migration.notify_primary_backfill';
+const AUDIT_ROLLBACK_ACTION = 'migration.notify_primary_backfill_rolled_back';
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('notification_prefs'))) return;
@@ -52,29 +59,37 @@ exports.up = async function up(knex) {
     withContacts = Number(row?.n || 0);
   }
 
+  const flippedAt = new Date();
   await knex.transaction(async (trx) => {
-    const updated = await trx('notification_prefs')
+    // RETURNING the ids actually written (codex #2992 P2): a row flipped
+    // concurrently between the `targets` pluck and this update is skipped by
+    // the `= false` guard, and must NOT land in the audit record — otherwise a
+    // later rollback would overwrite a value this migration never set.
+    const flipped = await trx('notification_prefs')
       .whereIn('customer_id', targets)
       .where({ appointment_notify_primary: false })
-      .update({ appointment_notify_primary: true, updated_at: new Date() });
+      .update({ appointment_notify_primary: true })
+      .returning('customer_id');
+    const flippedIds = flipped.map((r) => (typeof r === 'string' ? r : r.customer_id)).filter(Boolean);
 
-    if (await trx.schema.hasTable('audit_log')) {
-      await trx('audit_log').insert({
-        id: randomUUID(),
-        actor_type: 'system:migration',
-        action: AUDIT_ACTION,
-        resource_type: 'notification_prefs',
-        // Row-level ids live in metadata; this backfill is account-wide.
-        resource_id: null,
-        metadata: JSON.stringify({
-          reason: 'appointment_notify_primary opt-in default silently dropped account holders from appointment texts',
-          updated_count: updated,
-          targets_with_on_location_contacts: withContacts,
-          customer_ids: targets,
-        }),
-      });
-    }
-    console.log(`[20260725000002] backfilled ${updated} notification_prefs row(s) to appointment_notify_primary=true (${withContacts} had on-location contacts)`);
+    const { recordAuditEvent } = require('../../services/audit-log');
+    await recordAuditEvent({
+      actor_type: 'system:migration',
+      action: AUDIT_ACTION,
+      resource_type: 'notification_prefs',
+      // critical: `down` reads this record to know what to revert, so a lost
+      // audit write must fail the migration rather than be swallowed.
+      critical: true,
+      trx,
+      metadata: {
+        reason: 'appointment_notify_primary opt-in default silently dropped account holders from appointment texts',
+        updated_count: flippedIds.length,
+        targets_with_on_location_contacts: withContacts,
+        flipped_at: flippedAt.toISOString(),
+        customer_ids: flippedIds,
+      },
+    });
+    console.log(`[20260725000002] backfilled ${flippedIds.length} notification_prefs row(s) to appointment_notify_primary=true (${withContacts} had on-location contacts)`);
   });
 };
 
@@ -94,11 +109,43 @@ exports.down = async function down(knex) {
   const ids = Array.isArray(meta.customer_ids) ? meta.customer_ids : [];
   if (!ids.length) return;
 
-  // Restore ONLY the rows this migration flipped, and only if they are still
-  // true — a customer who has since opted out on their own is left alone.
-  await knex('notification_prefs')
-    .whereIn('customer_id', ids)
-    .where({ appointment_notify_primary: true })
-    .update({ appointment_notify_primary: false, updated_at: new Date() });
-  await knex('audit_log').where({ id: record.id }).del();
+  // Revert ONLY rows this migration actually flipped AND that nobody has
+  // touched since (codex #2992 P2). `up` does not restamp updated_at, so a row
+  // it flipped still carries its original timestamp, while any later change
+  // through the app stamps a newer one — that is the "unchanged since our
+  // write" marker. A customer who has since chosen `true` themselves keeps it.
+  // Revert + audit atomically on the MIGRATION's own connection: passing trx
+  // keeps recordAuditEvent off the service's separate db handle, and
+  // critical:true means a lost audit write aborts the rollback instead of
+  // leaving reverted data with no forensic record.
+  await knex.transaction(async (trx) => {
+    const query = trx('notification_prefs')
+      .whereIn('customer_id', ids)
+      .where({ appointment_notify_primary: true });
+    if (meta.flipped_at) {
+      query.where(function untouchedSinceBackfill() {
+        this.whereNull('updated_at').orWhere('updated_at', '<=', new Date(meta.flipped_at));
+      });
+    }
+    const reverted = await query.update({ appointment_notify_primary: false });
+    const skipped = ids.length - reverted;
+
+    // audit_log rows are NEVER deleted (see 20260419000005 header) — the
+    // record of a mass customer-preference rewrite must survive its own
+    // rollback. Append a rollback event instead.
+    const { recordAuditEvent } = require('../../services/audit-log');
+    await recordAuditEvent({
+      actor_type: 'system:migration',
+      action: AUDIT_ROLLBACK_ACTION,
+      resource_type: 'notification_prefs',
+      critical: true,
+      trx,
+      metadata: {
+        reverts_audit_id: record.id,
+        reverted_count: reverted,
+        skipped_changed_since_backfill: skipped,
+      },
+    });
+    console.log(`[20260725000002] rollback reverted ${reverted} row(s); left ${skipped} changed-since-backfill row(s) alone`);
+  });
 };

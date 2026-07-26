@@ -33,6 +33,23 @@ function cleanEmail(v) {
   return clean(v).toLowerCase();
 }
 
+// Sentinel for "we could not READ the preferences", as distinct from "there is
+// no preference row". Callers wrap their notification_prefs lookup in
+// `.catch(() => PREFS_UNAVAILABLE)`; the notify-primary resolvers then fail
+// CLOSED rather than treating an unreadable row as the default.
+//
+// Why this matters (codex #2992 P1): under the old opt-IN default a failed
+// lookup produced `{}` and excluded the account holder, so an error could only
+// drop a message. Under opt-OUT semantics the same `{}` would ADD the holder —
+// silently overriding a stored `false` and texting someone who opted out. For
+// every other field the sentinel behaves exactly like the `{}` these callers
+// already passed (all reads undefined), so nothing else changes behavior.
+const PREFS_UNAVAILABLE = Object.freeze({ __prefsUnavailable: true });
+
+function prefsUnavailable(prefs) {
+  return prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true;
+}
+
 function sameEmail(a, b) {
   const ea = cleanEmail(a);
   const eb = cleanEmail(b);
@@ -168,11 +185,21 @@ function getAppointmentContacts(customer, prefs = {}, { skipConsentGate = false 
 
   // Opt-OUT, not opt-in: the account holder is always a legitimate recipient of
   // their own appointment info (own number, own consent validated at send time),
-  // so only an EXPLICIT false removes them. Default-on because opt-in default
-  // failed silently — naming a spouse switched off the `!contacts.length`
-  // safety net and the holder stopped getting texts with no signal to them or
-  // the owner (5 accounts hit this by 2026-07-24; all repaired by hand).
-  const notifyPrimary = !contacts.length || prefs.appointment_notify_primary !== false;
+  // so only an EXPLICIT false removes them. Default-on because the opt-in
+  // default failed silently — naming a spouse switched off the old
+  // `!contacts.length` safety net and the holder stopped getting texts with no
+  // signal to them or the owner (5 accounts hit this by 2026-07-24).
+  //
+  // That safety net is deliberately GONE rather than OR'd in (codex #2992 P1):
+  // `!contacts.length || …` overrode an explicit `false`, so unchecking the
+  // toggle did nothing for an account with no distinct consented contact — the
+  // UI promised an opt-out the send path ignored. Under opt-out semantics the
+  // net is redundant anyway: an absent preference already resolves to true.
+  //
+  // Safe for the legacy `false` rows only because 20260725000002 backfills them
+  // BEFORE this code serves traffic — Railway runs migrations pre-deploy and a
+  // failed migration blocks the deploy, so this cannot go live without it.
+  const notifyPrimary = !prefsUnavailable(prefs) && prefs.appointment_notify_primary !== false;
   if (notifyPrimary && primary.phone && !contacts.some(c => samePhone(c.phone, primary.phone))) {
     contacts.push({ ...primary, role: 'primary' });
   }
@@ -215,14 +242,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
     });
   }
 
-  // Opt-OUT, same as getAppointmentContacts: only an EXPLICIT false drops the
-  // account holder from their own service reports. The opt-in default failed
-  // the same silent way — adding a contact EMAIL switched off the
-  // `!recipients.length` safety net. This path is MORE exposed than the
-  // appointment one because it is not behind the consent artifact, so an
-  // unstamped row dropped the holder too (3 accounts were live in that state
-  // on 2026-07-24).
-  const notifyPrimary = !recipients.length || prefs.service_report_notify_primary !== false;
+  // Opt-OUT, same as getAppointmentContacts — including dropping the old
+  // `!recipients.length` net so an explicit false is actually honored, and
+  // failing closed when the preferences could not be read. The opt-in default
+  // failed the same silent way here: adding a contact EMAIL switched the net
+  // off. This path is MORE exposed than the appointment one because it is not
+  // behind the consent artifact, so an unstamped row dropped the holder too
+  // (3 accounts were live in that state on 2026-07-24).
+  const notifyPrimary = !prefsUnavailable(prefs) && prefs.service_report_notify_primary !== false;
   // Billing-recipient copy is only meaningful when a billing_email is set —
   // without one the billing contact IS the primary, which the notify-primary
   // toggle already covers.
@@ -266,6 +293,8 @@ function isServiceContactRole(role) {
 }
 
 module.exports = {
+  PREFS_UNAVAILABLE,
+  prefsUnavailable,
   SERVICE_CONTACT_SLOTS,
   SERVICE_CONTACT_COLUMNS,
   firstNameFrom,
