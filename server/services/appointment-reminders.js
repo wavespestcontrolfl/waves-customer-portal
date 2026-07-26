@@ -710,7 +710,13 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // (always a legitimate recipient of their own appointment changes; their
   // own consent is validated at send time) so reschedule/cancel/no-show
   // notices from DIRECT callers never silently vanish (#2956 codex r7).
-  if (!allowedContacts.length && contacts.length) {
+  // …but NEVER over an explicit opt-out (codex #2992 P1): the resolver now
+  // honors a stored `false`, so re-adding the holder here would reinstate
+  // exactly the messages the toggle promises to stop. An unreadable preference
+  // is treated the same way — fail closed rather than guess.
+  const { prefsUnavailable: primaryPrefsUnavailable } = require('./customer-contact');
+  const primaryOptedOut = primaryPrefsUnavailable(prefs) || prefs?.appointment_notify_primary === false;
+  if (!allowedContacts.length && contacts.length && !primaryOptedOut) {
     const { getPrimaryContact } = require('./customer-contact');
     const primary = getPrimaryContact(customer);
     if (primary.phone) {

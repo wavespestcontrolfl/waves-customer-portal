@@ -4,9 +4,10 @@
 // rows only). Unlike the appointment sibling, this one repairs customers who are
 // ALREADY broken: verified read-only against prod 2026-07-24, THREE account
 // holders were receiving none of their own service reports because a contact
-// email existed and their stored value was the old `false` default —
-// Robert Meelan, Henry Palmer, Chris Whitney. Their reports were going only to
-// the on-location contact.
+// email existed and their stored value was the old `false` default. Their
+// reports were going only to the on-location contact. (Accounts identified in
+// the PR discussion — deliberately not named here; customer identities do not
+// belong in repository history.)
 //
 // Distribution at that time: 1142 `false`, 5 `true`, 0 NULL.
 //

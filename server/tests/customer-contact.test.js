@@ -180,7 +180,7 @@ describe('customer contact recipient routing', () => {
     expect(getAppointmentContacts(withDupes, { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
     ]);
-    // Robert Meelan's shape (2026-07-24): the holder's OWN number sitting in a
+    // The 2026-07-24 incident shape: the holder's OWN number sitting in a
     // contact slot is de-duped away, so with the holder opted IN they appear
     // exactly once, as primary — never twice.
     expect(getAppointmentContacts(withDupes, {})).toEqual([

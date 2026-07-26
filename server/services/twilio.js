@@ -697,7 +697,12 @@ const TwilioService = {
     // Hold emptied a NON-empty list: fall back to the primary account
     // holder (their own consent is validated at send time) — an email-less
     // customer must still get the en-route notice somewhere (#2956 r9).
-    if (!contacts.length && enRouteUnfiltered.length) {
+    // …but NEVER over an explicit opt-out (codex #2992 P1) — re-adding the
+    // holder here would reinstate the very texts the toggle promises to stop.
+    // An unreadable preference fails closed too.
+    const { prefsUnavailable } = require("./customer-contact");
+    const primaryOptedOut = prefsUnavailable(prefs) || prefs?.appointment_notify_primary === false;
+    if (!contacts.length && enRouteUnfiltered.length && !primaryOptedOut) {
       const primary = getPrimaryContact(customer);
       if (primary.phone) contacts = [{ ...primary, role: "primary" }];
     }
