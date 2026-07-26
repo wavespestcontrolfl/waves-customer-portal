@@ -4,6 +4,11 @@
 // Called on server startup; re-syncs every 60s on next estimate
 // ============================================================
 const constants = require('./constants');
+// Pristine in-code mosquito brackets, captured at module load. `constants` is a
+// mutable singleton that every sync writes through, so rejecting a bad DB row has
+// to ASSIGN these back — merely skipping the assignment leaves whatever a prior
+// sync applied live while the DB and admin UI show the rejected values.
+const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -1252,8 +1257,15 @@ async function syncConstantsFromDB(dbInstance) {
       const smallMax = Number(config.mosquito_lot_sizes.SMALL?.maxSqFt ?? config.mosquito_lot_sizes.SMALL?.max_sqft);
       const halfMax = Number(config.mosquito_lot_sizes.HALF?.maxSqFt ?? config.mosquito_lot_sizes.HALF?.max_sqft);
       const isLegacyGrossLotSeed = smallMax === 10889 && halfMax === 43559;
-      if (!isLegacyGrossLotSeed) {
-        const next = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
+      if (isLegacyGrossLotSeed) {
+        // Kill-value pattern: reject the row AND reassert the in-code brackets.
+        // Skipping the assignment would leave thresholds from an earlier sync
+        // live on this mutable singleton — the admin PUT re-runs this sync, so a
+        // save of the legacy seed would otherwise keep quoting the previous
+        // custom brackets until the process restarted.
+        constants.MOSQUITO.lotCategories = MOSQUITO_DEFAULT_LOT_CATEGORIES.map(c => ({ ...c }));
+      } else {
+        const next = MOSQUITO_DEFAULT_LOT_CATEGORIES.map(c => ({ ...c }));
         for (const c of next) {
           const cfg = config.mosquito_lot_sizes[c.key];
           const maxSqFt = cfg?.maxSqFt ?? cfg?.max_sqft;

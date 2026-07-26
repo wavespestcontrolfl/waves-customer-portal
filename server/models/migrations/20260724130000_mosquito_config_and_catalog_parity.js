@@ -86,11 +86,45 @@ const STALE_ONE_TIME_BASE_PRICE = 250;
 // this migration actually changed — not just their current values.
 const CATALOG_AUDIT_KEY = 'mosquito_catalog_parity';
 const CATALOG_UP_REASON = 'Mosquito catalog parity: cleared stale pre-2026-06 one-time base_price';
+const CATALOG_DOWN_REASON = 'Rollback: restored pre-migration mosquito one-time base_price';
 
 function bucketMax(bucket) {
   if (!bucket || typeof bucket !== 'object') return undefined;
   const raw = bucket.maxSqFt ?? bucket.max_sqft;
   return raw == null ? undefined : Number(raw);
+}
+
+// Audit rows persist across up/down cycles, so a later no-op reapplication must
+// NOT consume provenance from an earlier cycle — that would restore values this
+// application never changed (legacy brackets, or a resurrected $250). Only an UP
+// row with a HIGHER id than the most recent matching DOWN row belongs to the
+// current cycle.
+async function latestUncancelledUp(knex, { configKey, upReasonPrefix, downReasonPrefix }) {
+  const lastDown = await knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG })
+    .whereLike('reason', `${downReasonPrefix}%`)
+    .orderBy('id', 'desc')
+    .first('id');
+  const query = knex('pricing_config_audit')
+    .where({ config_key: configKey, changed_by: MIGRATION_TAG })
+    .whereLike('reason', `${upReasonPrefix}%`)
+    .orderBy('id', 'desc');
+  if (lastDown?.id != null) query.where('id', '>', lastDown.id);
+  return query.first('old_value', 'new_value');
+}
+
+// Mirrors validatePestPricingConfig's MOSQUITO.lotCategories check: thresholds
+// must ascend in the engine's bucket order, with the terminal bucket unbounded.
+const BUCKET_ORDER = ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE'];
+function isAscending(row) {
+  let previous = -Infinity;
+  for (const bucket of BUCKET_ORDER) {
+    const max = bucketMax(row[bucket]);
+    const value = max === undefined ? Infinity : max;
+    if (value < previous) return false;
+    previous = value;
+  }
+  return true;
 }
 
 // jsonb does not preserve object-key order, so a stringify comparison against a
@@ -154,7 +188,14 @@ exports.up = async function (knex) {
         next[bucket] = merged;
         rewritten.push(bucket);
       }
-      if (rewritten.length) {
+      // A per-bucket rewrite can cross a NEIGHBOUR an admin tuned and leave the
+      // row descending — e.g. SMALL=13000 (tuned) with QUARTER=14519 legacy
+      // becomes 13000, 11999. `validatePestPricingConfig` then fails the WHOLE
+      // sync ("lotCategories must be sorted ascending") and
+      // `restorePricingConstants` reverts EVERY pricing constant to in-code
+      // defaults, so one mosquito row would silently disable DB-authoritative
+      // pricing across all services. Never write a row that cannot load.
+      if (rewritten.length && isAscending(next)) {
         const reason = skipped.length
           ? `${UP_REASON} — left non-legacy bucket(s) alone: ${skipped.join(', ')}`
           : UP_REASON;
@@ -198,11 +239,11 @@ exports.down = async function (knex) {
   const hasAudit = await knex.schema.hasTable('pricing_config_audit');
   if (!hasAudit) return;
 
-  const lotUp = await knex('pricing_config_audit')
-    .where({ config_key: LOT_SIZES_KEY, changed_by: MIGRATION_TAG })
-    .whereLike('reason', `${UP_REASON}%`)
-    .orderBy('id', 'desc')
-    .first('old_value', 'new_value');
+  const lotUp = await latestUncancelledUp(knex, {
+    configKey: LOT_SIZES_KEY,
+    upReasonPrefix: UP_REASON,
+    downReasonPrefix: DOWN_REASON,
+  });
   if (lotUp) {
     const snapshot = parseJson(lotUp.old_value) || {};
     const priorData = snapshot.data || {};
@@ -264,10 +305,11 @@ exports.down = async function (knex) {
   }
 
   if (await knex.schema.hasTable('services')) {
-    const catalogUp = await knex('pricing_config_audit')
-      .where({ config_key: CATALOG_AUDIT_KEY, changed_by: MIGRATION_TAG, reason: CATALOG_UP_REASON })
-      .orderBy('id', 'desc')
-      .first('old_value', 'new_value');
+    const catalogUp = await latestUncancelledUp(knex, {
+      configKey: CATALOG_AUDIT_KEY,
+      upReasonPrefix: CATALOG_UP_REASON,
+      downReasonPrefix: CATALOG_DOWN_REASON,
+    });
     if (catalogUp) {
       const prior = parseJson(catalogUp.old_value) || {};
       const applied = parseJson(catalogUp.new_value) || {};
@@ -292,6 +334,15 @@ exports.down = async function (knex) {
           await knex('services')
             .where({ service_key: key })
             .update({ ...patch, updated_at: knex.fn.now() });
+          // Marker that closes this cycle: a later reapplication that changes
+          // nothing must not consume the provenance row above a second time.
+          await knex('pricing_config_audit').insert({
+            config_key: CATALOG_AUDIT_KEY,
+            old_value: JSON.stringify(appliedFields),
+            new_value: JSON.stringify(patch),
+            changed_by: MIGRATION_TAG,
+            reason: CATALOG_DOWN_REASON,
+          });
         }
       }
     }

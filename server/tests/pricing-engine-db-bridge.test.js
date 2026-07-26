@@ -277,6 +277,31 @@ describe('pricing engine DB bridge', () => {
     ]);
   });
 
+  test('legacy gross-lot seed reasserts the in-code brackets, not the last synced ones', async () => {
+    // constants.MOSQUITO.lotCategories is a mutable singleton and the admin PUT
+    // re-runs this sync, so rejecting the seed has to ASSIGN the in-code values
+    // back. Skipping the assignment would keep a previous sync's custom
+    // thresholds live while the DB and admin UI show the rejected seed.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'mosquito_lot_sizes',
+      data: { SMALL: { max_sqft: 5000 }, QUARTER: { max_sqft: 9000 }, THIRD: { max_sqft: 14000 }, HALF: { max_sqft: 30000 }, ACRE: { max_sqft: 999999 } },
+    }]))).resolves.toBe(true);
+    expect(constants.MOSQUITO.lotCategories.map((c) => c.maxSqFt)).toEqual([5000, 9000, 14000, 30000, Infinity]);
+
+    // Now an admin saves the legacy acreage seed: the custom 5000 must NOT survive.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'mosquito_lot_sizes',
+      data: { SMALL: { max_sqft: 10889 }, QUARTER: { max_sqft: 14519 }, THIRD: { max_sqft: 21779 }, HALF: { max_sqft: 43559 }, ACRE: {} },
+    }]))).resolves.toBe(true);
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
+  });
+
   test('ignores the legacy gross-lot-acreage mosquito lot-size seed', async () => {
     const db = pricingConfigDb([
       {
