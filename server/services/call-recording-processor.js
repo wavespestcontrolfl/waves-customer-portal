@@ -5134,6 +5134,35 @@ const CallRecordingProcessor = {
             bridgeNeedsConfirmation.push('address_recovered');
           }
 
+          // When AV accepted or corrected the address, adopt Google's
+          // normalized form (street/city/state/zip + county) into the
+          // extraction BEFORE the routing branch — BOTH paths persist
+          // extracted.* downstream (approved: dispatch + customer/lead upsert;
+          // blocked: the lead/customer writes that still run for triaged
+          // calls). Adopting only on approval left blocked calls saving the
+          // raw transcript spelling even though AV had already resolved the
+          // rooftop address (live 2026-07-27: a phantom city and a split
+          // street name reached lead rows). The gate and flag computation
+          // above already consumed the AV verdict, so adopting here changes
+          // what gets SAVED, not what routes.
+          if (addressValidation?.normalized
+            && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
+            const n = addressValidation.normalized;
+            v2Extraction.property = v2Extraction.property || {};
+            v2Extraction.property.service_address = {
+              ...(v2Extraction.property.service_address || {}),
+              ...(n.street_line_1 ? { street_line_1: n.street_line_1 } : {}),
+              ...(n.city ? { city: n.city } : {}),
+              ...(n.state ? { state: n.state } : {}),
+              ...(n.postal_code ? { postal_code: n.postal_code } : {}),
+              ...(addressValidation.county ? { county: addressValidation.county } : {}),
+            };
+            if (n.street_line_1) extracted.address_line1 = n.street_line_1;
+            if (n.city) extracted.city = n.city;
+            if (n.state) extracted.state = n.state;
+            if (n.postal_code) extracted.zip = n.postal_code;
+          }
+
           if (!routingResult.allowed) {
             // Prefer the flags that actually BLOCK the appointment. When none do
             // (the block came from a non-flag reason like low_confidence /
@@ -5154,31 +5183,8 @@ const CallRecordingProcessor = {
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
           } else {
-            // Approved. When AV accepted or corrected the address, dispatch on
-            // Google's normalized address (e.g. the corrected zip), not the
-            // caller's raw input. The gate already cleared the address flags;
-            // this makes the appointment use the address the gate trusted.
-            // CRITICAL: also write the corrected address into `extracted` HERE,
-            // before the customer/lead upsert below reads extracted.* — otherwise
-            // the saved customer record keeps the uncorrected address even though
-            // the gate auto-routed on the corrected one.
-            if (addressValidation?.normalized
-              && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
-              const n = addressValidation.normalized;
-              v2Extraction.property = v2Extraction.property || {};
-              v2Extraction.property.service_address = {
-                ...(v2Extraction.property.service_address || {}),
-                ...(n.street_line_1 ? { street_line_1: n.street_line_1 } : {}),
-                ...(n.city ? { city: n.city } : {}),
-                ...(n.state ? { state: n.state } : {}),
-                ...(n.postal_code ? { postal_code: n.postal_code } : {}),
-                ...(addressValidation.county ? { county: addressValidation.county } : {}),
-              };
-              if (n.street_line_1) extracted.address_line1 = n.street_line_1;
-              if (n.city) extracted.city = n.city;
-              if (n.state) extracted.state = n.state;
-              if (n.postal_code) extracted.zip = n.postal_code;
-            }
+            // Approved — dispatch proceeds on the AV-normalized address
+            // adopted above (both branches adopt it now).
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -5776,6 +5782,42 @@ const CallRecordingProcessor = {
           .merge({ payload: secondaryTriageItem.payload, updated_at: new Date() });
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+
+    // Phone-verification lane (owner directive 2026-07-27): when a call ends
+    // up linked to an EXISTING customer whose on-file numbers do NOT include
+    // the caller's number, the link came from something weaker than the phone
+    // (a pre-set call.customer_id, a name/context match) — never trust it
+    // silently. Advisory card carries the number + the matched identity so
+    // the office confirms it's really them and saves the number to the
+    // account (future calls then hard-match by phone). Skips brand-new
+    // customers (their phone IS this call's) and outbound dials. Best-effort:
+    // a failed check must never break call processing.
+    if (customerId && phone && !createdCustomerFromCall && !isOutboundCall(call)) {
+      try {
+        const linked = await db('customers').where({ id: customerId })
+          .first(['first_name', 'last_name', ...CONTACT_MATCH_PHONE_COLS]);
+        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(phone, linked[col]));
+        if (linked && !phoneOnFile) {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'caller_phone_not_on_file',
+              extraction: v2CanonicalExtraction,
+              severity: 'advisory',
+              extraPayload: {
+                caller_phone: phone,
+                matched_customer_name: [linked.first_name, linked.last_name].filter(Boolean).join(' ') || null,
+                on_file_phone: linked.phone || null,
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+          logger.info(`[call-proc] Caller number not on any phone slot of linked customer ${customerId} — advisory identity-confirm card opened for ${maskSid(callSid)}`);
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] caller-phone-on-file check skipped: ${e.message}`);
       }
     }
 

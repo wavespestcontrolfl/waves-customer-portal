@@ -164,6 +164,11 @@ function buildTriageItem({
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
+    // The call linked to an existing customer via something WEAKER than the
+    // phone (pre-set call.customer_id, name/context) and the caller's number
+    // is not on any of that customer's phone slots — the office confirms the
+    // identity and saves the number to the account if it's really them.
+    caller_phone_not_on_file: 'customer_field_conflict',
     unassigned_auto_booking: 'time_ambiguous',
     // Advisory schedule-clash / time-sanity cards for AI call bookings
     // (call-recording-processor): the visit BOOKED as normal — the card
