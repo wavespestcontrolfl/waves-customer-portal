@@ -21,6 +21,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const MODELS = require('../../config/models');
+const { stripThinkingBlocks } = require('../llm/deep');
 const twilioNumbers = require('../../config/twilio-numbers');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -269,7 +270,10 @@ class LLMMentionProber {
           content: `An AI answer mentioned "Waves Pest Control" like this:\n"""${context}"""\nReply with ONE word — positive, neutral, or negative — for how it portrays Waves.`,
         }],
       });
-      const word = (resp.content?.[0]?.text || '').toLowerCase().trim();
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+      const word = (stripThinkingBlocks(resp).content?.[0]?.text || '').toLowerCase().trim();
       return ['positive', 'negative', 'neutral'].find(s => word.includes(s)) || 'neutral';
     } catch {
       return 'neutral';

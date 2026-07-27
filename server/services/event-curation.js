@@ -46,6 +46,7 @@ try {
 }
 
 const MODELS = require('../config/models');
+const { stripThinkingBlocks } = require('./llm/deep');
 
 // Examined per run. One Claude call per CLASSIFY_BATCH; a fully fresh
 // backlog (e.g. first deploy) drains within a couple of runs.
@@ -175,7 +176,10 @@ async function classifyBatch(events, todayIso) {
     system: 'You are a precise event curator. You output strict JSON and nothing else.',
     messages: [{ role: 'user', content: buildCurationPrompt(events, todayIso) }],
   });
-  const text = response.content?.[0]?.text || '';
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
   return parseCurationResponse(text, events.map((e) => e.id));
 }
 
