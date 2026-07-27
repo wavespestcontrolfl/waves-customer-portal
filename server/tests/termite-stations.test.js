@@ -32,18 +32,22 @@ const {
 // Minimal knex-shaped fake for the exact chains the service uses
 // (where/orderBy/insert.returning/insert.onConflict.merge/update, plus a
 // passthrough transaction), recording writes for assertions.
-function makeFakeDb({ stations = [], checks = [] } = {}) {
+function makeFakeDb({ stations = [], checks = [], customers = [] } = {}) {
   // seeds default to the termite program — the service's program-scoped
   // where({ program }) must still see legacy-shaped seed rows
   const state = {
     stations: stations.map((row) => ({ program: 'termite', ...row })),
     checks: [...checks],
+    // Station ownership for newly created pins is read from the customer
+    // (rental programs are stamped there at estimate conversion).
+    customers: [...customers],
     rawCalls: [],
   };
   let nextId = 0;
   const rowsFor = (table) => {
     if (table === 'termite_stations') return state.stations;
     if (table === 'termite_station_checks') return state.checks;
+    if (table === 'customers') return state.customers;
     throw new Error(`unexpected table ${table}`);
   };
   const db = (table) => {
@@ -58,6 +62,7 @@ function makeFakeDb({ stations = [], checks = [] } = {}) {
       },
       orderBy: () => builder,
       select: () => builder,
+      first: () => Promise.resolve(rows.filter(matches)[0] || null),
       insert(row) {
         const created = { id: `${table}-${nextId += 1}`, is_active: true, ...row };
         rows.push(created);
@@ -949,4 +954,60 @@ test('current context drift is all-or-nothing like the report map', () => {
     program: 'termite',
   });
   expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+});
+
+// ── station ownership (rental) ────────────────────────────────────────────────
+//
+// termite_stations.owned_by has to be right at CREATE time: the pins are made
+// at the install visit, by a completion-sync/office path with no view of the
+// estimate that sold the program. The rented fact is stamped on the customer
+// at conversion, and this is where it lands on the hardware.
+
+const RENTER = { id: CUSTOMER, termite_stations_rented: true };
+const BUYER = { id: CUSTOMER, termite_stations_rented: false };
+
+test('rented program: newly created termite stations are recorded as Waves-owned', async () => {
+  const { db, state } = makeFakeDb({ customers: [RENTER] });
+  const summary = await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ shape: pin(0.2, 0.2) }, { shape: pin(0.5, 0.5) }],
+  });
+  expect(summary.created).toBe(2);
+  expect(state.stations.map((row) => row.owned_by)).toEqual(['waves', 'waves']);
+});
+
+test('purchased program (and unknown customer) leaves stations customer-owned', async () => {
+  for (const customers of [[BUYER], []]) {
+    const { db, state } = makeFakeDb({ customers });
+    await upsertStationsForCustomer(db, {
+      customerId: CUSTOMER,
+      entries: [{ shape: pin(0.2, 0.2) }],
+    });
+    expect(state.stations.map((row) => row.owned_by)).toEqual(['customer']);
+  }
+});
+
+test('ownership is termite-only — rodent hardware is Waves’ either way, never stamped from the bait rental', async () => {
+  const { db, state } = makeFakeDb({ customers: [RENTER] });
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    program: 'rodent',
+    entries: [{ shape: pin(0.4, 0.4) }],
+  });
+  expect(state.stations.map((row) => row.owned_by)).toEqual(['customer']);
+});
+
+test('moving or retiring an existing station never rewrites its ownership', async () => {
+  const { db, state } = makeFakeDb({
+    customers: [RENTER],
+    stations: [
+      { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, owned_by: 'customer', geometry_image: pin(0.1, 0.1) },
+    ],
+  });
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ id: 'st-1', shape: pin(0.4, 0.4) }],
+  });
+  // A renter relocating a station they BOUGHT keeps owning it.
+  expect(state.stations.find((row) => row.id === 'st-1').owned_by).toBe('customer');
 });

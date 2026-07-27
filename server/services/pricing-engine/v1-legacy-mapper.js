@@ -389,6 +389,7 @@ function mapV1ToLegacyShape(v1Result) {
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
   const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
+  const tbRentLI = lineItems.find(l => l.service === 'termite_station_rental');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
   const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
   // Commercial auto-priced recurring lines (guard on .annual so a manual
@@ -698,6 +699,23 @@ function mapV1ToLegacyShape(v1Result) {
         bondTerm: tbBondLI.bondTerm,
         bondYears: tbBondLI.bondYears,
         annual: Number(tbBondLI.annual) || null,
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+      });
+    }
+    // Station rental uplift (owner 2026-07-26) — same posture as the bond
+    // rider: standalone recurring line, in the totals, but never tier-counted
+    // and never bundle-discountable. This is hardware cost recovery on
+    // stations Waves still owns, so a WaveGuard percentage applied here would
+    // discount the stations themselves rather than a margin.
+    if (tbRentLI) {
+      svcAdd(tbRentLI.name || 'Termite Station Rental', tbRentLI, {
+        service: 'termite_station_rental',
+        annual: Number(tbRentLI.annual) || null,
+        detail: `${tbLI.stations} rented stations · Waves-owned`,
+        retailValue: tbRentLI.retailValue,
         discountable: false,
         discountEligible: false,
         waveGuardDiscountEligible: false,

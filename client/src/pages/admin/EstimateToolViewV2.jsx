@@ -2109,6 +2109,7 @@ export default function EstimateToolViewV2({
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
     termiteBondTerm: "none",
+    termiteOwnership: "own",
     termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
@@ -3504,6 +3505,7 @@ export default function EstimateToolViewV2({
         termiteBaitSystem: form.termiteBaitSystem || "advance",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBondTerm: form.termiteBondTerm || "none",
+        termiteOwnership: form.termiteOwnership || "own",
         termiteBaitComplexity: form.termiteBaitComplexity || "",
         termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
         termiteFootprintSqFt,
@@ -4183,6 +4185,7 @@ export default function EstimateToolViewV2({
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
       termiteBondTerm: "none",
+      termiteOwnership: "own",
       termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
@@ -6012,6 +6015,24 @@ export default function EstimateToolViewV2({
                                 { value: "1yr", label: "1-Year term" },
                                 { value: "5yr", label: "5-Year term" },
                                 { value: "10yr", label: "10-Year term" },
+                              ]}
+                            />
+                          </FieldV2>
+                        )}
+                        {/* Station ownership (owner 2026-07-26): rental drops
+                            the one-time install and recovers it as a per-
+                            application uplift on the quarterly check. Amount
+                            comes from the engine (pricing_config.termite_rental),
+                            so no rate is spelled out here. Residential only —
+                            commercial routes hardware through the manual-quote
+                            scope split below. */}
+                        {!isCommercialEstimateInput(form) && (
+                          <FieldV2 label="Stations">
+                            <SelectV2
+                              k="termiteOwnership"
+                              options={[
+                                { value: "own", label: "Purchased" },
+                                { value: "rent", label: "Rented" },
                               ]}
                             />
                           </FieldV2>

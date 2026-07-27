@@ -1301,15 +1301,28 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+// Termite billing riders ride the bait visit instead of being units of
+// their own: the bond via its combined route, the station rental with no
+// row at all. Both must stay out of every unit count, or a bait+rider plan
+// reads as multi-unit and nulls the whole-plan per-application fee.
+function isTermiteStationRentalLine(svc = {}) {
+  return recurringServiceKey(svc) === 'termite_station_rental';
+}
+
+function isTermiteBillingRiderLine(svc = {}) {
+  const key = String(recurringServiceKey(svc) || '');
+  return key.startsWith('termite_bond') || key === 'termite_station_rental';
+}
+
 // The per-application charge divides the plan annual by the SINGLE unit's
-// visit count. Termite-bond riders are unit-count-exempt, so the single
-// unit is the non-bond line set (codex #2915 r6) — bait+bond derives 4
-// from the bait line; true multi-unit plans still return null.
+// visit count. Termite riders are unit-count-exempt, so the single unit is
+// the non-rider line set (codex #2915 r6) — bait+bond derives 4 from the
+// bait line; true multi-unit plans still return null.
 function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
-  const nonBond = (Array.isArray(recurringLines) ? recurringLines : [])
-    .filter((svc) => !String(recurringServiceKey(svc) || '').startsWith('termite_bond'));
-  if (nonBond.length !== 1 || supplementUnitCount !== 0) return null;
-  return visitsPerYearForRecurringService(nonBond[0]);
+  const nonRider = (Array.isArray(recurringLines) ? recurringLines : [])
+    .filter((svc) => !isTermiteBillingRiderLine(svc));
+  if (nonRider.length !== 1 || supplementUnitCount !== 0) return null;
+  return visitsPerYearForRecurringService(nonRider[0]);
 }
 
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
@@ -1526,7 +1539,30 @@ const EstimateConverter = {
       recurringServices,
       estimateData,
     });
-    const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
+    // Station rental (owner 2026-07-26) is a pure BILLING rider, and unlike
+    // the bond rider it is NOT a scheduling unit under any route. The bond
+    // needs a visit identity — its "%Termite Bond% (N-Year Term)" name is
+    // the termite_bonds lifecycle-sync contract — so it rides a combined
+    // route. The rental has no lifecycle table and no name contract: the
+    // stations it pays for are checked on the bait visit that already
+    // exists, so there is nothing for a second row to do.
+    //
+    // Leaving the line in the conversion set breaks billing three ways
+    // (codex P0 on this PR): scheduling turns it into a phantom "Termite
+    // Station Rental" appointment, the plan reads as multi-unit so
+    // riderAwareSingleUnitVisits returns null, and per_application_fee +
+    // both rows' estimated_price go null — completion then invoices
+    // NOTHING, monitoring included. Dropping it here costs no money: the
+    // uplift is already inside estimate.monthly_total / annual_total, and
+    // the per-application charge divides that whole-plan annual.
+    const recurringServicesForConversion = suppressRecurringConversion
+      ? []
+      : recurringServices.filter((svc) => !isTermiteStationRentalLine(svc));
+    // Read BEFORE the filter drops the line — this is the only signal that
+    // the sold program rents its stations, and it has to outlive conversion
+    // (see the customers.termite_stations_rented stamp below).
+    const acceptedTermiteStationRental = !suppressRecurringConversion
+      && recurringServices.some(isTermiteStationRentalLine);
     // FAIL-CLOSED money guard: annual-prepay coverage is a per-TERM fact and an
     // annual_prepay_terms row carries exactly ONE coverage service
     // (coverage_service_type / coverage_visit_count / coverage_cadence). A
@@ -1562,6 +1598,8 @@ const EstimateConverter = {
     // flip a bait+bond plan to "multi-unit" and null out the whole-plan
     // per-application fee/row price that the single combined visit must
     // carry ($150/application = monitoring + bond, whole plan ÷ 4).
+    // (Station-rental lines are already filtered out of
+    // recurringServicesForConversion above — they are never units.)
     const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
     const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
     const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
@@ -1761,6 +1799,16 @@ const EstimateConverter = {
           } : {}),
           active: true,
           deleted_at: null,
+          // Station rental (owner 2026-07-26): the accepted agreement is the
+          // only place that knows Waves keeps title to the hardware, and the
+          // stations themselves are not created until the install visit — a
+          // completion-sync/office code path with no view of this estimate.
+          // Stamping the customer here is what lets upsertStationsForCustomer
+          // default new stations to owned_by='waves' (codex P1). Only ever
+          // set TRUE from an accept: a customer who later buys their stations
+          // is an owner action, not an estimate side effect, so an accept
+          // without a rental line must not silently flip a renter back.
+          ...(acceptedTermiteStationRental ? { termite_stations_rented: true } : {}),
           // Reactivating to active_customer — clear any churn stamp so a former
           // (churned/dormant) customer who accepts a recurring estimate isn't
           // still counted as churned by churned_at-based queries (e.g. MRR trend).

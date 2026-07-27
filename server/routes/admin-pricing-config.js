@@ -229,6 +229,16 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     for (const term of ['term_1yr', 'term_5yr', 'term_10yr']) {
       if (!isPositive(data?.[term])) return fail(`termite_bond.${term} must be a positive $/quarter amount`);
     }
+  } else if (configKey === 'termite_rental') {
+    // Station rental amortization horizon (owner 2026-07-26). The uplift is
+    // install price / recovery_quarters, so a zero here divides by nothing
+    // and a negative would pay the customer to rent. Whole quarters only —
+    // the db-bridge rounds, and accepting a fraction here would just make the
+    // stored value disagree with the one that actually prices.
+    const quarters = num(data?.recovery_quarters);
+    if (!Number.isInteger(quarters) || quarters < 1) {
+      return fail('termite_rental.recovery_quarters must be a whole number of quarters (>= 1)');
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then

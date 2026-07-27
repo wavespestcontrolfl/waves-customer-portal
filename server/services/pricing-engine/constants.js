@@ -794,6 +794,27 @@ const TERMITE = {
     '5yr':  { quarterly: r(54), label: '5-Year',  years: 5 },
     '10yr': { quarterly: r(45), label: '10-Year', years: 10 },
   },
+  // Station rental (owner 2026-07-26): the Massey/Sentricon-style option —
+  // $0 install, Waves RETAINS ownership of the in-ground stations, and the
+  // install price it would have cost to buy them is recovered as a fixed
+  // per-application uplift on the same quarterly station check.
+  //
+  // recoveryQuarters is the amortization horizon, NOT an end date: the
+  // uplift is permanent for the life of the agreement (owner ruling — it is
+  // a rental fee, not a payment plan). At the seeded 20 quarters a rental
+  // customer reaches parity with outright purchase at the 5-year mark and
+  // pays more after that, which is the honest trade for $0 up front and is
+  // exactly the shape of the builder programs these takeovers come from.
+  //
+  // The uplift rides its OWN line item (termite_station_rental), mirroring
+  // the bond rider: hardware cost recovery must never be eroded by a
+  // WaveGuard tier or bundle percentage, so it is registered in
+  // excludedFromPercentDiscount. DB-tunable via pricing_config.termite_rental
+  // (recovery_quarters — see db-bridge).
+  rental: {
+    recoveryQuarters: 20,
+    label: 'Station Rental',
+  },
 };
 
 // ============================================================
@@ -1873,6 +1894,10 @@ const WAVEGUARD = {
     pre_slab_termidor: true,    // Excluded — no discount
     foam_recurring: true,       // Recurring spot-foam: standalone, no WaveGuard tier or bundle % discount (cadence multiplier is its only discount)
     termite_bond: true,         // Warranty rider (owner 2026-07-20): fixed quarterly rate by term, no tier count, no bundle % discount
+    // Station rental uplift (owner 2026-07-26): straight hardware cost
+    // recovery on stations Waves still owns — discounting it would give away
+    // the stations, not a margin. No tier count, no bundle % discount.
+    termite_station_rental: true,
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
     // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
     // it here stops the orchestrator discount loop from applying the 15% rc

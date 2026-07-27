@@ -301,6 +301,21 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}:${stationProgram}`]);
   }
 
+  // Who owns stations created in THIS write (owner 2026-07-26). Rented
+  // programs are stamped on the customer at estimate conversion, because the
+  // install visit that creates the pins has no view of the agreement that
+  // sold them. Termite-only: the rental option exists for bait stations, and
+  // rodent/trapping hardware is Waves' either way. Fail-soft — a customer
+  // row we cannot read leaves the column at its 'customer' default rather
+  // than blocking the field save.
+  let createdOwnedBy = 'customer';
+  if (stationProgram === 'termite') {
+    try {
+      const owner = await trx('customers').where({ id: customerId }).first('termite_stations_rented');
+      if (owner?.termite_stations_rented) createdOwnedBy = 'waves';
+    } catch (_err) { /* column not migrated yet / unreadable — keep the default */ }
+  }
+
   // Program-scoped throughout: numbering, ownership, dedupe, occupancy and
   // the active cap are each per (customer, program) — a rodent save can
   // never renumber, move, or retire a termite pin, and vice versa.
@@ -433,6 +448,7 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
         program: stationProgram,
         label: normalizeLabel(entry.label),
         geometry_image: JSON.stringify(shape),
+        owned_by: createdOwnedBy,
       })
       .returning('*');
     nextNumber += 1;

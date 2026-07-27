@@ -78,7 +78,8 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceRodentBait, priceRodentTrapping,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
@@ -938,10 +939,17 @@ function generateEstimate(input) {
       }
     } else {
       const termiteOptions = serviceOptions(termiteBaitService);
+      // Station rental (owner 2026-07-26) is dark-shipped like the bond
+      // rider: with GATE_TERMITE_STATION_RENTAL off, a 'rent' request is
+      // ignored and the program prices as outright purchase, exactly as it
+      // did before this lane. Kill = unset the var.
+      const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
+      const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
         system: termiteOptions.system || 'advance',
         monitoringTier: termiteOptions.monitoringTier || 'basic',
+        ownership: wantsRental ? 'rent' : 'own',
         modifiers,
       });
       result.annual = Math.round(result.annual);
@@ -956,6 +964,24 @@ function generateEstimate(input) {
       lineItems.push(result);
       if (!result.quoteRequired && !result.requiresMeasurement) {
         activeServiceKeys.push('termite_bait');
+        // Station rental uplift — standalone recurring line beside the bond
+        // rider, for the same reason: it is hardware cost recovery, so it is
+        // NOT tier-counted and NOT bundle-discountable
+        // (excludedFromPercentDiscount.termite_station_rental). Amortizes the
+        // install price the customer did not pay at signing.
+        if (wantsRental) {
+          const rental = priceTermiteStationRental(result.installation?.retailValue);
+          if (rental) {
+            lineItems.push(rental);
+            result.stationRental = {
+              perApp: rental.perApp,
+              annual: rental.annual,
+              monthly: rental.monthly,
+              retailValue: rental.retailValue,
+              recoveryQuarters: rental.recoveryQuarters,
+            };
+          }
+        }
         // Termite bond rider (owner 2026-07-20): only alongside a PRICED
         // bait program — the warranty rides the bait stations' quarterly
         // check. NOT added to activeServiceKeys (no WaveGuard tier) and
