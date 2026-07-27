@@ -176,6 +176,14 @@ describe('notification trigger push tags', () => {
     expect(safe.message).toBe('call ***4123 or ***2299 today');
   });
 
+  test('phone redaction still masks URL-encoded numbers', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      message: 'Lookup phone=%2B19415551212&Fields=caller_name failed',
+    });
+
+    expect(safe.message).toBe('Lookup phone=***1212&Fields=caller_name failed');
+  });
+
   test('notification metadata payload sanitizer does not persist raw contact fields', () => {
     const safe = __private.sanitizeNotificationPayload('new_lead', {
       phone: '+18182079399',

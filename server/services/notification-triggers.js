@@ -29,6 +29,10 @@ const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // "extension 4") is consumed as part of the phone so the trailing lookahead
 // doesn't mistake it for an identifier tail.
 const PHONE_CANDIDATE_RE = /(?<![A-Za-z0-9])\+?\d[\d\s().-]{6,}\d(?:\s*(?:extension|ext\.?|x)\s*\d{1,6})?(?![A-Za-z0-9])/gi;
+// URL-encoded E.164 ("phone=%2B19415551212") starts its digit run right after
+// the alphanumeric "B", which the identifier lookbehind above would skip —
+// handle the encoded form first, before the boundary logic runs.
+const URL_ENCODED_PHONE_RE = /%2B(\d{7,15})(?![A-Za-z0-9])/gi;
 const STREET_ADDRESS_RE = /\b\d{1,6}\s+[A-Za-z0-9 .'-]+?\s(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Boulevard|Blvd|Trail|Trl|Terrace|Ter|Place|Pl|Parkway|Pkwy|Way)\b/gi;
 const SENSITIVE_TEXT_KEY_RE = /(message|body|note|reason|summary|text|description|title)/i;
 
@@ -55,6 +59,7 @@ function redactSensitiveText(value) {
   return String(value)
     .replace(EMAIL_RE, (match) => maskEmail(match))
     .replace(STREET_ADDRESS_RE, '[address]')
+    .replace(URL_ENCODED_PHONE_RE, (match, digits) => maskPhone(digits))
     .replace(PHONE_CANDIDATE_RE, redactPhoneCandidate);
 }
 
