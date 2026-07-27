@@ -4812,18 +4812,24 @@ function EstimateViewPageInner() {
     if (paymentPreference !== 'prepay_annual') return;
     const pricingState = data?.pricing || {};
     const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
-    // A seasonal bundle combo axis disables prepay even when the top-level
-    // (pest) frequency carries no per-tier flag (codex r14 P1).
-    const eligible = !cadencesRequestSeasonal(serviceCadences)
-      && (typeof frequency?.annualPrepayEligible === 'boolean'
-        ? frequency.annualPrepayEligible
-        : pricingState.annualPrepayEligible === true);
+    // Same adjudication order as annualPrepayEligibleEffective below: the
+    // matched combo's server-stamped flag wins (codex r18 P1), a seasonal
+    // axis without one disables, then the tier/estimate-level flags.
+    let eligible;
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      eligible = selectedCombo.annualPrepayEligible;
+    } else {
+      eligible = !cadencesRequestSeasonal(serviceCadences)
+        && (typeof frequency?.annualPrepayEligible === 'boolean'
+          ? frequency.annualPrepayEligible
+          : pricingState.annualPrepayEligible === true);
+    }
     if (!eligible) {
       setPaymentPreference(null);
       setCtaPhase('configure');
       setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
     }
-  }, [data?.pricing, selectedFrequency, serviceCadences, paymentPreference]);
+  }, [data?.pricing, selectedFrequency, serviceCadences, selectedCombo, paymentPreference]);
 
   if (loading) {
     return (
@@ -4973,13 +4979,21 @@ function EstimateViewPageInner() {
   // the estimate-level flag only reflects the stored default row. The server
   // enforces the same per-tier rule at accept and /deposit-intent.
   // The mosquito tier can arrive on the top-level frequency (solo mosquito —
-  // stamped per tier) OR as a bundle combo axis (codex r14 P1) — a seasonal
-  // axis disables prepay regardless of the pest frequency's flag.
-  const annualPrepayEligibleEffective = cadencesRequestSeasonal(serviceCadences)
-    ? false
-    : (typeof combinedFrequency?.annualPrepayEligible === 'boolean'
-      ? combinedFrequency.annualPrepayEligible
-      : pricing.annualPrepayEligible === true);
+  // stamped per tier) OR as a bundle combo axis (codex r14 P1). The matched
+  // combo's server-stamped flag is authoritative when present (codex r18 P1:
+  // it can RESTORE prepay for a monthly12 axis on a seasonal-default
+  // estimate, which the estimate-level flag alone cannot); a seasonal axis
+  // without a stamped combo still disables prepay.
+  const annualPrepayEligibleEffective = (() => {
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      return selectedCombo.annualPrepayEligible;
+    }
+    if (cadencesRequestSeasonal(serviceCadences)) return false;
+    if (typeof combinedFrequency?.annualPrepayEligible === 'boolean') {
+      return combinedFrequency.annualPrepayEligible;
+    }
+    return pricing.annualPrepayEligible === true;
+  })();
   // The WaveGuard setup fee's waiver disclosure follows the SELECTED tier,
   // not the stored default (codex r11 P1): a monthly-default estimate
   // switched to seasonal9 must not promise "waived when you pay the year"

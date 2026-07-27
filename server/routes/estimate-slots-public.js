@@ -41,6 +41,7 @@ const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
   annualPrepayEligibleForMosquitoTier,
+  annualPrepayHasSellableIncentive,
   mosquitoTierForAxisToken,
   buildPricingBundle,
   commercialAcceptDepositExempt,
@@ -655,8 +656,13 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
         : null;
       let prepayEligibleHere;
       if (cadenceRequestsSeasonal) prepayEligibleHere = false;
-      else if (depositAxisTier) prepayEligibleHere = annualPrepayEligibleForMosquitoTier(estData, depositAxisTier);
-      else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
+      else if (depositAxisTier) {
+        // Mix eligibility AND the sellable-incentive gate — mirrors accept
+        // (codex r18 P1): no deposit for a prepay finalizePricingBundle
+        // deliberately disabled.
+        prepayEligibleHere = annualPrepayEligibleForMosquitoTier(estData, depositAxisTier)
+          && annualPrepayHasSellableIncentive(estimate, estData, pricingBundle || {});
+      } else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
         prepayEligibleHere = prepayFreq.annualPrepayEligible;
       } else prepayEligibleHere = annualPrepayEligibleForEstimateData(estData);
       if (!prepayEligibleHere) {

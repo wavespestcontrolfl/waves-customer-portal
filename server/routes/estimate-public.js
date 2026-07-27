@@ -8220,8 +8220,13 @@ router.put('/:token/accept', async (req, res, next) => {
         : null;
       let prepayMixEligible;
       if (cadenceRequestsSeasonal) prepayMixEligible = false;
-      else if (axisTier) prepayMixEligible = annualPrepayEligibleForMosquitoTier(estData, axisTier);
-      else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
+      else if (axisTier) {
+        // Mix eligibility AND the sellable-incentive gate (codex r18 P1) —
+        // a crafted monthly12 axis must not buy a prepay finalizePricingBundle
+        // deliberately disabled (operator-waived setup, no discount headroom).
+        prepayMixEligible = annualPrepayEligibleForMosquitoTier(estData, axisTier)
+          && annualPrepayHasSellableIncentive(estimate, estData, pricingBundle || {});
+      } else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
       else prepayMixEligible = isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
       if (!prepayMixEligible) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
@@ -16387,17 +16392,37 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // applies to tiers too (codex r12 P1): an operator-waived setup fee leaves
   // monthly-mosquito prepay with NO benefit, and the tier flag must not
   // resurrect an option the global gate correctly disabled.
-  if (Array.isArray(withQuoteState.frequencies)
-    && withQuoteState.frequencies.some(frequencyIsMosquitoTier)) {
+  const hasMosquitoTierFrequencies = Array.isArray(withQuoteState.frequencies)
+    && withQuoteState.frequencies.some(frequencyIsMosquitoTier);
+  const hasMosquitoAxisCombos = Array.isArray(withQuoteState.serviceCadenceCombos)
+    && withQuoteState.serviceCadenceCombos.some((combo) => !!mosquitoTierForAxisToken(combo?.selection?.mosquito));
+  if (hasMosquitoTierFrequencies || hasMosquitoAxisCombos) {
     const tierIncentive = annualPrepayHasSellableIncentive(estimate, estData, withQuoteState);
-    withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
-      frequencyIsMosquitoTier(frequency)
-        ? {
-          ...frequency,
+    if (hasMosquitoTierFrequencies) {
+      withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
+        frequencyIsMosquitoTier(frequency)
+          ? {
+            ...frequency,
+            annualPrepayEligible: tierIncentive
+              && annualPrepayEligibleForMosquitoTier(estData, frequency),
+          }
+          : frequency));
+    }
+    // Bundle combos carry the mosquito tier on their selection axis — stamp
+    // authoritative eligibility on each so the client can RESTORE prepay for
+    // a monthly12 axis on a seasonal-default estimate (the estimate-level
+    // flag can't distinguish why it's false — codex r18 P1).
+    if (hasMosquitoAxisCombos) {
+      withQuoteState.serviceCadenceCombos = withQuoteState.serviceCadenceCombos.map((combo) => {
+        const axisTier = mosquitoTierForAxisToken(combo?.selection?.mosquito);
+        if (!axisTier) return combo;
+        return {
+          ...combo,
           annualPrepayEligible: tierIncentive
-            && annualPrepayEligibleForMosquitoTier(estData, frequency),
-        }
-        : frequency));
+            && annualPrepayEligibleForMosquitoTier(estData, axisTier),
+        };
+      });
+    }
   }
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
@@ -18426,6 +18451,7 @@ module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceM
 module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
 module.exports.annualPrepayEligibleForMosquitoTier = annualPrepayEligibleForMosquitoTier;
 module.exports.mosquitoTierForAxisToken = mosquitoTierForAxisToken;
+module.exports.annualPrepayHasSellableIncentive = annualPrepayHasSellableIncentive;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
