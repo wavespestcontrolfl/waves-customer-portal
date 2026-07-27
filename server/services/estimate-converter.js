@@ -2280,6 +2280,9 @@ const EstimateConverter = {
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
+      // Earliest date actually inserted by the loop below — replaces the
+      // picked date when a seasonal roll moved the real first visit.
+      let earliestScheduledUnitDate = null;
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; standalone rewrites (e.g. rodent bait) schedule
@@ -2444,6 +2447,10 @@ const EstimateConverter = {
             continue;
           }
           if (!firstScheduledServiceId && outcome.insertedId) firstScheduledServiceId = outcome.insertedId;
+          if (outcome.insertedId && unitFirstDate
+            && (!earliestScheduledUnitDate || unitFirstDate < earliestScheduledUnitDate)) {
+            earliestScheduledUnitDate = unitFirstDate;
+          }
           let insertedFollowUps = 0;
           if (outcome.seedResult) {
             if (deferFollowUpReminderRegistration && Array.isArray(outcome.seedResult.insertedRows)) {
@@ -2458,6 +2465,13 @@ const EstimateConverter = {
           logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
         }
       }
+      // The membership term/email start must reflect what was ACTUALLY
+      // scheduled: a solo seasonal plan accepted in Nov–Jan rolls its first
+      // visit to February, so the pre-roll firstServiceDate would tell the
+      // customer their membership starts on a winter date with no service
+      // (codex r15 P2). A mixed plan keeps its earliest real visit date;
+      // if nothing inserted (duplicate-series keeps), the picked date stands.
+      if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
     }
 
     // 3. Log conversion in activity_log

@@ -13,7 +13,7 @@ const {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('./recurring-appointment-seeder');
 
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
@@ -178,12 +178,15 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
-      // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option: the
-      // rain-out flow commits these targets through reschedule() with a
-      // non-admin initiator, whose season guard would reject them — recording
-      // failures and leaving the job unmoved (codex r14 P1). Late-October
-      // rain-outs simply offer the remaining in-season days.
-      if (service.recurring_pattern === SEASONAL_FEB_OCT) {
+      // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
+      // flows that commit with a non-admin initiator: rain-out calls
+      // reschedule() as 'tech', whose season guard would reject the target —
+      // recording failures and leaving the job unmoved (codex r14 P1).
+      // Late-October rain-outs simply offer the remaining in-season days.
+      // The ADMIN dispatch picker calls this generator with NO reason and
+      // commits as 'admin', which deliberately allows off-season exceptions —
+      // its options stay unfiltered (codex r15 P2).
+      if (reason && service.recurring_pattern === SEASONAL_FEB_OCT) {
         const month = Number(dateStr.slice(5, 7));
         if (month < 2 || month > 10) continue;
       }
@@ -603,6 +606,28 @@ class SmartRebooker {
     }
     const pattern = parent.recurring_pattern;
     const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
+    // Seasonal series keep their seeded weekend/season contract on re-anchor
+    // (codex r15 P2): conversion seeds seasonal series with skip_weekends,
+    // but a weekend anchor (public availability can offer weekends) would
+    // otherwise project every later occurrence onto weekends — and a shifted
+    // date can cross the season edge (Oct 31 Sat → Nov 2). The customer's
+    // picked anchor date itself is honored as-is; only projected siblings
+    // shift. Scoped to seasonal so every other cadence keeps its
+    // long-standing unshifted re-anchor behavior.
+    const projectSeriesDate = (raw) => {
+      if (pattern !== SEASONAL_FEB_OCT) return raw;
+      let out = String(raw).split('T')[0];
+      if (parent.skip_weekends) {
+        const at = parseETDateTime(`${out}T12:00`);
+        const { dayOfWeek } = etParts(at);
+        if (dayOfWeek === 0 || dayOfWeek === 6) {
+          const back = parent.weekend_shift === 'back';
+          const delta = back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1);
+          out = etDateString(addETDays(at, delta));
+        }
+      }
+      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends });
+    };
     const opts = {
       ...(isMonthBasedPattern
         ? recurrenceOrdinalOptions(newDate)
@@ -716,7 +741,7 @@ class SmartRebooker {
           const oi = i - startIdx;
           projectedDates.push(oi === 0
             ? String(newDate).split('T')[0]
-            : nextRecurringDate(newDate, parent.recurring_pattern, oi, opts));
+            : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, oi, opts)));
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -789,7 +814,7 @@ class SmartRebooker {
         const isAnchor = occurrenceIndex === 0;
         const date = isAnchor
           ? newDate
-          : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
+          : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
 
         const updateData = {
           scheduled_date: date,
