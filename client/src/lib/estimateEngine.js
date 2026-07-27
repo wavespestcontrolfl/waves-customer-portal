@@ -447,23 +447,38 @@ const MOSQUITO_DEFAULT_BASE_PRICES = {
 const MOSQUITO_BASE_PRICES = { ...MOSQUITO_DEFAULT_BASE_PRICES };
 
 export function applyServerMosquitoPricingConfig(config) {
-  const rate = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
-  };
+  // ROUNDING MUST MIRROR THE BRIDGE, same rule as the pest floor above:
+  // db-bridge applies r() — whole-dollar round, PROCESSING_ADJUSTMENT is 1.00 —
+  // to mosquito_base_prices (db-bridge.js:1232-1234), NOT the cent-preserving
+  // bondRate(). A configured $66.50 becomes $67 server-side, so a cents-keeping
+  // client would price 66.5 x 1.15 = $76 against the server's 67 x 1.15 = $77,
+  // and CLIENT_FALLBACK would persist the mismatch as the billed price.
+  const normalize = (v) => Math.round(Number(v));
+  // WHOLE-ROW semantics, also mirroring the bridge: syncConstantsFromDB
+  // validates the assembled snapshot and restorePricingConstants reverts EVERY
+  // constant if any value is invalid. A single bad cell must therefore leave the
+  // in-code card intact here too, not a half-applied mix.
+  const next = {};
+  let valid = true;
   for (const key of Object.keys(MOSQUITO_DEFAULT_BASE_PRICES)) {
     const fallback = MOSQUITO_DEFAULT_BASE_PRICES[key];
     const row = config?.[key];
     if (!row || typeof row !== 'object') {
-      MOSQUITO_BASE_PRICES[key] = [...fallback];
+      next[key] = [...fallback];
       continue;
     }
-    // Legacy rows used metal-tier keys; db-bridge accepts the same aliases.
+    // Legacy rows used metal-tier keys; db-bridge accepts the same aliases and
+    // falls back to the in-code value per program before normalizing.
     const legacy = row.silver ?? row.monthly ?? row.bronze;
-    MOSQUITO_BASE_PRICES[key] = [
-      rate(row.seasonal9 ?? row.seasonal ?? legacy) ?? fallback[0],
-      rate(row.monthly12 ?? row.monthly ?? legacy) ?? fallback[1],
+    const pair = [
+      normalize(row.seasonal9 ?? row.seasonal ?? legacy ?? fallback[0]),
+      normalize(row.monthly12 ?? row.monthly ?? legacy ?? fallback[1]),
     ];
+    if (!pair.every((n) => Number.isFinite(n) && n > 0)) { valid = false; break; }
+    next[key] = pair;
+  }
+  for (const key of Object.keys(MOSQUITO_DEFAULT_BASE_PRICES)) {
+    MOSQUITO_BASE_PRICES[key] = valid ? next[key] : [...MOSQUITO_DEFAULT_BASE_PRICES[key]];
   }
   return { ...MOSQUITO_BASE_PRICES };
 }

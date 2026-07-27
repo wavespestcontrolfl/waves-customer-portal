@@ -637,6 +637,24 @@ describe('deprecated client estimator pricing drift guards', () => {
     // Absent/failed row resets to the in-code default — db-bridge kill-value pattern.
     applyServerMosquitoPricingConfig(null);
     expect(priceSmall()).toEqual([MOSQUITO.basePrices.SMALL[0], MOSQUITO.basePrices.SMALL[1]]);
+
+    // FRACTIONAL rates round to whole dollars BEFORE the pressure multiplier,
+    // exactly like db-bridge's r() — a cents-keeping client would price $66.50
+    // at 1.15 as $76 while the server charges $77 (pre-push P0 on #2996).
+    expect(applyServerMosquitoPricingConfig({ SMALL: { seasonal9: 66.5, monthly12: 60.4 } }).SMALL)
+      .toEqual([67, 60]);
+
+    // INVALID cell rejects the WHOLE row, mirroring restorePricingConstants —
+    // never a half-applied card.
+    applyServerMosquitoPricingConfig({ SMALL: { seasonal9: 91, monthly12: 84 } });
+    expect(priceSmall()).toEqual([91, 84]);
+    applyServerMosquitoPricingConfig({
+      SMALL: { seasonal9: 70, monthly12: 65 },
+      HALF: { seasonal9: 'not-a-number', monthly12: 70 },
+    });
+    expect(priceSmall()).toEqual([MOSQUITO.basePrices.SMALL[0], MOSQUITO.basePrices.SMALL[1]]);
+    applyServerMosquitoPricingConfig({ SMALL: { seasonal9: 0, monthly12: 60 } });
+    expect(priceSmall()).toEqual([MOSQUITO.basePrices.SMALL[0], MOSQUITO.basePrices.SMALL[1]]);
   });
 
   test('admin estimate page loads the live mosquito row on mount', () => {
