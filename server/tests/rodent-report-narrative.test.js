@@ -18,6 +18,7 @@ const {
   deviceFacts,
   isNameableDevice,
   echoesWithheldName,
+  ungroundedClaims,
   buildUserMessage,
   _cache,
 } = _test;
@@ -43,11 +44,13 @@ function input(overrides = {}) {
     },
     activity: { label: 'Rodent Activity', levelWord: 'Moderate activity', score: 3, maxScore: 5, isBaseline: true, trendWord: null },
     stationSummary: { total: 7, checked: 7, activity: 0, serviced: 0, inaccessible: 0 },
+    stationProgram: 'trapping',
     applications: [
       {
         product: {
           name: 'Victor Expanded Trigger Rat Snap Trap',
           epa_reg: 'N/A',
+          active_ingredient: 'Mechanical snap trap',
           category: 'Rodent Control',
           service_report_summary: 'A mechanical trap or monitoring device used to detect and capture activity — it contains no pesticide.',
         },
@@ -68,7 +71,12 @@ test('groundingFacts keeps only usable facts', () => {
     { label: 'Traps checked', value: '7' },
   ]);
   expect(facts.activity).toMatchObject({ levelWord: 'Moderate activity', score: 3, isBaseline: true });
-  expect(facts.stations).toEqual({ total: 7, checked: 7, capturesRecorded: 0, serviced: 0, inaccessible: 0 });
+  // trapping names the fact for what the number IS: traps carrying a
+  // capture status, never a capture total (codex P1)
+  expect(facts.stations).toEqual({ program: 'trapping', total: 7, checked: 7, trapsWithCaptureRecorded: 0, serviced: 0, inaccessible: 0 });
+  // bait-station programs get consumption semantics instead
+  expect(groundingFacts(input({ stationProgram: 'rodent', stationSummary: { total: 4, checked: 4, activity: 2, serviced: 0, inaccessible: 0 } })).stations)
+    .toEqual({ program: 'rodent', total: 4, checked: 4, stationsWithBaitConsumption: 2, serviced: 0, inaccessible: 0 });
   expect(facts.photoEvidence).toHaveLength(1);
   expect(facts.nextVisit).toMatchObject({ date: 'Monday, August 3', window: '8–10 AM' });
 
@@ -85,17 +93,23 @@ test('groundingFacts keeps only usable facts', () => {
   expect(groundingFacts(input({ stationSummary: { total: 0 } })).stations).toBeNull();
 });
 
-test('registered pesticide products never enter the prompt by name', () => {
+test('only explicit mechanical devices are nameable — unknown products fail closed', () => {
   const apps = [
-    { product: { name: 'Victor Rat Snap Trap', epa_reg: '', category: 'Rodent Control' } },
+    { product: { name: 'Victor Rat Snap Trap', epa_reg: '', active_ingredient: 'Mechanical snap trap', category: 'Rodent Control' } },
     { product: { name: 'Contrac Blox Rodenticide', epa_reg: '12455-79', category: 'Rodenticide' } },
   ];
   const devices = deviceFacts(apps);
   expect(devices[0]).toMatchObject({ name: 'Victor Rat Snap Trap', nameable: true });
   expect(devices[1]).toMatchObject({ name: null, nameable: false, category: 'Rodenticide' });
-  expect(isNameableDevice({ epa_reg: 'N/A' })).toBe(true);
-  expect(isNameableDevice({ epa_reg: 'none' })).toBe(true);
-  expect(isNameableDevice({ epa_reg: '12455-79' })).toBe(false);
+  // a bare/N-A/none EPA field proves NOTHING (legacy rows, 25(b)-exempt
+  // pesticides) — without an explicit device signal the product stays
+  // generic (codex P2)
+  expect(isNameableDevice({ epa_reg: 'N/A' })).toBe(false);
+  expect(isNameableDevice({ epa_reg: 'none' })).toBe(false);
+  expect(isNameableDevice({ epa_reg: '', name: 'Essentria IC-3' })).toBe(false);
+  expect(isNameableDevice({ epa_reg: '12455-79', active_ingredient: 'Mechanical snap trap' })).toBe(false);
+  expect(isNameableDevice({ epa_reg: 'N/A', active_ingredient: 'Mechanical snap trap' })).toBe(true);
+  expect(isNameableDevice({ epa_reg: '', service_report_summary: 'A monitoring device — it contains no pesticide.' })).toBe(true);
 
   const message = buildUserMessage(groundingFacts(input({ applications: apps })));
   expect(message).toContain('Victor Rat Snap Trap');
@@ -106,6 +120,20 @@ test('registered pesticide products never enter the prompt by name', () => {
   expect(echoesWithheldName('We checked the Victor snap traps.', apps)).toBe(false);
 });
 
+test('ungrounded numbers and unsupported capture/consumption claims are rejected', () => {
+  const facts = groundingFacts(input());
+  // every numeral in clean copy is grounded (7 traps, activity 3/5, Aug 3, 8–10 window)
+  expect(ungroundedClaims('We inspected all 7 traps; activity was 3 out of 5. Next visit Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
+  // a changed count is caught
+  expect(ungroundedClaims('We inspected 9 traps today.', facts)).toContain('ungrounded_number:9');
+  // an invented capture (zero traps carry the status) is caught even without digits
+  expect(ungroundedClaims('We removed a capture from the garage trap.', facts)).toContain('unsupported_capture_claim');
+  // negated forms stay clean
+  expect(ungroundedClaims('No captures were recorded on this visit.', facts)).toEqual([]);
+  // consumption claims need a bait-station fact
+  expect(ungroundedClaims('Bait consumption was observed at the rear station.', facts)).toContain('unsupported_consumption_claim');
+});
+
 test('deterministic summary = ratified copy + factual counts + next visit', () => {
   const text = deterministicSummary(groundingFacts(input()));
   expect(text).toContain('Rodent activity was moderate today.');
@@ -114,11 +142,18 @@ test('deterministic summary = ratified copy + factual counts + next visit', () =
   expect(text).toContain('Photos from this visit are included with this report.');
   expect(text).toContain('Your next visit is scheduled for Monday, August 3, arriving 8–10 AM.');
 
-  // capture counts render factually
+  // traps-with-capture counts render as locations, never capture totals
+  // (one trap can hold multiple captures — codex P1)
   const captures = deterministicSummary(groundingFacts(input({
     stationSummary: { total: 7, checked: 7, activity: 2, serviced: 0, inaccessible: 0 },
   })));
-  expect(captures).toContain('with 2 captures recorded');
+  expect(captures).toContain('with a capture recorded at 2 traps');
+  // bait-station programs speak consumption, not captures
+  const bait = deterministicSummary(groundingFacts(input({
+    stationProgram: 'rodent',
+    stationSummary: { total: 4, checked: 4, activity: 1, serviced: 0, inaccessible: 0 },
+  })));
+  expect(bait).toContain('4 of 4 bait stations were inspected, with bait consumption observed at 1 station.');
   // without a snapshot body the recap carries the summary
   const noSnapshot = groundingFacts(input({ typedReport: null }));
   expect(deterministicSummary(noSnapshot)).toContain('Today we completed your Rodent Trapping Service.');
@@ -158,7 +193,7 @@ test('banned copy, bad length, and withheld-name echoes fall back deterministica
   // withheld registered-product echo
   const withBait = await applyRodentReportNarrative(input({
     applications: [
-      { product: { name: 'Victor Rat Snap Trap', epa_reg: 'N/A', category: 'Rodent Control' } },
+      { product: { name: 'Victor Rat Snap Trap', epa_reg: 'N/A', active_ingredient: 'Mechanical snap trap', category: 'Rodent Control' } },
       { product: { name: 'Contrac Blox Rodenticide', epa_reg: '12455-79', category: 'Rodenticide' } },
     ],
   }), {

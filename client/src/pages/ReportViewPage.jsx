@@ -8095,16 +8095,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <p>{visitSummaryCopy(data)}</p>
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
-                gallery is skipped for these reports so the photos show once. */}
+                gallery is skipped for these reports so the photos show once.
+                The typed snapshot's consolidated photoSummary moves with the
+                gallery (it only rendered in the legacy section — codex P2). */}
             {data.rodentReportRefresh && (data.photos || []).length > 0 && (
-              <div className="sr-grid-3" style={{ marginTop: 16 }}>
-                {data.photos.map((photo) => (
-                  <div className="sr-cell" key={photo.id}>
-                    {photo.url && <img src={photo.url} alt={photo.caption || 'Service photo'} style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }} />}
-                    <div className="sr-cell-value">{photo.caption || photo.stateBadge || 'Documented during this visit'}</div>
-                  </div>
-                ))}
-              </div>
+              <>
+                {data.typedReport?.photoSummary && (
+                  <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '16px 0 0' }}>
+                    {data.typedReport.photoSummary}
+                  </p>
+                )}
+                <div className="sr-grid-3" style={{ marginTop: 16 }}>
+                  {data.photos.map((photo) => (
+                    <div className="sr-cell" key={photo.id}>
+                      {photo.url && <img src={photo.url} alt={photo.caption || 'Service photo'} style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }} />}
+                      <div className="sr-cell-value">{photo.caption || photo.stateBadge || 'Documented during this visit'}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
             {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
                 REPLACING the legacy Lawn Intelligence card + mowing block it supersedes.

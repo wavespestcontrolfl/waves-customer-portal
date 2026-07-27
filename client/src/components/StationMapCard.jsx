@@ -205,12 +205,22 @@ function prefersReducedMotion() {
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
+// Only ARMED traps (checked, no capture) may star in the ambient cycle — a
+// rat running to an inaccessible, unchecked, or already-sprung pin would
+// visually contradict that trap's persisted legend status (codex P2 #3004).
+export function eligibleTrapIndices(stations = []) {
+  return stations
+    .map((station, index) => (station.status === 'ok' ? index : -1))
+    .filter((index) => index >= 0);
+}
+
 // Cycles the ambient rat: pick the next armed trap round-robin, run the rat
 // to it (~2.3s), fire the trap, clear. Returns null when idle/disabled.
-function useAmbientRatCycle(enabled, stationCount) {
+function useAmbientRatCycle(enabled, eligibleIndices) {
   const [run, setRun] = useState(null); // { stationIdx, phase: 'run' | 'snap' }
+  const eligibleKey = eligibleIndices.join(',');
   useEffect(() => {
-    if (!enabled || !stationCount || prefersReducedMotion()) return undefined;
+    if (!enabled || !eligibleIndices.length || prefersReducedMotion()) return undefined;
     let cursor = 0;
     const timers = new Set();
     const later = (fn, ms) => {
@@ -218,7 +228,7 @@ function useAmbientRatCycle(enabled, stationCount) {
       timers.add(t);
     };
     const cycle = () => {
-      const stationIdx = cursor % stationCount;
+      const stationIdx = eligibleIndices[cursor % eligibleIndices.length];
       cursor += 1;
       setRun({ stationIdx, phase: 'run' });
       later(() => setRun({ stationIdx, phase: 'snap' }), 2300);
@@ -230,7 +240,9 @@ function useAmbientRatCycle(enabled, stationCount) {
       clearInterval(interval);
       timers.forEach(clearTimeout);
     };
-  }, [enabled, stationCount]);
+    // eligibleKey is the value identity of eligibleIndices (a fresh array
+    // each render) — depending on the array itself would re-arm every render.
+  }, [enabled, eligibleKey]);
   return run;
 }
 
@@ -256,10 +268,11 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
   // Hook runs unconditionally (Rules of Hooks) — it self-disables when the
-  // card won't render, animation is off, or reduced motion is requested.
+  // card won't render, animation is off, no trap is armed, or reduced
+  // motion is requested.
   const ratRun = useAmbientRatCycle(
     useTrapPins && animate && !!stationMap?.available && !!stationMap?.image?.url,
-    stations.length,
+    eligibleTrapIndices(stations),
   );
   if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
   const plan = variant === 'plan';

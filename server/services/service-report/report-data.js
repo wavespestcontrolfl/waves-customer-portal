@@ -2949,6 +2949,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       typedReport: typedSnapshot,
       activity,
       stationSummary: stationMap?.summary || null,
+      // summary.activity semantics differ by program (traps with a capture
+      // vs stations with bait consumption) — the narrative names the fact
+      // accordingly and must know which map this is.
+      stationProgram: stationMap?.program || null,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3083,8 +3087,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       ? { enabled: false }
       : serviceCoverage,
     // Client-side switch for the refreshed rodent layout (photos in the
-    // summary, next-visit row, trap-styled animated map pins).
-    rodentReportRefresh: rodentReportRefresh || undefined,
+    // summary, trap-styled animated map pins). LIVE VIEWS ONLY: stored PDF
+    // keys don't carry this gate, so a flag that changed pdf/static markup
+    // would keep serving stale cached PDFs across a gate flip (codex P2
+    // #3004) — non-live renders keep the legacy layout unconditionally.
+    rodentReportRefresh: (rodentReportRefresh && opts.mode === 'live') || undefined,
     nextAppointment,
     visitTimeline,
     serviceLocations,

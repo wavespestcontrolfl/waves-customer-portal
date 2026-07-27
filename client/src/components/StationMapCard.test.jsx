@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { StationMapCard } from './StationMapCard';
+import { StationMapCard, eligibleTrapIndices } from './StationMapCard';
 
 // Trap-pin mode (GATE_RODENT_REPORT_REFRESH): trapping pins render as snap
 // traps — wooden base, kill bar, number badge — with the caught-rat
@@ -57,5 +57,19 @@ describe('StationMapCard — trap pins', () => {
     const { container } = render(<StationMapCard stationMap={STATION_MAP} trapPins />);
     expect(container.textContent).toContain('2 of 2 stations inspected');
     expect(container.textContent).toContain('1 with captures recorded');
+  });
+
+  it('only armed (ok) traps are eligible for the ambient rat cycle', () => {
+    // capture / inaccessible / serviced / unchecked pins carry a persisted
+    // legend status — the decorative rat must never fire them (codex P2)
+    expect(eligibleTrapIndices([
+      { status: 'ok' },
+      { status: 'activity' },
+      { status: 'inaccessible' },
+      { status: 'serviced' },
+      { status: 'on_file' },
+      { status: 'ok' },
+    ])).toEqual([0, 5]);
+    expect(eligibleTrapIndices([])).toEqual([]);
   });
 });

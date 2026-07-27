@@ -57,12 +57,26 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-// A device is nameable to the customer only when it is plainly not a
-// registered pesticide: no real EPA registration number. Rodenticide baits
-// and any registered product stay generic context.
+// A device is nameable to the customer only when it FAILS CLOSED into the
+// hardware bucket: no real EPA registration number AND an explicit device
+// signal in the recorded facts (mechanical trap / monitoring device / "no
+// pesticide" report copy). A missing or N/A EPA field alone proves nothing —
+// legacy rows and EPA-exempt (25(b)) pesticides also look like that, and an
+// unknown product must stay generic (codex P2 #3004).
+const DEVICE_SIGNAL_RE = /\b(mechanical|snap\s*trap|live\s*trap|glue\s*(board|trap)|monitor(?:ing)?\s*(device|station|trap)|no\s+pesticide|contains\s+no\s+pesticide)\b/i;
+
 function isNameableDevice(product = {}) {
   const reg = cleanText(product.epa_reg);
-  return !reg || /^n\/?a\.?$/i.test(reg) || /^none$/i.test(reg);
+  const hasRealReg = reg && !/^n\/?a\.?$/i.test(reg) && !/^none$/i.test(reg);
+  if (hasRealReg) return false;
+  const signal = [
+    product.active_ingredient,
+    product.category,
+    product.product_type,
+    product.service_report_summary,
+    product.precaution_summary,
+  ].map(cleanText).join(' ');
+  return DEVICE_SIGNAL_RE.test(signal);
 }
 
 function deviceFacts(applications = []) {
@@ -110,15 +124,28 @@ function activityFacts(activity = null) {
   };
 }
 
-function stationFacts(stationSummary = null) {
+// summary.activity is the count of STATIONS/TRAPS carrying the program's
+// activity status this visit — traps with a capture recorded (trapping) or
+// bait stations with consumption observed (rodent bait). It is NOT a total
+// capture count (one trap can hold more than one capture — codex P1 #3004),
+// so the fact names say exactly what the number is and the actual capture
+// count, when recorded, arrives via the typed findings.
+function stationFacts(stationSummary = null, program = null) {
   if (!stationSummary || !stationSummary.total) return null;
-  return {
+  const base = {
+    program: program || null,
     total: stationSummary.total,
     checked: stationSummary.checked || 0,
-    capturesRecorded: stationSummary.activity || 0,
     serviced: stationSummary.serviced || 0,
     inaccessible: stationSummary.inaccessible || 0,
   };
+  if (program === 'trapping') {
+    return { ...base, trapsWithCaptureRecorded: stationSummary.activity || 0 };
+  }
+  if (program === 'rodent') {
+    return { ...base, stationsWithBaitConsumption: stationSummary.activity || 0 };
+  }
+  return { ...base, stationsWithActivity: stationSummary.activity || 0 };
 }
 
 function photoFacts(photos = []) {
@@ -134,6 +161,7 @@ function groundingFacts({
   typedReport = null,
   activity = null,
   stationSummary = null,
+  stationProgram = null,
   applications = [],
   photos = [],
   nextAppointment = null,
@@ -157,9 +185,12 @@ function groundingFacts({
       : null,
     findings: findingFacts(typedReport),
     activity: activityFacts(activity),
-    stations: stationFacts(stationSummary),
+    stations: stationFacts(stationSummary, stationProgram),
     devices: deviceFacts(applications),
     photoEvidence: photoFacts(photos),
+    // The tech-reviewed consolidated photo analysis, when present — richer
+    // grounding than the per-photo captions alone.
+    photoSummary: cleanText(typedReport?.photoSummary).slice(0, 400) || null,
     nextVisit: nextVisit && nextVisit.date ? nextVisit : null,
   };
 }
@@ -176,7 +207,20 @@ function deterministicSummary(facts) {
     parts.push(facts.recap);
   }
   if (facts.stations && facts.stations.checked > 0) {
-    parts.push(`${facts.stations.checked} of ${facts.stations.total} trap${facts.stations.total === 1 ? '' : 's'} were inspected, with ${facts.stations.capturesRecorded === 0 ? 'no captures recorded' : `${facts.stations.capturesRecorded} capture${facts.stations.capturesRecorded === 1 ? '' : 's'} recorded`}.`);
+    const s = facts.stations;
+    if (s.program === 'trapping') {
+      const clause = s.trapsWithCaptureRecorded === 0
+        ? 'no captures recorded'
+        : `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
+      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected, with ${clause}.`);
+    } else if (s.program === 'rodent') {
+      const clause = s.stationsWithBaitConsumption === 0
+        ? 'no bait consumption observed'
+        : `bait consumption observed at ${s.stationsWithBaitConsumption} station${s.stationsWithBaitConsumption === 1 ? '' : 's'}`;
+      parts.push(`${s.checked} of ${s.total} bait station${s.total === 1 ? '' : 's'} were inspected, with ${clause}.`);
+    } else {
+      parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected.`);
+    }
   }
   if (facts.photoEvidence.length) {
     parts.push('Photos from this visit are included with this report.');
@@ -191,14 +235,15 @@ function deterministicSummary(facts) {
 
 const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control rodent service report.
 
-You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a 0-5 index where lower is better), trap/station check counts, the devices and products in service, captions of photo evidence the technician documented, and the next scheduled rodent visit.
+You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a 0-5 index where lower is better), trap/station check counts, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled rodent visit.
 
 Rules:
 - 4 to 7 short sentences in one or two short paragraphs. Plain, calm, professional language. No greeting, no headings, no markdown, no bullet lists.
 - Facts only: never invent work, counts, captures, sightings, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
-- State numbers factually (traps checked, captures recorded). A count of zero is stated as "no captures were recorded" — never as proof rodents are gone or the issue is resolved.
+- Write every count as a numeral, exactly as it appears in the facts. Never introduce a number that is not in the facts.
+- Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof rodents are gone or the issue is resolved.
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
-- If photo evidence captions are provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
+- If photo evidence is provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
 - If a next visit is provided, close with it, including the date (and arrival window if given).
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
@@ -207,6 +252,64 @@ Return JSON: {"summary": "<the summary>"}`;
 
 function buildUserMessage(facts) {
   return `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`;
+}
+
+// ---------------------------------------------------------------------------
+// Fail-closed grounding validator (codex P1 #3004): the prompt's facts-only
+// contract is ENFORCED, not just requested. Every numeral in the model's
+// output must already appear somewhere in the grounding facts — a fluent
+// summary that changes a trap count, invents "2 captures", or adds a made-up
+// figure falls back to the deterministic copy. The prompt requires counts as
+// numerals, so word-form numbers ("seven") can't smuggle counts past this;
+// they'd have to match the facts' own prose to survive the ban below.
+// ---------------------------------------------------------------------------
+function numberTokens(text) {
+  return String(text || '').match(/\d+(?:[:.,]\d+)*/g) || [];
+}
+
+function collectNumbers(set, value) {
+  if (value == null) return;
+  if (typeof value === 'object') {
+    (Array.isArray(value) ? value : Object.values(value)).forEach((v) => collectNumbers(set, v));
+    return;
+  }
+  numberTokens(value).forEach((token) => {
+    set.add(token);
+    token.split(/[:.,]/).forEach((part) => {
+      set.add(part);
+      set.add(String(Number(part)));
+    });
+  });
+}
+
+function groundedNumberSet(facts) {
+  const set = new Set();
+  collectNumbers(set, facts);
+  return set;
+}
+
+// Returns the list of ungrounded claims found in the text (empty = clean).
+function ungroundedClaims(text, facts) {
+  const problems = [];
+  const allowed = groundedNumberSet(facts);
+  for (const token of numberTokens(text)) {
+    const grounded = allowed.has(token)
+      || allowed.has(String(Number(token)))
+      || token.split(/[:.,]/).every((part) => allowed.has(part) || allowed.has(String(Number(part))));
+    if (!grounded) problems.push(`ungrounded_number:${token}`);
+  }
+  // Capture/consumption claims must not appear positively when the facts
+  // record none of that activity ("we removed a capture" with zero traps
+  // flagged). Negated forms ("no captures were recorded") are fine.
+  const negated = (noun) => new RegExp(`\\b(no|without|zero)\\b[^.!?]{0,40}\\b${noun}`, 'i');
+  const stations = facts.stations || {};
+  if (!((stations.trapsWithCaptureRecorded || 0) > 0) && /\bcaptur/i.test(text) && !negated('captur').test(text)) {
+    problems.push('unsupported_capture_claim');
+  }
+  if (!((stations.stationsWithBaitConsumption || 0) > 0) && /\bconsum/i.test(text) && !negated('consum').test(text)) {
+    problems.push('unsupported_consumption_claim');
+  }
+  return problems;
 }
 
 // True when the copy echoes a product name the facts withheld (registered
@@ -257,6 +360,7 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
       ];
       if (!banned.length && !validateCustomerCopy(text)) banned.push('forbidden_language');
       if (echoesWithheldName(text, input.applications)) banned.push('withheld_product_name');
+      banned.push(...ungroundedClaims(text, facts));
       if (!banned.length) {
         value = text;
       } else {
@@ -283,6 +387,7 @@ module.exports = {
     deviceFacts,
     isNameableDevice,
     echoesWithheldName,
+    ungroundedClaims,
     buildUserMessage,
     SYSTEM_PROMPT,
     PROMPT_VERSION,
