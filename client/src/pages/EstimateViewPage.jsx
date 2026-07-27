@@ -5156,10 +5156,13 @@ function EstimateViewPageInner() {
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+            // Tier-aware fee state on the plan-level card too (codex r24 P2):
+            // a combo selection that disables prepay must not keep promising
+            // the waiver — or, under glass, suppress the fee card entirely.
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
               ? pricing.firstVisitFees
               : (pricing.setupFee ? [pricing.setupFee] : [])
-            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
+            ).map(tierAwareFee).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
           ) : null}
 
           {services.length > 1 && !estimate.showOneTimeOption ? (

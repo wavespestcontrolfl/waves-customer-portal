@@ -979,6 +979,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const groupKey = (group) => {
     if (group.cadence === 'custom') return `custom:${group.intervalDays}`;
     if (group.cadence === 'monthly_nth_weekday') return `nth:${group.nth}:${group.weekday}`;
+    // Seasonal groups are split ONE PER LINE, so the cadence alone would
+    // collide: after the first POST the second seasonal group's identical key
+    // read as already-created and it silently skipped (codex r24 P2). Key on
+    // the primary line's identity as well.
+    if (group.cadence === 'seasonal_feb_oct') {
+      const primary = group.lines?.[0] || {};
+      return `seasonal_feb_oct:${primary.lineId || primary.id || primary.serviceKey || primary.name || ''}`;
+    }
     return group.cadence;
   };
   const groupLabel = (group) => {
