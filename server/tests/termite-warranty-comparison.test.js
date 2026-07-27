@@ -168,6 +168,44 @@ describe('the numbers are the engine’s', () => {
   });
 });
 
+describe('replay must reproduce the stored quote', () => {
+  test('the sold-ownership column is checked against the persisted rows and fails closed on drift (codex P1)', () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const rentMapped = mapV1ToLegacyShape(generateEstimate(termiteInputs({ termiteOwnership: 'rent' })));
+    const baitRow = rentMapped.recurring.services.find((s) => s.service === 'termite_bait');
+    const rentalRow = rentMapped.recurring.services.find((s) => s.service === 'termite_station_rental');
+
+    // Matching persisted rows (what the frozen bundle serves) → renders.
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'rent', baitPerApp: baitRow.perTreatment, upliftPerApp: rentalRow.perTreatment },
+    })).toBeTruthy();
+    // A config change after send (stored uplift no longer reproducible) → no sheet.
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'rent', baitPerApp: baitRow.perTreatment, upliftPerApp: rentalRow.perTreatment + 7 },
+    })).toBeNull();
+    // Own-mode: stored bait rate must match too.
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'own', baitPerApp: 105 },
+    })).toBeTruthy();
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'own', baitPerApp: 99 },
+    })).toBeNull();
+  });
+});
+
+describe('crossover copy', () => {
+  test('fractional horizons keep their precision and pluralization (codex P2)', () => {
+    const { crossoverText } = require('../services/pdf/termite-comparison-pdf');
+    expect(crossoverText(1)).toBe('the first quarter');
+    expect(crossoverText(2)).toBe('the first 2 quarters');
+    expect(crossoverText(4)).toBe('the first 1 year');
+    expect(crossoverText(10)).toBe('the first 2.5 years');
+    expect(crossoverText(20)).toBe('the first 5 years');
+    expect(crossoverText(0)).toBe('the recovery period');
+  });
+});
+
 describe('PDF renders', () => {
   test('a real buffer, with and without bond options', async () => {
     const data = buildTermiteComparisonData(termiteInputs());

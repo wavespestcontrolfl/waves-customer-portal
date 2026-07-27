@@ -51,6 +51,18 @@ const money = (n) => `$${Number(n).toLocaleString('en-US', {
   maximumFractionDigits: 2,
 })}`;
 
+// Human wording for the rent-vs-buy crossover horizon. Whole quarters below
+// a year, decimal years above (codex P2: rounding to whole years turned a
+// 1-quarter horizon into "the first 0 years" and 2 quarters into a year).
+function crossoverText(quarters) {
+  const q = Number(quarters);
+  if (!Number.isFinite(q) || q <= 0) return 'the recovery period';
+  if (q === 1) return 'the first quarter';
+  if (q < 4) return `the first ${q} quarters`;
+  const years = Math.round((q / 4) * 10) / 10;
+  return `the first ${years} year${years === 1 ? '' : 's'}`;
+}
+
 function footer(doc) {
   const previousBottomMargin = doc.page.margins.bottom;
   doc.save();
@@ -237,12 +249,20 @@ function renderTermiteComparisonPdf(content) {
       ['If you end the program', 'The stations stay in your yard.', 'We remove the stations; your inspection history stays in your app.'],
     ]);
     noteParagraph(doc,
-      `Straight talk: renting costs nothing up front but is not a payment plan — the rental charge is a fixed rate that continues for as long as the program runs. The two options cost about the same over the first ${Math.round((rent.recoveryQuarters || 20) / 4)} years; past that point, owning costs less. Renting is the right fit for starting at $0 today; buying is the right fit for the long haul.`);
+      `Straight talk: renting costs nothing up front but is not a payment plan — the rental charge is a fixed rate that continues for as long as the program runs. The two options cost about the same over ${crossoverText(rent.recoveryQuarters || 20)}; past that point, owning costs less. Renting is the right fit for starting at $0 today; buying is the right fit for the long haul.`);
 
     if (bondOptions.length) {
       sectionHeading(doc, 'Add a warranty: the termite bond');
+      // The rate-ordering claim is DERIVED from the actual snapshot (codex
+      // P2): a valid-but-non-monotonic bond config must not ship a sheet
+      // promising "longer terms are cheaper" over rows showing the opposite.
+      const ratesDescendWithTerm = bondOptions.every(
+        (opt, i, all) => i === 0 || opt.perApp <= all[i - 1].perApp,
+      );
       doc.font('Helvetica').fontSize(10).fillColor(BODY).text(
-        'Either ownership option can carry a termite bond — a repair warranty that rides the same quarterly station check. Pick the term on your estimate; longer terms lock a lower per-application rate, fixed for the term you pick.',
+        ratesDescendWithTerm
+          ? 'Either ownership option can carry a termite bond — a repair warranty that rides the same quarterly station check. Pick the term on your estimate; longer terms lock a lower per-application rate, fixed for the term you pick.'
+          : 'Either ownership option can carry a termite bond — a repair warranty that rides the same quarterly station check. Pick the term on your estimate; each term’s per-application rate is fixed for the term you pick.',
         L, doc.y, { width: W, lineGap: 1.5 },
       );
       doc.moveDown(0.4);
@@ -260,4 +280,4 @@ function renderTermiteComparisonPdf(content) {
   });
 }
 
-module.exports = { renderTermiteComparisonPdf };
+module.exports = { renderTermiteComparisonPdf, crossoverText };

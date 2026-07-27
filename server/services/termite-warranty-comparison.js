@@ -84,7 +84,19 @@ function finalLineAnnual(li) {
 // prices at a different percentage than the customer-visible quote (codex
 // P1); the name-only tier guard can't see that, so the rate itself is
 // checked and any mismatch fails the sheet closed.
-function buildTermiteComparisonData(engineInputs, { bondOptions = null, selectedTier = null, expectedTierDiscount = null } = {}) {
+// persistedQuote (optional) is the estimate's STORED termite pricing —
+// { ownership, baitPerApp, upliftPerApp } read off the persisted recurring
+// rows the estimate page serves frozen (sendSnapshot.pricingBundle). Any
+// mutable termite config change after send (bait brackets, monitoring rate,
+// recovery horizon) makes the live replay disagree with the quote the
+// customer sees and accepts (codex P1); the sold-ownership column is
+// checked against the stored rows and any mismatch fails the sheet closed.
+function buildTermiteComparisonData(engineInputs, {
+  bondOptions = null,
+  selectedTier = null,
+  expectedTierDiscount = null,
+  persistedQuote = null,
+} = {}) {
   if (!termiteComparisonGateOn()) return null;
   if (!engineInputs) return null;
 
@@ -138,6 +150,21 @@ function buildTermiteComparisonData(engineInputs, { bondOptions = null, selected
   const perAppRent = round2(rentBasePerApp + upliftPerApp);
   if (!(installToday > 0) || !(perAppOwn > 0) || !(upliftPerApp > 0)) return null;
 
+  // The sold-ownership column must reproduce the STORED quote (see header
+  // note on persistedQuote): a bait/monitoring/rental config change after
+  // send means the estimate page serves the frozen price while this replay
+  // prices the new one — fail closed rather than disagree with it.
+  if (persistedQuote && typeof persistedQuote === 'object') {
+    const near = (a, b) => Number.isFinite(Number(a)) && Number.isFinite(Number(b))
+      && Math.abs(Number(a) - Number(b)) <= 0.01;
+    if (persistedQuote.ownership === 'rent') {
+      if (!near(rentBasePerApp, persistedQuote.baitPerApp)) return null;
+      if (!near(upliftPerApp, persistedQuote.upliftPerApp)) return null;
+    } else {
+      if (!near(perAppOwn, persistedQuote.baitPerApp)) return null;
+    }
+  }
+
   // Five-year totals — the honest horizon: with the seeded 20-quarter
   // recovery the two lines meet at year five, and past it renting costs
   // more. The sheet SAYS so; that asymmetry is the price of $0 up front.
@@ -145,7 +172,9 @@ function buildTermiteComparisonData(engineInputs, { bondOptions = null, selected
   const fiveYearRent = round2(perAppRent * visitsPerYear * 5);
 
   // Quote-time snapshot only (see header). Absent/empty → no bond section.
-  const bondMenu = Array.isArray(bondOptions)
+  // Sorted by term length so the PDF's rate-ordering copy can be derived
+  // from the actual snapshot rather than assumed.
+  const bondMenu = (Array.isArray(bondOptions)
     ? bondOptions
       .map((opt) => ({
         key: opt.key,
@@ -154,7 +183,8 @@ function buildTermiteComparisonData(engineInputs, { bondOptions = null, selected
         perApp: Number(opt.perApp ?? opt.quarterly) || 0,
       }))
       .filter((opt) => opt.perApp > 0 && opt.label)
-    : [];
+    : [])
+    .sort((a, b) => (Number(a.years) || 0) - (Number(b.years) || 0));
 
   return {
     system: ownBait.selectedSystem || ownBait.system || 'advance',
