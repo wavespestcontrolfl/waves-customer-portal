@@ -27,6 +27,12 @@ const createLeadSchema = Joi.object({
   is_residential: Joi.boolean(),
   is_commercial: Joi.boolean(),
   notes: Joi.string().trim().max(5000).allow('', null),
+  // Builder termite warranty the prospect holds today (new-construction
+  // takeover leads). Provider is a data field — competitor names belong here,
+  // never in code or customer copy. Expiry is a DATE-shaped string; the
+  // column is a calendar date, so no timestamp forms accepted.
+  builder_warranty_provider: Joi.string().trim().max(80).allow('', null),
+  builder_warranty_expires_on: Joi.string().trim().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
 }).unknown(true);
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
@@ -770,6 +776,7 @@ router.post('/', async (req, res, next) => {
       first_name, last_name, phone, email, address, city, zip,
       lead_source_id, lead_type, service_interest, urgency,
       is_residential, is_commercial, notes,
+      builder_warranty_provider, builder_warranty_expires_on,
     } = validated;
 
     const [lead] = await db('leads').insert({
@@ -781,6 +788,8 @@ router.post('/', async (req, res, next) => {
       service_interest, urgency: urgency || 'normal',
       is_residential: is_residential !== false,
       is_commercial: is_commercial === true,
+      builder_warranty_provider: builder_warranty_provider || null,
+      builder_warranty_expires_on: builder_warranty_expires_on || null,
       first_contact_at: new Date(),
       first_contact_channel: 'manual',
       status: 'new',
@@ -894,6 +903,7 @@ router.put('/:id', async (req, res, next) => {
       'disqualification_reason', 'assigned_to', 'estimate_id', 'customer_id',
       'monthly_value', 'initial_service_value', 'waveguard_tier',
       'next_follow_up_at', 'notes',
+      'builder_warranty_provider', 'builder_warranty_expires_on',
     ];
     const existingLead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!existingLead) return res.status(404).json({ error: 'Lead not found' });
@@ -904,6 +914,21 @@ router.put('/:id', async (req, res, next) => {
     }
     if (updates.status !== undefined && !LEAD_STATUS_SET.has(updates.status)) {
       return res.status(400).json({ error: 'Invalid lead status' });
+    }
+    // Mirror the create-side shape rules: clearing sends '', which stores as
+    // NULL; the expiry column is a calendar DATE, so only a date-shaped
+    // string is accepted (a timestamp would smuggle a timezone into it).
+    if (updates.builder_warranty_provider !== undefined) {
+      const provider = String(updates.builder_warranty_provider || '').trim();
+      if (provider.length > 80) return res.status(400).json({ error: 'Invalid builder warranty provider' });
+      updates.builder_warranty_provider = provider || null;
+    }
+    if (updates.builder_warranty_expires_on !== undefined) {
+      const expires = String(updates.builder_warranty_expires_on || '').trim();
+      if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+        return res.status(400).json({ error: 'builder_warranty_expires_on must be a YYYY-MM-DD date' });
+      }
+      updates.builder_warranty_expires_on = expires || null;
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     updates.updated_at = new Date();

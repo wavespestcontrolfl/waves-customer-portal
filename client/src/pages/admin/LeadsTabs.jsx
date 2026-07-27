@@ -1078,6 +1078,16 @@ export function LeadsSection() {
           body: { technician_id: formData.technician_id },
         });
         loadLeads();
+      } else if (showModal === "builderWarranty") {
+        await adminFetch(`/admin/leads/${formData.leadId}`, {
+          method: "PUT",
+          body: {
+            builder_warranty_provider: formData.builder_warranty_provider || "",
+            builder_warranty_expires_on:
+              formData.builder_warranty_expires_on || "",
+          },
+        });
+        loadLeads();
       } else if (showModal === "logCost") {
         await adminFetch(`/admin/leads/sources/${formData.sourceId}/cost`, {
           method: "POST",
@@ -1539,6 +1549,15 @@ export function LeadsSection() {
                                 }}
                               >
                                 {lead.service_interest || "--"}
+                                {lead.builder_warranty_expires_on && (
+                                  <Badge
+                                    label={`warranty exp ${String(
+                                      lead.builder_warranty_expires_on,
+                                    ).slice(0, 10)}`}
+                                    color={C.amber}
+                                    style={{ marginLeft: 6 }}
+                                  />
+                                )}
                               </td>
                               <td style={{ padding: "12px 16px" }}>
                                 {" "}
@@ -1736,6 +1755,51 @@ export function LeadsSection() {
                                               ).toLocaleString()
                                             : "--"}
                                         </span>
+                                      </div>
+                                      <div>
+                                        Builder Warranty:{" "}
+                                        <span style={{ color: C.text }}>
+                                          {lead.builder_warranty_provider ||
+                                          lead.builder_warranty_expires_on
+                                            ? [
+                                                lead.builder_warranty_provider,
+                                                lead.builder_warranty_expires_on
+                                                  ? // DATE column arrives as an
+                                                    // ISO string; slice the date
+                                                    // part instead of new Date()
+                                                    // (UTC midnight renders as
+                                                    // the previous ET day)
+                                                    `expires ${String(
+                                                      lead.builder_warranty_expires_on,
+                                                    ).slice(0, 10)}`
+                                                  : null,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(" — ")
+                                            : "--"}
+                                        </span>{" "}
+                                        <Btn
+                                          small
+                                          onClick={() => {
+                                            setFormData({
+                                              leadId: lead.id,
+                                              builder_warranty_provider:
+                                                lead.builder_warranty_provider ||
+                                                "",
+                                              builder_warranty_expires_on:
+                                                String(
+                                                  lead.builder_warranty_expires_on ||
+                                                    "",
+                                                ).slice(0, 10),
+                                            });
+                                            setShowModal("builderWarranty");
+                                          }}
+                                        >
+                                          {lead.builder_warranty_provider ||
+                                          lead.builder_warranty_expires_on
+                                            ? "Edit"
+                                            : "Set"}
+                                        </Btn>
                                       </div>
                                       {lead.monthly_value && (
                                         <div>
@@ -4237,6 +4301,29 @@ export function LeadsSection() {
             }
             placeholder="e.g. General Pest, Lawn Care, Termite"
           />{" "}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {" "}
+            <div style={{ flex: "1 1 55%" }}>
+              <Input
+                label="Builder Termite Warranty (provider)"
+                value={formData.builder_warranty_provider}
+                onChange={(v) =>
+                  setFormData((f) => ({ ...f, builder_warranty_provider: v }))
+                }
+                placeholder="who covers the home today"
+              />
+            </div>{" "}
+            <div style={{ flex: "1 1 35%" }}>
+              <Input
+                label="Warranty Expires"
+                type="date"
+                value={formData.builder_warranty_expires_on}
+                onChange={(v) =>
+                  setFormData((f) => ({ ...f, builder_warranty_expires_on: v }))
+                }
+              />
+            </div>{" "}
+          </div>{" "}
           <Input
             label="Lead Source"
             value={formData.lead_source_id}
@@ -4245,6 +4332,38 @@ export function LeadsSection() {
           />{" "}
           <Btn onClick={submitForm} disabled={loading}>
             {loading ? "Saving..." : "Create Lead"}
+          </Btn>{" "}
+        </Modal>
+      );
+
+    if (showModal === "builderWarranty")
+      return (
+        <Modal
+          title="Builder Termite Warranty"
+          onClose={() => setShowModal(null)}
+        >
+          {" "}
+          <Input
+            label="Provider"
+            value={formData.builder_warranty_provider}
+            onChange={(v) =>
+              setFormData((f) => ({ ...f, builder_warranty_provider: v }))
+            }
+            placeholder="who covers the home today"
+          />{" "}
+          <Input
+            label="Expires"
+            type="date"
+            value={formData.builder_warranty_expires_on}
+            onChange={(v) =>
+              setFormData((f) => ({ ...f, builder_warranty_expires_on: v }))
+            }
+          />{" "}
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+            Clearing both fields removes the warranty from this lead.
+          </div>{" "}
+          <Btn onClick={submitForm} disabled={loading}>
+            {loading ? "Saving..." : "Save"}
           </Btn>{" "}
         </Modal>
       );

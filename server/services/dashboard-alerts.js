@@ -14,7 +14,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
 const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
@@ -30,6 +30,13 @@ const LEAD_RESPONSE_SLA_MINUTES = 30;
 // Below this share of live customers on chargeable autopay, the coverage gap
 // itself is an action item (manual collection labor + churn risk).
 const AUTOPAY_COVERAGE_TARGET_PCT = 50;
+
+// Builder termite warranties: the pitch window for winning a new-construction
+// home onto a Waves program opens ahead of the builder coverage lapsing and
+// stays viable a while past it — the homeowner is uncovered, not committed
+// elsewhere. Window sizes are pitch-timing judgment, not a contract term.
+const BUILDER_WARRANTY_WINDOW_DAYS = 60;
+const BUILDER_WARRANTY_GRACE_DAYS = 30;
 
 // Severity → bell-priority mapping. The existing notification_service
 // metadata already carries `priority: urgent|high|normal|low` and the
@@ -481,6 +488,40 @@ async function computeDashboardAlertsUncached() {
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
+
+  // 13. Builder termite warranties expiring — open leads whose builder-provided
+  //     coverage lapses inside the pitch window (or lapsed recently enough
+  //     that the home is uncovered and still shopping). `won` already
+  //     converted and `lost` was a deliberate close, so neither is an action
+  //     item. builder_warranty_expires_on is a DATE on the ET business
+  //     calendar — boundaries built with addETDays/etDateString, never a UTC
+  //     ISO slice (a UTC slice shifts the boundary day for 4-5 ET hours).
+  try {
+    const windowEnd = etDateString(addETDays(new Date(), BUILDER_WARRANTY_WINDOW_DAYS));
+    const graceStart = etDateString(addETDays(new Date(), -BUILDER_WARRANTY_GRACE_DAYS));
+    const expiringLeads = (await excludeInternalLeads(
+      db('leads')
+        .whereNull('deleted_at')
+        .whereNotNull('builder_warranty_expires_on')
+        .whereNotIn('status', ['won', 'lost', ...NON_ENGAGED_LEAD_STATUSES])
+        .where('builder_warranty_expires_on', '>=', graceStart)
+        .where('builder_warranty_expires_on', '<=', windowEnd),
+    ).select('id')) || [];
+    const count = expiringLeads.length;
+    if (count > 0) {
+      alerts.push({
+        id: 'builder_warranty_expiring',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        // Membership-aware: a new lead entering the window must re-surface
+        // the alert even if another left it at an unchanged count.
+        members: queueMembers(expiringLeads.map((r) => r.id)),
+        label: `${count} lead${count === 1 ? '' : 's'} with a builder termite warranty expiring soon`,
+        href: '/admin/leads',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] builder_warranty_expiring: ${err.message}`); }
 
   // Duplicate customers pending review — pairs sharing a phone that haven't
   // been merged or dismissed. Green-tier pairs clear on the nightly auto-merge
