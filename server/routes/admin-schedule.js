@@ -2451,6 +2451,10 @@ function duplicateSeriesConflictBody(existingSeries) {
       serviceType: s.service_type,
       pattern: s.recurring_pattern,
       nextUpcomingDate: s.next_upcoming_date || null,
+      // Provenance for idempotent retries (codex r21 P0): a client that lost
+      // its partial-save state can recover ONLY when the existing series
+      // demonstrably came from the same linked estimate it is booking.
+      sourceEstimateId: s.source_estimate_id || null,
     })),
   };
 }

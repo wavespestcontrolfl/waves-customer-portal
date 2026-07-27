@@ -558,6 +558,10 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  // Which estimate created the existing series — lets the duplicate-conflict
+  // payload prove to a retrying client that the series IS the one its
+  // partial save already created (codex r21 P0).
+  if (columns.source_estimate_id) query.select('source_estimate_id');
   if (columns.recurring_ongoing) query.select('recurring_ongoing');
   if (excludeParentId) query.whereNot('id', excludeParentId);
   const parents = await query;

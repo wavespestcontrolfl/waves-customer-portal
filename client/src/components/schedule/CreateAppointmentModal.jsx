@@ -53,11 +53,16 @@ function adminFetch(path, options = {}) {
   }).then(async r => {
     if (!r.ok) {
       let message = `HTTP ${r.status}`;
+      let parsedBody = null;
       try {
-        const body = await r.json();
-        if (body?.error) message = body.error;
+        parsedBody = await r.json();
+        if (parsedBody?.error) message = parsedBody.error;
       } catch { /* keep status fallback */ }
-      throw new Error(message);
+      const err = new Error(message);
+      // Structured payload for callers that adjudicate specific rejections
+      // (e.g. the split-save duplicate-series recovery below).
+      err.body = parsedBody;
+      throw err;
     }
     return r.json();
   });
@@ -1267,13 +1272,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         createdGroupKeysRef.current.add(key);
         results.push(r);
       } catch (e) {
-        // A duplicate-series rejection means THIS group's series already
-        // exists — typically a prior partial split save whose
-        // createdGroupKeysRef was lost when the modal closed between POSTs.
-        // Treat it as created and keep going so the remaining groups (e.g.
-        // the seasonal mosquito series behind an already-accepted estimate)
-        // still book instead of the retry dying on group one (codex r20 P1).
-        if (/already has an active recurring series/i.test(String(e.message || ''))) {
+        // Idempotent retry recovery, PROVEN only (codex r20 P1 + r21 P0): a
+        // prior partial split save can lose createdGroupKeysRef when the
+        // modal closes between POSTs, and the retry then dies on group one's
+        // duplicate-series rejection — stranding the later seasonal group
+        // behind an already-accepted estimate. Recover ONLY when the
+        // server's conflict payload shows the existing series came from THIS
+        // booking's linked estimate — that series IS the one this group
+        // would create. Any other duplicate rejection (a genuinely
+        // pre-existing program) surfaces as the error it is.
+        const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
+        const provenOwnSeries = !!dupBody && !!linkedEstimate?.id
+          && Array.isArray(dupBody.existingSeries)
+          && dupBody.existingSeries.some(
+            (s) => s?.sourceEstimateId != null && String(s.sourceEstimateId) === String(linkedEstimate.id),
+          );
+        if (provenOwnSeries) {
           createdGroupKeysRef.current.add(key);
           continue;
         }
