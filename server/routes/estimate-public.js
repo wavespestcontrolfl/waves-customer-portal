@@ -15889,7 +15889,79 @@ function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
   return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
 }
 
-function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
+// Engine inputs for the buy-vs-rent comparison replays. Admin-builder saves
+// store the replayable payload as engineRequest = { profile,
+// selectedServices, options } (estimate_data.inputs there is the FLATTENED
+// form — svcTermiteBait etc. — which has no `services` and would fail the
+// builder's guard; codex P1 on #3001). Translate it exactly like
+// serverRecomputeFromEstimateData does, then feed the result back through
+// extractEngineInputs so the saved-floor replay overrides,
+// priorQualifyingServices, and operator price adjustment all apply the same
+// way they do for engine-shaped saves.
+function comparisonEngineInputs(estData) {
+  if (!estData || typeof estData !== 'object') return null;
+  const req = estData.engineRequest;
+  if (req && typeof req === 'object' && req.profile) {
+    try {
+      const { translateV2CallToV1Input } = require('./property-lookup-v2');
+      const base = translateV2CallToV1Input(
+        req.profile,
+        Array.isArray(req.selectedServices) ? req.selectedServices : [],
+        req.options || {},
+      );
+      if (base && typeof base === 'object') {
+        return extractEngineInputs({ ...estData, engineInputs: base });
+      }
+    } catch (_err) { /* fall through to the stored input shapes */ }
+  }
+  return extractEngineInputs(estData);
+}
+
+// Per-ESTIMATE availability for the comparison-sheet link (codex P1 on
+// #3001): the gate alone is not enough — the rental gate being off, a
+// commercial property, or an unpriceable uplift all make the builder
+// fail-closed and the PDF 404, so the link must not render. Runs the same
+// fail-closed builder the PDF route runs; cheap pre-filters keep the two
+// engine replays off every non-termite /data call, and a per-request memo
+// (keyed on the parsed estData object) keeps repeat buildRenderFlags calls
+// on the same payload — attach + finalize, cached bundles included — from
+// replaying the engine again (codex P2, round 3).
+const termiteComparisonAvailabilityMemo = new WeakMap();
+function termiteComparisonAvailableForEstimate(estData, services = [], estimate = null) {
+  const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+  if (!termiteComparisonGateOn()) return false;
+  if (!estData || typeof estData !== 'object') return false;
+  // Unsplit multi-service estimates render ONE 'bundle' section carrying
+  // the real services in memberKeys (codex P2, round 3) — a bundled
+  // termite program must still offer the sheet.
+  const hasTermiteSection = services.some((section) => section?.key === 'termite_bait'
+    || (Array.isArray(section?.memberKeys) && section.memberKeys.includes('termite_bait')));
+  if (!hasTermiteSection) return false;
+  if (termiteComparisonAvailabilityMemo.has(estData)) {
+    return termiteComparisonAvailabilityMemo.get(estData);
+  }
+  let available = false;
+  try {
+    // Same guards as the PDF route — selectedTier, quote-time discount, AND
+    // the stored-quote reproduction check: a quote the replay can't
+    // reproduce must hide the link, not 404 it.
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
+    available = persistedQuote != null && buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      selectedTier: estimate?.waveguard_tier || null,
+      expectedTierDiscount: estimate?.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
+      persistedQuote,
+    }) != null;
+  } catch (_err) {
+    available = false;
+  }
+  termiteComparisonAvailabilityMemo.set(estData, available);
+  return available;
+}
+
+function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null, estimate = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
@@ -15912,6 +15984,10 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     // default — owner approved the packet copy 2026-07-11;
     // GATE_SERVICE_DETAILS_PDF=false is the kill switch).
     showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF !== 'false',
+    // Buy-vs-rent options sheet link on the termite section (dark, explicit
+    // opt-in). Computed per estimate with the SAME fail-closed builder the
+    // PDF route runs (codex P1) — the link never renders toward a 404.
+    showTermiteComparison: termiteComparisonAvailableForEstimate(estData, services, estimate),
   };
 }
 
@@ -16047,7 +16123,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
+    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData, estimate),
     askChips,
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
@@ -16281,7 +16357,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
-    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring),
+    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData, estimate),
   };
 }
 
@@ -17670,6 +17746,77 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       .del()
       .catch(() => {});
     return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+  } catch (err) { next(err); }
+});
+
+// ── Termite options comparison sheet (dark; GATE_TERMITE_COMPARISON_SHEET) ──
+//
+// Buy-vs-rent the bait stations, priced for THIS estimate's property by two
+// deterministic engine replays, plus the bond term menu. Same bearer-token
+// contract as the service-details PDF above: token-shaped 404s, viewable
+// estimates only, no draft leak. Availability is computed fail-closed in the
+// content builder (gate, residential termite line, rental actually priced) —
+// a comparison that can only show one column 404s instead of rendering.
+router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    // ONE 404 body for every branch (codex P2): gate-off, malformed token,
+    // unknown token, non-viewable row, and viewable-but-unbuildable must be
+    // indistinguishable, or the response becomes an existence oracle for
+    // bearer-token links.
+    const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+    const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+    if (!termiteComparisonGateOn()) return notFound();
+    if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
+      return notFound();
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return notFound();
+    }
+    // Same membership reconciliation /data performs before pricing (codex
+    // P2, round 3): a linked customer whose plan lapsed leaves stale
+    // existing-member artifacts in estimate_data, and replaying them would
+    // print lower totals than the estimate page shows.
+    await reconcileFrozenMembershipSnapshot(estimate);
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+    } catch { /* unparseable → no comparison */ }
+    // engineRequest-aware replay inputs + the QUOTE-TIME bond snapshot (the
+    // same shapes attachTermiteBondSelector reads, incl. the legacy
+    // root-mapped blob — codex P2), passed ONLY while the live bond gate is
+    // on: with the kill switch off the selector hides and PUT /:token/bond
+    // 403s, so the sheet must not advertise terms the customer can't pick.
+    // The row's persisted waveguard_tier + quote-time tier discount ride
+    // along so a quote the replay can't reproduce (customer-selected tier,
+    // or a tier-discount config change after send) fails the sheet closed
+    // instead of misprinting discounted figures.
+    const storedBondSnapshot = termiteBondOptionsFromEstimateData(estData)
+      || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
+    if (!persistedQuote) return notFound();
+    const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      bondOptions: termiteBondOptionGateOn() ? storedBondSnapshot : null,
+      selectedTier: estimate.waveguard_tier || null,
+      expectedTierDiscount: estimate.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
+      persistedQuote,
+    });
+    if (!data) return notFound();
+    const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');
+    const buffer = await renderTermiteComparisonPdf({
+      ...data,
+      address: estimate.address || null,
+      // Same canonical host every other estimate link uses.
+      estimateUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+    });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', 'inline; filename="Waves_Termite_Options.pdf"');
+    res.send(buffer);
   } catch (err) { next(err); }
 });
 

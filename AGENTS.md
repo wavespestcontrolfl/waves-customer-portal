@@ -440,6 +440,16 @@ finding and warns on P1. Reviewers must return JSON matching
   service guide plus PUBLIC product-registry fields only — active
   ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
   dilution, or inventory data).
+  `/api/estimates/:token/warranty-comparison/pdf` (read-only termite
+  buy-vs-rent options sheet; dark behind GATE_TERMITE_COMPARISON_SHEET —
+  404 when off; same token format gate + generic 404 +
+  isEstimateCustomerViewable contract as the service-details PDF above;
+  content is two deterministic pricing-engine replays of the estimate's own
+  saved inputs (ownership toggled) plus the bond-term snapshot — the
+  builder is fail-closed, so a config where the rental cannot actually
+  price 404s instead of rendering a one-column comparison; 60 req/min
+  limit, `no-store`/`no-referrer` headers; no product-registry, vendor, or
+  cost data — customer-priced figures only).
   `/api/estimates/:token/service-details/send` (write; emails or texts that
   same packet to the contact info ALREADY ON the estimate — the destination
   is NEVER caller-supplied (body carries only `service` + `channel`), so
