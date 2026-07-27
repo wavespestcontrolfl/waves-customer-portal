@@ -1069,10 +1069,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       groups.push(buildGroup([...yearRoundRecurring, ...oneTimeRows]));
     }
     const [firstSeasonal, ...restSeasonal] = seasonalRows;
-    groups.push(buildGroup(yearRoundRecurring.length
+    // seasonalIndex = this group's position among the SAME-FAMILY seasonal
+    // series this save creates — the duplicate-guard recovery needs it to
+    // tell "my series already exists" apart from "the guard is seeing my
+    // earlier sibling" (codex r26 P1).
+    const firstGroup = buildGroup(yearRoundRecurring.length
       ? [firstSeasonal]
-      : [firstSeasonal, ...oneTimeRows]));
-    restSeasonal.forEach((row) => groups.push(buildGroup([row])));
+      : [firstSeasonal, ...oneTimeRows]);
+    if (firstGroup) groups.push({ ...firstGroup, seasonalIndex: 0 });
+    restSeasonal.forEach((row, i) => {
+      const g = buildGroup([row]);
+      if (g) groups.push({ ...g, seasonalIndex: i + 1 });
+    });
     return groups.filter(Boolean);
   };
 
@@ -1161,6 +1169,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // own confirmation (codex r20 P2). Same first-group rule the
       // card-on-file link already uses.
       const firstGroupOfBooking = results.length === 0 && createdGroupKeysRef.current.size === 0;
+      let body = null;
       try {
         const [primary, ...extras] = group.lines;
         const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
@@ -1202,7 +1211,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           && extras.length === 0 && !groupHasBoosters
           && visitsPerYearForCadence(prepayCadenceKey(group.cadence, group.intervalDays)) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
-        const body = {
+        body = {
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary.name,
@@ -1302,14 +1311,38 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // would create. Any other duplicate rejection (a genuinely
         // pre-existing program) surfaces as the error it is.
         const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
-        const provenOwnSeries = !!dupBody && !!linkedEstimate?.id
-          && Array.isArray(dupBody.existingSeries)
-          && dupBody.existingSeries.some(
+        const ownSeriesCount = !!dupBody && !!linkedEstimate?.id && Array.isArray(dupBody.existingSeries)
+          ? dupBody.existingSeries.filter(
             (s) => s?.sourceEstimateId != null && String(s.sourceEstimateId) === String(linkedEstimate.id),
-          );
-        if (provenOwnSeries) {
-          createdGroupKeysRef.current.add(key);
-          continue;
+          ).length
+          : 0;
+        if (ownSeriesCount > 0) {
+          // The guard matches by service FAMILY, so with multiple seasonal
+          // lines the first sibling's series also conflicts with the second
+          // group (codex r26 P1). This group's series exists only when the
+          // owned-series count exceeds its position among same-family
+          // groups; otherwise the guard is merely seeing the earlier
+          // sibling and this DISTINCT series still needs creating — re-post
+          // with the guard's own intentional-second-program escape.
+          const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
+          if (ownSeriesCount > familyIndex) {
+            createdGroupKeysRef.current.add(key);
+            continue;
+          }
+          if (body) {
+            try {
+              const r2 = await adminFetch('/admin/schedule', {
+                method: 'POST',
+                body: JSON.stringify({ ...body, allowDuplicateSeries: true }),
+              });
+              createdGroupKeysRef.current.add(key);
+              results.push(r2);
+              continue;
+            } catch (e2) {
+              firstError = { label: groupLabel(group), message: e2.message };
+              break;
+            }
+          }
         }
         firstError = { label: groupLabel(group), message: e.message };
         break;
