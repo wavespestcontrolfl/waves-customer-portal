@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ s3: {} }));
 
 const twitter = require('../services/twitter');
-const { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT } = twitter._test;
+const { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT, weightedTweetLength } = twitter._test;
 
 const LINK = 'https://www.wavespestcontrol.com/pest-control/lizard-droppings/';
 const ACCOUNT_ID = '6a500d943ecd8aa344819c49';
@@ -83,7 +83,72 @@ describe('twitter service', () => {
       const caption = composed.slice(0, -(`\n\n${LINK}`.length));
       expect(caption.endsWith('…')).toBe(true);
       // Effective X length: caption + separator + fixed t.co URL length.
-      expect(caption.length + 2 + TCO_URL_LENGTH).toBeLessThanOrEqual(TWEET_LIMIT);
+      expect(weightedTweetLength(caption) + 2 + TCO_URL_LENGTH).toBeLessThanOrEqual(TWEET_LIMIT);
+    });
+
+    test('weighs emoji and arrows at 2 like X does — a caption that passes .length but not weighted gets trimmed', () => {
+      // 240 ASCII + 5 emoji + 4 arrows. Naive .length = 254 ≤ the 255 caption
+      // budget (280 − 23 t.co − 2 separator), so the OLD check passed it —
+      // but X weighs it 258 > 255 and hard-rejects. Must be trimmed.
+      const caption = `${'x'.repeat(240)}🔍🍯💡📦🚰→→→→`;
+      expect(caption.length).toBe(254); // astral emoji are 2 UTF-16 units each
+      expect(weightedTweetLength(caption)).toBe(258);
+      const composed = twitter.composeTweet(caption, LINK);
+      const trimmed = composed.slice(0, -(`\n\n${LINK}`.length));
+      expect(trimmed.endsWith('…')).toBe(true);
+      expect(weightedTweetLength(trimmed)).toBeLessThanOrEqual(TWEET_LIMIT - TCO_URL_LENGTH - 2);
+      expect(weightedTweetLength(composed) - LINK.length + TCO_URL_LENGTH).toBeLessThanOrEqual(TWEET_LIMIT);
+    });
+
+    test('never splits a surrogate pair at the trim boundary', () => {
+      // Budget lands mid-emoji: the emoji before the boundary must be dropped
+      // whole, never sliced into a lone surrogate.
+      const caption = `${'x'.repeat(200)}${'🔍'.repeat(60)}`;
+      const composed = twitter.composeTweet(caption, LINK);
+      const trimmed = composed.slice(0, -(`\n\n${LINK}`.length));
+      expect(trimmed.endsWith('…')).toBe(true);
+      // A well-formed string round-trips through encode/decode unchanged.
+      expect(Buffer.from(trimmed, 'utf8').toString('utf8')).toBe(trimmed);
+      expect(weightedTweetLength(trimmed)).toBeLessThanOrEqual(TWEET_LIMIT - TCO_URL_LENGTH - 2);
+    });
+
+    test('no-link content is returned intact — embedded URLs must never be sliced', () => {
+      // Manual content can embed its own URLs, which X counts as fixed-length
+      // t.co links; trimming by raw characters could break them.
+      const urlHeavy = `Read this: https://example.com/${'a'.repeat(300)}`;
+      expect(twitter.composeTweet(urlHeavy, null)).toBe(urlHeavy);
+    });
+
+    test('multi-code-point emoji sequences weigh 2 each, like X counts them', () => {
+      expect(weightedTweetLength('1️⃣')).toBe(2); // keycap: digit + FE0F + 20E3
+      expect(weightedTweetLength('❤️')).toBe(2); // heart + variation selector
+      expect(weightedTweetLength('🇺🇸')).toBe(2); // flag: two regional indicators
+      expect(weightedTweetLength('👍🏽')).toBe(2); // skin-tone modifier
+      expect(weightedTweetLength('👨‍👩‍👧‍👦')).toBe(2); // ZWJ family
+      expect(weightedTweetLength('🇺🇸🇩🇪')).toBe(4); // adjacent flags segment separately
+      // A keycap-heavy caption fits the budget instead of being over-trimmed
+      // (per-code-point counting scored 1️⃣ as 5 and truncated ~70 of them).
+      const keycaps = '1️⃣'.repeat(70);
+      expect(weightedTweetLength(keycaps)).toBe(140);
+      expect(twitter.composeTweet(keycaps, LINK)).toBe(`${keycaps}\n\n${LINK}`);
+      // Trimming never splits a ZWJ sequence mid-family.
+      const families = '👨‍👩‍👧‍👦'.repeat(200);
+      const composed = twitter.composeTweet(families, LINK);
+      const trimmed = composed.slice(0, -(`\n\n${LINK}`.length));
+      expect(trimmed.endsWith('…')).toBe(true);
+      const body = trimmed.slice(0, -1);
+      expect(body.length % '👨‍👩‍👧‍👦'.length).toBe(0); // whole families only
+    });
+
+    test('weightedTweetLength matches X for the 2026-07-25 incident text', () => {
+      const incident = "SWFL PEST ID: Something's in the kitchen. \u{1F50D}\n"
+        + 'Follow the clue, not the panic:\n'
+        + '\u{1F36F} Trails to the fruit bowl or sugar → ghost ant\n'
+        + '\u{1F4A1} Scatters the second the light hits → German cockroach\n'
+        + '\u{1F4E6} Carrot-shaped, hiding in the pantry → silverfish\n'
+        + '\u{1F6B0} Only ever near the sink drain → drain fly';
+      expect(incident.length).toBe(279); // naive count says it fits under 280
+      expect(weightedTweetLength(incident)).toBe(283); // X's count says it doesn't
     });
   });
 
