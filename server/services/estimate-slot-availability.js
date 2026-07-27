@@ -574,18 +574,50 @@ function seasonalWindowEnd(from, days) {
 }
 
 // How many days out the seasonal offer surfaces may reach: far enough to
-// cover the seasonal browse window's END. In mid-season this equals the
-// standard horizon; in the Nov–Jan gap AND in the season's last days (when
-// the remaining tail is shorter than the browse window) it extends across
-// the gap to early February (codex r10 P2 + #3000 post-merge P2). Bounded:
-// at worst ~Feb + windowDays.
+// cover the END of the WIDEST seasonal browse window the public route
+// permits (?windowDays clamps to MAX_SLOT_HORIZON_DAYS), counted in
+// IN-SEASON days across the Nov–Jan gap (codex r10 P2 + #3000 post-merge P2
+// + #3005 P2 — a horizon keyed to the 14-day default would let a wide
+// straddling window offer slots the reservation gate then rejects). In
+// mid-season with a long tail this equals the standard horizon exactly.
 function seasonalMaxHorizonDays(now = new Date()) {
   const today = etDateString(now);
-  const windowEnd = seasonalWindowEnd(nextSeasonStartFrom(today), DEFAULT_OPTS.windowDays);
+  const windowEnd = seasonalWindowEnd(nextSeasonStartFrom(today), MAX_SLOT_HORIZON_DAYS);
   const daysOut = Math.round(
     (new Date(`${windowEnd}T12:00:00Z`) - new Date(`${today}T12:00:00Z`)) / 86400000,
   );
   return Math.max(MAX_SLOT_HORIZON_DAYS, daysOut);
+}
+
+// In-season sub-ranges of a window. A straddling window (late-October start
+// crossing to February) must reach the slot GENERATORS as separate segments:
+// their candidate caps apply during date enumeration, so a continuous
+// Oct–Feb range would spend the whole cap on Nov–Jan days the seasonal
+// filter then discards, leaving February with no fallback slots (codex
+// #3005 P2). Non-seasonal callers and non-straddling windows keep the
+// single original range.
+function seasonalDateSegments(dateFrom, dateTo, seasonal) {
+  const from = String(dateFrom).slice(0, 10);
+  const to = String(dateTo).slice(0, 10);
+  if (!seasonal) return [[from, to]];
+  const segments = [];
+  let segStart = null;
+  let segEnd = null;
+  let at = parseETDateTime(`${from}T12:00`);
+  for (let i = 0; i < 400; i++) {
+    const d = etDateString(at);
+    if (inMosquitoSeason(d)) {
+      if (!segStart) segStart = d;
+      segEnd = d;
+    } else if (segStart) {
+      segments.push([segStart, segEnd]);
+      segStart = null;
+    }
+    if (d >= to) break;
+    at = addETDays(at, 1);
+  }
+  if (segStart) segments.push([segStart, segEnd]);
+  return segments.length ? segments : [[from, to]];
 }
 
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
@@ -1510,15 +1542,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // If we can't resolve coords, degrade gracefully: return empty primary,
   // no route-proximity tags. Getting the customer on the calendar still
   // matters more than withholding slots because geocoding failed.
+  // Straddling seasonal windows feed the generators per in-season segment
+  // (see seasonalDateSegments) — single-range for everything else.
+  const slotSegments = seasonalDateSegments(
+    dateFrom, dateTo, seasonalSelectionProfile(serviceProfile),
+  );
   if (!coords) {
-    const asapRaw = await buildAsapCapacitySlots({
-      dateFrom,
-      dateTo,
+    const asapRaw = (await Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+      dateFrom: segFrom,
+      dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
-    });
+    })))).flat();
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
     const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
@@ -1556,25 +1593,27 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
-  const [raw, asapRaw] = await Promise.all([
-    findAvailableSlots({
+  const [rawLists, asapLists] = await Promise.all([
+    Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
-      dateFrom,
-      dateTo,
+      dateFrom: segFrom,
+      dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
       includeWeekends: opts.includeWeekends,
-    }),
-    buildAsapCapacitySlots({
-      dateFrom,
-      dateTo,
+    }))),
+    Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+      dateFrom: segFrom,
+      dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
-    }),
+    }))),
   ]);
+  const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
+  const asapRaw = asapLists.flat();
 
   const classifiedRaw = (raw?.slots || [])
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
@@ -1808,6 +1847,7 @@ module.exports = {
   inMosquitoSeason,
   nextSeasonStartFrom,
   seasonalWindowEnd,
+  seasonalDateSegments,
   seasonalMaxHorizonDays,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.
