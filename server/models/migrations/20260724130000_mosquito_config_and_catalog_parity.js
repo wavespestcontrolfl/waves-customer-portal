@@ -295,11 +295,24 @@ exports.down = async function (knex) {
         next[bucket] = restored;
         reverted.push(bucket);
       }
+      // The DOWN marker closes the cycle and MUST be written whenever the UP
+      // record was consumed — including when an owner edit meant nothing needed
+      // restoring. Writing it only on a successful revert leaves the UP record
+      // "uncancelled", so a later no-op reapplication could consume this same
+      // snapshot and restore legacy brackets it never applied.
       if (reverted.length) {
         await writeConfig(
           knex, LOT_SIZES_KEY, current, next,
           `${DOWN_REASON} — reverted: ${reverted.join(', ')}`
         );
+      } else {
+        await knex('pricing_config_audit').insert({
+          config_key: LOT_SIZES_KEY,
+          old_value: JSON.stringify(applied),
+          new_value: JSON.stringify({ reverted: [] }),
+          changed_by: MIGRATION_TAG,
+          reason: `${DOWN_REASON} — nothing to revert (all buckets edited since up)`,
+        });
       }
     }
   }
@@ -334,16 +347,18 @@ exports.down = async function (knex) {
           await knex('services')
             .where({ service_key: key })
             .update({ ...patch, updated_at: knex.fn.now() });
-          // Marker that closes this cycle: a later reapplication that changes
-          // nothing must not consume the provenance row above a second time.
-          await knex('pricing_config_audit').insert({
-            config_key: CATALOG_AUDIT_KEY,
-            old_value: JSON.stringify(appliedFields),
-            new_value: JSON.stringify(patch),
-            changed_by: MIGRATION_TAG,
-            reason: CATALOG_DOWN_REASON,
-          });
         }
+        // Cycle-closing marker, written whether or not a field was restored —
+        // see the lot-size branch above for why an unconditional marker matters.
+        await knex('pricing_config_audit').insert({
+          config_key: CATALOG_AUDIT_KEY,
+          old_value: JSON.stringify(appliedFields),
+          new_value: JSON.stringify(patch),
+          changed_by: MIGRATION_TAG,
+          reason: Object.keys(patch).length
+            ? CATALOG_DOWN_REASON
+            : `${CATALOG_DOWN_REASON} — nothing to restore (edited since up)`,
+        });
       }
     }
   }

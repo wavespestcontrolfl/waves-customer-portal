@@ -426,6 +426,48 @@ const TERMITE_BOND_TERM_META = {
   '10yr': { label: '10-Year', years: 10 },
 };
 
+// Mirrors server constants MOSQUITO.basePrices — per-visit rate card, keyed
+// [seasonal9, monthly12]. Repriced 2026-06 to the SW-FL recurring market; the
+// pre-reprice table (SMALL [105, 90] ... ACRE [195, 175]) lived on here after the
+// reprice, so this fallback quoted ~1.6x the live card.
+//
+// `pricing_config.mosquito_base_prices` is admin-editable and server-authoritative,
+// and a save that the server cannot replay persists THIS preview as the price
+// (pricing_authority CLIENT_FALLBACK). Compiled defaults alone would therefore go
+// stale on the next Pricing Logic reprice, so EstimatePage fetches the row on
+// mount and applies it here — same contract as lawn/pest/termite-bond above. On
+// fetch failure the in-code defaults stand (db-bridge's kill-value pattern).
+const MOSQUITO_DEFAULT_BASE_PRICES = {
+  SMALL: [66, 60],
+  QUARTER: [69, 63],
+  THIRD: [72, 66],
+  HALF: [78, 70],
+  ACRE: [88, 78],
+};
+const MOSQUITO_BASE_PRICES = { ...MOSQUITO_DEFAULT_BASE_PRICES };
+
+export function applyServerMosquitoPricingConfig(config) {
+  const rate = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  };
+  for (const key of Object.keys(MOSQUITO_DEFAULT_BASE_PRICES)) {
+    const fallback = MOSQUITO_DEFAULT_BASE_PRICES[key];
+    const row = config?.[key];
+    if (!row || typeof row !== 'object') {
+      MOSQUITO_BASE_PRICES[key] = [...fallback];
+      continue;
+    }
+    // Legacy rows used metal-tier keys; db-bridge accepts the same aliases.
+    const legacy = row.silver ?? row.monthly ?? row.bronze;
+    MOSQUITO_BASE_PRICES[key] = [
+      rate(row.seasonal9 ?? row.seasonal ?? legacy) ?? fallback[0],
+      rate(row.monthly12 ?? row.monthly ?? legacy) ?? fallback[1],
+    ];
+  }
+  return { ...MOSQUITO_BASE_PRICES };
+}
+
 export function applyServerTermiteBondPricingConfig(config) {
   const rate = (v) => {
     const n = Number(v);
@@ -2109,19 +2151,7 @@ export function calculateEstimate(inputs) {
     if (sz === 'ACRE') pr += 0.15;
     else if (sz === 'HALF') pr += 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
-    // Mirrors the server-authoritative per-visit rate card
-    // (server/services/pricing-engine/constants.js MOSQUITO.basePrices, itself
-    // overridden by pricing_config.mosquito_base_prices). Repriced 2026-06 to
-    // the SW-FL recurring market; the pre-reprice table (SMALL [105, 90] ...
-    // ACRE [195, 175]) lived on here and showed the builder ~1.6x what the
-    // server actually saved. Any reprice must update this table in the same PR.
-    const bp = {
-      SMALL: [66, 60],
-      QUARTER: [69, 63],
-      THIRD: [72, 66],
-      HALF: [78, 70],
-      ACRE: [88, 78],
-    };
+    const bp = MOSQUITO_BASE_PRICES;
     const b = bp[sz] || bp.SMALL;
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [

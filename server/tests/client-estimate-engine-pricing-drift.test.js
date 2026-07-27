@@ -571,7 +571,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     // and "$Y/mo"), so a stale copy shows the operator a price the server will
     // not save. It sat on the pre-2026-06 band (SMALL [105, 90] ... ACRE
     // [195, 175]) after the reprice and displayed ~1.6x the real price.
-    const table = source.match(/const bp = \{([\s\S]*?)\};/);
+    const table = source.match(/const MOSQUITO_DEFAULT_BASE_PRICES = \{([\s\S]*?)\};/);
     expect(table).not.toBeNull();
     const clientBasePrices = {};
     for (const [, key, seasonal, monthly] of table[1].matchAll(/(SMALL|QUARTER|THIRD|HALF|ACRE):\s*\[(\d+),\s*(\d+)\]/g)) {
@@ -607,6 +607,42 @@ describe('deprecated client estimator pricing drift guards', () => {
       [MOSQUITO.programLabels.seasonal9, MOSQUITO.basePrices.SMALL[0], MOSQUITO.tierVisits.seasonal9],
       [MOSQUITO.programLabels.monthly12, MOSQUITO.basePrices.SMALL[1], MOSQUITO.tierVisits.monthly12],
     ]);
+  });
+
+  test('mosquito rate card follows the live DB row, not just compiled defaults', () => {
+    // pricing_config.mosquito_base_prices is admin-editable and server-
+    // authoritative, and a save the server cannot replay persists this preview
+    // as the price (pricing_authority CLIENT_FALLBACK). Compiled defaults alone
+    // go stale on the next Pricing Logic reprice (pre-push P0 on #2996).
+    const { calculateEstimate: calc, applyServerMosquitoPricingConfig } = loadClientEstimator(source);
+    const priceSmall = () => {
+      const est = calc({
+        homeSqFt: 1400, stories: 1, lotSqFt: 7000, propertyType: 'single_family',
+        svcMosquito: true, treeDensity: 'LIGHT', landscapeComplexity: 'SIMPLE',
+        hasPool: false, nearWater: false, hasIrrigation: false,
+        urgency: 'NONE', isAfterHours: false, isRecurringCustomer: false,
+      });
+      return est.results.mq.map((t) => t.pv);
+    };
+    expect(priceSmall()).toEqual([MOSQUITO.basePrices.SMALL[0], MOSQUITO.basePrices.SMALL[1]]);
+
+    // An admin reprice in Pricing Logic must reach this preview.
+    applyServerMosquitoPricingConfig({ SMALL: { seasonal9: 91, monthly12: 84 } });
+    expect(priceSmall()).toEqual([91, 84]);
+
+    // Legacy metal-tier key shape (db-bridge accepts the same aliases).
+    applyServerMosquitoPricingConfig({ SMALL: { silver: 77 } });
+    expect(priceSmall()).toEqual([77, 77]);
+
+    // Absent/failed row resets to the in-code default — db-bridge kill-value pattern.
+    applyServerMosquitoPricingConfig(null);
+    expect(priceSmall()).toEqual([MOSQUITO.basePrices.SMALL[0], MOSQUITO.basePrices.SMALL[1]]);
+  });
+
+  test('admin estimate page loads the live mosquito row on mount', () => {
+    // The fallback engine only self-corrects if someone fetches the row.
+    expect(legacyAdminSource).toContain('fetchConfigRow("mosquito_base_prices")');
+    expect(legacyAdminSource).toContain('applyServerMosquitoPricingConfig(mosquitoRow.data)');
   });
 
   test('admin customer preview adds preserved pest specialty rows to one-time pest choice', () => {
