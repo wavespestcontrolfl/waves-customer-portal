@@ -2356,9 +2356,16 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
+  // The gated typed-report narrative (summarySource 'typed_narrative')
+  // replaces the template body ONLY here when Pest/Mosquito V2 suppresses
+  // the legacy Visit Summary section — this card is then the report's one
+  // summary surface. Non-V2 typed reports render the narrative in the
+  // Visit Summary section instead and keep the ratified template body here
+  // (both would otherwise show the same paragraph twice).
+  const body = bodyOverride || result.body;
   return (
     <section data-glass="card" className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
@@ -2367,10 +2374,13 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {result.body && <p className="ai-summary-body">{result.body}</p>}
+      {body && <p className="ai-summary-body">{body}</p>}
       {/* The snapshot builder embeds nextStep in body on most paths — only
-          render the bullet when it adds something the paragraph doesn't. */}
-      {result.nextStep && !(result.body || '').includes(result.nextStep) && (
+          render the bullet when it adds something the paragraph doesn't.
+          The narrative override always carries the follow-up itself (the
+          prompt requires it verbatim in meaning), so the bullet would read
+          as a paraphrased duplicate under it — suppressed. */}
+      {result.nextStep && !bodyOverride && !(body || '').includes(result.nextStep) && (
         <div className="ai-summary-bullets">
           <div className="ai-summary-bullet">{result.nextStep}</div>
         </div>
@@ -8009,7 +8019,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             for pest to match. */}
         {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
-        <TodaysResultCard typedReport={data.typedReport} />
+        <TodaysResultCard
+          typedReport={data.typedReport}
+          bodyOverride={data.summarySource === 'typed_narrative' && (data.pestReportV2 || data.mosquitoReportV2)
+            ? cleanVisitSummary(data.summary)
+            : null}
+        />
 
         <RecapVideoCard recap={data.recap} token={token} />
 

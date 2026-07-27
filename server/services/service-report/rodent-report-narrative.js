@@ -41,7 +41,11 @@ const {
   formatArrivalWindow,
 } = require('./visit-summary-narrative');
 
-const PROMPT_VERSION = 'rodent_report_narrative_v1';
+// v2: the narrative covers EVERY typed specialty report (cockroach, bed
+// bug, termite bait, WDO, rodent…) — the prompt generalized from rodent-
+// only wording (owner ask 2026-07-27, second lane). File name kept (no
+// renames); rodent remains a thin alias over the same engine.
+const PROMPT_VERSION = 'typed_report_narrative_v2';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -160,6 +164,7 @@ function photoFacts(photos = []) {
 function groundingFacts({
   recap,
   serviceTypeDisplay,
+  reportTypeLabel = null,
   typedReport = null,
   activity = null,
   stationSummary = null,
@@ -177,7 +182,8 @@ function groundingFacts({
     : null;
   return {
     recap: cleanText(recap),
-    serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'rodent service',
+    serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
+    reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
     todaysResult: typedReport?.todaysResult
       ? {
         headline: cleanText(typedReport.todaysResult.headline) || null,
@@ -281,19 +287,21 @@ function deterministicSummary(facts) {
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control rodent service report.
+const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
 
-You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/station check counts, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled rodent visit.
+You are given grounding facts: the technician's recap message, the report type, the report's ratified result copy, customer-labeled findings (target pest, areas noted, work completed), the property's activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/bait-station check counts when the program uses them, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled visit.
 
 Rules:
 - 4 to 7 short sentences in one or two short paragraphs. Plain, calm, professional language. No greeting, no headings, no markdown, no bullet lists.
-- Facts only: never invent work, counts, captures, sightings, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
+- Facts only: never invent work, counts, captures, sightings, locations, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
+- When the findings tag specific pests (e.g. German cockroaches, roof rats, subterranean termites), name the main one(s) in plain language — never a pest that is not tagged.
 - Write every count as a numeral, exactly as it appears in the facts. Never introduce a number that is not in the facts.
-- Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof rodents are gone or the issue is resolved.
+- Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof the pests are gone or the issue is resolved.
 - When a capture or bait consumption IS recorded, state it ONLY in the grounded generic form ("a capture was recorded at 2 traps", "bait consumption was observed at 1 station") — never invent species, rooms, or other details the facts do not carry.
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
-- If photo evidence is provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
+- If photo evidence is provided, briefly and calmly reference what was documented — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
+- If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
 - If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
 
@@ -698,11 +706,11 @@ function echoesWithheldName(text, applications = []) {
 }
 
 /**
- * Returns the detailed Visit Summary string for a rodent typed report, or
- * the deterministic fallback. Never throws; never returns unguarded model
- * copy.
+ * Returns the detailed Visit Summary string for a typed specialty report
+ * (rodent, cockroach, bed bug, termite bait, WDO…), or the deterministic
+ * fallback. Never throws; never returns unguarded model copy.
  */
-async function applyRodentReportNarrative(input = {}, deps = {}) {
+async function applyTypedReportNarrative(input = {}, deps = {}) {
   const facts = groundingFacts(input);
   if (!facts.recap && !facts.todaysResult) return cleanText(input.recap);
 
@@ -745,13 +753,13 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
       if (!banned.length) {
         value = text;
       } else {
-        logger.warn(`[rodent-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
+        logger.warn(`[typed-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
       }
     } else if (res && !res.ok) {
-      logger.warn(`[rodent-narrative] miss (${res.reason}); using deterministic summary`);
+      logger.warn(`[typed-narrative] miss (${res.reason}); using deterministic summary`);
     }
   } catch (err) {
-    logger.warn(`[rodent-narrative] failed: ${err.message}; using deterministic summary`);
+    logger.warn(`[typed-narrative] failed: ${err.message}; using deterministic summary`);
   }
 
   _cache.set(cacheKey, { at: Date.now(), value });
@@ -760,7 +768,10 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
 }
 
 module.exports = {
-  applyRodentReportNarrative,
+  applyTypedReportNarrative,
+  // Back-compat alias — the rodent refresh (GATE_RODENT_REPORT_REFRESH)
+  // shipped against this name; same engine.
+  applyRodentReportNarrative: applyTypedReportNarrative,
   // exported for tests
   _test: {
     groundingFacts,

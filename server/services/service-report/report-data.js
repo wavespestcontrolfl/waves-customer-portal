@@ -12,7 +12,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
-const { applyRodentReportNarrative } = require('./rodent-report-narrative');
+const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
@@ -435,7 +435,13 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
-  if (normalized.exterior_reentry_min != null && scope.hasExplicitScope && scope.hasInterior && !scope.hasExterior) {
+  // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
+  // the visit explicitly classified exterior treatment — never as a
+  // default timer. A visit with no recorded scope at all therefore shows
+  // no exterior row (previously both service-line default timers rendered).
+  // This subsumes the old interior-only branch: explicitly-interior visits
+  // have hasExterior false and zero out here the same way.
+  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
     normalized.exterior_reentry_min = 0;
   }
 
@@ -3004,6 +3010,46 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Typed-report narrative for EVERY OTHER typed specialty report (owner
+  // ask 2026-07-27, second lane): cockroach, bed bug, termite bait, WDO…
+  // keep the frozen recap/template as their summary — the gate reweaves the
+  // typed findings, activity reading, station counts, products, photo
+  // evidence, and next same-line visit into the grounded narrative (same
+  // engine + guard stack as the rodent refresh). Precedence unchanged: the
+  // tech's reviewed "Generate AI report" copy still wins — both the summary
+  // slot and a snapshot whose Today's Result body came from it. LIVE VIEWS
+  // ONLY, so pdf/static/sms_preview output never varies with the gate (no
+  // PDF cache-key impact). The client shows the narrative in whichever
+  // summary surface the report renders: the legacy Visit Summary section,
+  // or the Today's Result body when Pest/Mosquito V2 suppresses that
+  // section (summarySource === 'typed_narrative' drives the override).
+  // Kill switch: unset GATE_TYPED_REPORT_NARRATIVE.
+  if (
+    serviceLine !== 'rodent'
+    && typedSnapshot
+    && visitSummarySource !== 'technician_report'
+    && typedSnapshot.todaysResult?.bodySource !== 'technician_report'
+    && opts.mode === 'live'
+    && process.env.GATE_TYPED_REPORT_NARRATIVE === 'true'
+  ) {
+    const narrated = await applyTypedReportNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: linkedServiceName,
+      reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
+      typedReport: typedSnapshot,
+      activity,
+      stationSummary: stationMap?.summary || null,
+      stationProgram: stationMap?.program || null,
+      applications,
+      photos: photoPayload,
+      nextAppointment,
+    }).catch(() => null);
+    if (narrated && narrated !== visitSummary) {
+      visitSummary = narrated;
+      visitSummarySource = 'typed_narrative';
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -3067,7 +3113,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     summary: visitSummary,
     // 'technician_report' when summary is the tech-reviewed AI report copy,
-    // 'rodent_narrative' when the gated rodent narrative composed it,
+    // 'rodent_narrative' / 'typed_narrative' when a gated narrative
+    // composed it (typed_narrative also drives the client's Today's Result
+    // body override on V2-suppressed summaries),
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,

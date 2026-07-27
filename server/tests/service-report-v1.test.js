@@ -397,7 +397,11 @@ describe('service report v1', () => {
       advisory,
     }, new Date('2026-05-16T13:25:00.000Z'));
 
-    expect(unknownScope).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+    // Owner rule 2026-07-27: an exterior re-entry timer exists ONLY when the
+    // visit explicitly classified exterior treatment — an unclassified visit
+    // must NOT default the exterior row onto the report (interior keeps its
+    // prior default behavior; only an explicitly exterior-only visit zeroes it).
+    expect(unknownScope).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 120 });
     expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     expect(context.targets.map((target) => target.key)).toEqual(['exterior']);
   });

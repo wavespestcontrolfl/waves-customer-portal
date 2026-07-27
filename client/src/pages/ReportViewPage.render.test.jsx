@@ -247,6 +247,35 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     expect(screen.queryByText('Bed Bug Activity')).toBeNull();
     expect(document.querySelector('[data-section="activity"]')).toBeNull();
   });
+
+  // GATE_TYPED_REPORT_NARRATIVE: with Pest V2 suppressing the legacy Visit
+  // Summary section, the Today's Result card is the report's one summary
+  // surface — the typed narrative takes its body there, and ONLY there.
+  it('typed narrative replaces the Today’s Result body when Pest V2 owns the summary slot', async () => {
+    const NARRATIVE = 'Bed bug activity was very low today, and we inspected the mattress encasements and monitors installed at your last visit.';
+    const TEMPLATE = 'We completed the scheduled follow-up inspection today.';
+    renderReport(typedPestPayload({
+      summary: NARRATIVE,
+      summarySource: 'typed_narrative',
+      typedReport: { type: 'bed_bug', todaysResult: { headline: 'Follow-up complete.', body: TEMPLATE } },
+    }));
+    await screen.findByText(NARRATIVE);
+    expect(screen.queryByText(TEMPLATE)).toBeNull();
+  });
+
+  it('without Pest V2 the narrative renders in Visit Summary and the ratified body stays on the card', async () => {
+    const NARRATIVE = 'Bed bug activity was very low today, and we inspected the mattress encasements and monitors installed at your last visit.';
+    const TEMPLATE = 'We completed the scheduled follow-up inspection today.';
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      summary: NARRATIVE,
+      summarySource: 'typed_narrative',
+      typedReport: { type: 'bed_bug', todaysResult: { headline: 'Follow-up complete.', body: TEMPLATE } },
+    }));
+    await screen.findByText('Visit Summary');
+    await screen.findByText(NARRATIVE);
+    await screen.findByText(TEMPLATE); // the card keeps its ratified copy
+  });
 });
 
 describe('ReportViewPage — trapping station map card (program labels)', () => {
