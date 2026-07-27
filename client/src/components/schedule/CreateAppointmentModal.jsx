@@ -1017,21 +1017,38 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     };
   };
   const groupServicesForAppointmentSubmit = (rows) => {
-    const sorted = [...rows].sort((a, b) => {
-      const rank = cadenceRankDays(a) - cadenceRankDays(b);
-      if (rank !== 0) return rank;
-      return rows.indexOf(a) - rows.indexOf(b);
-    });
-    const primary = sorted[0] || rows[0];
-    if (!primary) return [];
-    const cfg = serviceCadenceConfig(primary);
-    return [{
-      cadence: primary.cadence || 'one_time',
-      intervalDays: cfg.recurringIntervalDays,
-      nth: cfg.recurringNth,
-      weekday: cfg.recurringWeekday,
-      lines: [primary, ...sorted.filter((s) => s !== primary)],
-    }];
+    const buildGroup = (subset) => {
+      const sorted = [...subset].sort((a, b) => {
+        const rank = cadenceRankDays(a) - cadenceRankDays(b);
+        if (rank !== 0) return rank;
+        return subset.indexOf(a) - subset.indexOf(b);
+      });
+      const primary = sorted[0] || subset[0];
+      if (!primary) return null;
+      const cfg = serviceCadenceConfig(primary);
+      return {
+        cadence: primary.cadence || 'one_time',
+        intervalDays: cfg.recurringIntervalDays,
+        nth: cfg.recurringNth,
+        weekday: cfg.recurringWeekday,
+        lines: [primary, ...sorted.filter((s) => s !== primary)],
+      };
+    };
+    // Seasonal (Feb–Oct) lines can share a parent with year-round services in
+    // NEITHER direction (codex r19 P1): as parent they'd starve companions of
+    // Nov–Jan visits (addons attach only to parent-generated dates); as an
+    // addon they'd ride winter dates. Each seasonal line books its own
+    // series; everything else keeps the single-parent grouping.
+    const seasonalRows = rows.filter((s) => s.cadence === 'seasonal_feb_oct');
+    const yearRoundRows = rows.filter((s) => s.cadence !== 'seasonal_feb_oct');
+    if (!seasonalRows.length || !yearRoundRows.length) {
+      const solo = buildGroup(rows);
+      return solo ? [solo] : [];
+    }
+    return [
+      buildGroup(yearRoundRows),
+      ...seasonalRows.map((row) => buildGroup([row])),
+    ].filter(Boolean);
   };
 
   // Tracks cadence-group keys already POSTed during this modal session.

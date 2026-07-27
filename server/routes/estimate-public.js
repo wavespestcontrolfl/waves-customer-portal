@@ -16409,19 +16409,20 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
           : frequency));
     }
     // Bundle combos carry the mosquito tier on their selection axis — stamp
-    // authoritative eligibility on each so the client can RESTORE prepay for
-    // a monthly12 axis on a seasonal-default estimate (the estimate-level
-    // flag can't distinguish why it's false — codex r18 P1).
+    // authoritative eligibility on each so the client renders from the
+    // matched combo (codex r18 P1). A combo by definition spans MULTIPLE
+    // recurring services, and multi-service annual prepay is hard-blocked
+    // everywhere downstream (/deposit-intent rejects unit counts above one;
+    // the converter throws ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED), so the
+    // stamp is always FALSE (codex r19 P1) — offering it would lead every
+    // checkout into a deterministic failure. The monthly12-axis restore case
+    // only exists for SOLO mosquito, which has no combos and resolves via
+    // the per-frequency stamp above.
     if (hasMosquitoAxisCombos) {
-      withQuoteState.serviceCadenceCombos = withQuoteState.serviceCadenceCombos.map((combo) => {
-        const axisTier = mosquitoTierForAxisToken(combo?.selection?.mosquito);
-        if (!axisTier) return combo;
-        return {
-          ...combo,
-          annualPrepayEligible: tierIncentive
-            && annualPrepayEligibleForMosquitoTier(estData, axisTier),
-        };
-      });
+      withQuoteState.serviceCadenceCombos = withQuoteState.serviceCadenceCombos.map((combo) => (
+        mosquitoTierForAxisToken(combo?.selection?.mosquito)
+          ? { ...combo, annualPrepayEligible: false }
+          : combo));
     }
   }
   // After the contract attaches sections, hide floor-clamped lawn cadences on

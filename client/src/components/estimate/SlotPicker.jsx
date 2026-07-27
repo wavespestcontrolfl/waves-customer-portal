@@ -247,7 +247,30 @@ export default function SlotPicker({
   const pad2 = (n) => String(n).padStart(2, '0');
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const browseMin = toYmd(new Date());
-  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+  const browseMax = (() => {
+    // Mirror of the server's seasonalMaxHorizonDays (codex r19 P2): a
+    // seasonal (Feb–Oct) mosquito selection in the Nov–Jan gap may browse
+    // through the season opener + the default window — on Nov 1–2 the next
+    // Feb 1 sits past the standard 90 days and the picker would otherwise
+    // block dates the API and reservation now accept.
+    const seasonalSelected = serviceMode !== 'one_time'
+      && ([selectedFrequency, serviceCadences?.mosquito]
+        .some((v) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+          .includes(String(v || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))));
+    let horizonDays = 90;
+    if (seasonalSelected) {
+      const now = new Date();
+      const m = now.getMonth(); // 0-indexed: Feb=1 … Oct=9
+      if (m === 0 || m > 9) {
+        const seasonStart = new Date(m === 0 ? now.getFullYear() : now.getFullYear() + 1, 1, 1, 12);
+        const gapDays = Math.round((seasonStart - now) / 86400000);
+        horizonDays = Math.max(90, gapDays + 14);
+      }
+    }
+    const d = new Date();
+    d.setDate(d.getDate() + horizonDays);
+    return toYmd(d);
+  })();
 
   const formatPickedDate = (ymd) => {
     try {
