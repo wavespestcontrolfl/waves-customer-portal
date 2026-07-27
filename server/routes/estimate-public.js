@@ -2685,7 +2685,39 @@ function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
   if (recurringRows.some((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'))) {
     return false;
   }
+  // Seasonal mosquito (9x Feb–Oct) can't annual-prepay yet either (codex r8
+  // P1): prepayCoverageCadenceForPattern rejects seasonal_feb_oct — the
+  // coverage seeder would place prepaid visits in winter — and the converter
+  // fails that conversion closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED
+  // 422) AFTER a deposit may have been collected. Same shared-gate rule as
+  // termite bonds: this predicate feeds the SSR CTA, the /data flag, the
+  // accept preflight, AND /deposit-intent, so the option never shows and no
+  // money is taken for an acceptance shape the converter refuses.
+  if (recurringMixHasSeasonalMosquito(recurringRows)) return false;
   return true;
+}
+
+// The recurring mix carries the seasonal mosquito program (9x Feb–Oct):
+// mosquito + nine visits/year has exactly one cadence — the converter forces
+// the seasonal walk at seeding (converterFollowUpSeedingPattern). Resolved
+// through the seeder directly: the converter module is jest-mocked in
+// acceptance tests and must not be a dependency of these predicates. NOTE:
+// this is the ONE mix that is annual-prepay-INELIGIBLE while still owing the
+// WaveGuard setup fee at accept — everywhere else prepay-ineligible implies
+// the fee isn't charged (existing customers get it waived outright; termite
+// bonds carry no membership-fee mix) — so the fee-card sites must keep
+// showing the card for it, un-waivable.
+function recurringMixHasSeasonalMosquito(recurring = []) {
+  const rows = Array.isArray(recurring) ? recurring : [];
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  return rows.some((svc) => {
+    if (RecurringAppointmentSeeder.serviceKeyFor(svc) !== 'mosquito') return false;
+    // First positive visits field, same order as the converter's
+    // visitsPerYearForRecurringService.
+    const visits = [svc.visitsPerYear, svc.appsPerYear, svc.visits, svc.apps, svc.treatmentsPerYear]
+      .map(Number).find((v) => Number.isFinite(v) && v > 0);
+    return visits === 9;
+  });
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -8135,9 +8167,11 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
-    if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
-      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
-    }
+    // Annual-prepay service-mix eligibility is adjudicated BELOW, after
+    // selectedFrequency resolves — a mosquito ladder pick overrides the
+    // stored default row in both directions (codex r10 P1): seasonal9 can't
+    // prepay even when the stored row is monthly, and monthly12 CAN prepay
+    // even when the stored row is seasonal.
     // Existing customers are pay-per-application only — the page never offers
     // prepay, but a stale/crafted client could still POST it. Reject so
     // EstimateConverter can't open an annual prepay invoice/term for them.
@@ -8161,6 +8195,29 @@ router.put('/:token/accept', async (req, res, next) => {
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+    }
+    // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
+    // entries carry their own annualPrepayEligible (finalizePricingBundle);
+    // that flag decides for the SELECTED tier — the stored-mix rule remains
+    // for everything else. Runs before any billing side effects.
+    if (annualPrepaySelected) {
+      // No raw serviceCadences adjudication here AT ALL (codex r21 P0 +
+      // r22 P2): with no combos this route IGNORES the map and books the
+      // selected/default tier, so a stale seasonal9 token must neither buy
+      // NOR block prepay — eligibility follows the selected frequency's
+      // stamped flag or the stored mix. When combos exist, the MATCHED
+      // combo's stamped flag is enforced right after combo resolution below
+      // (combos are always prepay-ineligible today), and an unmatched map
+      // 400s there.
+      const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
+        ? selectedFrequency.annualPrepayEligible
+        : null;
+      const prepayMixEligible = tierPrepayFlag != null
+        ? tierPrepayFlag
+        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+      if (!prepayMixEligible) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
     }
     // Per-service cadence: in a bundle the customer may pick each selectable
     // service's cadence independently. `serviceCadences` maps a service key to
@@ -8194,6 +8251,13 @@ router.put('/:token/accept', async (req, res, next) => {
       }) || null;
       if (!selectedCombo) {
         return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+      }
+      // A matched combo's server-stamped prepay flag is authoritative
+      // (codex r21 P0): combos span multiple recurring services and
+      // multi-service prepay is hard-blocked downstream, so an accept that
+      // selected one must not carry prepay past this point.
+      if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
@@ -12065,6 +12129,52 @@ function annualPrepayEligibleForEstimateData(estData) {
   if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+}
+
+// A mosquito ladder entry (seasonal9 / monthly12). The customer switches
+// tiers live, so prepay eligibility must follow the SELECTED tier, not the
+// stored default row (codex r10 P1): seasonal can't prepay, monthly can —
+// in BOTH directions of the default.
+function frequencyIsMosquitoTier(frequency = {}) {
+  return String(frequency?.serviceCategory || '') === 'mosquito';
+}
+
+function frequencyIsSeasonalMosquitoTier(frequency = {}) {
+  if (!frequencyIsMosquitoTier(frequency)) return false;
+  return String(frequency.key || frequency.tierKey || '') === 'seasonal9'
+    || Number(frequency.visitsPerYear) === 9;
+}
+
+// Bundle combo-axis token → mosquito tier stub for
+// annualPrepayEligibleForMosquitoTier; null when the token isn't a mosquito
+// ladder key. Lets accept and /deposit-intent honor a monthly12 axis on a
+// seasonal-default estimate (eligible) and refuse a seasonal9 axis on a
+// monthly-default one — the top-level frequency stays the pest cadence in a
+// bundle and carries no per-tier flag (codex r16 P2).
+function mosquitoTierForAxisToken(token) {
+  const t = String(token || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (t === 'seasonal9' || t === 'seasonal' || t === 'seasonal_feb_oct') {
+    return { serviceCategory: 'mosquito', key: 'seasonal9', visitsPerYear: 9 };
+  }
+  if (t === 'monthly12') return { serviceCategory: 'mosquito', key: 'monthly12', visitsPerYear: 12 };
+  return null;
+}
+
+// Prepay eligibility with the mix's mosquito row replaced by the given tier —
+// the same substitution acceptance performs when it restamps the selected
+// tier onto the row before conversion. All non-mosquito rules (existing
+// customer, termite bond, one-time-only) keep their normal effect.
+function annualPrepayEligibleForMosquitoTier(estData, frequency) {
+  if (!estData || typeof estData !== 'object') return false;
+  if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
+  if (frequencyIsSeasonalMosquitoTier(frequency)) return false;
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  const swapped = (recurringSvcList || []).map((svc) => (
+    RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+      ? { service: 'mosquito', name: svc.name, visitsPerYear: Number(frequency?.visitsPerYear) || 12 }
+      : svc));
+  return isAnnualPrepayEligibleServiceMix(swapped, oneTimeList);
 }
 
 // Does annual prepay carry a SELLABLE incentive for this estimate? Mirrors
@@ -15964,7 +16074,10 @@ function termiteComparisonAvailableForEstimate(estData, services = [], estimate 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null, estimate = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
-  const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
+  // Waivability no longer matters for showing the card: seasonal mosquito
+  // carries a NON-waivable setup fee (prepay isn't offered for it) that the
+  // converter still charges — the card must render either way.
+  const hasSetupFeeCard = services.some((section) => section?.isRecurring && section?.setupFee);
   // Tier UI shows when any recurring section is badge-eligible. Derived from the
   // same per-section flag the client reads, so the global gate and the per-section
   // badge can never disagree. Pest-only setup fee/perks/add-ons stay on
@@ -15977,7 +16090,7 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null,
     showRecurringSummary: combinedRecurring != null,
     showWaveGuardTierUi: hasRecurringPest || hasTierBadgeRecurringService || hasDiscountContext || qualifyingCount > 1,
     showWaveGuardPerks: hasRecurringPest || qualifyingCount > 1 || hasDiscountContext,
-    showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
+    showWaveGuardSetupFee: hasRecurringPest || hasSetupFeeCard,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
     showOneTimePestAddOns: false && hasPestOneTime,
     // Per-service "email/text me the full details PDF" buttons (live by
@@ -16340,6 +16453,47 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   if (withQuoteState.annualPrepayEligible === true
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
+  }
+  // Per-tier prepay eligibility for the mosquito ladder (codex r10 P1): the
+  // estimate-level flag reflects the STORED default row, but seasonal9 can't
+  // prepay while monthly12 can — stamp each mosquito frequency so the client
+  // resolves the option from the SELECTED tier. Accept and /deposit-intent
+  // enforce the same per-tier rule server-side. The sellable-incentive gate
+  // applies to tiers too (codex r12 P1): an operator-waived setup fee leaves
+  // monthly-mosquito prepay with NO benefit, and the tier flag must not
+  // resurrect an option the global gate correctly disabled.
+  const hasMosquitoTierFrequencies = Array.isArray(withQuoteState.frequencies)
+    && withQuoteState.frequencies.some(frequencyIsMosquitoTier);
+  const hasMosquitoAxisCombos = Array.isArray(withQuoteState.serviceCadenceCombos)
+    && withQuoteState.serviceCadenceCombos.some((combo) => !!mosquitoTierForAxisToken(combo?.selection?.mosquito));
+  if (hasMosquitoTierFrequencies || hasMosquitoAxisCombos) {
+    const tierIncentive = annualPrepayHasSellableIncentive(estimate, estData, withQuoteState);
+    if (hasMosquitoTierFrequencies) {
+      withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
+        frequencyIsMosquitoTier(frequency)
+          ? {
+            ...frequency,
+            annualPrepayEligible: tierIncentive
+              && annualPrepayEligibleForMosquitoTier(estData, frequency),
+          }
+          : frequency));
+    }
+    // Bundle combos carry the mosquito tier on their selection axis — stamp
+    // authoritative eligibility on each so the client renders from the
+    // matched combo (codex r18 P1). A combo by definition spans MULTIPLE
+    // recurring services, and multi-service annual prepay is hard-blocked
+    // everywhere downstream (/deposit-intent rejects unit counts above one;
+    // the converter throws ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED), so the
+    // stamp is always FALSE (codex r19 P1) — offering it would lead every
+    // checkout into a deterministic failure. The monthly12-axis restore case
+    // only exists for SOLO mosquito, which has no combos and resolves via
+    // the per-frequency stamp above.
+    if (hasMosquitoAxisCombos) {
+      withQuoteState.serviceCadenceCombos = withQuoteState.serviceCadenceCombos.map((combo) => (
+        mosquitoTierForAxisToken(combo?.selection?.mosquito)
+          ? { ...combo, annualPrepayEligible: false }
+          : combo));
+    }
   }
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
@@ -16803,7 +16957,16 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
     && bundle.oneTimeBreakdown.items.some(isSetupRow)) return false;
   if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return false;
-  if (!annualPrepayEligibleForEstimateData(estData)) return false;
+  // Seasonal mosquito is prepay-INELIGIBLE yet still owes the setup fee
+  // (codex r14 P1): the eligibility early-return alone would let pre-rule
+  // fee-less sendSnapshots fast-path forever, hiding a fee acceptance
+  // invoices. Recognize the fee-due seasonal mix the same way the fee-card
+  // sites do; existing customers keep the outright waiver (no recompute).
+  const stalePrepayEligible = annualPrepayEligibleForEstimateData(estData);
+  const staleSeasonalFeeDue = !stalePrepayEligible
+    && !estData?.membershipSnapshot?.isExistingCustomer
+    && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+  if (!stalePrepayEligible && !staleSeasonalFeeDue) return false;
   return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
     recurringServices: estimateDataRecurringServices(estData),
     estimateData: estData,
@@ -17171,12 +17334,21 @@ async function buildPricingBundleInner(estimate) {
     // prepay-eligible too but carry no setup fee.
     const membershipFeeMixApplies = require('../services/estimate-converter')
       .recurringMixHasMembershipFeeService(v1.services);
-    if (annualPrepayEligible && membershipFeeMixApplies) {
+    // Seasonal mosquito is prepay-INELIGIBLE but still owes the setup fee at
+    // accept (codex r8: hiding the prepay CTA must not also hide a fee the
+    // converter charges). Existing customers stay excluded — their fee is
+    // waived outright.
+    const seasonalSetupFeeDue = membershipFeeMixApplies
+      && !annualPrepayEligible
+      && !estData?.membershipSnapshot?.isExistingCustomer
+      && recurringMixHasSeasonalMosquito(v1.services);
+    if ((annualPrepayEligible || seasonalSetupFeeDue) && membershipFeeMixApplies) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
         label: 'WaveGuard setup',
-        waivedWithPrepay: true,
+        // No waiver note when prepay isn't offered (seasonal mosquito).
+        waivedWithPrepay: annualPrepayEligible,
       });
     }
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
@@ -17205,7 +17377,7 @@ async function buildPricingBundleInner(estimate) {
       if (!membershipFeeMixApplies && rawV1OneTimeTotal && v1.membershipFee > 0) {
         return Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100);
       }
-      if (membershipFeeMixApplies && annualPrepayEligible && !(v1.membershipFee > 0)) {
+      if (membershipFeeMixApplies && (annualPrepayEligible || seasonalSetupFeeDue) && !(v1.membershipFee > 0)) {
         const fee = Number(PEST.initialFee || 99) || 99;
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }
@@ -17228,7 +17400,7 @@ async function buildPricingBundleInner(estimate) {
       anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
       // for any older client build still reading the singular field.
-      setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
@@ -17272,7 +17444,14 @@ async function buildPricingBundleInner(estimate) {
     let fallbackAnchorLift = 0;
     const fallbackMixApplies = require('../services/estimate-converter')
       .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
-    if (fallbackMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+    const fallbackPrepayEligible = annualPrepayEligibleForEstimateData(estData);
+    // Same seasonal-mosquito carve-out as the v1 branch: prepay-ineligible
+    // but the setup fee is still charged at accept, so the card must show.
+    const fallbackSeasonalFeeDue = fallbackMixApplies
+      && !fallbackPrepayEligible
+      && !estData?.membershipSnapshot?.isExistingCustomer
+      && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+    if (fallbackMixApplies && (fallbackPrepayEligible || fallbackSeasonalFeeDue)) {
       const storedSetupRow = (Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [])
         .find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
       const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
@@ -17281,7 +17460,7 @@ async function buildPricingBundleInner(estimate) {
         service: 'waveguard_setup',
         amount: feeAmount,
         label: 'WaveGuard setup',
-        waivedWithPrepay: true,
+        waivedWithPrepay: fallbackPrepayEligible,
       });
       if (!storedSetupRow) fallbackAnchorLift = feeAmount;
     }
@@ -17303,7 +17482,7 @@ async function buildPricingBundleInner(estimate) {
       waveGuardTier: estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice: storedChoiceOneTimePrice
         ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
-      setupFee: fallbackFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
@@ -17431,12 +17610,18 @@ async function buildPricingBundleInner(estimate) {
     : [];
   const engineMembershipFeeMixApplies = require('../services/estimate-converter')
     .recurringMixHasMembershipFeeService(engineRecurringServices);
-  if (!oneTimeOnly && engineMembershipFeeMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+  const enginePrepayEligible = annualPrepayEligibleForEstimateData(estData);
+  // Same seasonal-mosquito carve-out as the v1/fallback branches.
+  const engineSeasonalFeeDue = engineMembershipFeeMixApplies
+    && !enginePrepayEligible
+    && !estData?.membershipSnapshot?.isExistingCustomer
+    && recurringMixHasSeasonalMosquito(engineRecurringServices);
+  if (!oneTimeOnly && engineMembershipFeeMixApplies && (enginePrepayEligible || engineSeasonalFeeDue)) {
     engineFirstVisitFees.push({
       service: 'waveguard_setup',
       amount: Number(PEST.initialFee || 99) || 99,
       label: 'WaveGuard setup',
-      waivedWithPrepay: true,
+      waivedWithPrepay: enginePrepayEligible,
     });
   }
 
@@ -17446,7 +17631,7 @@ async function buildPricingBundleInner(estimate) {
     anchorOneTimePrice,
     defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
-    setupFee: engineFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
+    setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
     source: 'engine_invocation',
   }), estimate, estData);
@@ -18406,6 +18591,9 @@ module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
+module.exports.annualPrepayEligibleForMosquitoTier = annualPrepayEligibleForMosquitoTier;
+module.exports.mosquitoTierForAxisToken = mosquitoTierForAxisToken;
+module.exports.annualPrepayHasSellableIncentive = annualPrepayHasSellableIncentive;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;

@@ -324,6 +324,10 @@ function sanitizeServiceType(serviceType) {
   return normalizeServiceType(serviceType);
 }
 
+// Seasonal mosquito cadence lives in the seeder — single source of truth for
+// the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('../services/recurring-appointment-seeder');
+
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
@@ -384,6 +388,12 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
+  // Seasonal mosquito (9x Feb-Oct) is neither a month-interval nor a fixed
+  // day-gap cadence — its gap is 1 month in season and 4 across the winter.
+  // Delegate to the seeder so extension/reschedule here cannot drift from the
+  // dates the series was seeded with (it would otherwise take the generic
+  // 91-day fallback below and schedule winter visits).
+  if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safeBaseStr, i, opts);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -415,6 +425,14 @@ function shiftPastWeekend(dateStr, skip, direction) {
     d.setDate(d.getDate() - (day === 6 ? 1 : 2)); // Sat→Fri, Sun→Fri
   }
   return d.toISOString().split('T')[0];
+}
+
+// Weekend-shifting a seasonal (Feb–Oct) series date can cross the season edge
+// (a forward-shifted Oct 31 lands Nov 2), breaking the cadence's no-Nov-Jan
+// contract. Every series date this file computes must go through this instead
+// of a bare shiftPastWeekend; the clamp is a no-op for all other patterns.
+function seasonalSafeShift(rawDate, pattern, skip, direction) {
+  return clampDateToSeason(pattern, shiftPastWeekend(rawDate, skip, direction), { skipWeekends: !!skip });
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -484,7 +502,10 @@ function normalizeNullableInt(value) {
 }
 
 function recurrenceUsesMonthAnchor(pattern) {
-  return pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
+  // seasonal_feb_oct is month-anchored too: seasonalFebOctDate honors the same
+  // nth/weekday ordinal options as every other month-based cadence.
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
+    || !!MONTH_RECURRENCE_INTERVALS[pattern];
 }
 
 function recurringRewriteSignature(row) {
@@ -1166,7 +1187,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr) {
   const dir = (line.weekendShift || line.weekend_shift) === 'back' ? 'back' : 'forward';
   for (let i = 1; i <= 120; i++) {
     const raw = nextRecurringDate(base, pattern, i, opts);
-    const due = shiftPastWeekend(raw, !!skip, dir);
+    const due = seasonalSafeShift(raw, pattern, !!skip, dir);
     if (due === target) return true;
     if (due > target) return false;
   }
@@ -2430,6 +2451,10 @@ function duplicateSeriesConflictBody(existingSeries) {
       serviceType: s.service_type,
       pattern: s.recurring_pattern,
       nextUpcomingDate: s.next_upcoming_date || null,
+      // Provenance for idempotent retries (codex r21 P0): a client that lost
+      // its partial-save state can recover ONLY when the existing series
+      // demonstrably came from the same linked estimate it is booking.
+      sourceEstimateId: s.source_estimate_id || null,
     })),
   };
 }
@@ -2824,7 +2849,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     // Merge notes
     const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
-    const monthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+    // seasonal_feb_oct derives its anchor from the date like every other
+    // month-based cadence; monthly_nth_weekday stays raw passthrough because
+    // there the operator supplies nth/weekday explicitly.
+    const monthAnchorOpts = (isRecurring
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
 
@@ -2992,7 +3021,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       while (inserted < plannedCount - 1 && attempt < maxAttempts) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
-        const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
         seriesDates.add(nextDateStr);
@@ -4261,13 +4290,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     let editAnchorDate = scheduledDate;
-    if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
+    // seasonal_feb_oct included (codex r21 P1): a partial edit without a
+    // scheduledDate would otherwise leave editAnchorDate undefined and
+    // recurrenceOrdinalOptions falls back to TODAY, overwriting the
+    // recurring_nth/weekday anchors and drifting the series.
+    if (isRecurring && !editAnchorDate
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT)) {
       const existingService = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('scheduled_date');
       editAnchorDate = dateOnly(existingService?.scheduled_date) || undefined;
     }
-    const editMonthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+    // seasonal_feb_oct derives its anchor from the date like the other
+    // month-based cadences (EditServiceModal sends no nth/weekday for it, so
+    // the raw passthrough would NULL both anchor columns on every save and
+    // later maintenance would re-derive a drifted weekday/ordinal — codex r10
+    // P2). monthly_nth_weekday stays raw passthrough: there the operator
+    // supplies nth/weekday explicitly.
+    const editMonthAnchorOpts = (isRecurring
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
     if (isRecurring) {
@@ -4878,7 +4919,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               while (!nextDateStr && attempt < maxAttempts) {
                 const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
                 attempt++;
-                const candidate = shiftPastWeekend(rawNext, skipChild, dirChild);
+                const candidate = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
                 if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, candidate)) continue;
                 if (seenDates.has(candidate)) continue;
                 seenDates.add(candidate);
@@ -5091,7 +5132,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           while (inserted < spawnTarget && attempt < maxAttempts) {
             const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
             attempt++;
-            const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
+            const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
             if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
@@ -6360,7 +6401,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         let nextStr = null;
         while (attempt <= 12) {
           const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-          const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
+          const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent);
           if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
             attempt++;
             continue;
@@ -8556,7 +8597,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < n && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
@@ -8608,7 +8649,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < need && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);

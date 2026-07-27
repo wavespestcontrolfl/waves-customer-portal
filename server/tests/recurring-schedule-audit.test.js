@@ -15,6 +15,13 @@ describe('recurring schedule anomaly audit', () => {
     expect(normalizedSql).toContain('?::text, ?::integer');
     expect(normalizedSql).toContain('s.status not in (?, ?, ?)');
     expect(bindings).toContain('monthly_nth_weekday');
+    // Seasonal mosquito series must be in the pattern map — the active_series
+    // CTE inner-joins it, so an absent pattern silently exempts every seasonal
+    // parent/child from the duplicate and too-close checks (codex r5 P2). The
+    // 1-month interval applies the 21-day in-season minimum; the winter gap is
+    // longer than any threshold and can't false-positive.
+    expect(bindings).toContain('seasonal_feb_oct');
+    expect(bindings[bindings.indexOf('seasonal_feb_oct') + 1]).toBe(1);
     expect(bindings).toEqual(expect.arrayContaining(['cancelled', 'rescheduled', 'completed']));
     expect(normalizedSql).not.toMatch(/\b(update|insert|delete|truncate|alter|drop)\b/);
   });

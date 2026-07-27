@@ -2124,6 +2124,21 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).toContain('How long does each visit last?');
     expect(payload.askChips).toContain('What about my pool area?');
     expect(payload.askChips).not.toContain('What products do you use?');
+    // Seasonal mosquito (codex r8): annual prepay is NOT offered (the
+    // converter would fail it closed), but the $99 setup is still charged at
+    // accept — so the card renders NON-waivable instead of disappearing.
+    expect(payload.firstVisitFees).toEqual([
+      expect.objectContaining({ service: 'waveguard_setup', waivedWithPrepay: false }),
+    ]);
+    expect(payload.setupFee).toEqual(expect.objectContaining({ service: 'waveguard_setup' }));
+    // Per-tier eligibility (codex r10 P1): the customer switches tiers live,
+    // so each mosquito ladder entry carries its own flag — seasonal9 can't
+    // prepay, monthly12 can — regardless of which row is the stored default.
+    // Client, accept, and /deposit-intent all resolve from the SELECTED tier.
+    expect(payload.services[0].frequencies.find((f) => f.key === 'seasonal9'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: false }));
+    expect(payload.services[0].frequencies.find((f) => f.key === 'monthly12'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: true }));
   });
 
   test('German Roach Cleanout contract surfaces roach specialty chips, not generic ant chips', async () => {
@@ -7433,6 +7448,31 @@ describe('public estimate one-time breakdown', () => {
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'mosquito', name: 'Mosquito' },
     ], [])).toBe(true);
+    // Bundle combo axes (codex r16 P2): the mosquito tier arrives as a
+    // serviceCadences token, and eligibility must follow the AXIS, not the
+    // stored row — monthly12 on a seasonal-default estimate is a valid
+    // prepay; seasonal9 on a monthly-default one is not.
+    const { mosquitoTierForAxisToken, annualPrepayEligibleForMosquitoTier } = require('../routes/estimate-public');
+    expect(mosquitoTierForAxisToken('monthly12')).toEqual(expect.objectContaining({ visitsPerYear: 12 }));
+    expect(mosquitoTierForAxisToken('seasonal9')).toEqual(expect.objectContaining({ visitsPerYear: 9 }));
+    expect(mosquitoTierForAxisToken('quarterly')).toBe(null);
+    const seasonalDefaultData = {
+      result: {
+        recurring: {
+          services: [{ service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 }],
+        },
+      },
+    };
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('monthly12'))).toBe(true);
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('seasonal9'))).toBe(false);
+    // …EXCEPT seasonal mosquito (9x Feb–Oct, codex r8 P1): the converter fails
+    // that prepay closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED) after a
+    // deposit may already be collected, so the shared gate — SSR CTA, /data
+    // flag, accept preflight, /deposit-intent — must never offer it. Monthly
+    // mosquito (12x) stays eligible above.
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 },
+    ], [])).toBe(false);
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
       { service: 'palm_injection', name: 'Palm Injection' },

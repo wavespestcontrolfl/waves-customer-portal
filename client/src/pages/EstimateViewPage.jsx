@@ -282,6 +282,14 @@ function selectedPricingFrequencyKey(pricing = {}, services = [], selected = {})
   return frequencies[0]?.key || null;
 }
 
+// A bundle combo-axis map requesting the seasonal mosquito cadence — prepay
+// is rejected for it server-side (accept + /deposit-intent use the same
+// token set), so the option must not be advertised for that selection.
+function cadencesRequestSeasonal(cadences) {
+  return !!cadences && Object.values(cadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+    .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
+}
+
 function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
   const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
   return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
@@ -4217,6 +4225,11 @@ function EstimateViewPageInner() {
       if (serviceModeForAttempt !== 'one_time' && selectedFrequencyForAttempt) {
         reservePayload.selectedFrequency = selectedFrequencyForAttempt;
       }
+      // Bundle combo axes: the mosquito tier travels here (not in the pest
+      // selectedFrequency) — the server's seasonal redemption check needs it.
+      if (serviceModeForAttempt !== 'one_time' && serviceCadences) {
+        reservePayload.serviceCadences = serviceCadences;
+      }
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4254,7 +4267,7 @@ function EstimateViewPageInner() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -4581,7 +4594,15 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/deposit-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+          // selectedFrequency + serviceCadences let the server apply per-tier
+          // prepay rules (mosquito seasonal9 — top-level OR a bundle combo
+          // axis — refuses the prepay deposit BEFORE money moves).
+          body: JSON.stringify({
+            serviceMode,
+            paymentMethodPreference: paymentPreference,
+            ...(selectedFrequency ? { selectedFrequency } : {}),
+            ...(serviceCadences ? { serviceCadences } : {}),
+          }),
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
@@ -4800,6 +4821,35 @@ function EstimateViewPageInner() {
     }
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
+  // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
+  // can't prepay (mosquito seasonal9) while annual prepay is chosen must send
+  // the customer back through the payment choice — the next confirm would 400
+  // mid-flow against a combination the server rejects. ABOVE the loading/
+  // error early returns (hooks must run on every render — codex r11 P1);
+  // inputs derive from state, tolerating missing data during load.
+  useEffect(() => {
+    if (paymentPreference !== 'prepay_annual') return;
+    const pricingState = data?.pricing || {};
+    const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
+    // Same adjudication order as annualPrepayEligibleEffective below: the
+    // matched combo's server-stamped flag wins (codex r18 P1), a seasonal
+    // axis without one disables, then the tier/estimate-level flags.
+    let eligible;
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      eligible = selectedCombo.annualPrepayEligible;
+    } else {
+      eligible = !cadencesRequestSeasonal(serviceCadences)
+        && (typeof frequency?.annualPrepayEligible === 'boolean'
+          ? frequency.annualPrepayEligible
+          : pricingState.annualPrepayEligible === true);
+    }
+    if (!eligible) {
+      setPaymentPreference(null);
+      setCtaPhase('configure');
+      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
+    }
+  }, [data?.pricing, selectedFrequency, serviceCadences, selectedCombo, paymentPreference]);
+
   if (loading) {
     return (
       <Page>
@@ -4943,6 +4993,36 @@ function EstimateViewPageInner() {
       sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? combinedBaseFrequency?.sameDayTreatmentTotal,
     }
     : combinedBaseFrequency;
+  // Per-tier prepay override (codex r10 P1): mosquito ladder entries carry
+  // their own annualPrepayEligible (seasonal9 can't prepay; monthly12 can) —
+  // the estimate-level flag only reflects the stored default row. The server
+  // enforces the same per-tier rule at accept and /deposit-intent.
+  // The mosquito tier can arrive on the top-level frequency (solo mosquito —
+  // stamped per tier) OR as a bundle combo axis (codex r14 P1). The matched
+  // combo's server-stamped flag is authoritative when present (codex r18 P1:
+  // it can RESTORE prepay for a monthly12 axis on a seasonal-default
+  // estimate, which the estimate-level flag alone cannot); a seasonal axis
+  // without a stamped combo still disables prepay.
+  const annualPrepayEligibleEffective = (() => {
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      return selectedCombo.annualPrepayEligible;
+    }
+    if (cadencesRequestSeasonal(serviceCadences)) return false;
+    if (typeof combinedFrequency?.annualPrepayEligible === 'boolean') {
+      return combinedFrequency.annualPrepayEligible;
+    }
+    return pricing.annualPrepayEligible === true;
+  })();
+  // The WaveGuard setup fee's waiver disclosure follows the SELECTED tier,
+  // not the stored default (codex r11 P1): a monthly-default estimate
+  // switched to seasonal9 must not promise "waived when you pay the year"
+  // (prepay is rejected for it), and a seasonal-default estimate switched to
+  // monthly12 earns the waiver its stored flag doesn't carry. Other fees
+  // (roach knockdown) keep their server-stated flag.
+  const tierAwareFee = (fee) => (fee && fee.service === 'waveguard_setup'
+    ? { ...fee, waivedWithPrepay: annualPrepayEligibleEffective }
+    : fee);
+  const setupFeeEffective = tierAwareFee(pricing.setupFee || null);
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -4978,12 +5058,14 @@ function EstimateViewPageInner() {
   const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
     const cardsDisabled = readOnly || ctaPhase === 'submitting';
     const mode = modeOverride || serviceMode;
+    // Tier-aware waiver disclosure — see tierAwareFee at component scope.
+    const feeList = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+      ? pricing.firstVisitFees
+      : (pricing.setupFee ? [pricing.setupFee] : [])).map(tierAwareFee);
     // Service keys whose one-time fee is waived with annual prepay (the
     // WaveGuard setup fee) — the breakdown card marks these rows with an
     // asterisk + waiver note when they render inside the one-time list.
-    const prepayWaivedServices = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-      ? pricing.firstVisitFees
-      : (pricing.setupFee ? [pricing.setupFee] : []))
+    const prepayWaivedServices = feeList
       .filter((fee) => fee?.waivedWithPrepay === true)
       .map((fee) => fee.service);
     if (mode === 'recurring') {
@@ -4998,9 +5080,7 @@ function EstimateViewPageInner() {
           <div>
           {services.map((section) => {
             const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
-              ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                ? pricing.firstVisitFees
-                : (pricing.setupFee ? [pricing.setupFee] : []))
+              ? feeList
               : [];
             const afterPrice = services.length === 1 ? (
               <>
@@ -5106,10 +5186,13 @@ function EstimateViewPageInner() {
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+            // Tier-aware fee state on the plan-level card too (codex r24 P2):
+            // a combo selection that disables prepay must not keep promising
+            // the waiver — or, under glass, suppress the fee card entirely.
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
               ? pricing.firstVisitFees
               : (pricing.setupFee ? [pricing.setupFee] : [])
-            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
+            ).map(tierAwareFee).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
           ) : null}
 
           {services.length > 1 && !estimate.showOneTimeOption ? (
@@ -5122,7 +5205,12 @@ function EstimateViewPageInner() {
               // keeps one-time work that has no rendered service section,
               // and hides entirely when nothing is left.
               excludeServices={[
+                // Tier-aware fees here too (codex r25 P2): the card above
+                // renders from tierAwareFee, so the exclusion must judge the
+                // SAME waivedWithPrepay or a non-prepay combo shows the
+                // setup fee twice (card + breakdown row).
                 ...(pricing.firstVisitFees || [])
+                  .map(tierAwareFee)
                   .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
                   .map((fee) => fee.service),
                 // Identity keys, not bare service strings — embedded rows
@@ -5382,8 +5470,8 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                setupFee={setupFeeEffective}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}
                 selectedFrequency={combinedFrequency}
@@ -5449,7 +5537,9 @@ function EstimateViewPageInner() {
             submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold
-              && (pricing.annualPrepayEligible === true || pricing.setupFee?.waivedWithPrepay)
+              // Tier-aware: the stored setupFee flag reflects the default
+              // tier; the effective flag already folds the selected one in.
+              && annualPrepayEligibleEffective
               ? (
                 <button
                   type="button"
@@ -5573,6 +5663,7 @@ function EstimateViewPageInner() {
                   refreshSignal={slotsRefreshSignal}
                   serviceMode={serviceMode}
                   selectedFrequency={selectedFrequency}
+                  serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   quickPick={seamlessAutoPay}
@@ -5622,8 +5713,8 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                setupFee={setupFeeEffective}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 invoiceOnly={invoiceOnlyAccept}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}

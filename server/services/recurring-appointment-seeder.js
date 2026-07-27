@@ -19,9 +19,97 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
+
+// Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
+// 2026-07-27). Nine in-season months (Feb-Oct) means a February start runs
+// Feb->Oct exactly; a mid/off-season start still gets all 9 by rolling across
+// the winter gap (a July start runs Jul-Oct, skips Nov-Jan, resumes Feb-Jun).
+// Not a MONTH_RECURRENCE_INTERVALS cadence — the gap is 1 month in season and
+// 4 months across the winter, so it needs its own date walk.
+const SEASONAL_FEB_OCT = 'seasonal_feb_oct';
+const SEASON_FIRST_MONTH = 2;   // February
+const SEASON_LAST_MONTH = 10;   // October
+const SEASON_MONTHS_PER_YEAR = SEASON_LAST_MONTH - SEASON_FIRST_MONTH + 1; // 9
+
+// Position of an in-season month on a continuous Feb..Oct timeline. An
+// off-season base sits one slot BEFORE the coming February, so follow-up 1
+// lands on that February.
+function seasonOrdinalForBase(year, month) {
+  if (month < SEASON_FIRST_MONTH) return year * SEASON_MONTHS_PER_YEAR - 1;
+  if (month > SEASON_LAST_MONTH) return (year + 1) * SEASON_MONTHS_PER_YEAR - 1;
+  return year * SEASON_MONTHS_PER_YEAR + (month - SEASON_FIRST_MONTH);
+}
+
+// The i-th seasonal occurrence after a base date. Exported because
+// admin-schedule.js and rebooker.js each keep their own nextRecurringDate for
+// series extension/rescheduling; without this they fall through to the generic
+// 91-day gap and would corrupt the cadence (and land visits in winter).
+function seasonalFebOctDate(baseDateStr, i, opts = {}) {
+  const safe = dateOnly(baseDateStr) || etDateString();
+  const base = parseETDateTime(`${safe}T12:00`);
+  if (isNaN(base.getTime())) return safe;
+  // Walk the Feb..Oct timeline, then convert back to a plain month delta so the
+  // shared helper keeps this cadence's day-of-month/weekday semantics identical
+  // to every other month-based pattern.
+  const baseEt = etParts(base);
+  const target = seasonOrdinalForBase(baseEt.year, baseEt.month) + i;
+  const targetYear = Math.floor(target / SEASON_MONTHS_PER_YEAR);
+  const targetMonth = (((target % SEASON_MONTHS_PER_YEAR) + SEASON_MONTHS_PER_YEAR) % SEASON_MONTHS_PER_YEAR)
+    + SEASON_FIRST_MONTH;
+  const monthDelta = (targetYear - baseEt.year) * 12 + (targetMonth - baseEt.month);
+  return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
+}
+
+// First in-season date for a seasonal series whose chosen start falls in the
+// Nov–Jan gap: Nov/Dec roll to the FOLLOWING February, January to its own
+// February, keeping the base's day-of-month/weekday semantics. In-season bases
+// pass through untouched. Exported for the estimate converter, which picks the
+// auto-scheduled first visit date itself — an office-booked off-season parent
+// is deliberately NOT moved (that date is the operator's), but an auto-created
+// one would otherwise put a winter treatment on a Feb–Oct program and leave
+// only eight in-season visits.
+function firstInSeasonDate(baseDateStr, opts = {}) {
+  const safe = dateOnly(baseDateStr) || etDateString();
+  const base = parseETDateTime(`${safe}T12:00`);
+  if (isNaN(base.getTime())) return safe;
+  const { year, month } = etParts(base);
+  if (month >= SEASON_FIRST_MONTH && month <= SEASON_LAST_MONTH) return safe;
+  const targetYear = month > SEASON_LAST_MONTH ? year + 1 : year;
+  const monthDelta = (targetYear - year) * 12 + (SEASON_FIRST_MONTH - month);
+  return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
+}
+
+// Weekend shifts and blackout nudges move dates across the season edge (a
+// forward-shifted Oct 31 lands Nov 2; a back-shifted Feb 1 lands Jan 30),
+// breaking the seasonal cadence's no-Nov-Jan contract. Walk back INTO the
+// season from whichever edge was crossed — clamping the wrong way would cross
+// the whole winter and land the visit ~4 months from where the cadence put it.
+// A no-op for every other pattern and for in-season dates. Exported because
+// every caller that weekend-shifts a seasonal series date (admin-schedule
+// creation/rewrite/extension) needs the same clamp the seeder applies.
+function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDates = null } = {}) {
+  if (pattern !== SEASONAL_FEB_OCT || !dateStr) return dateStr;
+  const drifted = Number(dateStr.slice(5, 7));
+  // Already in season: the weekend/blackout passes have run, so this date is
+  // good — never move it.
+  if (drifted >= SEASON_FIRST_MONTH && drifted <= SEASON_LAST_MONTH) return dateStr;
+  const step = drifted < SEASON_FIRST_MONTH ? 1 : -1;
+  let candidate = dateStr;
+  for (let i = 0; i < 75; i++) {
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
+    const month = Number(candidate.slice(5, 7));
+    if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
+    const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+    const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+    if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
+  }
+  return dateStr;
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
+  [SEASONAL_FEB_OCT]: 9,
   bimonthly: 6,
   quarterly: 4,
   triannual: 3,
@@ -54,6 +142,10 @@ function normalizeRecurringPattern(value) {
   // seasonal rows carry 9 visits and must not reclassify); only the explicit
   // frequency text selects this cadence.
   if (['every6weeks', 'everysixweeks', '6weeks', 'sixweeks', '9x', '9xperyear'].includes(compact)) return 'every_6_weeks';
+  // Seasonal mosquito (9 visits, Feb-Oct). EXPLICIT tokens only, for the same
+  // reason as every_6_weeks above: numeric 9-visit inference must stay
+  // 'bimonthly' so legacy 9-visit rows keep their office-scheduled behavior.
+  if ([SEASONAL_FEB_OCT.replace(/_/g, ''), 'seasonalfeboctober', 'seasonal9', 'seasonal9x'].includes(compact)) return SEASONAL_FEB_OCT;
   if (['bimonthly', 'bimonth', 'bimonthlypest', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bimonthly';
   if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
   if (['triannual', 'threetimesyearly', '3x', '3xperyear'].includes(compact)) return 'triannual';
@@ -69,7 +161,7 @@ function normalizeRecurringPattern(value) {
   if (compact === 'biweekly') return 'biweekly';
   const visits = Number(raw);
   if (Number.isFinite(visits) && visits > 0) return patternFromVisitsPerYear(visits);
-  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks'].includes(raw)) return raw;
+  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT].includes(raw)) return raw;
   return null;
 }
 
@@ -191,6 +283,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
+  if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -288,11 +381,15 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     return candidate;
   };
 
+  // Weekend shift and blackout nudge can cross the season edge — clamp back
+  // into Feb–Oct (see clampDateToSeason for the direction rules).
+  const clampToSeason = (dateStr) => clampDateToSeason(pattern, dateStr, { skipWeekends, blackoutDates });
+
   let attempt = 1;
   while (rows.length < targetNewRows && attempt < maxAttempts) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
-    const nextDateStr = clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir));
+    const nextDateStr = clampToSeason(clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir)));
     if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
     if (existingDates.has(nextDateStr)) continue;
     existingDates.add(nextDateStr);
@@ -461,6 +558,10 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  // Which estimate created the existing series — lets the duplicate-conflict
+  // payload prove to a retrying client that the series IS the one its
+  // partial save already created (codex r21 P0).
+  if (columns.source_estimate_id) query.select('source_estimate_id');
   if (columns.recurring_ongoing) query.select('recurring_ongoing');
   if (excludeParentId) query.whereNot('id', excludeParentId);
   const parents = await query;
@@ -649,6 +750,10 @@ module.exports = {
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,
+  SEASONAL_FEB_OCT,
+  seasonalFebOctDate,
+  clampDateToSeason,
+  firstInSeasonDate,
   markParentRecurring,
   normalizeRecurringPattern,
   patternFromVisitsPerYear,

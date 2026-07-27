@@ -832,6 +832,7 @@ const EDIT_FREQUENCIES = [
   { value: "semiannual", label: "Semiannual" },
   { value: "annual", label: "Annual" },
   { value: "monthly_nth_weekday", label: "Every month on the Nth weekday" },
+  { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct, monthly)" },
   { value: "custom", label: "Custom (every N days)" },
 ];
 const EDIT_NTH_OPTIONS = [
@@ -887,6 +888,36 @@ function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     );
     return isNaN(d.getTime()) ? base : d;
   }
+  // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
+  // to a plain month delta so day semantics match the other month cadences.
+  // Mirrors the server's seasonalFebOctDate INCLUDING seasonOrdinalForBase's
+  // off-season normalization — Nov/Dec/Jan anchors all sit one slot before
+  // the coming February, so occurrence 1 lands on that February. Without this
+  // the editor previewed the 91-day fallback for a seasonal mosquito series.
+  if (pattern === "seasonal_feb_oct") {
+    // The preview's first chip is the anchor itself — display it as booked,
+    // never renormalized (an off-season office booking is the operator's).
+    if (i === 0) return base;
+    const SEASON_MONTHS = 9; // Feb..Oct
+    const m1 = base.getMonth() + 1;
+    const y = base.getFullYear();
+    const baseOrdinal = m1 < 2 ? y * SEASON_MONTHS - 1
+      : m1 > 10 ? (y + 1) * SEASON_MONTHS - 1
+        : y * SEASON_MONTHS + (m1 - 2);
+    const ordinal = baseOrdinal + i;
+    const targetYear = Math.floor(ordinal / SEASON_MONTHS);
+    const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
+    const monthDelta = (targetYear - y) * 12 + (targetMonth1 - m1);
+    const d = new Date(base);
+    const nthOfBase = Math.ceil(d.getDate() / 7);
+    const target = editNthWeekdayOfMonth(
+      d.getFullYear(),
+      d.getMonth() + monthDelta,
+      nthOfBase,
+      d.getDay(),
+    );
+    return isNaN(target.getTime()) ? base : target;
+  }
   const monthIntervals = {
     monthly: 1,
     bimonthly: 2,
@@ -928,6 +959,26 @@ function editShiftPastWeekend(date, skip, direction) {
     shifted.setDate(shifted.getDate() + (day === 6 ? 2 : 1));
   }
   return shifted;
+}
+
+// Mirror of the server's clampDateToSeason: a weekend-shifted seasonal date
+// that crossed the season edge (Oct 31 Sat → Nov 2) walks back into Feb–Oct
+// so the edit preview matches the dates the server will save.
+function editClampToSeason(date, pattern, skip) {
+  if (pattern !== "seasonal_feb_oct" || !date || isNaN(date.getTime())) return date;
+  const m = date.getMonth(); // 0-indexed: Feb=1 … Oct=9
+  if (m >= 1 && m <= 9) return date;
+  const step = m === 0 ? 1 : -1; // Jan undershoot → forward; Nov/Dec → back
+  const out = new Date(date);
+  for (let n = 0; n < 75; n++) {
+    out.setDate(out.getDate() + step);
+    const mm = out.getMonth();
+    if (mm < 1 || mm > 9) continue;
+    const day = out.getDay();
+    if (skip && (day === 0 || day === 6)) continue;
+    return out;
+  }
+  return date;
 }
 const EDIT_FALLBACK_SERVICES = [
   {
@@ -1432,7 +1483,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const displayDate =
         i === 0
           ? d
-          : editShiftPastWeekend(d, !!skipWeekends, weekendShift);
+          : editClampToSeason(
+              editShiftPastWeekend(d, !!skipWeekends, weekendShift),
+              recurringFreq,
+              !!skipWeekends,
+            );
       dates.push(
         displayDate.toLocaleDateString("en-US", {
           month: "short",

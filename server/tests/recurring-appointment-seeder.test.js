@@ -92,6 +92,222 @@ describe('recurring appointment seeder', () => {
   });
 });
 
+describe('seasonal_feb_oct cadence (mosquito seasonal 9x, owner 2026-07-27)', () => {
+  const seedFrom = (scheduled_date) => RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+    id: 'parent-mq9',
+    customer_id: 'customer-1',
+    scheduled_date,
+    service_type: 'Seasonal Mosquito Control Service',
+    status: 'confirmed',
+  }, {
+    pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+    visitsPerYear: 9,
+    skipWeekends: false,
+  });
+  const monthsOf = (base, rows) => [base, ...rows.map((r) => r.scheduled_date)].map((d) => d.slice(0, 7));
+
+  test('normalizes the explicit cadence but NOT bare 9-visit numbers', () => {
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('seasonal_feb_oct')).toBe('seasonal_feb_oct');
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('seasonal9')).toBe('seasonal_feb_oct');
+    // Unchanged contract: a bare 9 still infers bimonthly, so legacy 9-visit
+    // rows keep office scheduling instead of silently gaining a series.
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('9')).toBe('bimonthly');
+    // '9x' remains the T&S every_6_weeks token — this cadence must not steal it.
+    expect(RecurringAppointmentSeeder.normalizeRecurringPattern('9x')).toBe('every_6_weeks');
+  });
+
+  test('fits the value in the recurring_pattern column (varchar(20))', () => {
+    expect(RecurringAppointmentSeeder.SEASONAL_FEB_OCT.length).toBeLessThanOrEqual(20);
+  });
+
+  test('February start runs Feb-Oct with no winter visits', () => {
+    const rows = seedFrom('2026-02-12');
+    expect(rows).toHaveLength(8); // + the parent = 9 visits
+    expect(monthsOf('2026-02-12', rows)).toEqual([
+      '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
+      '2026-07', '2026-08', '2026-09', '2026-10',
+    ]);
+  });
+
+  test('mid-season start still delivers all 9, rolling across the winter gap', () => {
+    // Owner ruling 2026-07-27: full 9 visits, rolling — a July buyer is not
+    // short-changed to four just because the season ends in October.
+    const rows = seedFrom('2026-07-14');
+    expect(rows).toHaveLength(8);
+    expect(monthsOf('2026-07-14', rows)).toEqual([
+      '2026-07', '2026-08', '2026-09', '2026-10',
+      '2027-02', '2027-03', '2027-04', '2027-05', '2027-06',
+    ]);
+  });
+
+  test('off-season start puts every SEEDED visit in season', () => {
+    // The parent visit is whatever the office booked and is not ours to move;
+    // every follow-up this seeder creates must clear Nov-Jan.
+    for (const base of ['2026-11-10', '2026-12-08', '2027-01-06']) {
+      const rows = seedFrom(base);
+      expect(rows).toHaveLength(8);
+      const offSeason = rows
+        .map((r) => Number(r.scheduled_date.slice(5, 7)))
+        .filter((m) => m === 11 || m === 12 || m === 1);
+      expect(offSeason).toEqual([]);
+      expect(rows[0].scheduled_date.slice(5, 7)).toBe('02');
+    }
+  });
+
+  test('no seeded visit ever lands in November, December or January', () => {
+    for (let month = 1; month <= 12; month++) {
+      const base = `2026-${String(month).padStart(2, '0')}-15`;
+      const bad = seedFrom(base)
+        .map((r) => Number(r.scheduled_date.slice(5, 7)))
+        .filter((m) => m === 11 || m === 12 || m === 1);
+      expect({ base, bad }).toEqual({ base, bad: [] });
+    }
+  });
+
+  test('a BACKWARD weekend shift cannot pull a February visit into January', () => {
+    // Mirror of the October edge (pre-push P1 r2). weekendShift:'back' moves
+    // dates earlier, so February is the dangerous edge — a 2024-10-05 parent
+    // produced 2025-01-31 before the clamp learned direction. Clamping the
+    // wrong way here would cross the whole winter and land it ~4 months off.
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: '2024-10-05',
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: true,
+      weekendShift: 'back',
+    });
+    expect(rows).toHaveLength(8);
+    expect(rows.map((r) => r.scheduled_date).filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7)))))
+      .toEqual([]);
+    // Pushed FORWARD into February, not back to the previous October.
+    expect(rows[0].scheduled_date.slice(0, 7)).toBe('2025-02');
+  });
+
+  test('both weekend-shift directions keep every start month out of winter', () => {
+    for (const weekendShift of ['forward', 'back']) {
+      for (let month = 1; month <= 12; month++) {
+        const base = `2026-${String(month).padStart(2, '0')}-15`;
+        const bad = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+          id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: base,
+        }, {
+          pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+          visitsPerYear: 9,
+          skipWeekends: true,
+          weekendShift,
+        }).map((r) => r.scheduled_date).filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7))));
+        expect({ weekendShift, base, bad }).toEqual({ weekendShift, base, bad: [] });
+      }
+    }
+  });
+
+  test('the weekend shift and blackout nudge cannot push an October visit into November', () => {
+    // Both adjustments move dates FORWARD, so the season's last month is the
+    // dangerous edge: a blacked-out Oct 31 would otherwise seed Nov 1 and break
+    // the cadence's contract (pre-push P1). The clamp walks BACK to the nearest
+    // in-season day that is also clear of weekends and blackouts.
+    const seeded = (opts) => RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: '2028-02-29',
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: true,
+      weekendShift: 'forward',
+      ...opts,
+    });
+
+    for (const blackoutDates of [
+      null,
+      new Set(['2028-10-31']),
+      new Set(['2028-10-31', '2028-10-30', '2028-10-27']),
+    ]) {
+      const rows = seeded(blackoutDates ? { blackoutDates } : {});
+      const offSeason = rows
+        .map((r) => r.scheduled_date)
+        .filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7))));
+      expect(offSeason).toEqual([]);
+      // The plan must still be whole — clamping trims dates, never visits.
+      expect(rows).toHaveLength(8);
+      // And never onto a blacked-out day.
+      if (blackoutDates) {
+        expect(rows.filter((r) => blackoutDates.has(r.scheduled_date))).toEqual([]);
+      }
+    }
+  });
+});
+
+describe('firstInSeasonDate — converter first-visit roll (codex r5 P1)', () => {
+  // The estimate converter picks the auto-scheduled first date itself; a
+  // Nov–Jan pick on a seasonal plan must roll to February so the parent is
+  // in-season and counts as visit 1 of 9. Office-booked parents are not
+  // moved — this helper is only applied on the auto-schedule path.
+  const roll = RecurringAppointmentSeeder.firstInSeasonDate;
+
+  test('in-season dates pass through untouched', () => {
+    for (const d of ['2026-02-01', '2026-06-15', '2026-10-31']) {
+      expect(roll(d)).toBe(d);
+    }
+  });
+
+  test('Nov and Dec roll to the FOLLOWING February (nth-weekday anchored)', () => {
+    // addETMonthsByWeekday keeps the base's nth-weekday-of-month, the same
+    // semantics every other month-based cadence uses — not raw day-of-month.
+    expect(roll('2026-11-10')).toBe('2027-02-09'); // 2nd Tue → 2nd Tue
+    expect(roll('2026-12-08')).toBe('2027-02-09'); // 2nd Tue → 2nd Tue
+  });
+
+  test('January rolls forward to its own February', () => {
+    expect(roll('2027-01-06')).toBe('2027-02-03'); // 1st Wed → 1st Wed
+  });
+
+  test('a rolled base seeds a full nine-visit Feb–Oct year', () => {
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: roll('2026-11-10'),
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: false,
+    });
+    expect(rows).toHaveLength(8);
+    expect([roll('2026-11-10'), ...rows.map((r) => r.scheduled_date)].map((d) => d.slice(0, 7))).toEqual([
+      '2027-02', '2027-03', '2027-04', '2027-05', '2027-06',
+      '2027-07', '2027-08', '2027-09', '2027-10',
+    ]);
+  });
+});
+
+describe('clampDateToSeason — shared season clamp for external callers (pre-push P1 r4)', () => {
+  // admin-schedule's creation/rewrite/extension paths weekend-shift series
+  // dates OUTSIDE the seeder; they clamp through this export so a shifted
+  // seasonal date can never land in the Nov–Jan gap.
+  const clamp = RecurringAppointmentSeeder.clampDateToSeason;
+  const S = RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+
+  test('no-op for other patterns, in-season dates, and empty input', () => {
+    expect(clamp('monthly', '2026-11-02', {})).toBe('2026-11-02');
+    expect(clamp(S, '2026-06-15', {})).toBe('2026-06-15');
+    expect(clamp(S, null, {})).toBe(null);
+  });
+
+  test('a forward weekend shift past Oct 31 (Sat) pulls back into October', () => {
+    expect(clamp(S, '2026-11-02', {})).toBe('2026-10-31');
+  });
+
+  test('honors skipWeekends while walking back', () => {
+    // Oct 31 is a Saturday; the nearest in-season weekday is Fri Oct 30.
+    expect(clamp(S, '2026-11-02', { skipWeekends: true })).toBe('2026-10-30');
+  });
+
+  test('a back-shifted date that undershoots February pushes forward, not across the winter', () => {
+    expect(clamp(S, '2027-01-29', {})).toBe('2027-02-01');
+  });
+
+  test('walks past blackout dates', () => {
+    expect(clamp(S, '2026-11-02', { blackoutDates: new Set(['2026-10-31', '2026-10-30']) }))
+      .toBe('2026-10-29');
+  });
+});
+
 describe('every_6_weeks cadence (T&S 9x Enhanced, un-retired 2026-07-24)', () => {
   test('normalizes the explicit frequency text but NOT bare 9-visit numbers', () => {
     expect(RecurringAppointmentSeeder.normalizeRecurringPattern('every_6_weeks')).toBe('every_6_weeks');

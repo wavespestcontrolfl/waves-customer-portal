@@ -75,6 +75,7 @@ const CADENCE_LABEL = {
   triannual: '3x per year',
   semiannual: 'Twice a year',
   annual: 'Annual',
+  seasonal_feb_oct: 'Seasonal (Feb–Oct)',
   one_time: 'One-time',
 };
 

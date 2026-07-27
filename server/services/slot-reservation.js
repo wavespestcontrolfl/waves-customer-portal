@@ -217,6 +217,7 @@ async function reserveSlot({
   durationMinutes,
   serviceMode = 'recurring',
   selectedFrequency = '',
+  serviceCadences = null,
 }) {
   const parsed = parseSlotId(slotId);
   if (!parsed) {
@@ -305,13 +306,24 @@ async function reserveSlot({
     throw err;
   }
   // No offer surface produces slots beyond MAX_SLOT_HORIZON_DAYS (the public
-  // route clamps ?windowDays and the AI date search caps maxDaysOut there).
-  if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+  // route clamps ?windowDays and the AI date search caps maxDaysOut there) —
+  // EXCEPT seasonal selections in the winter gap, whose window opens at the
+  // next Feb 1 (codex r10 P2: on Nov 1–2 that is 91–92 days out). The widest
+  // horizon ANY selection could have needs only today's date
+  // (seasonalMaxHorizonDays === the standard 90 while in season), so slots
+  // past it still reject PRE-txn with no db work; a date between the
+  // standard and seasonal ceilings is noted and adjudicated against the
+  // estimate's profile inside the transaction below.
+  const outerHorizonDays = typeof estimateSlotAvailability.seasonalMaxHorizonDays === 'function'
+    ? estimateSlotAvailability.seasonalMaxHorizonDays()
+    : MAX_SLOT_HORIZON_DAYS;
+  if (date > etDateString(addETDays(new Date(), outerHorizonDays))) {
     const err = new Error('slot date is beyond the booking horizon');
     err.code = 'SLOT_UNAVAILABLE';
     err.slotId = slotId;
     throw err;
   }
+  const beyondStandardHorizon = date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
 
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
@@ -368,9 +380,45 @@ async function reserveSlot({
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
           serviceMode,
           selectedFrequency,
+          serviceCadences,
           durationMinutes,
         })
         : null;
+      // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
+      // is season-filtered for a seasonal mosquito selection, but the offer
+      // HMAC does not bind the frequency — a list fetched under monthly12
+      // (where winter dates are legitimately offered) could be redeemed with
+      // selectedFrequency seasonal9, and the converter would then seed the
+      // series from a Nov–Jan parent, counting a prohibited winter visit
+      // toward the nine. Office/admin bookings don't come through this route.
+      // Guarded like resolveEstimateSlotProfile above — suites mock the
+      // availability module down to the functions they assert on.
+      const seasonalSelection = !!serviceProfile
+        && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
+        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
+      if (seasonalSelection
+        && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
+        && !estimateSlotAvailability.inMosquitoSeason(date)) {
+        const err = new Error('This seasonal program runs February through October — pick an in-season date.');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+      // Deferred horizon adjudication (see the pre-txn note): standard callers
+      // keep the 90-day ceiling; a seasonal selection may reach the extended
+      // winter-gap horizon its slot list was generated with.
+      if (beyondStandardHorizon) {
+        const allowedDays = seasonalSelection
+          && typeof estimateSlotAvailability.seasonalMaxHorizonDays === 'function'
+          ? estimateSlotAvailability.seasonalMaxHorizonDays()
+          : MAX_SLOT_HORIZON_DAYS;
+        if (date > etDateString(addETDays(new Date(), allowedDays))) {
+          const err = new Error('slot date is beyond the booking horizon');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
+      }
       const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;

@@ -259,6 +259,17 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  // Seasonal mosquito (9 visits): its quote rows carry frequency
+  // 'every_6_weeks' (the estimate-public tier map), but nine mosquito visits
+  // have exactly ONE valid cadence — the Feb–Oct walk. Without this the modal
+  // pre-fill books a custom 42-day series (including winter visits), and the
+  // converter's forced resolver never runs because the booking route creates
+  // the series itself (skipAutoSchedule). Same rule as
+  // converterFollowUpSeedingPattern / annualPrepayCoverageCadence.
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  if (RecurringAppointmentSeeder.serviceKeyFor(line || {}) === 'mosquito' && visits === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
   // Before the month-based buckets: an every-6-weeks plan (9 visits/year) has
   // no month-based cadence — without this it fell to the quarterly fallback,
   // so a 6-week quote pre-filled the modal as quarterly and the prepay
@@ -293,11 +304,19 @@ function indexServicesForSchedule(rows = []) {
 }
 
 function serviceCatalogMatch(line, serviceIndex) {
-  const rawKey = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  // The explicit serviceKey is its own candidate, tried FIRST (codex r17
+  // P2): an accepted seasonal selection is restamped as { service:
+  // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
+  // into a service-wins fallback made the exact seasonal row unreachable —
+  // the fuzzy matcher then returned mosquito_monthly.
+  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.key || '');
+  const rawKey = normalizeServiceKey(line?.service || '');
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [
+    explicitKey,
     rawKey,
     labelKey,
+    ...(SERVICE_KEY_ALIASES[explicitKey] || []),
     ...(SERVICE_KEY_ALIASES[rawKey] || []),
     ...(SERVICE_KEY_ALIASES[labelKey] || []),
   ].filter(Boolean);
@@ -378,8 +397,16 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
   if (kind !== 'recurring' && price == null) return null;
 
-  const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
   const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // Never stamp the monthly catalog identity on a seasonal mosquito line
+  // (codex r16 P2): the seasonal row is normally in the index (queried
+  // explicitly despite is_active=false), but a fuzzy hit on mosquito_monthly
+  // would make catalog-first consumers classify the plan as 12-visit
+  // monthly. Fail to NO identity rather than the wrong one.
+  const matched = cadence === 'seasonal_feb_oct' && rawMatched?.service_key === 'mosquito_monthly'
+    ? null
+    : rawMatched;
   // The scheduler (and Schedule modal) have no native every_6_weeks cadence —
   // they represent it as a custom 42-day interval. Translate here so the
   // modal pre-fill books the series the quote actually sold; intervalDays is
@@ -1880,7 +1907,14 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
-        .where({ is_active: true })
+        // mosquito_seasonal is is_active=false until the owner activates the
+        // program, but a seasonal QUOTE still needs its catalog identity —
+        // without it the fuzzy match stamps mosquito_monthly's service_id on
+        // a seasonal booking and catalog-first consumers classify the plan
+        // as 12-visit monthly (codex r16 P2). Inactive here only widens the
+        // schedule-modal pre-fill's identity resolution; it does not make
+        // the service bookable anywhere else.
+        .where((q) => q.where({ is_active: true }).orWhere({ service_key: 'mosquito_seasonal' }))
         .select(
           'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
           'frequency', 'visits_per_year', 'default_duration_minutes',

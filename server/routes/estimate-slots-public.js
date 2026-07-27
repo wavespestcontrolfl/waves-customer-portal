@@ -227,29 +227,54 @@ router.get('/:token/available-slots', async (req, res) => {
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
-    // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
-    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
-    // rejects any slot past MAX_SLOT_HORIZON_DAYS in ET, so browsing must not
-    // display far-future days whose every slot would 409 on the first tap.
-    // Same ET day-string compare, same strict `>` so the boundary day both
-    // displays and reserves. Silently substituting the default window (the
-    // windowDays treatment) would mislead here — the customer asked for a
-    // specific day — so an out-of-horizon date is a 400 like find-slots'
-    // out-of-bound query.
-    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
-        return res.status(400).json({ error: 'date is beyond the booking horizon' });
-      }
-      opts.dateFrom = date;
-      opts.dateTo = date;
-    }
     if (typeof req.query.timeOfDay === 'string' && req.query.timeOfDay.trim()) {
       opts.timeOfDay = req.query.timeOfDay.trim();
     }
     opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
+    }
+    // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
+    // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
+    // while selectedFrequency stays the pest cadence (codex r14 P1).
+    if (typeof req.query.serviceCadences === 'string' && req.query.serviceCadences.trim()) {
+      try {
+        const parsed = JSON.parse(req.query.serviceCadences);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          opts.serviceCadences = parsed;
+        }
+      } catch { /* malformed axis param — ignore, stored-row profile applies */ }
+    }
+    // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
+    // rejects any slot past the horizon in ET, so browsing must not display
+    // far-future days whose every slot would 409 on the first tap. Same ET
+    // day-string compare, same strict `>` so the boundary day both displays
+    // and reserves. Seasonal selections use the extended winter-gap horizon
+    // (their default window opens at the next Feb 1, which can sit past the
+    // standard 90 days on Nov 1–2 — codex r10 P2); resolved AFTER
+    // serviceMode/selectedFrequency parse so the profile matches reserve's.
+    // Silently substituting the default window (the windowDays treatment)
+    // would mislead here — the customer asked for a specific day — so an
+    // out-of-horizon date is a 400 like find-slots' out-of-bound query.
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      const slotAvailability = require('../services/estimate-slot-availability');
+      // Guarded like slot-reservation's profile resolution — suites mock this
+      // module down to the functions they assert on.
+      const seasonalBrowse = typeof slotAvailability.resolveEstimateSlotProfile === 'function'
+        && typeof slotAvailability.seasonalSelectionProfile === 'function'
+        && slotAvailability.seasonalSelectionProfile(
+          slotAvailability.resolveEstimateSlotProfile(estimate, opts),
+        );
+      const browseHorizonDays = seasonalBrowse && typeof slotAvailability.seasonalMaxHorizonDays === 'function'
+        ? slotAvailability.seasonalMaxHorizonDays()
+        : MAX_SLOT_HORIZON_DAYS;
+      if (date > etDateString(addETDays(new Date(), browseHorizonDays))) {
+        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      }
+      opts.dateFrom = date;
+      opts.dateTo = date;
     }
 
     try {
@@ -364,8 +389,14 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
       : '';
+    const findServiceCadences = req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
+      && !Array.isArray(req.body.serviceCadences)
+      ? req.body.serviceCadences
+      : undefined;
     try {
-      const result = await findEstimateSlots(estimate.id, { query, serviceMode, selectedFrequency });
+      const result = await findEstimateSlots(estimate.id, {
+        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences,
+      });
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -407,6 +438,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     : '';
   const slotOpts = {};
   if (selectedFrequency) slotOpts.selectedFrequency = selectedFrequency;
+  // Bundle combo axes (codex r14 P1): the mosquito tier can travel as
+  // serviceCadences.mosquito while selectedFrequency stays the pest cadence —
+  // the reserve-side seasonal redemption check needs it.
+  if (req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
+    && !Array.isArray(req.body.serviceCadences)) {
+    slotOpts.serviceCadences = req.body.serviceCadences;
+  }
 
   try {
     const estimate = await db('estimates')
@@ -552,7 +590,72 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       if (resolveEstimateInvoiceMode(estimate, estData)) {
         return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
       }
-      if (!annualPrepayEligibleForEstimateData(estData)) {
+      // Tier-aware (codex r10 P1 + r13 P0): the mosquito ladder's SELECTED
+      // tier carries its own eligibility (stamped by finalizePricingBundle) —
+      // seasonal9 must refuse the deposit even when the stored default row is
+      // monthly, and monthly12 may proceed even when the stored row is
+      // seasonal. The selection can arrive as the top-level frequency OR as a
+      // bundle combo axis (serviceCadences.mosquito), and an unmatched
+      // nonempty key is an acceptance shape /accept rejects — never collect
+      // money for either. Old clients that omit both fields keep the
+      // stored-mix rule (fail-closed for seasonal-default estimates).
+      const prepayFreqKey = typeof req.body?.selectedFrequency === 'string'
+        ? req.body.selectedFrequency.trim()
+        : '';
+      const prepayFreq = prepayFreqKey
+        ? [
+          ...(Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : []),
+          ...(Array.isArray(pricingBundle?.hiddenLawnFrequencies) ? pricingBundle.hiddenLawnFrequencies : []),
+        ].find((f) => f?.key === prepayFreqKey)
+        : null;
+      if (prepayFreqKey && !prepayFreq) {
+        return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+      }
+      // Sanitize serviceCadences exactly like accept, then mirror accept's
+      // exact-combo validation (codex r14 P1): an unmatched map — bogus tier
+      // keys, wrong axis set — is an acceptance shape /accept 400s, so no
+      // PaymentIntent may be minted for it. Same no-combos passthrough as
+      // accept (the map is ignored there when the bundle offers no combos).
+      const depositServiceCadences = (() => {
+        const raw = req.body?.serviceCadences;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        const out = {};
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof v === 'string' && v.trim()) out[String(k)] = v.trim();
+        }
+        return Object.keys(out).length ? out : null;
+      })();
+      const depositCombos = Array.isArray(pricingBundle?.serviceCadenceCombos)
+        ? pricingBundle.serviceCadenceCombos
+        : [];
+      let depositMatchedCombo = null;
+      if (depositServiceCadences && depositCombos.length) {
+        const requestedNonPest = Object.keys(depositServiceCadences);
+        depositMatchedCombo = depositCombos.find((c) => {
+          const sel = c.selection || {};
+          const comboNonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+          if (comboNonPest.length !== requestedNonPest.length) return false;
+          if (!requestedNonPest.every((k) => sel[k] === depositServiceCadences[k])) return false;
+          if (sel.pest_control) return sel.pest_control === prepayFreqKey;
+          return true;
+        }) || null;
+        if (!depositMatchedCombo) {
+          return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+        }
+      }
+      // Axis eligibility comes ONLY from a matched combo's server-stamped
+      // flag (codex r21 P0 + r22 P2): with no combos, accept IGNORES
+      // serviceCadences and books the selected/default tier, so a raw axis
+      // token must neither buy a deposit (crafted monthly12 on a
+      // seasonal-default estimate) nor block one (stale seasonal9 on a
+      // monthly-default estimate). The adjudication order mirrors accept
+      // exactly.
+      let prepayEligibleHere;
+      if (depositMatchedCombo) prepayEligibleHere = depositMatchedCombo.annualPrepayEligible === true;
+      else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
+        prepayEligibleHere = prepayFreq.annualPrepayEligible;
+      } else prepayEligibleHere = annualPrepayEligibleForEstimateData(estData);
+      if (!prepayEligibleHere) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
       // Mirror the converter's fail-closed multi-service block
