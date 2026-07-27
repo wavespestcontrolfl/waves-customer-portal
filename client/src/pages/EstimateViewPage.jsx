@@ -4787,6 +4787,26 @@ function EstimateViewPageInner() {
     }
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
+  // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
+  // can't prepay (mosquito seasonal9) while annual prepay is chosen must send
+  // the customer back through the payment choice — the next confirm would 400
+  // mid-flow against a combination the server rejects. ABOVE the loading/
+  // error early returns (hooks must run on every render — codex r11 P1);
+  // inputs derive from state, tolerating missing data during load.
+  useEffect(() => {
+    if (paymentPreference !== 'prepay_annual') return;
+    const pricingState = data?.pricing || {};
+    const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
+    const eligible = typeof frequency?.annualPrepayEligible === 'boolean'
+      ? frequency.annualPrepayEligible
+      : pricingState.annualPrepayEligible === true;
+    if (!eligible) {
+      setPaymentPreference(null);
+      setCtaPhase('configure');
+      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
+    }
+  }, [data?.pricing, selectedFrequency, paymentPreference]);
+
   if (loading) {
     return (
       <Page>
@@ -4937,17 +4957,16 @@ function EstimateViewPageInner() {
   const annualPrepayEligibleEffective = typeof combinedFrequency?.annualPrepayEligible === 'boolean'
     ? combinedFrequency.annualPrepayEligible
     : pricing.annualPrepayEligible === true;
-  // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
-  // can't prepay (seasonal9) while annual prepay is chosen must send the
-  // customer back through the payment choice — the next confirm would 400
-  // mid-flow against a combination the server rejects.
-  useEffect(() => {
-    if (!annualPrepayEligibleEffective && paymentPreference === 'prepay_annual') {
-      setPaymentPreference(null);
-      setCtaPhase('configure');
-      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
-    }
-  }, [annualPrepayEligibleEffective, paymentPreference]);
+  // The WaveGuard setup fee's waiver disclosure follows the SELECTED tier,
+  // not the stored default (codex r11 P1): a monthly-default estimate
+  // switched to seasonal9 must not promise "waived when you pay the year"
+  // (prepay is rejected for it), and a seasonal-default estimate switched to
+  // monthly12 earns the waiver its stored flag doesn't carry. Other fees
+  // (roach knockdown) keep their server-stated flag.
+  const tierAwareFee = (fee) => (fee && fee.service === 'waveguard_setup'
+    ? { ...fee, waivedWithPrepay: annualPrepayEligibleEffective }
+    : fee);
+  const setupFeeEffective = tierAwareFee(pricing.setupFee || null);
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -4983,12 +5002,14 @@ function EstimateViewPageInner() {
   const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
     const cardsDisabled = readOnly || ctaPhase === 'submitting';
     const mode = modeOverride || serviceMode;
+    // Tier-aware waiver disclosure — see tierAwareFee at component scope.
+    const feeList = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+      ? pricing.firstVisitFees
+      : (pricing.setupFee ? [pricing.setupFee] : [])).map(tierAwareFee);
     // Service keys whose one-time fee is waived with annual prepay (the
     // WaveGuard setup fee) — the breakdown card marks these rows with an
     // asterisk + waiver note when they render inside the one-time list.
-    const prepayWaivedServices = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-      ? pricing.firstVisitFees
-      : (pricing.setupFee ? [pricing.setupFee] : []))
+    const prepayWaivedServices = feeList
       .filter((fee) => fee?.waivedWithPrepay === true)
       .map((fee) => fee.service);
     if (mode === 'recurring') {
@@ -5003,9 +5024,7 @@ function EstimateViewPageInner() {
           <div>
           {services.map((section) => {
             const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
-              ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                ? pricing.firstVisitFees
-                : (pricing.setupFee ? [pricing.setupFee] : []))
+              ? feeList
               : [];
             const afterPrice = services.length === 1 ? (
               <>
@@ -5376,7 +5395,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
+                setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}
@@ -5443,7 +5462,9 @@ function EstimateViewPageInner() {
             submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold
-              && (annualPrepayEligibleEffective || pricing.setupFee?.waivedWithPrepay)
+              // Tier-aware: the stored setupFee flag reflects the default
+              // tier; the effective flag already folds the selected one in.
+              && annualPrepayEligibleEffective
               ? (
                 <button
                   type="button"
@@ -5616,7 +5637,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
+                setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 invoiceOnly={invoiceOnlyAccept}
