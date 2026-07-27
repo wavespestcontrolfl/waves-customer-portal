@@ -150,3 +150,155 @@ test('payload nextAppointment is null when nothing upcoming matches the service 
 
   expect(data.nextAppointment).toBeNull();
 });
+
+// Rodent reports under GATE_RODENT_REPORT_REFRESH widen the match to the
+// whole rodent program (owner 2026-07-27: next service date if and only if
+// it is rodent-related) — exclusion/sanitation/trapping names carry no
+// rodent token and fall to the 'pest' default line, so the strict same-line
+// match missed them. The widening is part of the gated refresh: with the
+// gate dark, behavior is exactly the pre-refresh strict match (codex
+// round-3 P2).
+const RODENT_SERVICE = {
+  ...BASE_SERVICE,
+  id: 'service-rodent-next',
+  service_line: 'rodent',
+  service_type: 'Rodent Trapping Service',
+};
+
+afterEach(() => { delete process.env.GATE_RODENT_REPORT_REFRESH; });
+
+const RODENT_PROGRAM_FIXTURES = {
+  ...BASE_FIXTURES,
+  // the catalog is the rodent evidence: a widened candidate must be a
+  // services row with category 'rodent' — name shape alone is not enough
+  // (codex round-4 P2)
+  services: [
+    { id: 'svc-exclusion', name: 'Exclusion Service', category: 'rodent' },
+    { id: 'svc-sanitation', name: 'Sanitation & Cleanup', category: 'rodent' },
+  ],
+  scheduled_services: [
+    // no rodent token, detects as pest — but it IS the rodent program
+    { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
+    { id: 'scheduled-rodent-later', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', window_start: '09:00:00' },
+  ],
+};
+
+test('gated: a rodent report discloses a rodent-adjacent visit (Exclusion Service) as next', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-excl', makeKnex(RODENT_PROGRAM_FIXTURES));
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Exclusion Service',
+    scheduledDate: '2999-01-03',
+    windowStart: '08:00:00',
+  });
+});
+
+test('gated: a service_id-linked rodent-catalog visit is disclosed even under a customized label', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [{ id: 'svc-exclusion', name: 'Exclusion Service', category: 'rodent' }],
+    scheduled_services: [
+      // admin renamed the label; service_id still points at the rodent
+      // catalog row — the link is the authority (codex round-5 P2)
+      { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Custom Attic Program', service_id: 'svc-exclusion', window_start: '08:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-linked', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Custom Attic Program',
+    scheduledDate: '2999-01-03',
+    windowStart: '08:00:00',
+  });
+});
+
+test('gated: a rodent-sounding label linked to a NON-rodent catalog service is vetoed', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-lawn', name: 'Lawn Aeration', category: 'lawn_care' },
+      { id: 'svc-trap-check', name: 'Rodent Trap Check', category: 'rodent' },
+    ],
+    scheduled_services: [
+      // stale rodent label, but the catalog link says lawn — the link is
+      // authoritative in BOTH directions (codex round-8 P2)
+      { id: 'scheduled-stale-label', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Rodent Check-Up', service_id: 'svc-lawn', window_start: '08:00:00' },
+      { id: 'scheduled-real-rodent', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', service_id: 'svc-trap-check', window_start: '09:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-veto', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Rodent Trap Check',
+    scheduledDate: '2999-02-01',
+    windowStart: '09:00:00',
+  });
+});
+
+test('gate dark: the strict same-line pick is unchanged (kill switch restores old behavior)', async () => {
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-dark', makeKnex(RODENT_PROGRAM_FIXTURES));
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Rodent Trap Check',
+    scheduledDate: '2999-02-01',
+    windowStart: '09:00:00',
+  });
+});
+
+test('a rodent report never claims trap-named visits of OTHER detectable lines or outside the rodent catalog', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    // only Sanitation & Cleanup is a rodent-category catalog service here
+    services: [
+      { id: 'svc-sanitation', name: 'Sanitation & Cleanup', category: 'rodent' },
+      { id: 'svc-wildlife', name: 'Wildlife Trapping', category: 'specialty' },
+    ],
+    scheduled_services: [
+      // "trap" token but detectably mosquito — stays off the rodent report
+      { id: 'scheduled-mosq-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Mosquito Trap Service', window_start: '08:00:00' },
+      // trapping token, pest-default line, but wildlife work — the negative
+      // guard AND the catalog keep non-rodent trapping out (codex P1)
+      { id: 'scheduled-wildlife', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Wildlife Trapping', window_start: '09:00:00' },
+      { id: 'scheduled-fly-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Fly Trap Service', window_start: '11:00:00' },
+      // adjacent-shaped name with NO rodent catalog row — name shape alone
+      // is not rodent evidence (codex round-4 P2)
+      { id: 'scheduled-postcon', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Post-Construction Exclusion', window_start: '12:00:00' },
+      // quarterly pest visit: not rodent-related, also skipped
+      { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-04', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00' },
+      { id: 'scheduled-sanitation', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'Sanitation & Cleanup', window_start: '10:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-mosq', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Sanitation & Cleanup',
+    scheduledDate: '2999-01-05',
+    windowStart: '10:00:00',
+  });
+});
+
+test('non-rodent reports keep the strict same-line match', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // pest report + rodent-adjacent name that detects pest: still matches
+      // (unchanged pest behavior), so assert with a LAWN report instead
+      { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(
+    { ...BASE_SERVICE, id: 'service-lawn-next', service_line: 'lawn', service_type: 'Lawn Care Treatment' },
+    'token-lawn-none',
+    knex,
+  );
+
+  expect(data.nextAppointment).toBeNull();
+});

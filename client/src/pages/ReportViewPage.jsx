@@ -4904,6 +4904,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // narrative names the areas, and Products Applied carries the products —
   // the lettered A-E list + "Completed 5" chips read as duplication.
   const hideCoverageCard = Boolean(data.pestReportV2)
+    // Rodent refresh: when the server suppressed coverage (enabled: false —
+    // the trap map renders in its place), hide the ENTIRE mount, traced map
+    // included. ServiceCoverageCard lets a traced snapshot bypass the
+    // enabled flag, which would render the coverage card alongside the trap
+    // map this suppression exists to deduplicate (codex round-2 P2). A
+    // refreshed rodent report the server did NOT suppress (no station map)
+    // keeps the card — and its traced override — as before.
+    || Boolean(data.rodentReportRefresh && data.serviceCoverage?.enabled === false)
     || ((data.serviceLine === 'lawn'
       || /tree|shrub/.test(String(data.serviceLine || ''))
       // Mosquito V2's habitat diagram replaces the lettered map the same way.
@@ -8093,6 +8101,28 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
+            {/* Rodent refresh: the photo evidence the summary narrates renders
+                WITH the summary (owner 2026-07-27) — the bottom Field photos
+                gallery is skipped for these reports so the photos show once.
+                The typed snapshot's consolidated photoSummary moves with the
+                gallery (it only rendered in the legacy section — codex P2). */}
+            {data.rodentReportRefresh && (data.photos || []).length > 0 && (
+              <>
+                {data.typedReport?.photoSummary && (
+                  <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '16px 0 0' }}>
+                    {data.typedReport.photoSummary}
+                  </p>
+                )}
+                <div className="sr-grid-3" style={{ marginTop: 16 }}>
+                  {data.photos.map((photo) => (
+                    <div className="sr-cell" key={photo.id}>
+                      {photo.url && <img src={photo.url} alt={photo.caption || 'Service photo'} style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }} />}
+                      <div className="sr-cell-value">{photo.caption || photo.stateBadge || 'Documented during this visit'}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
                 REPLACING the legacy Lawn Intelligence card + mowing block it supersedes.
                 Falls back to the legacy card when reportV2 is absent (flag off). */}
@@ -8223,8 +8253,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         ))}
 
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
-            no satellite basemap to pin against (provider ToS). */}
-        {mode === 'live' && <StationMapCard stationMap={data.stationMap} />}
+            no satellite basemap to pin against (provider ToS). Rodent refresh
+            draws trapping pins as animated snap traps. */}
+        {mode === 'live' && (
+          <StationMapCard
+            stationMap={data.stationMap}
+            trapPins={Boolean(data.rodentReportRefresh)}
+            animate={Boolean(data.rodentReportRefresh)}
+          />
+        )}
 
         {/* Lawn: program explainer drops below the factual record, just above
             Ask-Waves. Removed from the V2 report (the visit-specific dashboard
@@ -8316,7 +8353,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Legacy field photos render each photo with its per-photo vision caption
             (which can over-diagnose). When reportV2 is present, the V2 photo strip
             above replaces this with a horizontal gallery + ONE consolidated analysis. */}
-        {(data.photos || []).length > 0 && !data.reportV2 && (
+        {/* Rodent refresh renders the photos inside Visit Summary instead. */}
+        {(data.photos || []).length > 0 && !data.reportV2 && !data.rodentReportRefresh && (
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (

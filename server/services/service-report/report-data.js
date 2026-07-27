@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -12,6 +12,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
+const { applyRodentReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
@@ -2812,6 +2813,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // itself uses. The visit this report covers is excluded by id so a same-day
   // report never shows its own just-completed slot. Best-effort: never blocks
   // the report.
+  // Rodent report refresh gate (owner ask 2026-07-27) — declared before the
+  // next-appointment pick because the widened rodent-program match below is
+  // part of the gated behavior: with the gate dark, reports keep the strict
+  // same-line pick exactly as before (codex round-3 P2), so unsetting the
+  // var restores pre-refresh output everywhere.
+  const rodentReportRefresh = serviceLine === 'rodent'
+    && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
+
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -2836,8 +2845,59 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .orderBy('window_start', 'asc')
       .limit(200)
       .catch(() => []);
+    // A rodent report's "next visit" spans the whole rodent program —
+    // trapping, exclusion, sanitation, proofing — including service names
+    // that carry no rodent token ("Exclusion Service" alone falls to the
+    // pest default). Owner 2026-07-27: the rodent report shows the next
+    // service date if and only if it is rodent-related. The widened match
+    // only claims names NO other line detects (the 'pest' fallback) — a
+    // "Mosquito Trap Service" still detects as mosquito and stays out —
+    // and isRodentAdjacentServiceType's negative guard keeps non-rodent
+    // trapping ("Wildlife Trapping") out too. Other report lines keep the
+    // strict same-line match.
+    // Name shape alone is NOT rodent evidence (codex round-4/5 P2): a
+    // generic "Sanitation & Cleanup" booking that has nothing to do with
+    // the rodent program would satisfy the regex. The catalog is the
+    // authority: a candidate whose scheduled_services.service_id points at
+    // a services row with category 'rodent' is rodent-related regardless
+    // of its (possibly customized/renamed) service_type label; unlinked
+    // legacy rows fall back to exact catalog-NAME matching plus the
+    // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
+    // the strict same-line match.
+    let serviceCategoryById = null;
+    let rodentCatalogNames = null;
+    if (rodentReportRefresh) {
+      try {
+        const catalogRows = await knex('services').select('id', 'name', 'category');
+        serviceCategoryById = new Map((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => row && row.id)
+          .map((row) => [String(row.id), String(row.category || '')]));
+        rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => String(row?.category || '') === 'rodent')
+          .map((row) => String(row.name || '').trim().toLowerCase())
+          .filter(Boolean));
+      } catch { serviceCategoryById = null; rodentCatalogNames = null; }
+    }
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
-      .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
+      .find((row) => {
+        // A resolvable catalog link is authoritative in BOTH directions
+        // (codex round-8 P2): it admits a rodent-category visit under any
+        // label AND vetoes a rodent-sounding label linked to a non-rodent
+        // service. Label matching only ever judges unlinked/unresolvable
+        // rows.
+        const linkedCategory = rodentReportRefresh && serviceCategoryById && row.service_id
+          ? serviceCategoryById.get(String(row.service_id)) || null
+          : null;
+        if (linkedCategory) return linkedCategory === 'rodent';
+        const rowLine = detectServiceLine(row.service_type);
+        if (rowLine === serviceLine) return true;
+        if (!rodentReportRefresh) return false;
+        // unlinked legacy rows: exact rodent-catalog name + adjacent shape
+        return rowLine === 'pest'
+          && isRodentAdjacentServiceType(row.service_type)
+          && !!rodentCatalogNames
+          && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
+      }) || null;
     if (nextApptRow && nextApptRow.scheduled_date) {
       const rawDate = nextApptRow.scheduled_date;
       nextAppointment = {
@@ -2906,6 +2966,44 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }).catch(() => structured.customerRecap || '');
   }
 
+  // Rodent report refresh (owner ask 2026-07-27, env-gated): the typed
+  // rodent report's Visit Summary is the frozen SMS recap — it never sees
+  // the findings, activity reading, trap counts, devices, or photo evidence
+  // the rest of the report is built from. The gate reweaves all of it into
+  // a detailed grounded narrative (rodent-report-narrative.js), and the
+  // client uses the same flag to lift photos into the summary, show the
+  // next rodent-related visit, drop the Rodent Service Coverage card (the
+  // trap map owns the spatial story), and render the trap-styled map pins.
+  // Tech-reviewed "Generate AI report" copy still wins the summary slot;
+  // narrative generation is LIVE VIEWS ONLY (same posture as the pest
+  // block). The rodentReportRefresh gate itself is computed above, before
+  // the next-appointment pick it also widens. Kill switch: unset the var.
+  if (
+    rodentReportRefresh
+    && typedSnapshot
+    && visitSummarySource !== 'technician_report'
+    && opts.mode === 'live'
+  ) {
+    const narrated = await applyRodentReportNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: linkedServiceName,
+      typedReport: typedSnapshot,
+      activity,
+      stationSummary: stationMap?.summary || null,
+      // summary.activity semantics differ by program (traps with a capture
+      // vs stations with bait consumption) — the narrative names the fact
+      // accordingly and must know which map this is.
+      stationProgram: stationMap?.program || null,
+      applications,
+      photos: photoPayload,
+      nextAppointment,
+    }).catch(() => null);
+    if (narrated && narrated !== visitSummary) {
+      visitSummary = narrated;
+      visitSummarySource = 'rodent_narrative';
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2969,6 +3067,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     summary: visitSummary,
     // 'technician_report' when summary is the tech-reviewed AI report copy,
+    // 'rodent_narrative' when the gated rodent narrative composed it,
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
@@ -3016,7 +3115,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
-    serviceCoverage,
+    // Rodent refresh drops the coverage card ONLY when the trap/station map
+    // actually renders in its place — the zone list duplicated it (owner
+    // 2026-07-27). That means stationMap.available AND a live view: the
+    // client only mounts StationMapCard on mode === 'live' (no satellite
+    // basemap in pdf/static per provider ToS), so PDF renders and rodent
+    // reports with no station map (exclusion/sanitation visits) keep
+    // coverage as their only spatial section. MUST be an explicit
+    // `enabled: false` — a null/absent key makes the client REBUILD the
+    // card from serviceLocations/serviceAreas (its legacy fallback path).
+    serviceCoverage: rodentReportRefresh && stationMap?.available && opts.mode === 'live'
+      ? { enabled: false }
+      : serviceCoverage,
+    // Client-side switch for the refreshed rodent layout (photos in the
+    // summary, trap-styled animated map pins). LIVE VIEWS ONLY: stored PDF
+    // keys don't carry this gate, so a flag that changed pdf/static markup
+    // would keep serving stale cached PDFs across a gate flip (codex P2
+    // #3004) — non-live renders keep the legacy layout unconditionally.
+    rodentReportRefresh: (rodentReportRefresh && opts.mode === 'live') || undefined,
     nextAppointment,
     visitTimeline,
     serviceLocations,
