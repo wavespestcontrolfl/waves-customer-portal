@@ -554,6 +554,21 @@ class SmartRebooker {
         });
       }
     }
+    // A seasonal (Feb–Oct) series must not re-anchor into the winter gap: the
+    // anchor would sit in Nov–Jan while the walk resumes in February,
+    // displacing the October visit (codex r7 P1 — the public pull-forward
+    // route reaches this method). Operators may still override — an
+    // off-season anchor is an office decision everywhere else in this lane.
+    if (initiatedBy !== 'admin' && parent.recurring_pattern === SEASONAL_FEB_OCT) {
+      const month = Number(seriesDateStr.slice(5, 7));
+      if (month < 2 || month > 10) {
+        throw Object.assign(new Error('This seasonal program runs February through October — winter dates are not available for this series. Contact the office if you need an exception.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'OFF_SEASON',
+        });
+      }
+    }
     if (sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
       throw Object.assign(new Error('That window has already passed today'), {
         statusCode: 409,

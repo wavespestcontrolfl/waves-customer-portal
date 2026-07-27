@@ -7,6 +7,15 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
+// Inert blackout lookups: rescheduleSeries' non-admin guards (blackout, then
+// seasonal winter) lazy-require this module, and the real one queries the db.
+jest.mock('../services/scheduling/blackout-dates', () => ({
+  getBlackoutDates: jest.fn().mockResolvedValue(new Set()),
+  isBlackoutDate: jest.fn().mockResolvedValue(false),
+  getWeeklyDaysOff: jest.fn().mockResolvedValue([]),
+  expandWeeklyDaysOff: jest.fn().mockReturnValue(new Set()),
+  WEEKLY_DAYS_OFF_KEY: 'weekly_days_off',
+}));
 const mockIoEmit = jest.fn();
 const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
 jest.mock('../sockets', () => ({
@@ -751,5 +760,54 @@ describe('isMonthBasedRecurrence — series re-anchor classification (pre-push P
     expect(isMonthBasedRecurrence('every_6_weeks')).toBe(false);
     expect(isMonthBasedRecurrence('weekly')).toBe(false);
     expect(isMonthBasedRecurrence('custom')).toBe(false);
+  });
+});
+
+describe('seasonal winter re-anchor guard (codex r7 P1)', () => {
+  // The public pull-forward route reaches rescheduleSeries, so without this a
+  // customer could move a February anchor into January: the anchor sits in
+  // winter while the walk resumes in February, displacing the October visit.
+  const nextJan15 = `${Number(etDateString().slice(0, 4)) + 1}-01-15`;
+  const seasonalChild = {
+    id: 'svc-9', customer_id: 'cust-1', status: 'confirmed',
+    recurring_parent_id: 'parent-9', scheduled_date: BASE,
+    window_start: '09:00', window_end: '11:00',
+  };
+  const seasonalParent = {
+    id: 'parent-9', customer_id: 'cust-1', is_recurring: true,
+    recurring_pattern: 'seasonal_feb_oct', scheduled_date: BASE,
+  };
+  const wireLookups = () => {
+    const svcLookup = chain({ first: jest.fn().mockResolvedValue(seasonalChild) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(seasonalParent) });
+    db.mockImplementationOnce(() => svcLookup).mockImplementationOnce(() => parentLookup);
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    db.transaction = undefined;
+  });
+
+  test('a self-serve re-anchor into Nov–Jan is refused with a clear 409', async () => {
+    wireLookups();
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-9', nextJan15, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OFF_SEASON',
+      message: expect.stringMatching(/February through October/),
+    });
+    // Refused before any write path was touched.
+    expect(db.transaction).toBeUndefined();
+  });
+
+  test('an admin re-anchor is NOT blocked by the season guard (office override)', async () => {
+    wireLookups();
+    // db.transaction is undefined, so the call fails DEEPER in the method —
+    // the point is it got PAST the guard (no OFF_SEASON code).
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-9', nextJan15, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+    )).rejects.not.toMatchObject({ code: 'OFF_SEASON' });
   });
 });
