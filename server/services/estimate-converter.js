@@ -2185,8 +2185,36 @@ const EstimateConverter = {
       }
 
       if (reservedStart) {
+        // Codex r8 P1 (last hole in the class): the slot list and reserve
+        // are season-filtered for seasonal selections, but the reservation
+        // is not re-validated when the FREQUENCY changes after reserving —
+        // a slot held under monthly12 (winter dates legitimately offered)
+        // then accepted as seasonal9 would seed the series from a Nov–Jan
+        // parent, counting a prohibited winter visit toward the nine.
+        // Refuse and roll the accept back; the customer re-picks a date
+        // (the hold expires on its own). Office/admin bookings never come
+        // through the reservation path. OUTSIDE the seeding try below — its
+        // catch is deliberately fail-soft (log and keep the acceptance),
+        // which would swallow this refusal and complete the accept anyway
+        // (pre-push P0 r9).
+        const reservedGuardSvc = reservedSeedSvc
+          || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+        const reservedSeedingPattern = converterFollowUpSeedingPattern(
+          reservedGuardSvc || {}, reservedStart, inferredFrequencyKey,
+        );
+        if (reservedSeedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+          const reservedMonth = Number(String(scheduledDateOnly(reservedStart.scheduled_date) || '').slice(5, 7));
+          if (reservedMonth < 2 || reservedMonth > 10) {
+            const err = new Error('This seasonal program runs February through October — pick an in-season visit date to finish accepting.');
+            err.code = 'SEASONAL_RESERVATION_OFF_SEASON';
+            err.isOperational = true;
+            err.status = 409;
+            err.statusCode = 409;
+            throw err;
+          }
+        }
         try {
-          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+          const seedSvc = reservedGuardSvc;
           // Duplicate-series guard on the RESERVED-slot path (P0): this
           // branch — the common public-accept path — seeded with NO guard,
           // so a customer already holding an active series of the family
@@ -2198,27 +2226,6 @@ const EstimateConverter = {
           // never seed a series don't take the lock or write skip notes.
           // Guard re-check + seeding share one locked transaction
           // (runSeedingStep) so concurrent creators serialize.
-          const reservedSeedingPattern = converterFollowUpSeedingPattern(seedSvc || {}, reservedStart, inferredFrequencyKey);
-          // Codex r8 P1 (last hole in the class): the slot list and reserve
-          // are season-filtered for seasonal selections, but the reservation
-          // is not re-validated when the FREQUENCY changes after reserving —
-          // a slot held under monthly12 (winter dates legitimately offered)
-          // then accepted as seasonal9 would seed the series from a Nov–Jan
-          // parent, counting a prohibited winter visit toward the nine.
-          // Refuse and roll the accept back; the customer re-picks a date
-          // (the hold expires on its own). Office/admin bookings never come
-          // through the reservation path.
-          if (reservedSeedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
-            const reservedMonth = Number(String(scheduledDateOnly(reservedStart.scheduled_date) || '').slice(5, 7));
-            if (reservedMonth < 2 || reservedMonth > 10) {
-              const err = new Error('This seasonal program runs February through October — pick an in-season visit date to finish accepting.');
-              err.code = 'SEASONAL_RESERVATION_OFF_SEASON';
-              err.isOperational = true;
-              err.status = 409;
-              err.statusCode = 409;
-              throw err;
-            }
-          }
           if (reservedSeedingPattern) {
             const outcome = await runSeedingStep(async (trx) => {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
@@ -2358,13 +2365,13 @@ const EstimateConverter = {
             if (unitFirstDate !== firstServiceDate) {
               try {
                 const { isBlackoutDate } = require('./scheduling/blackout-dates');
+                const { parseETDateTime, etParts, addETDays } = require('../utils/datetime-et');
                 for (let nudge = 0; nudge < 14; nudge++) {
-                  const day = new Date(`${unitFirstDate}T12:00:00`).getDay();
-                  const closed = day === 0 || day === 6 || (await isBlackoutDate(unitFirstDate));
+                  const at = parseETDateTime(`${unitFirstDate}T12:00`);
+                  const { dayOfWeek } = etParts(at);
+                  const closed = dayOfWeek === 0 || dayOfWeek === 6 || (await isBlackoutDate(unitFirstDate));
                   if (!closed) break;
-                  const next = new Date(`${unitFirstDate}T12:00:00`);
-                  next.setDate(next.getDate() + 1);
-                  unitFirstDate = next.toISOString().split('T')[0];
+                  unitFirstDate = etDateString(addETDays(at, 1));
                 }
               } catch (nudgeErr) {
                 logger.warn(`[estimate-converter] rolled-date closed-day nudge failed (failing open): ${nudgeErr.message}`);
