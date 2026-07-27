@@ -2365,7 +2365,16 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
   // summary surface. Non-V2 typed reports render the narrative in the
   // Visit Summary section instead and keep the ratified template body here
   // (both would otherwise show the same paragraph twice).
-  const body = bodyOverride || result.body;
+  // The deterministic fallback narrative LEADS with the headline this card
+  // already renders as its <h2> — strip that leading repeat so a guard
+  // miss doesn't print the headline twice (codex P2 #3007 r2).
+  let body = bodyOverride || result.body;
+  if (bodyOverride) {
+    const headline = String(result.headline).replace(/\.$/, '');
+    if (body.startsWith(headline)) {
+      body = body.slice(headline.length).replace(/^[.!?]\s*/, '').trim() || result.body;
+    }
+  }
   return (
     <section data-glass="card" className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">

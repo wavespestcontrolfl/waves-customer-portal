@@ -98,6 +98,60 @@ test('cross-domain claims reject: pests, actions, and locations must exist in th
   expect(ungroundedClaims('We also inspected for bed bugs during the visit.', facts)).toContain('ungrounded_pest:bed bugs');
 });
 
+test('typed count findings validate their own noun (codex r2: palms serviced)', () => {
+  const palmFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Palm Injection Service',
+    reportTypeLabel: 'Palm Injection',
+    typedReport: {
+      reportTypeLabel: 'Palm Injection',
+      todaysResult: { headline: 'Palm service complete.', body: 'We serviced 1 palm today.', nextStep: null },
+      findings: [{ fieldKey: 'palms_serviced', customerLabel: 'Palms serviced', customerValueLabel: '1', value: '1' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+    nextAppointment: { serviceType: 'Palm Injection Service', scheduledDate: '2026-08-27', windowStart: '08:00' },
+  }));
+  expect(ungroundedClaims('We serviced 1 palm today.', palmFacts)).toEqual([]);
+  // 27 is grounded globally (August 27) but is NOT the palms-serviced count
+  expect(ungroundedClaims('27 palms were serviced today.', palmFacts)).toContain('uncorroborated_count:27 palms');
+});
+
+test('wildlife species are grounded like any other pest term', () => {
+  const roachFacts = groundingFacts(roachInput());
+  expect(ungroundedClaims('A raccoon was relocated during the visit.', roachFacts)).toContain('ungrounded_pest:raccoon');
+  const wildlifeFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Wildlife Trapping Service',
+    reportTypeLabel: 'Wildlife Trapping',
+    typedReport: {
+      reportTypeLabel: 'Wildlife Trapping',
+      todaysResult: { headline: 'Wildlife service complete.', body: 'One raccoon was captured and relocated today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'Raccoon', value: 'raccoon' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We relocated the raccoon from the property.', wildlifeFacts)
+    .filter((p) => p.startsWith('ungrounded_pest'))).toEqual([]);
+  // the recorded animal can't be swapped
+  expect(ungroundedClaims('A squirrel was relocated from the property.', wildlifeFacts)).toContain('ungrounded_pest:squirrel');
+});
+
+test('negative-valued findings do not ground their action label (codex r2 polarity)', () => {
+  const facts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Cockroach Treatment',
+      todaysResult: { headline: 'Cockroach activity was high today.', body: 'We treated cracks and crevices today.', nextStep: null },
+      findings: [
+        { fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'German cockroaches', value: 'german' },
+        { fieldKey: 'monitors', customerLabel: 'Monitors placed', customerValueLabel: 'No', value: 'No' },
+      ],
+    },
+  }));
+  expect(ungroundedClaims('We placed monitors in the kitchen.', facts)).toContain('ungrounded_action:monitors');
+});
+
 test('termite bait maps ground activity-status counts by their own role', () => {
   const termiteFacts = groundingFacts(roachInput({
     serviceTypeDisplay: 'Termite Bait Station Monitoring',
@@ -126,7 +180,10 @@ test('clean model copy is accepted; a withheld pesticide echo falls back', async
   const accepted = await applyTypedReportNarrative(roachInput(), {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
   });
-  expect(accepted).toBe(clean);
+  // care-instruction preservation is ENFORCED: the narrative paraphrased
+  // the follow-up, so the ratified next-step sentence is appended verbatim
+  expect(accepted).toContain(clean);
+  expect(accepted).toContain('A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity.');
 
   const echoed = await applyTypedReportNarrative(roachInput(), {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: 'We applied Gentrol IGR to the cracks and crevices throughout the kitchen and completed a full flush-out treatment of the affected areas today.' } }),

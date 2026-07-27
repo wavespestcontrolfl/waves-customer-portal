@@ -688,6 +688,17 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bcrickets?\b/i, corpus: /\bcricket/ },
   { kind: 'pest', out: /\bbeetles?\b/i, corpus: /\bbeetle/ },
   { kind: 'pest', out: /\bscorpions?\b/i, corpus: /\bscorpion/ },
+  // wildlife species (wildlife_trapping typed schema — codex P1 #3007 r2):
+  // the narrative must never swap the recorded animal
+  { kind: 'pest', out: /\braccoons?\b/i, corpus: /\braccoon/ },
+  { kind: 'pest', out: /\bo?possums?\b/i, corpus: /\bo?possum/ },
+  { kind: 'pest', out: /\bsquirrels?\b/i, corpus: /\bsquirrel/ },
+  { kind: 'pest', out: /\barmadillos?\b/i, corpus: /\barmadillo/ },
+  { kind: 'pest', out: /\bbats?\b/i, corpus: /\bbats?\b/ },
+  { kind: 'pest', out: /\bbirds?\b/i, corpus: /\bbirds?\b/ },
+  { kind: 'pest', out: /\bsnakes?\b/i, corpus: /\bsnake/ },
+  { kind: 'pest', out: /\biguanas?\b/i, corpus: /\biguana/ },
+  { kind: 'pest', out: /\bcoyotes?\b/i, corpus: /\bcoyote/ },
   // treatment actions
   { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
   { kind: 'action', out: /\bbait(?:s|ed)?\b/i, corpus: /\bbait/ },
@@ -736,13 +747,72 @@ const DOMAIN_TERMS = [
   { kind: 'location', out: /\bfence\b/i, corpus: /\bfence/ },
 ];
 
+// A finding whose VALUE is negative ("Monitors placed: No") must not
+// ground its label's action — the label alone would promote a declined
+// action into completed work (codex P1 #3007 r2). Negative-valued findings
+// are excluded from the domain corpus entirely.
+const NEGATIVE_FINDING_VALUE_RE = /^(?:no\b|none\b|not\b|0(?:\.0*)?$|n\/a\b|false\b)/i;
+
+function domainCorpus(facts) {
+  const positiveFacts = {
+    ...facts,
+    findings: (facts.findings || []).filter(
+      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
+    ),
+  };
+  return ` ${JSON.stringify(positiveFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+}
+
 function ungroundedDomainTerms(text, facts) {
   const problems = [];
-  const corpus = ` ${JSON.stringify(facts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  const corpus = domainCorpus(facts);
   for (const term of DOMAIN_TERMS) {
     const match = String(text).match(new RegExp(term.out.source, 'i'));
     if (match && !term.corpus.test(corpus)) {
       problems.push(`ungrounded_${term.kind}:${match[0].toLowerCase()}`);
+    }
+  }
+  return problems;
+}
+
+// Typed COUNT findings get role validation of their own (codex P1 #3007
+// r2): "Palms serviced: 1" must reject "27 palms were serviced" even when
+// 27 is grounded elsewhere (a next-visit date). Every numeral followed
+// (within a word) by a noun that appears in a numeric finding's label must
+// equal that finding's value. Trap/station/device/capture nouns are
+// excluded — the station role validator owns them.
+const ROLE_VALIDATED_NOUN_STEMS = new Set(['trap', 'station', 'device', 'capture']);
+
+function typedCountRoles(facts) {
+  const map = new Map(); // noun stem -> Set of grounded values
+  (facts.findings || []).forEach((finding) => {
+    const n = Number(String(finding.value).trim());
+    if (!Number.isFinite(n)) return;
+    String(finding.label).toLowerCase().split(/[^a-z]+/)
+      .filter((word) => word.length >= 4)
+      .forEach((word) => {
+        const stem = word.replace(/s$/, '');
+        if (ROLE_VALIDATED_NOUN_STEMS.has(stem)) return;
+        if (!map.has(stem)) map.set(stem, new Set());
+        map.get(stem).add(n);
+      });
+  });
+  return map;
+}
+
+function typedCountProblems(text, facts) {
+  const problems = [];
+  const rolesByNoun = typedCountRoles(facts);
+  if (!rolesByNoun.size) return problems;
+  for (const match of String(text).matchAll(/\b(\d+)((?:\s+[a-z-]+){1,2})/gi)) {
+    const value = Number(match[1]);
+    for (const word of match[2].trim().toLowerCase().split(/\s+/)) {
+      const stem = word.replace(/s$/, '');
+      if (!rolesByNoun.has(stem)) continue;
+      if (!rolesByNoun.get(stem).has(value)) {
+        problems.push(`uncorroborated_count:${match[1]} ${word}`);
+      }
+      break; // first mapped noun decides the role for this numeral
     }
   }
   return problems;
@@ -767,6 +837,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...unsupportedActivityClaims(text, facts));
   problems.push(...nextVisitProblems(text, facts));
   problems.push(...ungroundedDomainTerms(text, facts));
+  problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month
@@ -856,6 +927,16 @@ async function applyTypedReportNarrative(input = {}, deps = {}) {
       banned.push(...ungroundedClaims(text, facts));
       if (!banned.length) {
         value = text;
+        // Care-instruction preservation is ENFORCED, not requested (codex
+        // P1 #3007 r2): on the Pest V2 override surface the narrative
+        // replaces the ratified body, so the typed next-step/care copy
+        // must survive verbatim. A narrative that only paraphrased it
+        // gets the ratified sentence appended (the client's containment
+        // rule then renders it once, in the body).
+        const nextStep = facts.todaysResult?.nextStep;
+        if (nextStep && !value.includes(nextStep)) {
+          value = `${value} ${nextStep}`.trim();
+        }
       } else {
         logger.warn(`[typed-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
       }

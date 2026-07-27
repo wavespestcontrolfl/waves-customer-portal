@@ -263,6 +263,17 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     expect(screen.queryByText(TEMPLATE)).toBeNull();
   });
 
+  it('a fallback override that leads with the headline is de-duplicated under the h2', async () => {
+    const TAIL = 'We inspected the mattress encasements and monitors installed at your last visit.';
+    renderReport(typedPestPayload({
+      summary: `Follow-up complete. ${TAIL}`,
+      summarySource: 'typed_narrative',
+      typedReport: { type: 'bed_bug', todaysResult: { headline: 'Follow-up complete.', body: 'Template body.' } },
+    }));
+    await screen.findByText(TAIL); // body renders WITHOUT the leading headline
+    expect(screen.getAllByText(/Follow-up complete/)).toHaveLength(1); // the h2 only
+  });
+
   it('without Pest V2 the narrative renders in Visit Summary and the ratified body stays on the card', async () => {
     const NARRATIVE = 'Bed bug activity was very low today, and we inspected the mattress encasements and monitors installed at your last visit.';
     const TEMPLATE = 'We completed the scheduled follow-up inspection today.';
