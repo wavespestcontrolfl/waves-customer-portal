@@ -122,19 +122,20 @@ describe('builder warranty fields on leads', () => {
     expect(captured.insert.builder_warranty_expires_on).toBeNull();
   });
 
-  test('create rejects a non-date expiry (timestamps would smuggle a timezone into a DATE column)', async () => {
+  test('create rejects non-date and impossible-date expiries (Postgres would 500 on a DATE it cannot parse)', async () => {
     const captured = {};
     primeCreate(captured);
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/leads`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          first_name: 'Test',
-          builder_warranty_expires_on: '2026-08-31T00:00:00Z',
-        }),
-      });
-      expect(res.status).toBe(400);
+      // Timestamps smuggle a timezone into a calendar DATE; impossible
+      // calendar dates pass a shape regex but blow up at insert (codex P2).
+      for (const bad of ['2026-08-31T00:00:00Z', '2026-02-31', '2026-99-01', '2026-00-10']) {
+        const res = await fetch(`${baseUrl}/admin/leads`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ first_name: 'Test', builder_warranty_expires_on: bad }),
+        });
+        expect(res.status).toBe(400);
+      }
     });
     expect(captured.insert).toBeUndefined();
   });
@@ -168,12 +169,14 @@ describe('builder warranty fields on leads', () => {
       expect(captured.update.builder_warranty_expires_on).toBeNull();
 
       captured.update = undefined;
-      res = await fetch(`${baseUrl}/admin/leads/lead-1`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ builder_warranty_expires_on: 'next month' }),
-      });
-      expect(res.status).toBe(400);
+      for (const bad of ['next month', '2026-02-31', '2026-13-05']) {
+        res = await fetch(`${baseUrl}/admin/leads/lead-1`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ builder_warranty_expires_on: bad }),
+        });
+        expect(res.status).toBe(400);
+      }
       expect(captured.update).toBeUndefined();
     });
   });

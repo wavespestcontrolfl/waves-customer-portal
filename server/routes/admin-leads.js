@@ -30,10 +30,26 @@ const createLeadSchema = Joi.object({
   // Builder termite warranty the prospect holds today (new-construction
   // takeover leads). Provider is a data field — competitor names belong here,
   // never in code or customer copy. Expiry is a DATE-shaped string; the
-  // column is a calendar date, so no timestamp forms accepted.
+  // column is a calendar date, so no timestamp forms accepted — and it must
+  // be a REAL calendar date (codex P2: the shape regex alone let 2026-02-31
+  // through to a Postgres 500 instead of a 400).
   builder_warranty_provider: Joi.string().trim().max(80).allow('', null),
-  builder_warranty_expires_on: Joi.string().trim().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
+  builder_warranty_expires_on: Joi.string().trim().custom((value, helpers) => {
+    if (!isRealCalendarDate(value)) return helpers.error('any.invalid');
+    return value;
+  }).allow('', null),
 }).unknown(true);
+
+// A YYYY-MM-DD string that names a date that actually exists. JS Date
+// auto-rolls overflow (2026-02-31 → Mar 3), so the round-trip check is what
+// catches impossible dates the shape regex passes.
+function isRealCalendarDate(value) {
+  const str = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
+  const [y, m, d] = str.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
@@ -98,8 +114,10 @@ const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
 // "Open" pipeline statuses — everything still being worked (not won/lost/
 // unresponsive/disqualified/duplicate). The list route expands the virtual
-// `status=open` filter (the Pipeline table's default) to this set.
-const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
+// `status=open` filter (the Pipeline table's default) to this set — shared
+// with the dashboard alerts service so action queues use the same
+// membership.
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -682,6 +700,13 @@ router.get('/', async (req, res, next) => {
     // still being worked. Individual status values pass through unchanged.
     if (status === 'open') query = query.whereIn('leads.status', OPEN_LEAD_STATUSES);
     else if (status) query = query.where('leads.status', status);
+    // Bell drill: the builder_warranty_expiring alert links here with this
+    // param, and the SHARED predicate guarantees the list shows exactly the
+    // leads the bell counted (window + open statuses + non-deleted).
+    if (req.query.builder_warranty === 'expiring') {
+      const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
+      query = whereBuilderWarrantyExpiring(query);
+    }
     if (source) query = query.where('leads.lead_source_id', source);
     // Drill-down from the dashboard's Marketing Attribution panel, which groups by
     // lead_sources.name — so we filter by the exact display name to match that
@@ -925,8 +950,8 @@ router.put('/:id', async (req, res, next) => {
     }
     if (updates.builder_warranty_expires_on !== undefined) {
       const expires = String(updates.builder_warranty_expires_on || '').trim();
-      if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
-        return res.status(400).json({ error: 'builder_warranty_expires_on must be a YYYY-MM-DD date' });
+      if (expires && !isRealCalendarDate(expires)) {
+        return res.status(400).json({ error: 'builder_warranty_expires_on must be a real YYYY-MM-DD date' });
       }
       updates.builder_warranty_expires_on = expires || null;
     }

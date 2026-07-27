@@ -715,6 +715,9 @@ export function LeadsSection() {
     // guard — an initial open-filtered fetch could resolve after the
     // widened one and hide a closed lead's expanded row.
     const leadDeepLink = new URLSearchParams(window.location.search).get("lead");
+    // Bell drill from the builder_warranty_expiring alert: the server-side
+    // predicate scopes the list to exactly the leads the bell counted.
+    const builderWarrantyDrill = new URLSearchParams(window.location.search).get("builder_warranty") === "expiring";
     return {
       // The pipeline table defaults to OPEN statuses (new / contacted /
       // estimate sent / estimate viewed) — the server expands `status=open`.
@@ -726,6 +729,7 @@ export function LeadsSection() {
       source_name: drill?.source_name || "",
       start_date: drill?.start_date || "",
       end_date: drill?.end_date || "",
+      builder_warranty: builderWarrantyDrill ? "expiring" : "",
     };
   });
   // Human label for the active source-drill chip (e.g. "This month").
@@ -761,6 +765,7 @@ export function LeadsSection() {
       if (status) params.set("status", status);
       if (filters.search) params.set("search", filters.search);
       if (filters.source_name) params.set("source_name", filters.source_name);
+      if (filters.builder_warranty) params.set("builder_warranty", filters.builder_warranty);
       if (filters.start_date) params.set("start_date", filters.start_date);
       if (filters.end_date) params.set("end_date", filters.end_date);
       params.set("sort", filters.sort);
@@ -1404,6 +1409,48 @@ export function LeadsSection() {
                   }));
                   setSourcePeriodLabel("");
                 }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  borderRadius: 999,
+                  border: "none",
+                  background: "transparent",
+                  color: C.muted,
+                  cursor: "pointer",
+                  fontSize: 14,
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {filters.builder_warranty === "expiring" && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                backgroundColor: C.bg,
+                border: `1px solid ${C.border}`,
+                borderRadius: 999,
+                padding: "5px 6px 5px 12px",
+                fontSize: 13,
+                color: C.text,
+                fontFamily: ROBOTO,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>Builder warranty expiring</span>
+              <button
+                type="button"
+                aria-label="Clear builder warranty filter"
+                title="Clear builder warranty filter"
+                onClick={() =>
+                  setFilters((f) => ({ ...f, builder_warranty: "", page: 1 }))
+                }
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
