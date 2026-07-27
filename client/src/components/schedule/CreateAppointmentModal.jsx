@@ -1130,6 +1130,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // Skip groups already created in a prior attempt of this submit
       // session — a retry after partial failure shouldn't duplicate them.
       if (createdGroupKeysRef.current.has(key)) continue;
+      // Only the FIRST created group of a booking asks for the customer
+      // confirmation text — a split seasonal/year-round save posts multiple
+      // series for the same picked slot, and each would otherwise send its
+      // own confirmation (codex r20 P2). Same first-group rule the
+      // card-on-file link already uses.
+      const firstGroupOfBooking = results.length === 0 && createdGroupKeysRef.current.size === 0;
       try {
         const [primary, ...extras] = group.lines;
         const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
@@ -1208,7 +1214,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
-          sendConfirmationSms: sendSms,
+          sendConfirmationSms: firstGroupOfBooking ? sendSms : false,
           // Only the FIRST appointment created by this submit (including
           // across a retry after a partial failure) carries the card-link
           // flag — a lawn + tree&shrub booking split into two cadence
@@ -1243,7 +1249,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               })()
             : undefined,
           createInvoice: true,
-          sendConfirmation: sendSms,
+          sendConfirmation: firstGroupOfBooking ? sendSms : false,
           prepaid: collectPrepay && isRecurring ? {
             totalAmount: groupSubtotal * (hasFiniteRecurringCount ? parsedRecurringCount : 4),
             method: prepayMethod,
@@ -1261,6 +1267,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         createdGroupKeysRef.current.add(key);
         results.push(r);
       } catch (e) {
+        // A duplicate-series rejection means THIS group's series already
+        // exists — typically a prior partial split save whose
+        // createdGroupKeysRef was lost when the modal closed between POSTs.
+        // Treat it as created and keep going so the remaining groups (e.g.
+        // the seasonal mosquito series behind an already-accepted estimate)
+        // still book instead of the retry dying on group one (codex r20 P1).
+        if (/already has an active recurring series/i.test(String(e.message || ''))) {
+          createdGroupKeysRef.current.add(key);
+          continue;
+        }
         firstError = { label: groupLabel(group), message: e.message };
         break;
       }
