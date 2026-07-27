@@ -134,6 +134,26 @@ describe('Twilio failure alerts', () => {
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  test('formatted, bare, and E.164 forms of one number share a key', async () => {
+    const shared = { channel: 'sms', direction: 'outbound', phase: 'delivery', status: 'failed' };
+    await alertTwilioFailure({ ...shared, sid: 'SM1', to: '(941) 555-0009' });
+    await alertTwilioFailure({ ...shared, sid: 'SM2', to: '+19415550009' });
+    await alertTwilioFailure({ ...shared, sid: 'SM3', to: '9415550009' });
+
+    const keys = claimedKeys();
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).toBe(keys[0]);
+  });
+
+  test('non-phone remote values take the per-event fallback', async () => {
+    const shared = { channel: 'voice', direction: 'inbound', phase: 'webhook', status: 'failed', to: '+19413187612' };
+    await alertTwilioFailure({ ...shared, sid: 'CA1', from: 'client:anonymous' });
+    await alertTwilioFailure({ ...shared, sid: 'CA2', from: 'client:anonymous' });
+
+    const keys = claimedKeys();
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
   test('falls back to a per-event key when no remote number is available', async () => {
     const shared = { channel: 'voice', direction: 'inbound', phase: 'webhook', status: 'failed' };
     await alertTwilioFailure({ ...shared, sid: 'CA1' });
@@ -231,8 +251,9 @@ describe('Twilio failure alerts', () => {
       .mockImplementationOnce(async () => ({ bellWritten: true, push: null }));
 
     const shared = { channel: 'sms', direction: 'outbound', status: 'failed', to: '+19415550009' };
+    // Same tick, no await between them — the exact race where an
+    // asynchronously-checked map would let both proceed independently.
     const first = alertTwilioFailure({ ...shared, sid: 'SM1' });
-    await new Promise((r) => setImmediate(r));
     const second = alertTwilioFailure({ ...shared, sid: 'SM2' });
     await new Promise((r) => setImmediate(r));
 

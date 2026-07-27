@@ -2,6 +2,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 
 const FAILURE_STATUSES = new Set([
   'failed',
@@ -59,8 +60,15 @@ function remotePartyDigits(direction, from, to) {
   const dir = String(direction || '').toLowerCase();
   if (dir !== 'inbound' && dir !== 'outbound') return null;
   const raw = dir === 'inbound' ? from : to;
-  const digits = String(raw || '').replace(/\D/g, '');
-  return digits.length >= 7 ? digits : null;
+  if (!raw) return null;
+  // Canonicalize before hashing: send paths pass stored/caller-supplied
+  // formats ("(941) 555-1234") while provider callbacks pass E.164 — without
+  // one canonical form the same party would hash to different keys. toE164
+  // returns the raw input on garbage ("anonymous", "client:foo"); gate on
+  // isLikelyE164 so those take the per-event fallback.
+  const e164 = toE164(raw);
+  if (!e164 || !isLikelyE164(e164)) return null;
+  return String(e164).replace(/\D/g, '');
 }
 
 // Atomically claim the alert window for this key. Exactly one concurrent
@@ -109,10 +117,40 @@ function pruneStaleDedupeRows() {
     });
 }
 
-// In-flight dispatches by dedupe key, so an overlapping same-key caller can
-// observe the outcome instead of returning "duplicate" against a claim whose
-// delivery later fails and gets released.
+// In-flight work by dedupe key, so an overlapping same-key caller observes
+// the outcome instead of returning "duplicate" against a claim whose delivery
+// later fails and gets released. Callers CHAIN onto the tail promise
+// synchronously — before any await — so two events arriving in the same tick
+// still serialize (an async-checked map would let both pass the check first).
 const pendingDispatches = new Map();
+
+async function runAlert(dedupeKey, notification) {
+  const claim = await claimAlertWindow(dedupeKey);
+  if (!claim.claimed) return { skipped: true, reason: 'duplicate' };
+  pruneStaleDedupeRows();
+
+  logger.warn(notification.logLine);
+
+  let result;
+  try {
+    result = await triggerNotification('twilio_failure', notification.payload);
+  } catch (err) {
+    if (claim.owned) await releaseAlertWindow(dedupeKey);
+    throw err;
+  }
+
+  // triggerNotification never throws — dispatch failures come back as
+  // { bellWritten: false, push: null, error }. If the alert reached no
+  // channel, give the window back so the next occurrence still alerts.
+  // A deliberate internal-test suppression counts as handled, not failed.
+  const delivered = !!result && (
+    result.suppressed === true ||
+    result.bellWritten === true ||
+    Number(result.push?.sent || 0) > 0
+  );
+  if (!delivered && claim.owned) await releaseAlertWindow(dedupeKey);
+  return result;
+}
 
 async function alertTwilioFailure(input = {}) {
   const {
@@ -141,67 +179,39 @@ async function alertTwilioFailure(input = {}) {
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
 
-  // A same-key dispatch may already be in flight in this process. Wait for it
-  // to settle before trying to claim: if it delivered, our claim attempt
-  // correctly reports duplicate; if it failed and released the window, we
-  // take over instead of having been skipped before its outcome was known.
-  // (Cross-process overlap still resolves through the atomic claim; the
-  // portal runs as a single service instance, so in-flight overlap is an
-  // in-process phenomenon.)
-  while (pendingDispatches.has(dedupeKey)) {
-    await pendingDispatches.get(dedupeKey).catch(() => {});
-  }
+  const notification = {
+    logLine:
+      `[twilio-alerts] channel=${channel || 'unknown'} direction=${direction || 'unknown'} phase=${phase || 'unknown'} ` +
+      `status=${normalizedStatus} sid=${maskSid(sid)} errorCode=${errorCode || 'none'} ` +
+      `from=${maskPhone(from)} to=${maskPhone(to)}`,
+    payload: {
+      channel,
+      direction,
+      phase,
+      status: normalizedStatus,
+      sidMasked: maskSid(sid),
+      errorCode,
+      errorMessage: safeErrorMessage,
+      fromMasked: maskPhone(from),
+      toMasked: maskPhone(to),
+      link,
+      dedupeKey,
+    },
+  };
 
-  const claim = await claimAlertWindow(dedupeKey);
-  if (!claim.claimed) return { skipped: true, reason: 'duplicate' };
-  pruneStaleDedupeRows();
-
-  logger.warn(
-    `[twilio-alerts] channel=${channel || 'unknown'} direction=${direction || 'unknown'} phase=${phase || 'unknown'} ` +
-    `status=${normalizedStatus} sid=${maskSid(sid)} errorCode=${errorCode || 'none'} ` +
-    `from=${maskPhone(from)} to=${maskPhone(to)}`
-  );
-
-  const dispatch = (async () => {
-    let result;
-    try {
-      result = await triggerNotification('twilio_failure', {
-        channel,
-        direction,
-        phase,
-        status: normalizedStatus,
-        sidMasked: maskSid(sid),
-        errorCode,
-        errorMessage: safeErrorMessage,
-        fromMasked: maskPhone(from),
-        toMasked: maskPhone(to),
-        link,
-        dedupeKey,
-      });
-    } catch (err) {
-      if (claim.owned) await releaseAlertWindow(dedupeKey);
-      throw err;
-    }
-
-    // triggerNotification never throws — dispatch failures come back as
-    // { bellWritten: false, push: null, error }. If the alert reached no
-    // channel, give the window back so the next occurrence still alerts.
-    // A deliberate internal-test suppression counts as handled, not failed.
-    const delivered = !!result && (
-      result.suppressed === true ||
-      result.bellWritten === true ||
-      Number(result.push?.sent || 0) > 0
-    );
-    if (!delivered && claim.owned) await releaseAlertWindow(dedupeKey);
-    return result;
-  })();
-
-  pendingDispatches.set(dedupeKey, dispatch);
-  try {
-    return await dispatch;
-  } finally {
-    pendingDispatches.delete(dedupeKey);
-  }
+  // Chain onto any same-key work already in flight — registered here
+  // SYNCHRONOUSLY, so an event arriving in the same tick serializes behind us
+  // and sees the true claim state (delivered → duplicate; released → it takes
+  // over). Cross-process overlap still resolves through the atomic claim; the
+  // portal runs as a single service instance.
+  const prior = pendingDispatches.get(dedupeKey) || Promise.resolve();
+  const task = prior.catch(() => {}).then(() => runAlert(dedupeKey, notification));
+  pendingDispatches.set(dedupeKey, task);
+  const cleanup = () => {
+    if (pendingDispatches.get(dedupeKey) === task) pendingDispatches.delete(dedupeKey);
+  };
+  task.then(cleanup, cleanup);
+  return task;
 }
 
 module.exports = {
