@@ -1443,6 +1443,27 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
   return pattern;
 }
 
+// The cadence an annual-prepay term would record for its coverage. MUST apply
+// the same forced-mosquito rule as converterFollowUpSeedingPattern above:
+// seasonal quote rows carry frequencyKey 'every_6_weeks' (the estimate-public
+// tier map), which raw inference would return — a cadence the prepay layer
+// SUPPORTS — while the actual series seeds seasonal_feb_oct. The term would
+// then hold a 42-day cadence and the payment-time coverage refresh would seed
+// mismatched winter visits over the real series. The caller rejects
+// SEASONAL_FEB_OCT (annual-prepay renewal doesn't support the season walk yet)
+// so seasonal prepay fails closed on every acceptance path, matching the
+// prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
+function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+    && visitsPerYearForRecurringService(svc) === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
+  return RecurringAppointmentSeeder.inferRecurringPattern({
+    service: svc,
+    fallbackFrequency,
+  }) || null;
+}
+
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
   const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency);
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
@@ -2560,6 +2581,7 @@ const EstimateConverter = {
           let coverageServiceType;
           let coverageVisitCount;
           let coverageCadence;
+          let seasonalPrepayCoverageUnsupported = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
             // created the coverage series with the BOOKED service_type/cadence
@@ -2574,28 +2596,37 @@ const EstimateConverter = {
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
-            const cadence = RecurringAppointmentSeeder.inferRecurringPattern({
-              service: coverageSvc,
-              fallbackFrequency: inferredFrequencyKey,
-            }) || null;
-            // Visits/year: prefer the line's explicit count (the series' own
-            // source); else map from cadence. Values mirror inferCoverageCadence
-            // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
-            const CADENCE_VISITS = {
-              monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
-            };
-            const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
-            if (svcType && visits > 0) {
-              coverageServiceType = svcType;
-              coverageVisitCount = visits;
-              coverageCadence = cadence || undefined; // absent → applyPrepaidCoverageForTerm infers from visit count
+            const cadence = annualPrepayCoverageCadence(coverageSvc, inferredFrequencyKey);
+            if (cadence === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+              // seasonal_feb_oct is UNSUPPORTED as a prepay coverage cadence
+              // (see prepayCoverageCadenceForPattern): the coverage seeder fills
+              // remaining visits with same-day-of-month math from one stored
+              // cadence and would place prepaid visits in Nov–Jan, which then
+              // complete-bill again. The seeded series meanwhile IS seasonal
+              // (converterFollowUpSeedingPattern forces it), so recording the
+              // raw inferred cadence here would diverge from the real series.
+              // Fail closed via the guard in the term-creation try below.
+              seasonalPrepayCoverageUnsupported = true;
             } else {
-              // Coverage service type / visit count could not be derived (e.g. a
-              // sparse line with no name/serviceName/service_name — the seeded
-              // visits then fall back to the generic 'Service' label). We must NOT
-              // create an unstampable term; the guard at the top of the
-              // term-creation try fails closed (routes to manual).
-              logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
+              // Visits/year: prefer the line's explicit count (the series' own
+              // source); else map from cadence. Values mirror inferCoverageCadence
+              // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
+              const CADENCE_VISITS = {
+                monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+              };
+              const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
+              if (svcType && visits > 0) {
+                coverageServiceType = svcType;
+                coverageVisitCount = visits;
+                coverageCadence = cadence || undefined; // absent → applyPrepaidCoverageForTerm infers from visit count
+              } else {
+                // Coverage service type / visit count could not be derived (e.g. a
+                // sparse line with no name/serviceName/service_name — the seeded
+                // visits then fall back to the generic 'Service' label). We must NOT
+                // create an unstampable term; the guard at the top of the
+                // term-creation try fails closed (routes to manual).
+                logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
+              }
             }
           } else if (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1) {
             // Supplemental-only accept (Codex r2 on the pest+rodent removal):
@@ -2638,6 +2669,16 @@ const EstimateConverter = {
             // it IS set stamping matches; when it can't be, refuse and route to
             // manual rather than ship an unstampable term. The catch below voids
             // the draft invoice; the enclosing transaction rolls back the rest.
+            if (seasonalPrepayCoverageUnsupported) {
+              const err = new Error(
+                `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
+              );
+              err.code = 'ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED';
+              err.isOperational = true;
+              err.status = 422;
+              err.statusCode = 422;
+              throw err;
+            }
             if ((recurringServicesForConversion.length === 1
               || (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1))
               && !coverageServiceType) {
@@ -3037,4 +3078,5 @@ module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
+module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;

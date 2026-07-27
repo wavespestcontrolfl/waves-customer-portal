@@ -171,6 +171,20 @@ describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27
       .toBe(SEASONAL);
   });
 
+  test('annual-prepay coverage records the SAME cadence the series seeds (pre-push P0 r4)', () => {
+    // estimate-public's seasonal9 tier stamps frequencyKey 'every_6_weeks';
+    // raw inference returns that — a cadence the prepay layer SUPPORTS — while
+    // the series seeds seasonal_feb_oct. A term recording 42-day coverage over
+    // a seasonal series would refresh mismatched winter visits; the converter
+    // instead resolves seasonal here and fails the prepay closed (422).
+    const { annualPrepayCoverageCadence } = EstimateConverter;
+    expect(annualPrepayCoverageCadence({ ...seasonalRow, frequency: 'every_6_weeks' }, 'every_6_weeks')).toBe(SEASONAL);
+    expect(annualPrepayCoverageCadence(seasonalRow, null)).toBe(SEASONAL);
+    // Monthly mosquito and T&S 9x keep their real, supported cadences.
+    expect(annualPrepayCoverageCadence(monthlyRow, null)).toBe('monthly');
+    expect(annualPrepayCoverageCadence({ service: 'tree_shrub', frequency: 'every_6_weeks', visitsPerYear: 9 }, null)).toBe('every_6_weeks');
+  });
+
   test('the forced seasonal resolution is scoped to mosquito', () => {
     // T&S also has a 9-visit program; it must keep its own 42-day cadence.
     expect(converterFollowUpSeedingPattern(

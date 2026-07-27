@@ -236,6 +236,38 @@ describe('seasonal_feb_oct cadence (mosquito seasonal 9x, owner 2026-07-27)', ()
   });
 });
 
+describe('clampDateToSeason — shared season clamp for external callers (pre-push P1 r4)', () => {
+  // admin-schedule's creation/rewrite/extension paths weekend-shift series
+  // dates OUTSIDE the seeder; they clamp through this export so a shifted
+  // seasonal date can never land in the Nov–Jan gap.
+  const clamp = RecurringAppointmentSeeder.clampDateToSeason;
+  const S = RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+
+  test('no-op for other patterns, in-season dates, and empty input', () => {
+    expect(clamp('monthly', '2026-11-02', {})).toBe('2026-11-02');
+    expect(clamp(S, '2026-06-15', {})).toBe('2026-06-15');
+    expect(clamp(S, null, {})).toBe(null);
+  });
+
+  test('a forward weekend shift past Oct 31 (Sat) pulls back into October', () => {
+    expect(clamp(S, '2026-11-02', {})).toBe('2026-10-31');
+  });
+
+  test('honors skipWeekends while walking back', () => {
+    // Oct 31 is a Saturday; the nearest in-season weekday is Fri Oct 30.
+    expect(clamp(S, '2026-11-02', { skipWeekends: true })).toBe('2026-10-30');
+  });
+
+  test('a back-shifted date that undershoots February pushes forward, not across the winter', () => {
+    expect(clamp(S, '2027-01-29', {})).toBe('2027-02-01');
+  });
+
+  test('walks past blackout dates', () => {
+    expect(clamp(S, '2026-11-02', { blackoutDates: new Set(['2026-10-31', '2026-10-30']) }))
+      .toBe('2026-10-29');
+  });
+});
+
 describe('every_6_weeks cadence (T&S 9x Enhanced, un-retired 2026-07-24)', () => {
   test('normalizes the explicit frequency text but NOT bare 9-visit numbers', () => {
     expect(RecurringAppointmentSeeder.normalizeRecurringPattern('every_6_weeks')).toBe('every_6_weeks');

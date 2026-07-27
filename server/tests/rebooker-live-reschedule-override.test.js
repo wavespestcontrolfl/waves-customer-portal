@@ -731,3 +731,25 @@ describe('applyLiveMoveSideEffects (shared with the raw movers)', () => {
     }));
   });
 });
+
+describe('isMonthBasedRecurrence — series re-anchor classification (pre-push P1 r4)', () => {
+  // A series re-anchor recomputes and persists recurring_nth/recurring_weekday
+  // only for month-anchored patterns. seasonal_feb_oct resolves its dates with
+  // the same nth/weekday month math, so excluding it would keep projecting
+  // siblings on the OLD weekday after a move to a new one.
+  const { isMonthBasedRecurrence } = require('../services/rebooker');
+
+  test('seasonal_feb_oct is month-anchored', () => {
+    expect(isMonthBasedRecurrence('seasonal_feb_oct')).toBe(true);
+  });
+
+  test('existing classifications are unchanged', () => {
+    expect(isMonthBasedRecurrence('monthly')).toBe(true);
+    expect(isMonthBasedRecurrence('quarterly')).toBe(true);
+    expect(isMonthBasedRecurrence('monthly_nth_weekday')).toBe(true);
+    // Day-gap cadences re-anchor by date alone — no ordinal fields to recompute.
+    expect(isMonthBasedRecurrence('every_6_weeks')).toBe(false);
+    expect(isMonthBasedRecurrence('weekly')).toBe(false);
+    expect(isMonthBasedRecurrence('custom')).toBe(false);
+  });
+});

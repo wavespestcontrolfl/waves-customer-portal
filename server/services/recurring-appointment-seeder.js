@@ -60,6 +60,33 @@ function seasonalFebOctDate(baseDateStr, i, opts = {}) {
   return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
 }
 
+// Weekend shifts and blackout nudges move dates across the season edge (a
+// forward-shifted Oct 31 lands Nov 2; a back-shifted Feb 1 lands Jan 30),
+// breaking the seasonal cadence's no-Nov-Jan contract. Walk back INTO the
+// season from whichever edge was crossed — clamping the wrong way would cross
+// the whole winter and land the visit ~4 months from where the cadence put it.
+// A no-op for every other pattern and for in-season dates. Exported because
+// every caller that weekend-shifts a seasonal series date (admin-schedule
+// creation/rewrite/extension) needs the same clamp the seeder applies.
+function clampDateToSeason(pattern, dateStr, { skipWeekends = false, blackoutDates = null } = {}) {
+  if (pattern !== SEASONAL_FEB_OCT || !dateStr) return dateStr;
+  const drifted = Number(dateStr.slice(5, 7));
+  // Already in season: the weekend/blackout passes have run, so this date is
+  // good — never move it.
+  if (drifted >= SEASON_FIRST_MONTH && drifted <= SEASON_LAST_MONTH) return dateStr;
+  const step = drifted < SEASON_FIRST_MONTH ? 1 : -1;
+  let candidate = dateStr;
+  for (let i = 0; i < 75; i++) {
+    candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
+    const month = Number(candidate.slice(5, 7));
+    if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
+    const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+    const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+    if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
+  }
+  return dateStr;
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
@@ -335,34 +362,9 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     return candidate;
   };
 
-  // The weekend shift and blackout nudge both move dates FORWARD, which can
-  // push an October visit into November and break the seasonal cadence's
-  // no-Nov-Jan contract (a blacked-out Oct 31 would seed Nov 1). Walk back to
-  // the nearest in-season day that is also clear of weekends and blackouts —
-  // backward, because the season's edge is the whole point.
-  const clampToSeason = (dateStr) => {
-    if (pattern !== SEASONAL_FEB_OCT || !dateStr) return dateStr;
-    const drifted = Number(dateStr.slice(5, 7));
-    // Already in season: the weekend/blackout passes above have run, so this
-    // date is good — never move it.
-    if (drifted >= SEASON_FIRST_MONTH && drifted <= SEASON_LAST_MONTH) return dateStr;
-    // Direction depends on WHICH edge we fell off. A forward weekend/blackout
-    // nudge overshoots October into Nov/Dec -> pull back to October. A BACKWARD
-    // weekend shift (weekendShift: 'back') undershoots February into January ->
-    // push forward to February. Clamping the wrong way would cross the whole
-    // winter and land the visit ~4 months from where the cadence put it.
-    const step = drifted < SEASON_FIRST_MONTH ? 1 : -1;
-    let candidate = dateStr;
-    for (let i = 0; i < 75; i++) {
-      candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
-      const month = Number(candidate.slice(5, 7));
-      if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
-      const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
-      const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
-      if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
-    }
-    return dateStr;
-  };
+  // Weekend shift and blackout nudge can cross the season edge — clamp back
+  // into Feb–Oct (see clampDateToSeason for the direction rules).
+  const clampToSeason = (dateStr) => clampDateToSeason(pattern, dateStr, { skipWeekends, blackoutDates });
 
   let attempt = 1;
   while (rows.length < targetNewRows && attempt < maxAttempts) {
@@ -727,6 +729,7 @@ module.exports = {
   inferRecurringPattern,
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
+  clampDateToSeason,
   markParentRecurring,
   normalizeRecurringPattern,
   patternFromVisitsPerYear,

@@ -326,7 +326,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('../services/recurring-appointment-seeder');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -427,6 +427,14 @@ function shiftPastWeekend(dateStr, skip, direction) {
   return d.toISOString().split('T')[0];
 }
 
+// Weekend-shifting a seasonal (Feb–Oct) series date can cross the season edge
+// (a forward-shifted Oct 31 lands Nov 2), breaking the cadence's no-Nov-Jan
+// contract. Every series date this file computes must go through this instead
+// of a bare shiftPastWeekend; the clamp is a no-op for all other patterns.
+function seasonalSafeShift(rawDate, pattern, skip, direction) {
+  return clampDateToSeason(pattern, shiftPastWeekend(rawDate, skip, direction), { skipWeekends: !!skip });
+}
+
 // Compute booster appointment dates for a recurring series. Booster months
 // are extra visits sprinkled on top of the base cadence (e.g. quarterly
 // pest + summer-month boosters). Returns YYYY-MM-DD strings within the
@@ -494,7 +502,10 @@ function normalizeNullableInt(value) {
 }
 
 function recurrenceUsesMonthAnchor(pattern) {
-  return pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
+  // seasonal_feb_oct is month-anchored too: seasonalFebOctDate honors the same
+  // nth/weekday ordinal options as every other month-based cadence.
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
+    || !!MONTH_RECURRENCE_INTERVALS[pattern];
 }
 
 function recurringRewriteSignature(row) {
@@ -1176,7 +1187,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr) {
   const dir = (line.weekendShift || line.weekend_shift) === 'back' ? 'back' : 'forward';
   for (let i = 1; i <= 120; i++) {
     const raw = nextRecurringDate(base, pattern, i, opts);
-    const due = shiftPastWeekend(raw, !!skip, dir);
+    const due = seasonalSafeShift(raw, pattern, !!skip, dir);
     if (due === target) return true;
     if (due > target) return false;
   }
@@ -3002,7 +3013,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       while (inserted < plannedCount - 1 && attempt < maxAttempts) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
-        const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir);
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
         seriesDates.add(nextDateStr);
@@ -4888,7 +4899,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               while (!nextDateStr && attempt < maxAttempts) {
                 const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
                 attempt++;
-                const candidate = shiftPastWeekend(rawNext, skipChild, dirChild);
+                const candidate = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
                 if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, candidate)) continue;
                 if (seenDates.has(candidate)) continue;
                 seenDates.add(candidate);
@@ -5101,7 +5112,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           while (inserted < spawnTarget && attempt < maxAttempts) {
             const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
             attempt++;
-            const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
+            const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipChild, dirChild);
             if (recurringCandidateTooCloseToAnchor(baseDateStr, recurringPattern, nextDateStr)) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
@@ -6370,7 +6381,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         let nextStr = null;
         while (attempt <= 12) {
           const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-          const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
+          const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent);
           if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
             attempt++;
             continue;
@@ -8566,7 +8577,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < n && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);
@@ -8618,7 +8629,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       while (inserted < need && attempt < maxAttempts) {
         const raw = nextRecurringDate(baseDateStr, parent.recurring_pattern, attempt, rOpts);
         attempt++;
-        const nd = shiftPastWeekend(raw, skipParent, dirParent);
+        const nd = seasonalSafeShift(raw, parent.recurring_pattern, skipParent, dirParent);
         if (recurringCandidateTooCloseToAnchor(baseDateStr, parent.recurring_pattern, nd)) continue;
         if (seen.has(nd)) continue;
         seen.add(nd);

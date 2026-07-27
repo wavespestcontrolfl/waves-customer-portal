@@ -15,6 +15,17 @@ const {
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate } = require('./recurring-appointment-seeder');
 
+// Patterns whose dates are month-anchored (nth-weekday semantics): a series
+// re-anchor must recompute and persist recurring_nth/recurring_weekday from
+// the new anchor date, or moving the anchor to a new weekday would keep
+// projecting siblings on the OLD weekday. seasonal_feb_oct qualifies —
+// seasonalFebOctDate resolves via the same nth/weekday month math. Exported
+// for tests.
+function isMonthBasedRecurrence(pattern) {
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
+    || !!MONTH_RECURRENCE_INTERVALS[pattern];
+}
+
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
@@ -551,7 +562,7 @@ class SmartRebooker {
       });
     }
     const pattern = parent.recurring_pattern;
-    const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
+    const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
     const opts = {
       ...(isMonthBasedPattern
         ? recurrenceOrdinalOptions(newDate)
@@ -1071,3 +1082,4 @@ module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
+module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
