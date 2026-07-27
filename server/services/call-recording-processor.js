@@ -5174,7 +5174,7 @@ const CallRecordingProcessor = {
             // rewrite leaves the pre-adoption blob, which is the old behavior.
             await db('call_log').where({ id: call.id })
               .update({ ai_extraction_enriched: JSON.stringify(v2Extraction) })
-              .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.message}`));
+              .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.code || e.name || 'db_error'}`));
           }
 
           if (!routingResult.allowed) {
@@ -5813,11 +5813,16 @@ const CallRecordingProcessor = {
     // outbound dials. Best-effort: a failed check must never break call
     // processing.
     let callerPhoneUnverified = false;
-    if (customerId && call.from_phone && !createdCustomerFromCall && !isOutboundCall(call)) {
+    // Anonymous/restricted sentinels and internal forwarding numbers are
+    // truthy but say nothing about the caller — without the usability gate
+    // they'd open bogus "save this number" cards and suppress legitimate
+    // backfills (pre-push audit P1).
+    const verifiableAni = firstExternalPhone(call.from_phone);
+    if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
         const linked = await db('customers').where({ id: customerId })
           .first(['first_name', 'last_name', ...CONTACT_MATCH_PHONE_COLS]);
-        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(call.from_phone, linked[col]));
+        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(verifiableAni, linked[col]));
         if (linked && !phoneOnFile) {
           callerPhoneUnverified = true;
           await db('triage_items')
@@ -5827,7 +5832,7 @@ const CallRecordingProcessor = {
               extraction: v2CanonicalExtraction,
               severity: 'advisory',
               extraPayload: {
-                caller_phone: call.from_phone,
+                caller_phone: verifiableAni,
                 matched_customer_name: [linked.first_name, linked.last_name].filter(Boolean).join(' ') || null,
                 on_file_phone: linked.phone || null,
               },
@@ -5837,7 +5842,13 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] Caller ANI not on any phone slot of linked customer ${customerId} — advisory identity-confirm card opened for ${maskSid(callSid)}`);
         }
       } catch (e) {
-        logger.warn(`[call-proc] caller-phone-on-file check skipped: ${e.message}`);
+        // Fail CLOSED: we couldn't prove the number is on file, so the
+        // appointment backfill must not save it (the exact corruption this
+        // guard exists to prevent). Suppression only skips one phone write —
+        // call processing continues. No e.message — DB errors can echo bound
+        // PII (pre-push audit P1s).
+        callerPhoneUnverified = true;
+        logger.warn(`[call-proc] caller-phone-on-file check errored for ${maskSid(callSid)} — failing closed on phone backfill: ${e.code || e.name || 'db_error'}`);
       }
     }
 
