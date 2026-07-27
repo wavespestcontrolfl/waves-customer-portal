@@ -301,11 +301,24 @@ exports.down = async function (knex) {
       // restoring. Writing it only on a successful revert leaves the UP record
       // "uncancelled", so a later no-op reapplication could consume this same
       // snapshot and restore legacy brackets it never applied.
-      if (reverted.length) {
+      // Same ordering rule as up(): restoring a legacy threshold next to a
+      // bucket the admin edited afterwards can leave the row descending (an
+      // edited SMALL=20000 beside a restored QUARTER=14519), which fails
+      // validatePestPricingConfig and makes syncConstantsFromDB drop ALL
+      // DB-authoritative pricing. A rollback must never write an unloadable row.
+      if (reverted.length && isStrictlyAscending(next)) {
         await writeConfig(
           knex, LOT_SIZES_KEY, current, next,
           `${DOWN_REASON} — reverted: ${reverted.join(', ')}`
         );
+      } else if (reverted.length) {
+        await knex('pricing_config_audit').insert({
+          config_key: LOT_SIZES_KEY,
+          old_value: JSON.stringify(applied),
+          new_value: JSON.stringify({ reverted: [], blocked: reverted }),
+          changed_by: MIGRATION_TAG,
+          reason: `${DOWN_REASON} — skipped: restore would order the row invalidly (${reverted.join(', ')})`,
+        });
       } else {
         await knex('pricing_config_audit').insert({
           config_key: LOT_SIZES_KEY,
