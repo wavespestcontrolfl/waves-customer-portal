@@ -85,6 +85,11 @@ function remotePartyDigits(direction, from, to) {
 // NULL); only after a channel actually receives the alert is it confirmed to
 // the full window. A process that dies between claim and delivery therefore
 // suppresses duplicates for minutes, not 24 hours.
+// The claimed timestamp doubles as a claim token: confirm and release match
+// on it, so a stale process whose lease was re-claimed by a newer one can no
+// longer confirm or delete the newer claim. Round-tripped as ::text — the pg
+// driver parses timestamptz into a millisecond Date, which would drop the
+// microseconds and never match again.
 async function claimAlertWindow(dedupeKey) {
   try {
     const result = await db.raw(
@@ -96,24 +101,29 @@ async function claimAlertWindow(dedupeKey) {
                 AND twilio_alert_dedupe.last_alerted_at <= now() - (? * interval '1 hour'))
             OR (twilio_alert_dedupe.delivered_at IS NULL
                 AND twilio_alert_dedupe.last_alerted_at <= now() - (? * interval '1 minute'))
-       RETURNING dedupe_key`,
+       RETURNING dedupe_key, last_alerted_at::text AS claimed_at`,
       [dedupeKey, DEDUPE_WINDOW_HOURS, DEDUPE_PENDING_LEASE_MINUTES]
     );
-    const claimed = (result.rows || []).length > 0;
-    return { claimed, owned: claimed };
+    const row = (result.rows || [])[0];
+    return row
+      ? { claimed: true, owned: true, claimedAt: row.claimed_at }
+      : { claimed: false, owned: false, claimedAt: null };
   } catch (err) {
     logger.warn(`[twilio-alerts] dedupe claim failed (alerting anyway): ${err.message}`);
-    return { claimed: true, owned: false };
+    return { claimed: true, owned: false, claimedAt: null };
   }
 }
 
-// Confirm the lease to the full window once a channel received the alert.
-// On error the row stays pending and expires after the lease — the failure
-// direction is an extra alert, never a suppressed one.
-async function confirmAlertDelivered(dedupeKey) {
+// Confirm the lease to the full window once a channel received the alert —
+// but only OUR lease: a newer claim (different last_alerted_at) is left
+// untouched. On error the row stays pending and expires after the lease —
+// the failure direction is an extra alert, never a suppressed one.
+async function confirmAlertDelivered(dedupeKey, claimedAt) {
   try {
     await db('twilio_alert_dedupe')
       .where({ dedupe_key: dedupeKey })
+      .whereRaw('last_alerted_at = ?::timestamptz', [claimedAt])
+      .whereNull('delivered_at')
       .update({ delivered_at: db.fn.now() });
   } catch (err) {
     logger.warn(`[twilio-alerts] dedupe confirm failed: ${err.message}`);
@@ -121,11 +131,16 @@ async function confirmAlertDelivered(dedupeKey) {
 }
 
 // If the notification itself failed after we claimed the window, give the
-// window back so the next occurrence still alerts. Deleting the row fails
-// toward alerting, same as claimAlertWindow's error path.
-async function releaseAlertWindow(dedupeKey) {
+// window back so the next occurrence still alerts — but only OUR claim.
+// Deleting the row fails toward alerting, same as claimAlertWindow's error
+// path.
+async function releaseAlertWindow(dedupeKey, claimedAt) {
   try {
-    await db('twilio_alert_dedupe').where({ dedupe_key: dedupeKey }).del();
+    await db('twilio_alert_dedupe')
+      .where({ dedupe_key: dedupeKey })
+      .whereRaw('last_alerted_at = ?::timestamptz', [claimedAt])
+      .whereNull('delivered_at')
+      .del();
   } catch (err) {
     logger.warn(`[twilio-alerts] dedupe release failed: ${err.message}`);
   }
@@ -158,7 +173,7 @@ async function runAlert(dedupeKey, notification) {
   try {
     result = await triggerNotification('twilio_failure', notification.payload);
   } catch (err) {
-    if (claim.owned) await releaseAlertWindow(dedupeKey);
+    if (claim.owned) await releaseAlertWindow(dedupeKey, claim.claimedAt);
     throw err;
   }
 
@@ -172,8 +187,8 @@ async function runAlert(dedupeKey, notification) {
     Number(result.push?.sent || 0) > 0
   );
   if (claim.owned) {
-    if (delivered) await confirmAlertDelivered(dedupeKey);
-    else await releaseAlertWindow(dedupeKey);
+    if (delivered) await confirmAlertDelivered(dedupeKey, claim.claimedAt);
+    else await releaseAlertWindow(dedupeKey, claim.claimedAt);
   }
   return result;
 }

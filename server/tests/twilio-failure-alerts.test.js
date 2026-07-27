@@ -26,6 +26,8 @@ let queries;
 function newQuery() {
   const q = {
     where: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     del: jest.fn().mockResolvedValue(1),
     update: jest.fn().mockResolvedValue(1),
   };
@@ -51,7 +53,9 @@ function mockDbRaw(claims = []) {
   db.raw = jest.fn((sql) => {
     if (CLAIM_SQL_RE.test(String(sql))) {
       const claimed = queue.length ? queue.shift() : true;
-      return Promise.resolve({ rows: claimed ? [{ dedupe_key: 'claimed' }] : [] });
+      return Promise.resolve({
+        rows: claimed ? [{ dedupe_key: 'claimed', claimed_at: '2026-07-27 12:00:00.123456+00' }] : [],
+      });
     }
     return { __rawFragment: sql };
   });
@@ -238,6 +242,12 @@ describe('Twilio failure alerts', () => {
 
     expect(confirmCalls()).toHaveLength(1);
     expect(confirmCalls()[0].update).toHaveBeenCalledWith({ delivered_at: 'NOW()' });
+    // Confirmation is scoped to the exact claim we took (timestamp token) —
+    // a newer claim by another process must never be confirmed by us.
+    expect(confirmCalls()[0].whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining('timestamptz'),
+      ['2026-07-27 12:00:00.123456+00']
+    );
     expect(releaseCalls()).toHaveLength(0);
   });
 
@@ -283,6 +293,13 @@ describe('Twilio failure alerts', () => {
 
     expect(result).toEqual({ bellWritten: false, push: null, error: 'db down' });
     expect(releaseCalls()).toHaveLength(1);
+    // Release is scoped to the exact claim we took, and only while still
+    // pending — a re-claimed or confirmed row is left alone.
+    expect(releaseCalls()[0].whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining('timestamptz'),
+      ['2026-07-27 12:00:00.123456+00']
+    );
+    expect(releaseCalls()[0].whereNull).toHaveBeenCalledWith('delivered_at');
     expect(confirmCalls()).toHaveLength(0);
   });
 
