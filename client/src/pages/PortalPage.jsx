@@ -7580,9 +7580,20 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
-    frequencies: ['Monthly (Apr–Oct)', 'Year-Round (12x)'],
-    basePrice: 45, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
-    products: ['Cyzmic CS', 'Tekko Pro IGR'],
+    // My Plan renders frequencies[0] as the cadence line for whichever mosquito
+    // service it matched, and SERVICE_CATALOG carries no link to the customer's
+    // enrolled program — so naming either cadence here states the wrong one for
+    // the other program's customers. Variant-neutral until the panel can read
+    // the matched service's real cadence. Was 'Monthly (Apr–Oct)', 7 visits,
+    // which matches neither program.
+    frequencies: ['Seasonal or monthly program'],
+    // basePrice has NO renderer on main — the per-service dollar figures were
+    // removed 2026-07-11 (owner: they were fabricated static-catalog math, see
+    // the comments at :4742 and :9026). Kept in sync with the rate card floor
+    // (SMALL lot, 12-visit = $60/visit) so a future re-wire can't resurrect the
+    // old $45, which the engine can never produce.
+    basePrice: 60, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
+    products: ['Bifen I/T', 'Tekko Pro IGR'],
   },
   {
     id: 'tree_shrub', name: 'Tree & Shrub Program', icon: 'palm',
