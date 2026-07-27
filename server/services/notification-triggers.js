@@ -28,7 +28,9 @@ const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // matches, and a conventional extension suffix ("x123", "ext 99",
 // "extension 4") is consumed as part of the phone so the trailing lookahead
 // doesn't mistake it for an identifier tail.
-const PHONE_CANDIDATE_RE = /(?<![A-Za-z0-9])\+?\d[\d\s().-]{6,}\d(?:\s*(?:extension|ext\.?|x)\s*\d{1,6})?(?![A-Za-z0-9])/gi;
+// Group 1 isolates the phone itself so the masked suffix ("***1234") is
+// derived from the phone's last four digits, never the extension's.
+const PHONE_CANDIDATE_RE = /(?<![A-Za-z0-9])(\+?\d[\d\s().-]{6,}\d)(?:\s*(?:extension|ext\.?|x)\s*\d{1,6})?(?![A-Za-z0-9])/gi;
 // URL-encoded E.164 ("phone=%2B19415551212") starts its digit run right after
 // the alphanumeric "B", which the identifier lookbehind above would skip —
 // handle the encoded form first, before the boundary logic runs.
@@ -49,9 +51,9 @@ function maskEmail(value) {
   return `${local.slice(0, 1)}***@${domain.toLowerCase()}`;
 }
 
-function redactPhoneCandidate(match) {
-  const digits = String(match || '').replace(/\D/g, '');
-  return digits.length >= 10 ? maskPhone(match) : match;
+function redactPhoneCandidate(match, phonePart) {
+  const digits = String(phonePart || '').replace(/\D/g, '');
+  return digits.length >= 10 ? maskPhone(phonePart) : match;
 }
 
 function redactSensitiveText(value) {

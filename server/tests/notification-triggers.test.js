@@ -187,12 +187,14 @@ describe('notification trigger push tags', () => {
     expect(safe.message).toBe('twilio:1234567890abcdef retry ***1234 later');
   });
 
-  test('phone redaction still masks numbers carrying extension suffixes', () => {
+  test('phone redaction masks extension-suffixed numbers by the PHONE last four', () => {
     const safe = __private.sanitizeNotificationPayload('twilio_failure', {
       message: 'call +19415551234x123 or 19415552222 ext 99 today',
     });
 
-    expect(safe.message).toBe('call ***4123 or ***2299 today');
+    // The identifying suffix comes from the phone itself, never the
+    // extension digits; the extension is consumed and dropped.
+    expect(safe.message).toBe('call ***1234 or ***2222 today');
   });
 
   test('phone redaction still masks URL-encoded numbers', () => {

@@ -15,6 +15,9 @@ const FAILURE_STATUSES = new Set([
 
 // One alert per dedupe key per rolling window.
 const DEDUPE_WINDOW_HOURS = 24;
+// A claim whose delivery was never confirmed (process died mid-dispatch)
+// only suppresses duplicates this long before it can be re-claimed.
+const DEDUPE_PENDING_LEASE_MINUTES = 5;
 // Rows whose window ended this long ago are dead state — prune opportunistically.
 const DEDUPE_PRUNE_DAYS = 30;
 
@@ -78,22 +81,42 @@ function remotePartyDigits(direction, from, to) {
 // from "we're alerting despite a broken claim": only an owned claim may be
 // released later, otherwise a dispatch failure here could delete a valid
 // in-window row established by an earlier, successfully delivered alert.
+// Two-phase: a fresh claim starts as a short pending lease (delivered_at
+// NULL); only after a channel actually receives the alert is it confirmed to
+// the full window. A process that dies between claim and delivery therefore
+// suppresses duplicates for minutes, not 24 hours.
 async function claimAlertWindow(dedupeKey) {
   try {
     const result = await db.raw(
-      `INSERT INTO twilio_alert_dedupe (dedupe_key, last_alerted_at)
-       VALUES (?, now())
+      `INSERT INTO twilio_alert_dedupe (dedupe_key, last_alerted_at, delivered_at)
+       VALUES (?, now(), NULL)
        ON CONFLICT (dedupe_key) DO UPDATE
-         SET last_alerted_at = now()
-         WHERE twilio_alert_dedupe.last_alerted_at <= now() - (? * interval '1 hour')
+         SET last_alerted_at = now(), delivered_at = NULL
+         WHERE (twilio_alert_dedupe.delivered_at IS NOT NULL
+                AND twilio_alert_dedupe.last_alerted_at <= now() - (? * interval '1 hour'))
+            OR (twilio_alert_dedupe.delivered_at IS NULL
+                AND twilio_alert_dedupe.last_alerted_at <= now() - (? * interval '1 minute'))
        RETURNING dedupe_key`,
-      [dedupeKey, DEDUPE_WINDOW_HOURS]
+      [dedupeKey, DEDUPE_WINDOW_HOURS, DEDUPE_PENDING_LEASE_MINUTES]
     );
     const claimed = (result.rows || []).length > 0;
     return { claimed, owned: claimed };
   } catch (err) {
     logger.warn(`[twilio-alerts] dedupe claim failed (alerting anyway): ${err.message}`);
     return { claimed: true, owned: false };
+  }
+}
+
+// Confirm the lease to the full window once a channel received the alert.
+// On error the row stays pending and expires after the lease — the failure
+// direction is an extra alert, never a suppressed one.
+async function confirmAlertDelivered(dedupeKey) {
+  try {
+    await db('twilio_alert_dedupe')
+      .where({ dedupe_key: dedupeKey })
+      .update({ delivered_at: db.fn.now() });
+  } catch (err) {
+    logger.warn(`[twilio-alerts] dedupe confirm failed: ${err.message}`);
   }
 }
 
@@ -148,7 +171,10 @@ async function runAlert(dedupeKey, notification) {
     result.bellWritten === true ||
     Number(result.push?.sent || 0) > 0
   );
-  if (!delivered && claim.owned) await releaseAlertWindow(dedupeKey);
+  if (claim.owned) {
+    if (delivered) await confirmAlertDelivered(dedupeKey);
+    else await releaseAlertWindow(dedupeKey);
+  }
   return result;
 }
 
@@ -173,9 +199,14 @@ async function alertTwilioFailure(input = {}) {
   // no phone is available fall back to the per-event key, which fails toward
   // alerting rather than suppressing.
   const remoteDigits = remotePartyDigits(direction, from, to);
+  // With neither a phone nor a SID there is no event identity at all (e.g. a
+  // malformed webhook with an empty body) — a constant key would classify
+  // every later such failure as a duplicate for 24h. A per-call nonce keeps
+  // those alerting every time, which is the fail-open direction.
+  const eventId = sid || `evt:${crypto.randomUUID()}`;
   const rawDedupeKey = input.dedupeKey || (remoteDigits
     ? ['twilio', channel || 'unknown', direction || 'unknown', `party:${remoteDigits}`, errorCode || 'no-code'].join(':')
-    : ['twilio', channel || 'unknown', direction || 'unknown', phase || 'unknown', sid || 'no-sid', normalizedStatus, errorCode || 'no-code'].join(':'));
+    : ['twilio', channel || 'unknown', direction || 'unknown', phase || 'unknown', eventId, normalizedStatus, errorCode || 'no-code'].join(':'));
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
 

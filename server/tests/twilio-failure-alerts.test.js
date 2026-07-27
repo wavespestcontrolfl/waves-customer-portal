@@ -17,12 +17,30 @@ const {
 
 const CLAIM_SQL_RE = /INSERT INTO twilio_alert_dedupe/i;
 
-function dedupeTableQuery() {
-  return {
+// One fresh chain object per db('twilio_alert_dedupe') invocation so the
+// release (where({dedupe_key}) → del), confirm (where({dedupe_key}) →
+// update), and prune (where('last_alerted_at', ...) → del) paths can be told
+// apart after the fact.
+let queries;
+
+function newQuery() {
+  const q = {
     where: jest.fn().mockReturnThis(),
     del: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockResolvedValue(1),
   };
+  queries.push(q);
+  return q;
 }
+
+function byKeyCalls(method) {
+  return queries.filter((q) =>
+    q.where.mock.calls.some(([arg]) => arg && typeof arg === 'object' && 'dedupe_key' in arg) &&
+    q[method].mock.calls.length > 0
+  );
+}
+const releaseCalls = () => byKeyCalls('del');
+const confirmCalls = () => byKeyCalls('update');
 
 // db.raw serves two roles: the awaited atomic claim (returns pg-shaped
 // { rows }) and inert SQL fragments used as query-builder values (prune's
@@ -48,7 +66,9 @@ function claimedKeys() {
 describe('Twilio failure alerts', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.mockImplementation(() => dedupeTableQuery());
+    queries = [];
+    db.mockImplementation(() => newQuery());
+    db.fn = { now: jest.fn(() => 'NOW()') };
     mockDbRaw();
   });
 
@@ -154,17 +174,6 @@ describe('Twilio failure alerts', () => {
     expect(keys[0]).not.toBe(keys[1]);
   });
 
-  test('falls back to a per-event key when no remote number is available', async () => {
-    const shared = { channel: 'voice', direction: 'inbound', phase: 'webhook', status: 'failed' };
-    await alertTwilioFailure({ ...shared, sid: 'CA1' });
-    await alertTwilioFailure({ ...shared, sid: 'CA2' });
-
-    const keys = claimedKeys();
-    // No phone to key on → per-SID keys, which fail toward alerting.
-    expect(keys[0]).not.toBe(keys[1]);
-    expect(triggerNotification).toHaveBeenCalledTimes(2);
-  });
-
   test('unknown direction takes the per-event fallback, never a shared-line key', async () => {
     // The voice /call-status catch path passes direction 'unknown'. Guessing
     // outbound there would key on `to` — a Waves business line — and one
@@ -185,11 +194,24 @@ describe('Twilio failure alerts', () => {
     expect(triggerNotification).toHaveBeenCalledTimes(2);
   });
 
-  test('fails open when the dedupe table is unavailable', async () => {
+  test('events with no phone and no SID never share a key', async () => {
+    // Malformed webhooks can arrive with an empty body — a constant fallback
+    // key would suppress every later such failure for the whole window.
+    const shared = { channel: 'sms', direction: 'inbound', phase: 'webhook', status: 'failed' };
+    await alertTwilioFailure({ ...shared });
+    await alertTwilioFailure({ ...shared });
+
+    const keys = claimedKeys();
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(triggerNotification).toHaveBeenCalledTimes(2);
+  });
+
+  test('fails open when the dedupe table is unavailable, and never releases what it does not own', async () => {
     db.raw = jest.fn((sql) => {
-      if (CLAIM_SQL_RE.test(String(sql))) return Promise.reject(new Error('relation missing'));
+      if (CLAIM_SQL_RE.test(String(sql))) return Promise.reject(new Error('claim down'));
       return { __rawFragment: sql };
     });
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'still down' });
 
     const result = await alertTwilioFailure({
       channel: 'sms',
@@ -199,12 +221,41 @@ describe('Twilio failure alerts', () => {
     });
 
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ bellWritten: true, push: null });
+    expect(result).toEqual({ bellWritten: false, push: null, error: 'still down' });
+    // Unowned claim: no release, no confirm — releasing could delete a valid
+    // in-window row established by an earlier delivered alert.
+    expect(releaseCalls()).toHaveLength(0);
+    expect(confirmCalls()).toHaveLength(0);
+  });
+
+  test('confirms the lease to the full window after successful delivery', async () => {
+    await alertTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'failed',
+      to: '+19415550009',
+    });
+
+    expect(confirmCalls()).toHaveLength(1);
+    expect(confirmCalls()[0].update).toHaveBeenCalledWith({ delivered_at: 'NOW()' });
+    expect(releaseCalls()).toHaveLength(0);
+  });
+
+  test('push-only delivery confirms the claimed window', async () => {
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 2, failed: 0 } });
+
+    await alertTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'failed',
+      to: '+19415550009',
+    });
+
+    expect(confirmCalls()).toHaveLength(1);
+    expect(releaseCalls()).toHaveLength(0);
   });
 
   test('releases the claimed window when notification dispatch throws', async () => {
-    const query = dedupeTableQuery();
-    db.mockImplementation(() => query);
     triggerNotification.mockRejectedValueOnce(new Error('bell down'));
 
     await expect(alertTwilioFailure({
@@ -214,16 +265,13 @@ describe('Twilio failure alerts', () => {
       to: '+19415550009',
     })).rejects.toThrow('bell down');
 
-    const [claimKey] = claimedKeys();
-    expect(query.where).toHaveBeenCalledWith({ dedupe_key: claimKey });
-    expect(query.del).toHaveBeenCalled();
+    expect(releaseCalls()).toHaveLength(1);
+    expect(confirmCalls()).toHaveLength(0);
   });
 
   test('releases the window when dispatch reports no channel succeeded', async () => {
     // triggerNotification never throws in practice — bell/push failures come
     // back as a result object. That result must still give the window back.
-    const query = dedupeTableQuery();
-    db.mockImplementation(() => query);
     triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'db down' });
 
     const result = await alertTwilioFailure({
@@ -234,17 +282,14 @@ describe('Twilio failure alerts', () => {
     });
 
     expect(result).toEqual({ bellWritten: false, push: null, error: 'db down' });
-    const [claimKey] = claimedKeys();
-    expect(query.where).toHaveBeenCalledWith({ dedupe_key: claimKey });
-    expect(query.del).toHaveBeenCalled();
+    expect(releaseCalls()).toHaveLength(1);
+    expect(confirmCalls()).toHaveLength(0);
   });
 
   test('an overlapping same-key caller takes over after a failed dispatch', async () => {
     // The losing claimant must not be skipped while the winner's delivery is
     // still unknown: it waits, and if the winner fails and releases the
     // window, it claims and dispatches itself.
-    const query = dedupeTableQuery();
-    db.mockImplementation(() => query);
     let resolveFirst;
     triggerNotification
       .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
@@ -264,49 +309,8 @@ describe('Twilio failure alerts', () => {
     expect(r1).toEqual({ bellWritten: false, push: null, error: 'db down' });
     expect(r2).toEqual({ bellWritten: true, push: null });
     expect(triggerNotification).toHaveBeenCalledTimes(2);
-    // The failed winner released its claim before the taker re-claimed.
-    expect(query.del).toHaveBeenCalled();
-  });
-
-  test('a fail-open claim is never released', async () => {
-    // When the claim query itself errored we alert anyway but do NOT own a
-    // row — releasing could delete a valid window established by an earlier
-    // delivered alert.
-    const query = dedupeTableQuery();
-    db.mockImplementation(() => query);
-    db.raw = jest.fn((sql) => {
-      if (CLAIM_SQL_RE.test(String(sql))) return Promise.reject(new Error('claim down'));
-      return { __rawFragment: sql };
-    });
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'still down' });
-
-    await alertTwilioFailure({
-      channel: 'sms',
-      direction: 'outbound',
-      status: 'failed',
-      to: '+19415550009',
-    });
-
-    expect(query.where).not.toHaveBeenCalledWith(
-      expect.objectContaining({ dedupe_key: expect.anything() })
-    );
-  });
-
-  test('push-only delivery keeps the claimed window', async () => {
-    const query = dedupeTableQuery();
-    db.mockImplementation(() => query);
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 2, failed: 0 } });
-
-    await alertTwilioFailure({
-      channel: 'sms',
-      direction: 'outbound',
-      status: 'failed',
-      to: '+19415550009',
-    });
-
-    // The release path is the only `where({ dedupe_key })` caller.
-    expect(query.where).not.toHaveBeenCalledWith(
-      expect.objectContaining({ dedupe_key: expect.anything() })
-    );
+    // The failed winner released; the taker confirmed its own claim.
+    expect(releaseCalls()).toHaveLength(1);
+    expect(confirmCalls()).toHaveLength(1);
   });
 });
