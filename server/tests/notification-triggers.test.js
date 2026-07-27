@@ -153,6 +153,21 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/dashboard');
   });
 
+  test('phone redaction leaves digit runs inside identifiers alone', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      // Hashed dedupe keys and hex digests contain 10+ digit runs ~3% of the
+      // time; masking them corrupted the stored key so dedupe never matched.
+      dedupeKey: 'twilio:1a2345678901bcde',
+      requestId: 'req-1234567890abcdef',
+      message: 'twilio:1234567890abcdef retry +19415551234 later',
+    });
+
+    expect(safe.dedupeKey).toBe('twilio:1a2345678901bcde');
+    expect(safe.requestId).toBe('req-1234567890abcdef');
+    // Digit run glued to hex tail is preserved; the real phone still masks.
+    expect(safe.message).toBe('twilio:1234567890abcdef retry ***1234 later');
+  });
+
   test('notification metadata payload sanitizer does not persist raw contact fields', () => {
     const safe = __private.sanitizeNotificationPayload('new_lead', {
       phone: '+18182079399',

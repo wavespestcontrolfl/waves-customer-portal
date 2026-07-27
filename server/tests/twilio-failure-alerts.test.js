@@ -15,19 +15,41 @@ const {
   sanitizeFailureText,
 } = require('../services/twilio-failure-alerts');
 
-function notificationQuery(existing = null) {
+const CLAIM_SQL_RE = /INSERT INTO twilio_alert_dedupe/i;
+
+function dedupeTableQuery() {
   return {
     where: jest.fn().mockReturnThis(),
-    whereRaw: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue(existing),
+    del: jest.fn().mockResolvedValue(1),
   };
+}
+
+// db.raw serves two roles: the awaited atomic claim (returns pg-shaped
+// { rows }) and inert SQL fragments used as query-builder values (prune's
+// interval). Route on the SQL text; `claims` yields one result per claim
+// call, defaulting to "window claimed".
+function mockDbRaw(claims = []) {
+  const queue = [...claims];
+  db.raw = jest.fn((sql) => {
+    if (CLAIM_SQL_RE.test(String(sql))) {
+      const claimed = queue.length ? queue.shift() : true;
+      return Promise.resolve({ rows: claimed ? [{ dedupe_key: 'claimed' }] : [] });
+    }
+    return { __rawFragment: sql };
+  });
+}
+
+function claimedKeys() {
+  return db.raw.mock.calls
+    .filter(([sql]) => CLAIM_SQL_RE.test(String(sql)))
+    .map(([, params]) => params[0]);
 }
 
 describe('Twilio failure alerts', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.raw = jest.fn((value) => value);
-    db.mockReturnValue(notificationQuery(null));
+    db.mockImplementation(() => dedupeTableQuery());
+    mockDbRaw();
   });
 
   test('sanitizes provider text before admin notification dispatch', async () => {
@@ -69,5 +91,91 @@ describe('Twilio failure alerts', () => {
   test('hashes caller-provided dedupe keys before persistence', () => {
     expect(publicDedupeKey('raw:+19415551212:SM1234567890abcdef1234567890abcdef'))
       .toMatch(/^twilio:[a-f0-9]{16}$/);
+  });
+
+  test('keys inbound failures by the caller, not the shared business line', async () => {
+    const shared = {
+      channel: 'voice',
+      direction: 'inbound',
+      phase: 'webhook',
+      status: 'failed',
+      to: '+19413187612', // Waves business line — identical on every inbound failure
+    };
+    await alertTwilioFailure({ ...shared, sid: 'CA1', from: '+19415550001' });
+    await alertTwilioFailure({ ...shared, sid: 'CA2', from: '+19415550002' });
+    await alertTwilioFailure({ ...shared, sid: 'CA3', from: '+19415550001' });
+
+    const keys = claimedKeys();
+    expect(keys).toHaveLength(3);
+    // Different callers must never share a key (one caller's failure would
+    // suppress the others' alerts for the whole window).
+    expect(keys[0]).not.toBe(keys[1]);
+    // Same caller dedupes together even though every event has a fresh SID.
+    expect(keys[2]).toBe(keys[0]);
+  });
+
+  test('outbound repeat failures to one number share a key across SIDs and statuses', async () => {
+    mockDbRaw([true, false]);
+    const shared = {
+      channel: 'sms',
+      direction: 'outbound',
+      phase: 'delivery',
+      from: '+19413187612',
+      to: '+19415550009',
+      errorCode: '30003',
+    };
+    const first = await alertTwilioFailure({ ...shared, sid: 'SM1', status: 'failed' });
+    const second = await alertTwilioFailure({ ...shared, sid: 'SM2', status: 'undelivered' });
+
+    const keys = claimedKeys();
+    expect(keys[1]).toBe(keys[0]);
+    expect(first).toEqual({ bellWritten: true, push: null });
+    expect(second).toEqual({ skipped: true, reason: 'duplicate' });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('falls back to a per-event key when no remote number is available', async () => {
+    const shared = { channel: 'voice', direction: 'inbound', phase: 'webhook', status: 'failed' };
+    await alertTwilioFailure({ ...shared, sid: 'CA1' });
+    await alertTwilioFailure({ ...shared, sid: 'CA2' });
+
+    const keys = claimedKeys();
+    // No phone to key on → per-SID keys, which fail toward alerting.
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(triggerNotification).toHaveBeenCalledTimes(2);
+  });
+
+  test('fails open when the dedupe table is unavailable', async () => {
+    db.raw = jest.fn((sql) => {
+      if (CLAIM_SQL_RE.test(String(sql))) return Promise.reject(new Error('relation missing'));
+      return { __rawFragment: sql };
+    });
+
+    const result = await alertTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'failed',
+      to: '+19415550009',
+    });
+
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ bellWritten: true, push: null });
+  });
+
+  test('releases the claimed window when notification dispatch fails', async () => {
+    const query = dedupeTableQuery();
+    db.mockImplementation(() => query);
+    triggerNotification.mockRejectedValueOnce(new Error('bell down'));
+
+    await expect(alertTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'failed',
+      to: '+19415550009',
+    })).rejects.toThrow('bell down');
+
+    const [claimKey] = claimedKeys();
+    expect(query.where).toHaveBeenCalledWith({ dedupe_key: claimKey });
+    expect(query.del).toHaveBeenCalled();
   });
 });

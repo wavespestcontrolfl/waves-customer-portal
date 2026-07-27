@@ -20,7 +20,12 @@ const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const PHONE_CANDIDATE_RE = /\+?\d[\d\s().-]{6,}\d/g;
+// Lookarounds keep the match from starting or ending inside a longer
+// alphanumeric token: without them, a 10-digit run inside a hex digest or an
+// ID like a dedupe key ("twilio:a1234567890bcdef") was masked as a phone
+// number — which corrupted stored dedupe keys ~3% of the time. A real phone
+// number embedded in prose is bounded by spaces/punctuation and still matches.
+const PHONE_CANDIDATE_RE = /(?<![A-Za-z0-9])\+?\d[\d\s().-]{6,}\d(?![A-Za-z0-9])/g;
 const STREET_ADDRESS_RE = /\b\d{1,6}\s+[A-Za-z0-9 .'-]+?\s(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Boulevard|Blvd|Trail|Trl|Terrace|Ter|Place|Pl|Parkway|Pkwy|Way)\b/gi;
 const SENSITIVE_TEXT_KEY_RE = /(message|body|note|reason|summary|text|description|title)/i;
 
