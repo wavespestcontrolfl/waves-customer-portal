@@ -5175,7 +5175,12 @@ function EstimateViewPageInner() {
               // keeps one-time work that has no rendered service section,
               // and hides entirely when nothing is left.
               excludeServices={[
+                // Tier-aware fees here too (codex r25 P2): the card above
+                // renders from tierAwareFee, so the exclusion must judge the
+                // SAME waivedWithPrepay or a non-prepay combo shows the
+                // setup fee twice (card + breakdown row).
                 ...(pricing.firstVisitFees || [])
+                  .map(tierAwareFee)
                   .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
                   .map((fee) => fee.service),
                 // Identity keys, not bare service strings — embedded rows
