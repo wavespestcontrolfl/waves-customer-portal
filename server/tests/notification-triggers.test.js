@@ -168,6 +168,14 @@ describe('notification trigger push tags', () => {
     expect(safe.message).toBe('twilio:1234567890abcdef retry ***1234 later');
   });
 
+  test('phone redaction still masks numbers carrying extension suffixes', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      message: 'call +19415551234x123 or 19415552222 ext 99 today',
+    });
+
+    expect(safe.message).toBe('call ***4123 or ***2299 today');
+  });
+
   test('notification metadata payload sanitizer does not persist raw contact fields', () => {
     const safe = __private.sanitizeNotificationPayload('new_lead', {
       phone: '+18182079399',

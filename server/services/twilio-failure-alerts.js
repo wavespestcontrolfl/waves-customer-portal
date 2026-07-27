@@ -51,9 +51,14 @@ function isFailureStatus(status) {
 // caller in `from` and one of our own business lines in `to` — keying on `to`
 // would collapse EVERY inbound failure into one key and a single webhook
 // error would suppress unrelated customers' alerts for a day. Outbound is the
-// reverse: the customer is `to`.
+// reverse: the customer is `to`. Only an EXPLICIT direction picks a side —
+// some error paths (voice /call-status catch) pass direction 'unknown', and
+// guessing outbound there would key unrelated inbound callers on our own
+// line; unknown direction takes the per-event fallback instead.
 function remotePartyDigits(direction, from, to) {
-  const raw = String(direction || '').toLowerCase() === 'inbound' ? from : to;
+  const dir = String(direction || '').toLowerCase();
+  if (dir !== 'inbound' && dir !== 'outbound') return null;
+  const raw = dir === 'inbound' ? from : to;
   const digits = String(raw || '').replace(/\D/g, '');
   return digits.length >= 7 ? digits : null;
 }
@@ -136,8 +141,9 @@ async function alertTwilioFailure(input = {}) {
     `from=${maskPhone(from)} to=${maskPhone(to)}`
   );
 
+  let result;
   try {
-    return await triggerNotification('twilio_failure', {
+    result = await triggerNotification('twilio_failure', {
       channel,
       direction,
       phase,
@@ -154,6 +160,18 @@ async function alertTwilioFailure(input = {}) {
     await releaseAlertWindow(dedupeKey);
     throw err;
   }
+
+  // triggerNotification never throws — dispatch failures come back as
+  // { bellWritten: false, push: null, error }. If the alert reached no
+  // channel, give the window back so the next occurrence still alerts.
+  // A deliberate internal-test suppression counts as handled, not failed.
+  const delivered = !!result && (
+    result.suppressed === true ||
+    result.bellWritten === true ||
+    Number(result.push?.sent || 0) > 0
+  );
+  if (!delivered) await releaseAlertWindow(dedupeKey);
+  return result;
 }
 
 module.exports = {
