@@ -643,18 +643,15 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
           return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
         }
       }
-      const cadenceRequestsSeasonal = !!depositServiceCadences
-        && Object.values(depositServiceCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
-          .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
       // Axis eligibility comes ONLY from a matched combo's server-stamped
-      // flag (codex r21 P0): with no combos, accept IGNORES serviceCadences
-      // and books the DEFAULT tier, so a crafted monthly12 axis on a
-      // seasonal-default solo estimate must not buy a deposit for an
-      // acceptance that books (and then rejects) the seasonal plan. The
-      // adjudication order mirrors accept exactly.
+      // flag (codex r21 P0 + r22 P2): with no combos, accept IGNORES
+      // serviceCadences and books the selected/default tier, so a raw axis
+      // token must neither buy a deposit (crafted monthly12 on a
+      // seasonal-default estimate) nor block one (stale seasonal9 on a
+      // monthly-default estimate). The adjudication order mirrors accept
+      // exactly.
       let prepayEligibleHere;
-      if (cadenceRequestsSeasonal) prepayEligibleHere = false;
-      else if (depositMatchedCombo) prepayEligibleHere = depositMatchedCombo.annualPrepayEligible === true;
+      if (depositMatchedCombo) prepayEligibleHere = depositMatchedCombo.annualPrepayEligible === true;
       else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
         prepayEligibleHere = prepayFreq.annualPrepayEligible;
       } else prepayEligibleHere = annualPrepayEligibleForEstimateData(estData);

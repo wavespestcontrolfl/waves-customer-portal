@@ -8201,29 +8201,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // that flag decides for the SELECTED tier — the stored-mix rule remains
     // for everything else. Runs before any billing side effects.
     if (annualPrepaySelected) {
-      // A bundle combo axis carries the mosquito tier via serviceCadences
-      // while the top-level frequency stays the pest cadence (codex r13 P0 +
-      // r16 P2): a seasonal9 axis is rejected here with the same 400 the
-      // deposit route uses, BEFORE the converter is reached — and a
-      // monthly12 axis on a seasonal-default estimate resolves ELIGIBLE
-      // (the stored-mix fallback would wrongly reject the valid selection).
-      const rawCadences = req.body?.serviceCadences;
-      const cadenceRequestsSeasonal = !!rawCadences && typeof rawCadences === 'object'
-        && !Array.isArray(rawCadences)
-        && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
-          .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
-      // No unproven axis adjudication here (codex r21 P0): with no combos,
-      // this route IGNORES serviceCadences and books the DEFAULT tier, so
-      // eligibility follows the selected frequency's stamped flag or the
-      // stored mix. A MATCHED combo's stamped flag is enforced right after
-      // combo resolution below.
+      // No raw serviceCadences adjudication here AT ALL (codex r21 P0 +
+      // r22 P2): with no combos this route IGNORES the map and books the
+      // selected/default tier, so a stale seasonal9 token must neither buy
+      // NOR block prepay — eligibility follows the selected frequency's
+      // stamped flag or the stored mix. When combos exist, the MATCHED
+      // combo's stamped flag is enforced right after combo resolution below
+      // (combos are always prepay-ineligible today), and an unmatched map
+      // 400s there.
       const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
         ? selectedFrequency.annualPrepayEligible
         : null;
-      let prepayMixEligible;
-      if (cadenceRequestsSeasonal) prepayMixEligible = false;
-      else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
-      else prepayMixEligible = isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+      const prepayMixEligible = tierPrepayFlag != null
+        ? tierPrepayFlag
+        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
       if (!prepayMixEligible) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
