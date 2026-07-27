@@ -2813,6 +2813,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // itself uses. The visit this report covers is excluded by id so a same-day
   // report never shows its own just-completed slot. Best-effort: never blocks
   // the report.
+  // Rodent report refresh gate (owner ask 2026-07-27) — declared before the
+  // next-appointment pick because the widened rodent-program match below is
+  // part of the gated behavior: with the gate dark, reports keep the strict
+  // same-line pick exactly as before (codex round-3 P2), so unsetting the
+  // var restores pre-refresh output everywhere.
+  const rodentReportRefresh = serviceLine === 'rodent'
+    && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
+
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -2851,7 +2859,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .find((row) => {
         const rowLine = detectServiceLine(row.service_type);
         if (rowLine === serviceLine) return true;
-        return serviceLine === 'rodent'
+        return rodentReportRefresh
           && rowLine === 'pest'
           && isRodentAdjacentServiceType(row.service_type);
       }) || null;
@@ -2933,10 +2941,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // trap map owns the spatial story), and render the trap-styled map pins.
   // Tech-reviewed "Generate AI report" copy still wins the summary slot;
   // narrative generation is LIVE VIEWS ONLY (same posture as the pest
-  // block), while the flag itself ships on every mode so PDF/static renders
-  // drop the coverage card consistently. Kill switch: unset the var.
-  const rodentReportRefresh = serviceLine === 'rodent'
-    && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
+  // block). The rodentReportRefresh gate itself is computed above, before
+  // the next-appointment pick it also widens. Kill switch: unset the var.
   if (
     rodentReportRefresh
     && typedSnapshot

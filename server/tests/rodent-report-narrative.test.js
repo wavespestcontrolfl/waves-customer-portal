@@ -40,6 +40,7 @@ function input(overrides = {}) {
       findings: [
         { fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'Roof rats', value: 'Roof rat' },
         { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '7', value: '7' },
+        { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '0', value: '0' },
       ],
     },
     activity: { label: 'Rodent Activity', levelWord: 'Moderate activity', score: 3, maxScore: 5, isBaseline: true, trendWord: null },
@@ -69,6 +70,7 @@ test('groundingFacts keeps only usable facts', () => {
   expect(facts.findings).toEqual([
     { label: 'What we found', value: 'Roof rats' },
     { label: 'Traps checked', value: '7' },
+    { label: 'Captures', value: '0' },
   ]);
   expect(facts.activity).toMatchObject({ levelWord: 'Moderate activity', score: 3, isBaseline: true });
   // trapping names the fact for what the number IS: traps carrying a
@@ -142,15 +144,52 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('We inspected all seven traps today.', facts)).toEqual([]);
   // partitive phrasing claims no count and harmless word-numbers stay clean
   expect(ungroundedClaims('One of the traps was relocated to the attic entry.', facts)).toEqual([]);
+
+  // counts validate per NOUN, not against a shared pool (codex round-3 P1):
+  // with 7 checked and captures at 2 traps, the model can't swap the facts
+  const swapFacts = groundingFacts(input({
+    stationSummary: { total: 7, checked: 7, activity: 2, serviced: 0, inaccessible: 0 },
+  }));
+  expect(ungroundedClaims('A capture was recorded at 2 traps.', swapFacts)).toEqual([]);
+  expect(ungroundedClaims('2 traps were inspected today.', swapFacts)).toContain('uncorroborated_count:2 traps');
+  expect(ungroundedClaims('We recorded 7 captures today.', swapFacts)).toContain('uncorroborated_count:7 captures');
+
+  // negation is judged per sentence — one negated sentence can't launder a
+  // positive claim elsewhere (codex round-3 P2)
+  expect(ungroundedClaims('No captures were recorded in the attic. We removed a capture from the garage trap.', facts))
+    .toContain('unsupported_capture_claim');
 });
 
 test('deterministic summary = ratified copy + factual counts + next visit', () => {
   const text = deterministicSummary(groundingFacts(input()));
   expect(text).toContain('Rodent activity was moderate today.');
   expect(text).toContain('We checked 7 traps today.');
+  // the zero-captures claim is grounded in the typed Captures finding
   expect(text).toContain('7 of 7 traps were inspected, with no captures recorded.');
   expect(text).toContain('Photos from this visit are included with this report.');
   expect(text).toContain('Your next visit is scheduled for Monday, August 3, arriving 8–10 AM.');
+
+  // NO typed capture record → zero is never inferred from map statuses
+  // alone (a positive typed count with unflagged pins is a permitted
+  // state — codex round-3 P1); the clause is omitted entirely
+  const noTypedCaptures = deterministicSummary(groundingFacts(input({
+    typedReport: {
+      todaysResult: { headline: 'Rodent activity was moderate today.', body: 'We checked 7 traps today.', nextStep: null },
+      findings: [{ fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '7', value: '7' }],
+    },
+  })));
+  expect(noTypedCaptures).toContain('7 of 7 traps were inspected.');
+  expect(noTypedCaptures).not.toContain('captures');
+
+  // typed positive + zero flagged pins → the typed count speaks, never "no captures"
+  const typedPositive = deterministicSummary(groundingFacts(input({
+    typedReport: {
+      todaysResult: { headline: 'We removed captures today.', body: null, nextStep: null },
+      findings: [{ fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '3', value: '3' }],
+    },
+  })));
+  expect(typedPositive).toContain('7 of 7 traps were inspected, with 3 captures recorded.');
+  expect(typedPositive).not.toContain('no captures');
 
   // traps-with-capture counts render as locations, never capture totals
   // (one trap can hold multiple captures — codex P1)

@@ -151,10 +151,13 @@ test('payload nextAppointment is null when nothing upcoming matches the service 
   expect(data.nextAppointment).toBeNull();
 });
 
-// Rodent reports widen the match to the whole rodent program (owner
-// 2026-07-27: next service date if and only if it is rodent-related) —
-// exclusion/sanitation/trapping names carry no rodent token and fall to the
-// 'pest' default line, so the strict same-line match missed them.
+// Rodent reports under GATE_RODENT_REPORT_REFRESH widen the match to the
+// whole rodent program (owner 2026-07-27: next service date if and only if
+// it is rodent-related) — exclusion/sanitation/trapping names carry no
+// rodent token and fall to the 'pest' default line, so the strict same-line
+// match missed them. The widening is part of the gated refresh: with the
+// gate dark, behavior is exactly the pre-refresh strict match (codex
+// round-3 P2).
 const RODENT_SERVICE = {
   ...BASE_SERVICE,
   id: 'service-rodent-next',
@@ -162,17 +165,20 @@ const RODENT_SERVICE = {
   service_type: 'Rodent Trapping Service',
 };
 
-test('a rodent report discloses a rodent-adjacent visit (Exclusion Service) as next', async () => {
-  const knex = makeKnex({
-    ...BASE_FIXTURES,
-    scheduled_services: [
-      // no rodent token, detects as pest — but it IS the rodent program
-      { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
-      { id: 'scheduled-rodent-later', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', window_start: '09:00:00' },
-    ],
-  });
+afterEach(() => { delete process.env.GATE_RODENT_REPORT_REFRESH; });
 
-  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-excl', knex);
+const RODENT_PROGRAM_FIXTURES = {
+  ...BASE_FIXTURES,
+  scheduled_services: [
+    // no rodent token, detects as pest — but it IS the rodent program
+    { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
+    { id: 'scheduled-rodent-later', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', window_start: '09:00:00' },
+  ],
+};
+
+test('gated: a rodent report discloses a rodent-adjacent visit (Exclusion Service) as next', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-excl', makeKnex(RODENT_PROGRAM_FIXTURES));
 
   expect(data.nextAppointment).toEqual({
     serviceType: 'Exclusion Service',
@@ -181,7 +187,18 @@ test('a rodent report discloses a rodent-adjacent visit (Exclusion Service) as n
   });
 });
 
+test('gate dark: the strict same-line pick is unchanged (kill switch restores old behavior)', async () => {
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-dark', makeKnex(RODENT_PROGRAM_FIXTURES));
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Rodent Trap Check',
+    scheduledDate: '2999-02-01',
+    windowStart: '09:00:00',
+  });
+});
+
 test('a rodent report never claims trap-named visits of OTHER detectable lines', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
   const knex = makeKnex({
     ...BASE_FIXTURES,
     scheduled_services: [

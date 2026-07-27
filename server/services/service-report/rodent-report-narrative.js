@@ -195,6 +195,15 @@ function groundingFacts({
   };
 }
 
+// The typed snapshot's own capture record ("Captures: 2"), when the tech
+// recorded one — the only source that may ground a capture TOTAL or a
+// zero-captures claim.
+function typedCaptureCount(facts) {
+  const finding = (facts.findings || []).find((item) => /captur/i.test(item.label)
+    && Number.isFinite(Number(String(item.value).trim())));
+  return finding ? Number(String(finding.value).trim()) : null;
+}
+
 // The always-safe summary, assembled only from copy that already passed a
 // ratified path: the snapshot's Today's Result (or the recap), the factual
 // station counts, and a plain next-visit sentence.
@@ -209,10 +218,23 @@ function deterministicSummary(facts) {
   if (facts.stations && facts.stations.checked > 0) {
     const s = facts.stations;
     if (s.program === 'trapping') {
-      const clause = s.trapsWithCaptureRecorded === 0
-        ? 'no captures recorded'
-        : `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
-      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected, with ${clause}.`);
+      // Capture wording is sourced from the records that actually carry it:
+      // pins flagged on the map ground "at N traps"; otherwise the typed
+      // Captures finding grounds a total or the zero claim. Zero is NEVER
+      // inferred from map statuses alone — a positive typed capture count
+      // with no flagged pin is a permitted state (trapCaptureConflict only
+      // rejects the reverse), and claiming "no captures" against it would
+      // contradict the ratified Today's Result (codex round-3 P1).
+      const typedCaptures = typedCaptureCount(facts);
+      let clause = null;
+      if (s.trapsWithCaptureRecorded > 0) {
+        clause = `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
+      } else if (typedCaptures > 0) {
+        clause = `${typedCaptures} capture${typedCaptures === 1 ? '' : 's'} recorded`;
+      } else if (typedCaptures === 0) {
+        clause = 'no captures recorded';
+      }
+      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
     } else if (s.program === 'rodent') {
       const clause = s.stationsWithBaitConsumption === 0
         ? 'no bait consumption observed'
@@ -304,40 +326,85 @@ function groundedNumberSet(facts) {
   return set;
 }
 
-// Numbers that may legitimately count traps/stations/devices: the station
-// facts themselves plus numeric typed-finding values ("Traps checked: 7").
-// Empty when nothing grounds a count — any count claim then fails closed.
-function stationCountSet(facts) {
-  const set = new Set();
-  Object.values(facts.stations || {}).forEach((value) => {
-    if (typeof value === 'number') set.add(value);
+// Per-noun fact mapping (codex round-3 P1): every count claim validates
+// against the fact it DESCRIBES, so trapsWithCaptureRecorded can't
+// corroborate "2 traps were inspected" and the roster size can't
+// corroborate "7 captures were recorded" — a shared pool would let the
+// model swap the two customer-facing facts.
+function factNumbers(facts) {
+  const s = facts.stations || {};
+  const placement = new Set(); // traps/stations/devices counted as places
+  ['total', 'checked', 'serviced', 'inaccessible'].forEach((key) => {
+    if (typeof s[key] === 'number') placement.add(s[key]);
   });
+  const capturesAt = new Set(); // "a capture recorded at N traps"
+  if (typeof s.trapsWithCaptureRecorded === 'number') capturesAt.add(s.trapsWithCaptureRecorded);
+  const consumptionAt = new Set(); // "bait consumption observed at N stations"
+  if (typeof s.stationsWithBaitConsumption === 'number') consumptionAt.add(s.stationsWithBaitConsumption);
+  const captureTotals = new Set(); // "N captures" — only a typed finding grounds this
   (facts.findings || []).forEach((finding) => {
     const n = Number(String(finding.value).trim());
-    if (Number.isFinite(n)) set.add(n);
+    if (!Number.isFinite(n)) return;
+    if (/captur/i.test(finding.label)) captureTotals.add(n);
+    else if (/trap|station|device|check/i.test(finding.label)) placement.add(n);
   });
-  return set;
+  return { placement, capturesAt, consumptionAt, captureTotals };
 }
 
-// "N traps" / "N of M stations" / "N captures" claims validated against the
-// facts they describe, not the global number pool — with 7 traps and a 0-5
-// activity scale, "we checked 5 traps" must NOT pass just because 5 exists
-// somewhere in the facts (codex round-2 P1). Runs on word-number-normalized
-// text so "five traps" is checked too; partitive phrasing without a count
-// ("one of the traps") is exempt via the filler check.
-const COUNT_NOUN_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(traps?|stations?|devices?|captures?)\b/gi;
+// "N traps" / "N of M stations" claims validated per noun and context —
+// with 7 traps checked and captures at 2 of them, "we checked 5 traps",
+// "2 traps were inspected", and "7 captures" must ALL fail. Runs on
+// word-number-normalized text so "five traps" is checked too; partitive
+// phrasing without a count ("one of the traps") is exempt via the filler
+// check.
+const PLACE_NOUN_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(traps?|stations?|devices?)\b/gi;
+const CAPTURE_COUNT_RE = /\b(\d+)\s+captures?\b/gi;
 
 function contextualCountProblems(text, facts) {
   const problems = [];
-  const allowed = stationCountSet(facts);
-  const re = new RegExp(COUNT_NOUN_RE.source, 'gi');
+  const { placement, capturesAt, consumptionAt, captureTotals } = factNumbers(facts);
+  const placeRe = new RegExp(PLACE_NOUN_RE.source, 'gi');
   let match;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = placeRe.exec(text)) !== null) {
     const [, first, second, filler] = match;
     if (/\bof\b/i.test(filler || '')) continue; // "1 of the traps" — no count claimed
-    for (const raw of [first, second]) {
-      if (raw == null) continue;
-      if (!allowed.has(Number(raw))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    // The ~30 chars before the number decide WHICH fact this count claims:
+    // "a capture recorded at 2 traps" counts capture locations, "bait
+    // consumption observed at 1 station" counts consumption locations,
+    // anything else is a placement/roster count.
+    const lead = text.slice(Math.max(0, match.index - 30), match.index);
+    const allowed = /captur/i.test(lead)
+      ? capturesAt
+      : (/consum/i.test(lead) ? consumptionAt : placement);
+    if (!allowed.has(Number(first))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    // the "of M" half is always the roster size
+    if (second != null && !placement.has(Number(second))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+  }
+  const capRe = new RegExp(CAPTURE_COUNT_RE.source, 'gi');
+  while ((match = capRe.exec(text)) !== null) {
+    if (!captureTotals.has(Number(match[1]))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+  }
+  return problems;
+}
+
+// Capture/consumption mentions are judged PER SENTENCE (codex round-3 P2):
+// one negated sentence must not launder a positive claim elsewhere in the
+// same output ("No captures in the attic. We removed a capture from the
+// garage." must still reject when nothing records a capture). A positive
+// claim is supported by capture locations on the map OR a positive typed
+// capture finding.
+function unsupportedActivityClaims(text, facts) {
+  const problems = [];
+  const { capturesAt, consumptionAt, captureTotals } = factNumbers(facts);
+  const captureSupported = [...capturesAt, ...captureTotals].some((n) => n > 0);
+  const consumptionSupported = [...consumptionAt].some((n) => n > 0);
+  for (const sentence of String(text).split(/[.!?]+/)) {
+    const negated = /\b(no|not|without|zero|none|never)\b/i.test(sentence);
+    if (!captureSupported && /\bcaptur/i.test(sentence) && !negated) {
+      problems.push('unsupported_capture_claim');
+    }
+    if (!consumptionSupported && /\bconsum/i.test(sentence) && !negated) {
+      problems.push('unsupported_consumption_claim');
     }
   }
   return problems;
@@ -359,17 +426,7 @@ function ungroundedClaims(rawText, facts) {
     if (!grounded) problems.push(`ungrounded_number:${token}`);
   }
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
-  // Capture/consumption claims must not appear positively when the facts
-  // record none of that activity ("we removed a capture" with zero traps
-  // flagged). Negated forms ("no captures were recorded") are fine.
-  const negated = (noun) => new RegExp(`\\b(no|without|zero)\\b[^.!?]{0,40}\\b${noun}`, 'i');
-  const stations = facts.stations || {};
-  if (!((stations.trapsWithCaptureRecorded || 0) > 0) && /\bcaptur/i.test(text) && !negated('captur').test(text)) {
-    problems.push('unsupported_capture_claim');
-  }
-  if (!((stations.stationsWithBaitConsumption || 0) > 0) && /\bconsum/i.test(text) && !negated('consum').test(text)) {
-    problems.push('unsupported_consumption_claim');
-  }
+  problems.push(...unsupportedActivityClaims(text, facts));
   return problems;
 }
 
@@ -449,6 +506,8 @@ module.exports = {
     isNameableDevice,
     echoesWithheldName,
     ungroundedClaims,
+    factNumbers,
+    typedCaptureCount,
     buildUserMessage,
     SYSTEM_PROMPT,
     PROMPT_VERSION,
