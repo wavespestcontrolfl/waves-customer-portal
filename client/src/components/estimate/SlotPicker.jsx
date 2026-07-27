@@ -125,6 +125,10 @@ export default function SlotPicker({
   refreshSignal,
   serviceMode = 'recurring',
   selectedFrequency = null,
+  // Bundle combo axes ({ mosquito: 'seasonal9' }): the mosquito tier changes
+  // the server's seasonal slot filter/horizon while selectedFrequency stays
+  // the pest cadence.
+  serviceCadences = null,
   onFirstSlotDate = null,
   cityLabel = null,
   quickPick = false,
@@ -228,13 +232,16 @@ export default function SlotPicker({
     if (serviceMode !== 'one_time' && selectedFrequency) {
       params.set('selectedFrequency', selectedFrequency);
     }
+    if (serviceMode !== 'one_time' && serviceCadences) {
+      params.set('serviceCadences', JSON.stringify(serviceCadences));
+    }
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
       .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, refreshSignal, serviceMode, selectedFrequency]);
+  }, [token, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
 
   // ── custom date/time finder ──
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -256,6 +263,7 @@ export default function SlotPicker({
     const p = new URLSearchParams();
     p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
+    if (serviceMode !== 'one_time' && serviceCadences) p.set('serviceCadences', JSON.stringify(serviceCadences));
     return p;
   };
 
@@ -266,7 +274,7 @@ export default function SlotPicker({
         'Content-Type': 'application/json',
         ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
       },
-      body: JSON.stringify({ query, serviceMode, selectedFrequency }),
+      body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');

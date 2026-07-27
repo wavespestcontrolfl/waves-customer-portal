@@ -549,6 +549,19 @@ describe('seasonal (Feb–Oct) mosquito slot filtering (codex r8 P1)', () => {
     expect(seasonalSelectionProfile(resolveEstimateSlotProfile(seasonalDefault, {
       serviceMode: 'one_time', selectedFrequency: 'seasonal9',
     }))).toBe(false);
+    // Bundle combo axis (codex r14 P1): the mosquito tier travels as
+    // serviceCadences.mosquito while selectedFrequency stays the pest cadence.
+    expect(seasonalSelectionProfile(resolveEstimateSlotProfile(monthlyDefault, {
+      selectedFrequency: 'quarterly', serviceCadences: { mosquito: 'seasonal9' },
+    }))).toBe(true);
+    expect(seasonalSelectionProfile(resolveEstimateSlotProfile(seasonalDefault, {
+      selectedFrequency: 'quarterly', serviceCadences: { mosquito: 'monthly12' },
+    }))).toBe(false);
+    // The axis participates in the wrapper-cache key so tier switches never
+    // share a cache bucket.
+    expect(resolveEstimateSlotProfile(monthlyDefault, {
+      selectedFrequency: 'quarterly', serviceCadences: { mosquito: 'seasonal9' },
+    }).mosquitoCadence).toBe('seasonal9');
   });
 
   test('the slot list drops Nov–Jan days for a seasonal selection only', () => {

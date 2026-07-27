@@ -282,6 +282,14 @@ function selectedPricingFrequencyKey(pricing = {}, services = [], selected = {})
   return frequencies[0]?.key || null;
 }
 
+// A bundle combo-axis map requesting the seasonal mosquito cadence — prepay
+// is rejected for it server-side (accept + /deposit-intent use the same
+// token set), so the option must not be advertised for that selection.
+function cadencesRequestSeasonal(cadences) {
+  return !!cadences && Object.values(cadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+    .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
+}
+
 function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
   const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
   return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
@@ -4198,6 +4206,11 @@ function EstimateViewPageInner() {
       if (serviceModeForAttempt !== 'one_time' && selectedFrequencyForAttempt) {
         reservePayload.selectedFrequency = selectedFrequencyForAttempt;
       }
+      // Bundle combo axes: the mosquito tier travels here (not in the pest
+      // selectedFrequency) — the server's seasonal redemption check needs it.
+      if (serviceModeForAttempt !== 'one_time' && serviceCadences) {
+        reservePayload.serviceCadences = serviceCadences;
+      }
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4235,7 +4248,7 @@ function EstimateViewPageInner() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -4799,15 +4812,18 @@ function EstimateViewPageInner() {
     if (paymentPreference !== 'prepay_annual') return;
     const pricingState = data?.pricing || {};
     const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
-    const eligible = typeof frequency?.annualPrepayEligible === 'boolean'
-      ? frequency.annualPrepayEligible
-      : pricingState.annualPrepayEligible === true;
+    // A seasonal bundle combo axis disables prepay even when the top-level
+    // (pest) frequency carries no per-tier flag (codex r14 P1).
+    const eligible = !cadencesRequestSeasonal(serviceCadences)
+      && (typeof frequency?.annualPrepayEligible === 'boolean'
+        ? frequency.annualPrepayEligible
+        : pricingState.annualPrepayEligible === true);
     if (!eligible) {
       setPaymentPreference(null);
       setCtaPhase('configure');
       setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
     }
-  }, [data?.pricing, selectedFrequency, paymentPreference]);
+  }, [data?.pricing, selectedFrequency, serviceCadences, paymentPreference]);
 
   if (loading) {
     return (
@@ -4956,9 +4972,14 @@ function EstimateViewPageInner() {
   // their own annualPrepayEligible (seasonal9 can't prepay; monthly12 can) —
   // the estimate-level flag only reflects the stored default row. The server
   // enforces the same per-tier rule at accept and /deposit-intent.
-  const annualPrepayEligibleEffective = typeof combinedFrequency?.annualPrepayEligible === 'boolean'
-    ? combinedFrequency.annualPrepayEligible
-    : pricing.annualPrepayEligible === true;
+  // The mosquito tier can arrive on the top-level frequency (solo mosquito —
+  // stamped per tier) OR as a bundle combo axis (codex r14 P1) — a seasonal
+  // axis disables prepay regardless of the pest frequency's flag.
+  const annualPrepayEligibleEffective = cadencesRequestSeasonal(serviceCadences)
+    ? false
+    : (typeof combinedFrequency?.annualPrepayEligible === 'boolean'
+      ? combinedFrequency.annualPrepayEligible
+      : pricing.annualPrepayEligible === true);
   // The WaveGuard setup fee's waiver disclosure follows the SELECTED tier,
   // not the stored default (codex r11 P1): a monthly-default estimate
   // switched to seasonal9 must not promise "waived when you pay the year"
@@ -5590,6 +5611,7 @@ function EstimateViewPageInner() {
                   refreshSignal={slotsRefreshSignal}
                   serviceMode={serviceMode}
                   selectedFrequency={selectedFrequency}
+                  serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   quickPick={seamlessAutoPay}

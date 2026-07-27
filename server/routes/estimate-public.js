@@ -16840,7 +16840,16 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
     && bundle.oneTimeBreakdown.items.some(isSetupRow)) return false;
   if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return false;
-  if (!annualPrepayEligibleForEstimateData(estData)) return false;
+  // Seasonal mosquito is prepay-INELIGIBLE yet still owes the setup fee
+  // (codex r14 P1): the eligibility early-return alone would let pre-rule
+  // fee-less sendSnapshots fast-path forever, hiding a fee acceptance
+  // invoices. Recognize the fee-due seasonal mix the same way the fee-card
+  // sites do; existing customers keep the outright waiver (no recompute).
+  const stalePrepayEligible = annualPrepayEligibleForEstimateData(estData);
+  const staleSeasonalFeeDue = !stalePrepayEligible
+    && !estData?.membershipSnapshot?.isExistingCustomer
+    && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+  if (!stalePrepayEligible && !staleSeasonalFeeDue) return false;
   return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
     recurringServices: estimateDataRecurringServices(estData),
     estimateData: estData,

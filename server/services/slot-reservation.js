@@ -217,6 +217,7 @@ async function reserveSlot({
   durationMinutes,
   serviceMode = 'recurring',
   selectedFrequency = '',
+  serviceCadences = null,
 }) {
   const parsed = parseSlotId(slotId);
   if (!parsed) {
@@ -368,6 +369,7 @@ async function reserveSlot({
         ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
           serviceMode,
           selectedFrequency,
+          serviceCadences,
           durationMinutes,
         })
         : null;

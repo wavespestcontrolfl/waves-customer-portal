@@ -591,9 +591,16 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   // STORED row — a monthly-default estimate selected as seasonal9 would
   // profile 12 visits and slip past every seasonal guard downstream (winter
   // slots listed, reserved, and seeded — codex r13 P0). Override the mosquito
-  // row's visit count from the selected tier token itself.
+  // row's visit count from the selected tier token itself. In a bundle the
+  // mosquito tier travels as a combo axis (serviceCadences.mosquito) while
+  // selectedFrequency stays the pest cadence — honor that axis too (r14 P1).
   if (serviceMode !== 'one_time') {
-    const selToken = normalizeSelectionToken(selectedFrequency);
+    const cadences = userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
+      && !Array.isArray(userOpts.serviceCadences)
+      ? userOpts.serviceCadences
+      : null;
+    const selToken = normalizeSelectionToken(cadences?.mosquito || '')
+      || normalizeSelectionToken(selectedFrequency);
     const tierVisits = selToken === 'seasonal9' || selToken === 'seasonal_feb_oct' ? 9
       : selToken === 'monthly12' ? 12
         : null;
@@ -617,6 +624,15 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   return {
     serviceMode,
     selectedFrequency: normalizeFrequencyKey(selectedFrequency) || null,
+    // The bundle mosquito axis, when sent — part of the wrapper-cache key so
+    // a seasonal-axis slot list can never be served from the pest-frequency
+    // cache bucket (and vice versa).
+    mosquitoCadence: normalizeSelectionToken(
+      (userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
+        && !Array.isArray(userOpts.serviceCadences)
+        ? userOpts.serviceCadences.mosquito
+        : '') || '',
+    ) || null,
     durationMinutes,
     serviceLabel,
     services,
@@ -1380,6 +1396,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     opts.includeWeekends ? 'weekends' : 'weekdays',
     serviceProfile.serviceMode,
     serviceProfile.selectedFrequency || 'default',
+    serviceProfile.mosquitoCadence || 'noaxis',
     serviceProfile.durationMinutes,
     opts.minimumLeadMinutes,
     opts.dateFrom || 'auto',
@@ -1619,6 +1636,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
     if (estimateRow && seasonalSelectionProfile(resolveEstimateSlotProfile(estimateRow, {
       serviceMode: userOpts.serviceMode,
       selectedFrequency: userOpts.selectedFrequency,
+      serviceCadences: userOpts.serviceCadences,
     }))) {
       maxDaysOut = seasonalMaxHorizonDays();
     }
@@ -1634,6 +1652,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const result = await getAvailableSlots(estimateId, {
     serviceMode: userOpts.serviceMode,
     selectedFrequency: userOpts.selectedFrequency,
+    serviceCadences: userOpts.serviceCadences,
     dateFrom: when.dateFrom,
     dateTo: when.dateTo,
     timeOfDay: when.timeOfDay,

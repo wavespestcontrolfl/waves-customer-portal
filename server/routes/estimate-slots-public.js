@@ -234,6 +234,17 @@ router.get('/:token/available-slots', async (req, res) => {
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
+    // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
+    // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
+    // while selectedFrequency stays the pest cadence (codex r14 P1).
+    if (typeof req.query.serviceCadences === 'string' && req.query.serviceCadences.trim()) {
+      try {
+        const parsed = JSON.parse(req.query.serviceCadences);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          opts.serviceCadences = parsed;
+        }
+      } catch { /* malformed axis param — ignore, stored-row profile applies */ }
+    }
     // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
     // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
     // rejects any slot past the horizon in ET, so browsing must not display
@@ -378,8 +389,14 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
       : '';
+    const findServiceCadences = req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
+      && !Array.isArray(req.body.serviceCadences)
+      ? req.body.serviceCadences
+      : undefined;
     try {
-      const result = await findEstimateSlots(estimate.id, { query, serviceMode, selectedFrequency });
+      const result = await findEstimateSlots(estimate.id, {
+        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences,
+      });
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -421,6 +438,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     : '';
   const slotOpts = {};
   if (selectedFrequency) slotOpts.selectedFrequency = selectedFrequency;
+  // Bundle combo axes (codex r14 P1): the mosquito tier can travel as
+  // serviceCadences.mosquito while selectedFrequency stays the pest cadence —
+  // the reserve-side seasonal redemption check needs it.
+  if (req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
+    && !Array.isArray(req.body.serviceCadences)) {
+    slotOpts.serviceCadences = req.body.serviceCadences;
+  }
 
   try {
     const estimate = await db('estimates')
@@ -587,10 +611,39 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       if (prepayFreqKey && !prepayFreq) {
         return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
       }
-      const rawCadences = req.body?.serviceCadences;
-      const cadenceRequestsSeasonal = !!rawCadences && typeof rawCadences === 'object'
-        && !Array.isArray(rawCadences)
-        && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+      // Sanitize serviceCadences exactly like accept, then mirror accept's
+      // exact-combo validation (codex r14 P1): an unmatched map — bogus tier
+      // keys, wrong axis set — is an acceptance shape /accept 400s, so no
+      // PaymentIntent may be minted for it. Same no-combos passthrough as
+      // accept (the map is ignored there when the bundle offers no combos).
+      const depositServiceCadences = (() => {
+        const raw = req.body?.serviceCadences;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        const out = {};
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof v === 'string' && v.trim()) out[String(k)] = v.trim();
+        }
+        return Object.keys(out).length ? out : null;
+      })();
+      const depositCombos = Array.isArray(pricingBundle?.serviceCadenceCombos)
+        ? pricingBundle.serviceCadenceCombos
+        : [];
+      if (depositServiceCadences && depositCombos.length) {
+        const requestedNonPest = Object.keys(depositServiceCadences);
+        const matchedCombo = depositCombos.find((c) => {
+          const sel = c.selection || {};
+          const comboNonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+          if (comboNonPest.length !== requestedNonPest.length) return false;
+          if (!requestedNonPest.every((k) => sel[k] === depositServiceCadences[k])) return false;
+          if (sel.pest_control) return sel.pest_control === prepayFreqKey;
+          return true;
+        }) || null;
+        if (!matchedCombo) {
+          return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+        }
+      }
+      const cadenceRequestsSeasonal = !!depositServiceCadences
+        && Object.values(depositServiceCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
       const prepayEligibleHere = !cadenceRequestsSeasonal
         && (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean'

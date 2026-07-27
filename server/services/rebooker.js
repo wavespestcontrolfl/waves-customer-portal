@@ -178,6 +178,15 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
+      // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option: the
+      // rain-out flow commits these targets through reschedule() with a
+      // non-admin initiator, whose season guard would reject them — recording
+      // failures and leaving the job unmoved (codex r14 P1). Late-October
+      // rain-outs simply offer the remaining in-season days.
+      if (service.recurring_pattern === SEASONAL_FEB_OCT) {
+        const month = Number(dateStr.slice(5, 7));
+        if (month < 2 || month > 10) continue;
+      }
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)
