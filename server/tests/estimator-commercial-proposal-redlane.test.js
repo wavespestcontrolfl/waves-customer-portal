@@ -294,9 +294,10 @@ test('re-entry recovery: generic existing draft keeps the classic bell (regressi
   expect(opts.link).toBe('/admin/estimates');
 });
 
-// One-time work prices entirely into onetime_total with monthly_total 0 —
-// Erica ($242 fire ant), Denise Miller ($301), Matthew Bills ($282) all showed
-// up in the review queue as "$0/mo" drafts, which reads as nothing to send.
+// One-time work prices entirely into onetime_total with monthly_total 0, so
+// keying the bell title off monthly alone showed real one-time jobs (observed
+// range roughly $240–$300) in the review queue as "$0/mo" drafts — which reads
+// as nothing worth sending.
 test('re-entry recovery: one-time-only draft leads with the one-time amount, not $0/mo', async () => {
   const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
   mockBuildCallContext.mockResolvedValue({ ...CONTEXT });

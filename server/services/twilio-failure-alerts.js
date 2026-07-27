@@ -57,28 +57,6 @@ async function alreadyAlerted(dedupeKey) {
   }
 }
 
-// How many times this same recipient+code has failed in the window. The per-SID
-// dedupeKey above can only ever collapse retries of ONE message: Twilio mints
-// a new SID per send, so three texts to the same dead handset produced three
-// byte-identical "Twilio SMS undelivered ... error 30005 ... to ***6842"
-// bells (2026-07-23/24) that the 24h dedupe was structurally unable to catch.
-// Counting by recipient closes that, and the count is what tells the operator
-// "this number is dead" rather than "a message failed".
-async function recipientFailureCount(recipientKey) {
-  if (!recipientKey) return 0;
-  try {
-    const [row] = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->'payload'->>'recipientKey' = ?", [recipientKey])
-      .where('created_at', '>=', db.raw("now() - interval '24 hours'"))
-      .count('id as n');
-    return Number(row?.n || 0);
-  } catch (err) {
-    logger.warn(`[twilio-alerts] recipient-count check failed: ${err.message}`);
-    return 0;
-  }
-}
-
 async function alertTwilioFailure(input = {}) {
   const {
     channel,
@@ -106,27 +84,7 @@ async function alertTwilioFailure(input = {}) {
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
 
-  // Recipient identity deliberately excludes the SID (see recipientFailureCount).
-  // Only formed when we actually know who we were reaching; without a `to` there
-  // is no repeat-offender to collapse and the per-SID key stays the sole gate.
-  const toDigits = String(to || '').replace(/\D/g, '');
-  const recipientKey = toDigits
-    ? publicDedupeKey([
-      'twilio-recipient',
-      channel || 'unknown',
-      direction || 'unknown',
-      phase || 'unknown',
-      toDigits,
-      errorCode || 'no-code',
-    ].join(':'))
-    : null;
-
   if (await alreadyAlerted(dedupeKey)) return { skipped: true, reason: 'duplicate' };
-
-  const priorFailures = await recipientFailureCount(recipientKey);
-  if (priorFailures > 0) {
-    return { skipped: true, reason: 'duplicate_recipient', priorFailures };
-  }
 
   logger.warn(
     `[twilio-alerts] channel=${channel || 'unknown'} direction=${direction || 'unknown'} phase=${phase || 'unknown'} ` +
@@ -146,13 +104,11 @@ async function alertTwilioFailure(input = {}) {
     toMasked: maskPhone(to),
     link,
     dedupeKey,
-    recipientKey,
   });
 }
 
 module.exports = {
   alertTwilioFailure,
-  recipientFailureCount,
   isFailureStatus,
   maskSid,
   maskPhone,
