@@ -386,6 +386,37 @@ const AREAS_BY_SERVICE = {
     "Follow-up recommended",
   ],
 };
+// Per-product treatment areas are multi-select but stored as ONE
+// comma-joined string in the existing applicationArea field
+// ("Kitchen, Bathrooms") so drafts, the submit payload, and the
+// service_products.application_area column keep their shape — only the
+// picker UI changed. Area labels are a controlled chip vocabulary and
+// never contain commas.
+function parseApplicationAreas(value) {
+  return String(value || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+// Chip choices = this visit's treated-area chips, plus any already-selected
+// area that is no longer chipped at the visit level. Keeping stale
+// selections visible (instead of hiding them like the old <select> did)
+// lets the tech see and clear a value that would otherwise submit
+// invisibly from p.applicationArea (same trap as codex P3 r2 on #2950).
+function productAreaChoices(areasServiced, currentValue) {
+  const choices = [...areasServiced];
+  for (const area of parseApplicationAreas(currentValue)) {
+    if (!choices.includes(area)) choices.push(area);
+  }
+  return choices;
+}
+function toggleProductAreaValue(currentValue, area, orderedChoices) {
+  const selected = parseApplicationAreas(currentValue);
+  const next = selected.includes(area)
+    ? selected.filter((a) => a !== area)
+    : orderedChoices.filter((a) => selected.includes(a) || a === area);
+  return next.join(", ");
+}
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
   { value: "not_home_full_access", label: "Customer not home — full access" },
@@ -12841,36 +12872,55 @@ export function CompletionPanel({
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
                       </select>{" "}
-                      {areasServiced.length > 0 && (
-                        <select
-                          value={sp.applicationArea || ""}
-                          onChange={(e) =>
-                            updateProduct(
-                              sp.productId,
-                              "applicationArea",
-                              e.target.value,
-                            )
-                          }
-                          style={{
-                            ...mInput,
-                            minWidth: 150,
-                            flex: "1 1 150px",
-                            height: 40,
-                            padding: "0 12px",
-                          }}
-                        >
-                          <option value="">
-                            {areasServiced.length === 1
-                              ? `Area: ${areasServiced[0]}`
-                              : "Treatment area"}
-                          </option>
-                          {areasServiced.map((area) => (
-                            <option key={area} value={area}>
-                              {area}
-                            </option>
-                          ))}
-                        </select>
-                      )}
+                      {areasServiced.length > 0 && (() => {
+                        const selectedAreas = parseApplicationAreas(
+                          sp.applicationArea,
+                        );
+                        const areaChoices = productAreaChoices(
+                          areasServiced,
+                          sp.applicationArea,
+                        );
+                        return (
+                          <div
+                            style={{
+                              flexBasis: "100%",
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: 6,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: "100%",
+                                fontSize: 12,
+                                fontWeight: 500,
+                                color: M.ink3,
+                              }}
+                            >
+                              Treatment areas
+                            </span>
+                            {areaChoices.map((area) => (
+                              <Chip
+                                key={area}
+                                selected={selectedAreas.includes(area)}
+                                onClick={() =>
+                                  updateProduct(
+                                    sp.productId,
+                                    "applicationArea",
+                                    toggleProductAreaValue(
+                                      sp.applicationArea,
+                                      area,
+                                      areaChoices,
+                                    ),
+                                  )
+                                }
+                              >
+                                {area}
+                              </Chip>
+                            ))}
+                          </div>
+                        );
+                      })()}
                       <select
                         value={productApplicationMethod(sp, serviceTypeForArea)}
                         onChange={(e) =>
@@ -14941,35 +14991,70 @@ export function CompletionPanel({
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                   </select>{" "}
-                  {areasServiced.length > 0 && (
-                    <select
-                      value={sp.applicationArea || ""}
-                      onChange={(e) =>
-                        updateProduct(
-                          sp.productId,
-                          "applicationArea",
-                          e.target.value,
-                        )
-                      }
-                      style={{
-                        ...inputStyle,
-                        minWidth: 150,
-                        flex: "1 1 150px",
-                        marginBottom: 0,
-                      }}
-                    >
-                      <option value="">
-                        {areasServiced.length === 1
-                          ? `Area: ${areasServiced[0]}`
-                          : "Treatment area"}
-                      </option>
-                      {areasServiced.map((area) => (
-                        <option key={area} value={area}>
-                          {area}
-                        </option>
-                      ))}
-                    </select>
-                  )}
+                  {areasServiced.length > 0 && (() => {
+                    const selectedAreas = parseApplicationAreas(
+                      sp.applicationArea,
+                    );
+                    const areaChoices = productAreaChoices(
+                      areasServiced,
+                      sp.applicationArea,
+                    );
+                    return (
+                      <div
+                        style={{
+                          flexBasis: "100%",
+                          display: "flex",
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.muted,
+                          }}
+                        >
+                          Treatment areas
+                        </span>
+                        {areaChoices.map((area) => {
+                          const selected = selectedAreas.includes(area);
+                          return (
+                            <button
+                              key={area}
+                              type="button"
+                              onClick={() =>
+                                updateProduct(
+                                  sp.productId,
+                                  "applicationArea",
+                                  toggleProductAreaValue(
+                                    sp.applicationArea,
+                                    area,
+                                    areaChoices,
+                                  ),
+                                )
+                              }
+                              style={{
+                                padding: "6px 14px",
+                                borderRadius: 20,
+                                fontSize: 12,
+                                fontWeight: 500,
+                                cursor: "pointer",
+                                background: selected ? D.teal + "22" : D.card,
+                                color: selected ? D.teal : D.muted,
+                                border: `1px solid ${selected ? D.teal : D.border}`,
+                                transition: "all 0.15s",
+                              }}
+                            >
+                              {selected ? "✓ " : ""}
+                              {area}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                   <select
                     value={productApplicationMethod(sp, serviceTypeForArea)}
                     onChange={(e) =>

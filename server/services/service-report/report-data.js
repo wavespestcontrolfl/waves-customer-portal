@@ -562,11 +562,20 @@ function defaultZones(labels, serviceLine) {
 function matchZoneIds(product, zones, areaLabels = []) {
   const explicit = parseJsonArray(product.zone_ids);
   if (explicit.length) return explicit.map(String);
-  const area = String(product.application_area || product.area || '').toLowerCase();
-  if (area) {
+  // application_area may be a comma-joined multi-area list ("Kitchen,
+  // Bathrooms") since the per-product picker went multi-select — match each
+  // listed area independently so multi-word zone labels ("Kitchen west")
+  // still resolve. A single-area value splits to itself, so the legacy
+  // shape behaves exactly as before.
+  const areas = String(product.application_area || product.area || '')
+    .toLowerCase()
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (areas.length) {
     const matched = zones.filter((zone) => {
-      return String(zone.label || '').toLowerCase().includes(area)
-        || area.includes(String(zone.label || '').toLowerCase());
+      const label = String(zone.label || '').toLowerCase();
+      return areas.some((area) => label.includes(area) || area.includes(label));
     });
     if (matched.length) return matched.map((zone) => String(zone.id));
   }
