@@ -15923,19 +15923,23 @@ function comparisonEngineInputs(estData) {
 // fail-closed and the PDF 404, so the link must not render. Runs the same
 // fail-closed builder the PDF route runs; cheap pre-filters keep the two
 // engine replays off every non-termite /data call.
-function termiteComparisonAvailableForEstimate(estData, services = []) {
+function termiteComparisonAvailableForEstimate(estData, services = [], estimate = null) {
   const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
   if (!termiteComparisonGateOn()) return false;
   if (!estData || typeof estData !== 'object') return false;
   if (!services.some((section) => section?.key === 'termite_bait')) return false;
   try {
-    return buildTermiteComparisonData(comparisonEngineInputs(estData)) != null;
+    // Same selectedTier guard as the PDF route — a tier-committed estimate
+    // the replay can't reproduce must hide the link, not 404 it.
+    return buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      selectedTier: estimate?.waveguard_tier || null,
+    }) != null;
   } catch (_err) {
     return false;
   }
 }
 
-function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null) {
+function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null, estimate = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
@@ -15961,7 +15965,7 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null,
     // Buy-vs-rent options sheet link on the termite section (dark, explicit
     // opt-in). Computed per estimate with the SAME fail-closed builder the
     // PDF route runs (codex P1) — the link never renders toward a 404.
-    showTermiteComparison: termiteComparisonAvailableForEstimate(estData, services),
+    showTermiteComparison: termiteComparisonAvailableForEstimate(estData, services, estimate),
   };
 }
 
@@ -16097,7 +16101,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData),
+    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData, estimate),
     askChips,
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
@@ -16331,7 +16335,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
-    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData),
+    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData, estimate),
   };
 }
 
@@ -17754,9 +17758,18 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
       estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
     } catch { /* unparseable → no comparison */ }
     // engineRequest-aware replay inputs + the QUOTE-TIME bond snapshot (the
-    // same one PUT /:token/bond validates against — never live constants).
+    // same shapes attachTermiteBondSelector reads, incl. the legacy
+    // root-mapped blob — codex P2), passed ONLY while the live bond gate is
+    // on: with the kill switch off the selector hides and PUT /:token/bond
+    // 403s, so the sheet must not advertise terms the customer can't pick.
+    // The row's persisted waveguard_tier rides along so a customer-selected
+    // tier the replay can't derive fails the sheet closed instead of
+    // misprinting discounted figures.
+    const storedBondSnapshot = termiteBondOptionsFromEstimateData(estData)
+      || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
     const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
-      bondOptions: termiteBondOptionsFromEstimateData(estData),
+      bondOptions: termiteBondOptionGateOn() ? storedBondSnapshot : null,
+      selectedTier: estimate.waveguard_tier || null,
     });
     if (!data) return notFound();
     const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');

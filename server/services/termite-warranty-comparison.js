@@ -71,7 +71,12 @@ function finalLineAnnual(li) {
 // route. The replay's freshly-priced options are deliberately NOT used
 // (codex P1): after a bond-rate config change they could advertise terms or
 // rates the linked estimate cannot actually select.
-function buildTermiteComparisonData(engineInputs, { bondOptions = null } = {}) {
+// selectedTier (optional) is the estimate row's persisted waveguard_tier.
+// PUT /:token/select-tier lets a customer COMMIT to a higher tier than the
+// natural service count derives, storing the choice on the row — a replay
+// can't see it, so its discounted figures would misstate the selected quote
+// (codex P2). Fail closed on a mismatch: no sheet beats a wrong-priced one.
+function buildTermiteComparisonData(engineInputs, { bondOptions = null, selectedTier = null } = {}) {
   if (!termiteComparisonGateOn()) return null;
   if (!engineInputs) return null;
 
@@ -91,6 +96,13 @@ function buildTermiteComparisonData(engineInputs, { bondOptions = null } = {}) {
   const ownBait = pricedBaitLine(ownResult);
   const rentBait = pricedBaitLine(rentResult);
   if (!ownBait || !rentBait) return null;
+  // Customer-selected tier must match what the replay derived, or the
+  // discounted figures below describe a different quote than the one the
+  // customer holds (see header note on selectedTier).
+  if (selectedTier) {
+    const replayTier = String(ownResult?.waveGuard?.tier || '').toLowerCase();
+    if (!replayTier || replayTier !== String(selectedTier).toLowerCase()) return null;
+  }
   // The rent replay must have ACTUALLY priced as a rental: with
   // GATE_TERMITE_STATION_RENTAL off the engine silently re-prices 'rent' as
   // a purchase, and the fail-closed unpriceable-uplift path reverts it too.

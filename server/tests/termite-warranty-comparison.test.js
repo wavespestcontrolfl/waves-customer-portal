@@ -55,6 +55,18 @@ describe('availability is fail-closed', () => {
     expect(buildTermiteComparisonData(termiteInputs())).toBeNull();
   });
 
+  test('a customer-selected tier the replay cannot derive fails the sheet closed (codex P2)', () => {
+    // The replay derives bronze for a solo termite estimate — a matching
+    // persisted tier renders; a select-tier COMMITTED higher tier the
+    // replay can't reproduce suppresses the sheet rather than misprinting
+    // discounted figures. Case-insensitive (row stores 'Bronze').
+    expect(buildTermiteComparisonData(termiteInputs(), { selectedTier: 'Bronze' })).toBeTruthy();
+    expect(buildTermiteComparisonData(termiteInputs(), { selectedTier: 'bronze' })).toBeTruthy();
+    expect(buildTermiteComparisonData(termiteInputs(), { selectedTier: 'Gold' })).toBeNull();
+    // No persisted tier (legacy rows) → no guard, sheet renders.
+    expect(buildTermiteComparisonData(termiteInputs(), { selectedTier: null })).toBeTruthy();
+  });
+
   test('the saved inputs are never mutated by the replays', () => {
     const inputs = termiteInputs();
     const before = JSON.stringify(inputs);
