@@ -811,3 +811,50 @@ describe('seasonal winter re-anchor guard (codex r7 P1)', () => {
     )).rejects.not.toMatchObject({ code: 'OFF_SEASON' });
   });
 });
+
+describe('seasonal winter single-visit guard (codex r10 P1)', () => {
+  // Small moves skip the series re-anchor entirely (shouldReanchor), so the
+  // single-occurrence path needs its own refusal or an October seasonal
+  // visit can be postponed into November.
+  const nextJan20 = `${Number(etDateString().slice(0, 4)) + 1}-01-20`;
+  const seasonalVisit = {
+    id: 'svc-10', customer_id: 'cust-1', technician_id: 'tech-1',
+    status: 'confirmed', scheduled_date: BASE, recurring_parent_id: 'parent-9',
+    recurring_pattern: 'seasonal_feb_oct', window_start: '09:00:00', window_end: '11:00:00',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    db.transaction = undefined;
+  });
+
+  test('a self-serve single-visit move into Nov–Jan is refused', async () => {
+    const svcLookup = chain({ first: jest.fn().mockResolvedValue(seasonalVisit) });
+    db.mockImplementation(() => svcLookup);
+    await expect(SmartRebooker.reschedule(
+      'svc-10', nextJan20, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OFF_SEASON',
+    });
+    expect(db.transaction).toBeUndefined();
+  });
+
+  test('an admin single-visit move is NOT blocked by the season guard', async () => {
+    const svcLookup = chain({ first: jest.fn().mockResolvedValue(seasonalVisit) });
+    db.mockImplementation(() => svcLookup);
+    // Fails deeper (no transaction wired) — the point is no OFF_SEASON.
+    await expect(SmartRebooker.reschedule(
+      'svc-10', nextJan20, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+    )).rejects.not.toMatchObject({ code: 'OFF_SEASON' });
+  });
+
+  test('non-seasonal series visits still move freely into winter', async () => {
+    const svcLookup = chain({ first: jest.fn().mockResolvedValue({ ...seasonalVisit, recurring_pattern: 'monthly' }) });
+    db.mockImplementation(() => svcLookup);
+    await expect(SmartRebooker.reschedule(
+      'svc-10', nextJan20, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.not.toMatchObject({ code: 'OFF_SEASON' });
+  });
+});

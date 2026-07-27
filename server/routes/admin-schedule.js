@@ -4292,7 +4292,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         .first('scheduled_date');
       editAnchorDate = dateOnly(existingService?.scheduled_date) || undefined;
     }
-    const editMonthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+    // seasonal_feb_oct derives its anchor from the date like the other
+    // month-based cadences (EditServiceModal sends no nth/weekday for it, so
+    // the raw passthrough would NULL both anchor columns on every save and
+    // later maintenance would re-derive a drifted weekday/ordinal — codex r10
+    // P2). monthly_nth_weekday stays raw passthrough: there the operator
+    // supplies nth/weekday explicitly.
+    const editMonthAnchorOpts = (isRecurring
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
     if (isRecurring) {

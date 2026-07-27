@@ -4562,7 +4562,13 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/deposit-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+          // selectedFrequency lets the server apply per-tier prepay rules
+          // (mosquito seasonal9 refuses the prepay deposit BEFORE money moves).
+          body: JSON.stringify({
+            serviceMode,
+            paymentMethodPreference: paymentPreference,
+            ...(selectedFrequency ? { selectedFrequency } : {}),
+          }),
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
@@ -4924,6 +4930,24 @@ function EstimateViewPageInner() {
       sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? combinedBaseFrequency?.sameDayTreatmentTotal,
     }
     : combinedBaseFrequency;
+  // Per-tier prepay override (codex r10 P1): mosquito ladder entries carry
+  // their own annualPrepayEligible (seasonal9 can't prepay; monthly12 can) —
+  // the estimate-level flag only reflects the stored default row. The server
+  // enforces the same per-tier rule at accept and /deposit-intent.
+  const annualPrepayEligibleEffective = typeof combinedFrequency?.annualPrepayEligible === 'boolean'
+    ? combinedFrequency.annualPrepayEligible
+    : pricing.annualPrepayEligible === true;
+  // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
+  // can't prepay (seasonal9) while annual prepay is chosen must send the
+  // customer back through the payment choice — the next confirm would 400
+  // mid-flow against a combination the server rejects.
+  useEffect(() => {
+    if (!annualPrepayEligibleEffective && paymentPreference === 'prepay_annual') {
+      setPaymentPreference(null);
+      setCtaPhase('configure');
+      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
+    }
+  }, [annualPrepayEligibleEffective, paymentPreference]);
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -5353,7 +5377,7 @@ function EstimateViewPageInner() {
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}
                 selectedFrequency={combinedFrequency}
@@ -5419,7 +5443,7 @@ function EstimateViewPageInner() {
             submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold
-              && (pricing.annualPrepayEligible === true || pricing.setupFee?.waivedWithPrepay)
+              && (annualPrepayEligibleEffective || pricing.setupFee?.waivedWithPrepay)
               ? (
                 <button
                   type="button"
@@ -5593,7 +5617,7 @@ function EstimateViewPageInner() {
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 invoiceOnly={invoiceOnlyAccept}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}

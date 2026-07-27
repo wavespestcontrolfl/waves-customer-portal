@@ -267,6 +267,22 @@ class SmartRebooker {
         });
       }
     }
+    // A single occurrence of a seasonal (Feb–Oct) series must not move into
+    // the Nov–Jan gap either (codex r10 P1 — small moves skip the series
+    // re-anchor and its guard entirely): an October visit postponed into
+    // November is a prohibited winter treatment. Both parents and seeded
+    // children carry recurring_pattern, so the row's own column decides.
+    // Admin moves stay allowed — an off-season visit is an office decision.
+    if (initiatedBy !== 'admin' && service.recurring_pattern === SEASONAL_FEB_OCT) {
+      const month = Number(newDateStr.slice(5, 7));
+      if (month < 2 || month > 10) {
+        throw Object.assign(new Error('This seasonal program runs February through October — winter dates are not available for this visit. Contact the office if you need an exception.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'OFF_SEASON',
+        });
+      }
+    }
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);

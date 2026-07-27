@@ -507,6 +507,21 @@ describe('seasonal (Feb–Oct) mosquito slot filtering (codex r8 P1)', () => {
     expect(inMosquitoSeason('2027-01-31')).toBe(false);
   });
 
+  test('the winter gap extends the seasonal horizon so February stays reachable (codex r10 P2)', () => {
+    const { nextSeasonStartFrom, seasonalMaxHorizonDays } = require('../services/estimate-slot-availability');
+    expect(nextSeasonStartFrom('2026-06-15')).toBe('2026-06-15');
+    expect(nextSeasonStartFrom('2026-11-01')).toBe('2027-02-01');
+    expect(nextSeasonStartFrom('2026-12-25')).toBe('2027-02-01');
+    expect(nextSeasonStartFrom('2027-01-05')).toBe('2027-02-01');
+    // Nov 1: Feb 1 is 92 days out — past the standard 90-day horizon, which
+    // made a seasonal first visit unbookable online — plus the browse window.
+    expect(seasonalMaxHorizonDays(new Date('2026-11-01T12:00:00-05:00'))).toBe(92 + 14);
+    // In season, the standard horizon applies untouched.
+    expect(seasonalMaxHorizonDays(new Date('2026-06-15T12:00:00-04:00'))).toBe(90);
+    // Late January: the gap is short, so the standard horizon still dominates.
+    expect(seasonalMaxHorizonDays(new Date('2027-01-31T12:00:00-05:00'))).toBe(90);
+  });
+
   test('the slot list drops Nov–Jan days for a seasonal selection only', () => {
     const slots = [
       { slotId: 'a', date: '2026-10-30' },

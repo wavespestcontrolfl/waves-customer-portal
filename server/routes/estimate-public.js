@@ -8167,9 +8167,11 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
-    if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
-      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
-    }
+    // Annual-prepay service-mix eligibility is adjudicated BELOW, after
+    // selectedFrequency resolves — a mosquito ladder pick overrides the
+    // stored default row in both directions (codex r10 P1): seasonal9 can't
+    // prepay even when the stored row is monthly, and monthly12 CAN prepay
+    // even when the stored row is seasonal.
     // Existing customers are pay-per-application only — the page never offers
     // prepay, but a stale/crafted client could still POST it. Reject so
     // EstimateConverter can't open an annual prepay invoice/term for them.
@@ -8193,6 +8195,21 @@ router.put('/:token/accept', async (req, res, next) => {
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+    }
+    // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
+    // entries carry their own annualPrepayEligible (finalizePricingBundle);
+    // that flag decides for the SELECTED tier — the stored-mix rule remains
+    // for everything else. Runs before any billing side effects.
+    if (annualPrepaySelected) {
+      const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
+        ? selectedFrequency.annualPrepayEligible
+        : null;
+      const prepayMixEligible = tierPrepayFlag != null
+        ? tierPrepayFlag
+        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+      if (!prepayMixEligible) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
     }
     // Per-service cadence: in a bundle the customer may pick each selectable
     // service's cadence independently. `serviceCadences` maps a service key to
@@ -12097,6 +12114,37 @@ function annualPrepayEligibleForEstimateData(estData) {
   if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+}
+
+// A mosquito ladder entry (seasonal9 / monthly12). The customer switches
+// tiers live, so prepay eligibility must follow the SELECTED tier, not the
+// stored default row (codex r10 P1): seasonal can't prepay, monthly can —
+// in BOTH directions of the default.
+function frequencyIsMosquitoTier(frequency = {}) {
+  return String(frequency?.serviceCategory || '') === 'mosquito';
+}
+
+function frequencyIsSeasonalMosquitoTier(frequency = {}) {
+  if (!frequencyIsMosquitoTier(frequency)) return false;
+  return String(frequency.key || frequency.tierKey || '') === 'seasonal9'
+    || Number(frequency.visitsPerYear) === 9;
+}
+
+// Prepay eligibility with the mix's mosquito row replaced by the given tier —
+// the same substitution acceptance performs when it restamps the selected
+// tier onto the row before conversion. All non-mosquito rules (existing
+// customer, termite bond, one-time-only) keep their normal effect.
+function annualPrepayEligibleForMosquitoTier(estData, frequency) {
+  if (!estData || typeof estData !== 'object') return false;
+  if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
+  if (frequencyIsSeasonalMosquitoTier(frequency)) return false;
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  const swapped = (recurringSvcList || []).map((svc) => (
+    RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+      ? { service: 'mosquito', name: svc.name, visitsPerYear: Number(frequency?.visitsPerYear) || 12 }
+      : svc));
+  return isAnnualPrepayEligibleServiceMix(swapped, oneTimeList);
 }
 
 // Does annual prepay carry a SELLABLE incentive for this estimate? Mirrors
@@ -16299,6 +16347,17 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   if (withQuoteState.annualPrepayEligible === true
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
+  }
+  // Per-tier prepay eligibility for the mosquito ladder (codex r10 P1): the
+  // estimate-level flag reflects the STORED default row, but seasonal9 can't
+  // prepay while monthly12 can — stamp each mosquito frequency so the client
+  // resolves the option from the SELECTED tier. Accept and /deposit-intent
+  // enforce the same per-tier rule server-side.
+  if (Array.isArray(withQuoteState.frequencies)) {
+    withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
+      frequencyIsMosquitoTier(frequency)
+        ? { ...frequency, annualPrepayEligible: annualPrepayEligibleForMosquitoTier(estData, frequency) }
+        : frequency));
   }
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped

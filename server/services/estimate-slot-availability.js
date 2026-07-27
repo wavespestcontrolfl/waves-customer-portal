@@ -29,7 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { isEnabled } = require('../config/feature-gates');
@@ -540,6 +540,32 @@ function inMosquitoSeason(dateStr) {
 function filterSeasonalSlots(slots = [], serviceProfile) {
   if (!seasonalSelectionProfile(serviceProfile)) return slots;
   return slots.filter((slot) => inMosquitoSeason(slot.date));
+}
+
+// First day of the mosquito season on/after the given ET date string: an
+// in-season date passes through; Nov/Dec resolve to the FOLLOWING Feb 1,
+// January to its own Feb 1.
+function nextSeasonStartFrom(dateStr) {
+  const m = Number(String(dateStr || '').slice(5, 7));
+  if (m >= 2 && m <= 10) return String(dateStr);
+  const y = Number(String(dateStr).slice(0, 4));
+  return `${m === 1 ? y : y + 1}-02-01`;
+}
+
+// How many days out the seasonal offer surfaces may reach. In season this is
+// the standard horizon. In the Nov–Jan gap the standard 90-day horizon can
+// end BEFORE the season opens (Feb 1 is 91–92 days out on Nov 1–2), which
+// would make a seasonal first visit unbookable online for those days — so the
+// horizon extends across the gap to the season opener plus the default
+// browse window (codex r10 P2). Bounded: at worst ~Feb 1 + windowDays.
+function seasonalMaxHorizonDays(now = new Date()) {
+  const today = etDateString(now);
+  const seasonStart = nextSeasonStartFrom(today);
+  if (seasonStart === today) return MAX_SLOT_HORIZON_DAYS;
+  const gapDays = Math.round(
+    (new Date(`${seasonStart}T12:00:00Z`) - new Date(`${today}T12:00:00Z`)) / 86400000,
+  );
+  return Math.max(MAX_SLOT_HORIZON_DAYS, gapDays + DEFAULT_OPTS.windowDays);
 }
 
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
@@ -1391,9 +1417,24 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   // A caller-supplied explicit window (specific date or AI-parsed range)
   // overrides the rolling windowDays lookahead.
-  const { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
+  let { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
     ? { dateFrom: opts.dateFrom, dateTo: opts.dateTo }
     : etDateRange(opts.windowDays);
+  // Seasonal selection in the Nov–Jan gap: the rolling window would sit
+  // entirely inside the gap and filter to ZERO offerable days. Open the
+  // DEFAULT window at the season start instead so the first in-season dates
+  // are bookable all winter (codex r10 P2). Explicit/AI windows keep their
+  // requested dates — an all-winter search legitimately returns nothing.
+  if (!(opts.dateFrom && opts.dateTo) && seasonalSelectionProfile(serviceProfile)) {
+    const seasonStart = nextSeasonStartFrom(dateFrom);
+    if (seasonStart !== dateFrom) {
+      dateFrom = seasonStart;
+      dateTo = etDateString(addETDays(
+        parseETDateTime(`${seasonStart}T12:00`),
+        Math.max(1, Number(opts.windowDays) || DEFAULT_OPTS.windowDays),
+      ));
+    }
+  }
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every
   // filterCollidingSlots pass — reserveSlot resolves the same zone (same
@@ -1553,10 +1594,23 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const { parseWhen, summarizeWindow } = require('./scheduling/parse-when');
   const query = String(userOpts.query || '').trim();
 
+  // Seasonal selections may search across the winter gap ("February") even
+  // when the standard 90-day horizon ends before the season opens.
+  let maxDaysOut = MAX_SLOT_HORIZON_DAYS;
+  try {
+    const estimateRow = await db('estimates').where({ id: estimateId }).first();
+    if (estimateRow && seasonalSelectionProfile(resolveEstimateSlotProfile(estimateRow, {
+      serviceMode: userOpts.serviceMode,
+      selectedFrequency: userOpts.selectedFrequency,
+    }))) {
+      maxDaysOut = seasonalMaxHorizonDays();
+    }
+  } catch { /* fall back to the standard horizon */ }
+
   const when = await parseWhen(query, {
     now: new Date(),
     minDaysOut: 0,
-    maxDaysOut: MAX_SLOT_HORIZON_DAYS,
+    maxDaysOut,
     defaultWindowDays: DEFAULT_OPTS.windowDays,
   });
 
@@ -1691,6 +1745,8 @@ module.exports = {
   resolveEstimateSlotProfile,
   seasonalSelectionProfile,
   inMosquitoSeason,
+  nextSeasonStartFrom,
+  seasonalMaxHorizonDays,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.
   SLOT_DAY_START_MINUTES,

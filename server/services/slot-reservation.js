@@ -305,13 +305,13 @@ async function reserveSlot({
     throw err;
   }
   // No offer surface produces slots beyond MAX_SLOT_HORIZON_DAYS (the public
-  // route clamps ?windowDays and the AI date search caps maxDaysOut there).
-  if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
-    const err = new Error('slot date is beyond the booking horizon');
-    err.code = 'SLOT_UNAVAILABLE';
-    err.slotId = slotId;
-    throw err;
-  }
+  // route clamps ?windowDays and the AI date search caps maxDaysOut there) —
+  // EXCEPT seasonal selections in the winter gap, whose window opens at the
+  // next Feb 1 (codex r10 P2: on Nov 1–2 that is 91–92 days out). Whether the
+  // extended horizon applies needs the estimate's profile, which resolves
+  // inside the transaction, so a beyond-standard date is only NOTED here and
+  // adjudicated after profile resolution below.
+  const beyondStandardHorizon = date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
 
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
@@ -378,13 +378,27 @@ async function reserveSlot({
       // selectedFrequency seasonal9, and the converter would then seed the
       // series from a Nov–Jan parent, counting a prohibited winter visit
       // toward the nine. Office/admin bookings don't come through this route.
-      if (serviceProfile
-        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile)
-        && !estimateSlotAvailability.inMosquitoSeason(date)) {
+      const seasonalSelection = !!serviceProfile
+        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
+      if (seasonalSelection && !estimateSlotAvailability.inMosquitoSeason(date)) {
         const err = new Error('This seasonal program runs February through October — pick an in-season date.');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+      // Deferred horizon adjudication (see the pre-txn note): standard callers
+      // keep the 90-day ceiling; a seasonal selection may reach the extended
+      // winter-gap horizon its slot list was generated with.
+      if (beyondStandardHorizon) {
+        const allowedDays = seasonalSelection
+          ? estimateSlotAvailability.seasonalMaxHorizonDays()
+          : MAX_SLOT_HORIZON_DAYS;
+        if (date > etDateString(addETDays(new Date(), allowedDays))) {
+          const err = new Error('slot date is beyond the booking horizon');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
       }
       const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
         ? Number(serviceProfile.durationMinutes)

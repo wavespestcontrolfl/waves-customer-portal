@@ -227,29 +227,43 @@ router.get('/:token/available-slots', async (req, res) => {
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
-    // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
-    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
-    // rejects any slot past MAX_SLOT_HORIZON_DAYS in ET, so browsing must not
-    // display far-future days whose every slot would 409 on the first tap.
-    // Same ET day-string compare, same strict `>` so the boundary day both
-    // displays and reserves. Silently substituting the default window (the
-    // windowDays treatment) would mislead here — the customer asked for a
-    // specific day — so an out-of-horizon date is a 400 like find-slots'
-    // out-of-bound query.
-    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
-        return res.status(400).json({ error: 'date is beyond the booking horizon' });
-      }
-      opts.dateFrom = date;
-      opts.dateTo = date;
-    }
     if (typeof req.query.timeOfDay === 'string' && req.query.timeOfDay.trim()) {
       opts.timeOfDay = req.query.timeOfDay.trim();
     }
     opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
+    }
+    // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
+    // rejects any slot past the horizon in ET, so browsing must not display
+    // far-future days whose every slot would 409 on the first tap. Same ET
+    // day-string compare, same strict `>` so the boundary day both displays
+    // and reserves. Seasonal selections use the extended winter-gap horizon
+    // (their default window opens at the next Feb 1, which can sit past the
+    // standard 90 days on Nov 1–2 — codex r10 P2); resolved AFTER
+    // serviceMode/selectedFrequency parse so the profile matches reserve's.
+    // Silently substituting the default window (the windowDays treatment)
+    // would mislead here — the customer asked for a specific day — so an
+    // out-of-horizon date is a 400 like find-slots' out-of-bound query.
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      const slotAvailability = require('../services/estimate-slot-availability');
+      // Guarded like slot-reservation's profile resolution — suites mock this
+      // module down to the functions they assert on.
+      const seasonalBrowse = typeof slotAvailability.resolveEstimateSlotProfile === 'function'
+        && typeof slotAvailability.seasonalSelectionProfile === 'function'
+        && slotAvailability.seasonalSelectionProfile(
+          slotAvailability.resolveEstimateSlotProfile(estimate, opts),
+        );
+      const browseHorizonDays = seasonalBrowse && typeof slotAvailability.seasonalMaxHorizonDays === 'function'
+        ? slotAvailability.seasonalMaxHorizonDays()
+        : MAX_SLOT_HORIZON_DAYS;
+      if (date > etDateString(addETDays(new Date(), browseHorizonDays))) {
+        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      }
+      opts.dateFrom = date;
+      opts.dateTo = date;
     }
 
     try {
@@ -552,7 +566,25 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       if (resolveEstimateInvoiceMode(estimate, estData)) {
         return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
       }
-      if (!annualPrepayEligibleForEstimateData(estData)) {
+      // Tier-aware (codex r10 P1): the mosquito ladder's SELECTED tier
+      // carries its own eligibility (stamped by finalizePricingBundle) —
+      // seasonal9 must refuse the deposit even when the stored default row is
+      // monthly, and monthly12 may proceed even when the stored row is
+      // seasonal. Old clients that omit selectedFrequency keep the
+      // stored-mix rule (fail-closed for seasonal-default estimates).
+      const prepayFreqKey = typeof req.body?.selectedFrequency === 'string'
+        ? req.body.selectedFrequency.trim()
+        : '';
+      const prepayFreq = prepayFreqKey
+        ? [
+          ...(Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : []),
+          ...(Array.isArray(pricingBundle?.hiddenLawnFrequencies) ? pricingBundle.hiddenLawnFrequencies : []),
+        ].find((f) => f?.key === prepayFreqKey)
+        : null;
+      const prepayEligibleHere = prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean'
+        ? prepayFreq.annualPrepayEligible
+        : annualPrepayEligibleForEstimateData(estData);
+      if (!prepayEligibleHere) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
       // Mirror the converter's fail-closed multi-service block

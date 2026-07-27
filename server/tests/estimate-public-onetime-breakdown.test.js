@@ -2131,6 +2131,14 @@ describe('public estimate one-time breakdown', () => {
       expect.objectContaining({ service: 'waveguard_setup', waivedWithPrepay: false }),
     ]);
     expect(payload.setupFee).toEqual(expect.objectContaining({ service: 'waveguard_setup' }));
+    // Per-tier eligibility (codex r10 P1): the customer switches tiers live,
+    // so each mosquito ladder entry carries its own flag — seasonal9 can't
+    // prepay, monthly12 can — regardless of which row is the stored default.
+    // Client, accept, and /deposit-intent all resolve from the SELECTED tier.
+    expect(payload.services[0].frequencies.find((f) => f.key === 'seasonal9'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: false }));
+    expect(payload.services[0].frequencies.find((f) => f.key === 'monthly12'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: true }));
   });
 
   test('German Roach Cleanout contract surfaces roach specialty chips, not generic ant chips', async () => {
