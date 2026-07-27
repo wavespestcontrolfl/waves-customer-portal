@@ -48,14 +48,23 @@ const confirmCalls = () => byKeyCalls('update');
 // { rows }) and inert SQL fragments used as query-builder values (prune's
 // interval). Route on the SQL text; `claims` yields one result per claim
 // call, defaulting to "window claimed".
-function mockDbRaw(claims = []) {
-  const queue = [...claims];
+const PENDING_SQL_RE = /SELECT \(delivered_at IS NULL\)/i;
+
+function mockDbRaw(claims = [], pendingStates = []) {
+  const claimQueue = [...claims];
+  const pendingQueue = [...pendingStates];
   db.raw = jest.fn((sql) => {
-    if (CLAIM_SQL_RE.test(String(sql))) {
-      const claimed = queue.length ? queue.shift() : true;
+    const s = String(sql);
+    if (CLAIM_SQL_RE.test(s)) {
+      const claimed = claimQueue.length ? claimQueue.shift() : true;
       return Promise.resolve({
         rows: claimed ? [{ dedupe_key: 'claimed', claimed_at: '2026-07-27 12:00:00.123456+00' }] : [],
       });
+    }
+    if (PENDING_SQL_RE.test(s)) {
+      // Default: the blocking row was a delivered duplicate.
+      const state = pendingQueue.length ? pendingQueue.shift() : { pending: false, retry_in_s: 0 };
+      return Promise.resolve({ rows: [state] });
     }
     return { __rawFragment: sql };
   });
@@ -301,6 +310,62 @@ describe('Twilio failure alerts', () => {
     );
     expect(releaseCalls()[0].whereNull).toHaveBeenCalledWith('delivered_at');
     expect(confirmCalls()).toHaveLength(0);
+  });
+
+  test('a caller blocked by another process\'s pending lease retries after expiry', async () => {
+    jest.useFakeTimers();
+    try {
+      // First claim refused by a PENDING row (cross-process lease); after the
+      // lease window passes, the retry claims and dispatches.
+      mockDbRaw([false, true], [{ pending: true, retry_in_s: 1 }]);
+
+      const promise = alertTwilioFailure({
+        channel: 'sms',
+        direction: 'outbound',
+        status: 'failed',
+        to: '+19415550009',
+      });
+      await jest.advanceTimersByTimeAsync(20000);
+
+      const result = await promise;
+      expect(result).toEqual({ bellWritten: true, push: null });
+      expect(claimedKeys()).toHaveLength(2);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a lease still contested after one retry is skipped, a delivered row is a duplicate', async () => {
+    jest.useFakeTimers();
+    try {
+      mockDbRaw(
+        [false, false],
+        [{ pending: true, retry_in_s: 0 }, { pending: true, retry_in_s: 0 }]
+      );
+
+      const promise = alertTwilioFailure({
+        channel: 'sms',
+        direction: 'outbound',
+        status: 'failed',
+        to: '+19415550009',
+      });
+      await jest.advanceTimersByTimeAsync(20000);
+
+      expect(await promise).toEqual({ skipped: true, reason: 'pending_conflict' });
+      expect(triggerNotification).not.toHaveBeenCalled();
+
+      // Refused claim + delivered row (default pending state) → duplicate, no retry.
+      mockDbRaw([false]);
+      expect(await alertTwilioFailure({
+        channel: 'sms',
+        direction: 'outbound',
+        status: 'failed',
+        to: '+19415550009',
+      })).toEqual({ skipped: true, reason: 'duplicate' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('an overlapping same-key caller takes over after a failed dispatch', async () => {

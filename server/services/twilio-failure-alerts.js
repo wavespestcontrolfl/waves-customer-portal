@@ -20,6 +20,10 @@ const DEDUPE_WINDOW_HOURS = 24;
 const DEDUPE_PENDING_LEASE_MINUTES = 5;
 // Rows whose window ended this long ago are dead state — prune opportunistically.
 const DEDUPE_PRUNE_DAYS = 30;
+// Slack added past lease expiry before a blocked caller retries its claim.
+const DEDUPE_RETRY_BUFFER_MS = 5000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -114,6 +118,29 @@ async function claimAlertWindow(dedupeKey) {
   }
 }
 
+// When a claim is refused, tell a delivered duplicate (suppress) apart from
+// another process's still-pending lease (worth retrying — the owner may have
+// crashed or its dispatch may fail). Row already gone → it was released →
+// retry immediately. Unknown state → treat as duplicate: the claim was
+// refused by an in-window row, which is overwhelmingly a delivered one.
+async function pendingLeaseState(dedupeKey) {
+  try {
+    const result = await db.raw(
+      `SELECT (delivered_at IS NULL) AS pending,
+              GREATEST(0, EXTRACT(EPOCH FROM (last_alerted_at + (? * interval '1 minute') - now()))) AS retry_in_s
+       FROM twilio_alert_dedupe
+       WHERE dedupe_key = ?`,
+      [DEDUPE_PENDING_LEASE_MINUTES, dedupeKey]
+    );
+    const row = (result.rows || [])[0];
+    if (!row) return { pending: true, retryInMs: 0 };
+    return { pending: !!row.pending, retryInMs: Math.ceil(Number(row.retry_in_s || 0) * 1000) };
+  } catch (err) {
+    logger.warn(`[twilio-alerts] pending-lease check failed: ${err.message}`);
+    return { pending: false, retryInMs: 0 };
+  }
+}
+
 // Confirm the lease to the full window once a channel received the alert —
 // but only OUR lease: a newer claim (different last_alerted_at) is left
 // untouched. On error the row stays pending and expires after the lease —
@@ -162,9 +189,23 @@ function pruneStaleDedupeRows() {
 // still serialize (an async-checked map would let both pass the check first).
 const pendingDispatches = new Map();
 
-async function runAlert(dedupeKey, notification) {
+async function runAlert(dedupeKey, notification, attempt = 0) {
   const claim = await claimAlertWindow(dedupeKey);
-  if (!claim.claimed) return { skipped: true, reason: 'duplicate' };
+  if (!claim.claimed) {
+    // Same-process callers never reach here while a dispatch is in flight
+    // (they chain on pendingDispatches) — a refused claim on a PENDING row
+    // means another process holds the lease. Wait it out and retry once: if
+    // the owner delivered, the retry sees a delivered duplicate; if it
+    // crashed or failed, the retry claims the expired lease and alerts.
+    const state = await pendingLeaseState(dedupeKey);
+    if (!state.pending) return { skipped: true, reason: 'duplicate' };
+    if (attempt >= 1) {
+      logger.warn('[twilio-alerts] pending lease still contested after retry — skipping');
+      return { skipped: true, reason: 'pending_conflict' };
+    }
+    await sleep(state.retryInMs + DEDUPE_RETRY_BUFFER_MS);
+    return runAlert(dedupeKey, notification, attempt + 1);
+  }
   pruneStaleDedupeRows();
 
   logger.warn(notification.logLine);
