@@ -4904,6 +4904,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // narrative names the areas, and Products Applied carries the products —
   // the lettered A-E list + "Completed 5" chips read as duplication.
   const hideCoverageCard = Boolean(data.pestReportV2)
+    // Rodent refresh: when the server suppressed coverage (enabled: false —
+    // the trap map renders in its place), hide the ENTIRE mount, traced map
+    // included. ServiceCoverageCard lets a traced snapshot bypass the
+    // enabled flag, which would render the coverage card alongside the trap
+    // map this suppression exists to deduplicate (codex round-2 P2). A
+    // refreshed rodent report the server did NOT suppress (no station map)
+    // keeps the card — and its traced override — as before.
+    || Boolean(data.rodentReportRefresh && data.serviceCoverage?.enabled === false)
     || ((data.serviceLine === 'lawn'
       || /tree|shrub/.test(String(data.serviceLine || ''))
       // Mosquito V2's habitat diagram replaces the lettered map the same way.

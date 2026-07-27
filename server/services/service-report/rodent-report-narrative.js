@@ -267,6 +267,22 @@ function numberTokens(text) {
   return String(text || '').match(/\d+(?:[:.,]\d+)*/g) || [];
 }
 
+// Word-form numbers are normalized to numerals BEFORE validation so "five
+// traps" can't route around the numeral checks (codex round-2 P1). "one" is
+// included deliberately — the partitive filter below keeps "one of the
+// traps" from tripping the count check.
+const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/gi;
+const WORD_NUMBER_VALUES = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
+  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20,
+};
+
+function normalizeWordNumbers(text) {
+  return String(text || '').replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]));
+}
+
 function collectNumbers(set, value) {
   if (value == null) return;
   if (typeof value === 'object') {
@@ -288,9 +304,53 @@ function groundedNumberSet(facts) {
   return set;
 }
 
-// Returns the list of ungrounded claims found in the text (empty = clean).
-function ungroundedClaims(text, facts) {
+// Numbers that may legitimately count traps/stations/devices: the station
+// facts themselves plus numeric typed-finding values ("Traps checked: 7").
+// Empty when nothing grounds a count — any count claim then fails closed.
+function stationCountSet(facts) {
+  const set = new Set();
+  Object.values(facts.stations || {}).forEach((value) => {
+    if (typeof value === 'number') set.add(value);
+  });
+  (facts.findings || []).forEach((finding) => {
+    const n = Number(String(finding.value).trim());
+    if (Number.isFinite(n)) set.add(n);
+  });
+  return set;
+}
+
+// "N traps" / "N of M stations" / "N captures" claims validated against the
+// facts they describe, not the global number pool — with 7 traps and a 0-5
+// activity scale, "we checked 5 traps" must NOT pass just because 5 exists
+// somewhere in the facts (codex round-2 P1). Runs on word-number-normalized
+// text so "five traps" is checked too; partitive phrasing without a count
+// ("one of the traps") is exempt via the filler check.
+const COUNT_NOUN_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(traps?|stations?|devices?|captures?)\b/gi;
+
+function contextualCountProblems(text, facts) {
   const problems = [];
+  const allowed = stationCountSet(facts);
+  const re = new RegExp(COUNT_NOUN_RE.source, 'gi');
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const [, first, second, filler] = match;
+    if (/\bof\b/i.test(filler || '')) continue; // "1 of the traps" — no count claimed
+    for (const raw of [first, second]) {
+      if (raw == null) continue;
+      if (!allowed.has(Number(raw))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    }
+  }
+  return problems;
+}
+
+// Returns the list of ungrounded claims found in the text (empty = clean).
+// The global numeral check runs on the RAW text (a word-form "one" in
+// harmless prose must not be flagged as an ungrounded numeral); the
+// count-noun check runs on word-number-normalized text so spelled-out
+// counts can't route around it.
+function ungroundedClaims(rawText, facts) {
+  const problems = [];
+  const text = String(rawText || '');
   const allowed = groundedNumberSet(facts);
   for (const token of numberTokens(text)) {
     const grounded = allowed.has(token)
@@ -298,6 +358,7 @@ function ungroundedClaims(text, facts) {
       || token.split(/[:.,]/).every((part) => allowed.has(part) || allowed.has(String(Number(part))));
     if (!grounded) problems.push(`ungrounded_number:${token}`);
   }
+  problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   // Capture/consumption claims must not appear positively when the facts
   // record none of that activity ("we removed a capture" with zero traps
   // flagged). Negated forms ("no captures were recorded") are fine.

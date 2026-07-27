@@ -132,6 +132,16 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('No captures were recorded on this visit.', facts)).toEqual([]);
   // consumption claims need a bait-station fact
   expect(ungroundedClaims('Bait consumption was observed at the rear station.', facts)).toContain('unsupported_consumption_claim');
+
+  // counts are validated against the fact they describe, not the global
+  // number pool: 5 is grounded (activity maxScore) but is NOT a trap count
+  // (codex round-2 P1)
+  expect(ungroundedClaims('We checked 5 traps today.', facts)).toContain('uncorroborated_count:5 traps');
+  // spelled-out counts can't route around the numeral check
+  expect(ungroundedClaims('We checked five traps today.', facts)).toContain('uncorroborated_count:5 traps');
+  expect(ungroundedClaims('We inspected all seven traps today.', facts)).toEqual([]);
+  // partitive phrasing claims no count and harmless word-numbers stay clean
+  expect(ungroundedClaims('One of the traps was relocated to the attic entry.', facts)).toEqual([]);
 });
 
 test('deterministic summary = ratified copy + factual counts + next visit', () => {
