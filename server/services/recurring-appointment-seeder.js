@@ -19,9 +19,31 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
+
+// Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
+// 2026-07-27). Nine in-season months (Feb-Oct) means a February start runs
+// Feb->Oct exactly; a mid/off-season start still gets all 9 by rolling across
+// the winter gap (a July start runs Jul-Oct, skips Nov-Jan, resumes Feb-Jun).
+// Not a MONTH_RECURRENCE_INTERVALS cadence — the gap is 1 month in season and
+// 4 months across the winter, so it needs its own date walk.
+const SEASONAL_FEB_OCT = 'seasonal_feb_oct';
+const SEASON_FIRST_MONTH = 2;   // February
+const SEASON_LAST_MONTH = 10;   // October
+const SEASON_MONTHS_PER_YEAR = SEASON_LAST_MONTH - SEASON_FIRST_MONTH + 1; // 9
+
+// Position of an in-season month on a continuous Feb..Oct timeline. An
+// off-season base sits one slot BEFORE the coming February, so follow-up 1
+// lands on that February.
+function seasonOrdinalForBase(year, month) {
+  if (month < SEASON_FIRST_MONTH) return year * SEASON_MONTHS_PER_YEAR - 1;
+  if (month > SEASON_LAST_MONTH) return (year + 1) * SEASON_MONTHS_PER_YEAR - 1;
+  return year * SEASON_MONTHS_PER_YEAR + (month - SEASON_FIRST_MONTH);
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
+  [SEASONAL_FEB_OCT]: 9,
   bimonthly: 6,
   quarterly: 4,
   triannual: 3,
@@ -54,6 +76,10 @@ function normalizeRecurringPattern(value) {
   // seasonal rows carry 9 visits and must not reclassify); only the explicit
   // frequency text selects this cadence.
   if (['every6weeks', 'everysixweeks', '6weeks', 'sixweeks', '9x', '9xperyear'].includes(compact)) return 'every_6_weeks';
+  // Seasonal mosquito (9 visits, Feb-Oct). EXPLICIT tokens only, for the same
+  // reason as every_6_weeks above: numeric 9-visit inference must stay
+  // 'bimonthly' so legacy 9-visit rows keep their office-scheduled behavior.
+  if ([SEASONAL_FEB_OCT.replace(/_/g, ''), 'seasonalfeboctober', 'seasonal9', 'seasonal9x'].includes(compact)) return SEASONAL_FEB_OCT;
   if (['bimonthly', 'bimonth', 'bimonthlypest', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bimonthly';
   if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
   if (['triannual', 'threetimesyearly', '3x', '3xperyear'].includes(compact)) return 'triannual';
@@ -69,7 +95,7 @@ function normalizeRecurringPattern(value) {
   if (compact === 'biweekly') return 'biweekly';
   const visits = Number(raw);
   if (Number.isFinite(visits) && visits > 0) return patternFromVisitsPerYear(visits);
-  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks'].includes(raw)) return raw;
+  if (MONTH_RECURRENCE_INTERVALS[raw] || ['weekly', 'biweekly', 'daily', 'custom', 'every_6_weeks', SEASONAL_FEB_OCT].includes(raw)) return raw;
   return null;
 }
 
@@ -190,6 +216,18 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const targetYear = baseEt.year + Math.floor(totalMonths / 12);
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
+  }
+  if (pattern === SEASONAL_FEB_OCT) {
+    // Walk the Feb..Oct timeline, then convert back to a plain month delta so
+    // the shared helper keeps this cadence's day-of-month/weekday semantics
+    // identical to every other month-based pattern.
+    const baseEt = etParts(base);
+    const target = seasonOrdinalForBase(baseEt.year, baseEt.month) + i;
+    const targetYear = Math.floor(target / SEASON_MONTHS_PER_YEAR);
+    const targetMonth = (((target % SEASON_MONTHS_PER_YEAR) + SEASON_MONTHS_PER_YEAR) % SEASON_MONTHS_PER_YEAR)
+      + SEASON_FIRST_MONTH;
+    const monthDelta = (targetYear - baseEt.year) * 12 + (targetMonth - baseEt.month);
+    return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
   }
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
@@ -649,6 +687,7 @@ module.exports = {
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,
+  SEASONAL_FEB_OCT,
   markParentRecurring,
   normalizeRecurringPattern,
   patternFromVisitsPerYear,

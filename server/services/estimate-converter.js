@@ -1353,6 +1353,22 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'quarterly') return visits == null || visits === 4;
     return false;
   }
+  // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
+  // plan booked its FIRST visit and never created the rest — the customer was
+  // billed monthly for a series they did not get. Same failure the T&S audit
+  // found; monthly mosquito was already live and bookable when this shipped.
+  //
+  // Seasonal is gated on the EXPLICIT seasonal cadence, never on a bare
+  // 9-visit count: numeric 9-visit inference resolves to 'bimonthly', and
+  // seeding a 9-visit seasonal plan at 2-month gaps would be the wrong cadence
+  // AND the wrong dates. A legacy row that reaches here as bimonthly keeps
+  // office scheduling, exactly as before.
+  if (key === 'mosquito') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) return visits === 9;
+    if (pattern === 'monthly') return visits == null || visits === 12;
+    return false;
+  }
   return false;
 }
 
@@ -1403,6 +1419,17 @@ function cadenceFallbackForSeeding(svc = {}, fallbackFrequency) {
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'termite_bait'
     && visitsPerYearForRecurringService(svc)) {
     return null;
+  }
+  // Seasonal mosquito carries no cadence TEXT the inference can read — its
+  // label is "Seasonal Mosquito Program (9 visits)", which matches no pattern —
+  // so without this it falls through to the numeric rule and resolves to
+  // 'bimonthly'. Supply the explicit seasonal cadence as the fallback. It is
+  // the LAST inference candidate, so a line that does carry real cadence text
+  // still wins; if that text disagrees with the 9-visit count,
+  // supportsConverterFollowUpSeeding declines and the office schedules.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+    && visitsPerYearForRecurringService(svc) === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
   return fallbackFrequency;
 }

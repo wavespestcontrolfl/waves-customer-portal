@@ -126,6 +126,46 @@ describe('resolveFirstApplicationAmount — per-application precedence', () => {
   });
 });
 
+describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27)', () => {
+  const { supportsConverterFollowUpSeeding, converterFollowUpSeedingPattern } = EstimateConverter;
+  const SEASONAL = 'seasonal_feb_oct';
+  const seasonalRow = { name: 'Seasonal Mosquito Program (9 visits)', service: 'mosquito', visitsPerYear: 9 };
+  const monthlyRow = { name: 'Monthly Mosquito Program (12 visits)', service: 'mosquito', visitsPerYear: 12 };
+
+  test('monthly 12x seeds its series', () => {
+    // Already live and bookable before this shipped: a sold plan booked visit 1
+    // and never created the other 11.
+    expect(supportsConverterFollowUpSeeding(monthlyRow, {}, 'monthly')).toBe(true);
+  });
+
+  test('seasonal 9x seeds only on the explicit seasonal cadence', () => {
+    expect(supportsConverterFollowUpSeeding(seasonalRow, {}, SEASONAL)).toBe(true);
+    // Numeric inference resolves 9 visits to bimonthly; seeding that would be
+    // the wrong cadence AND the wrong dates, so it must decline.
+    expect(supportsConverterFollowUpSeeding(seasonalRow, {}, 'bimonthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding(seasonalRow, {}, 'every_6_weeks')).toBe(false);
+  });
+
+  test('a visit count that contradicts the cadence declines rather than guesses', () => {
+    expect(supportsConverterFollowUpSeeding({ ...seasonalRow }, {}, 'monthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding({ ...monthlyRow, visitsPerYear: 9 }, {}, SEASONAL)).toBe(true);
+    expect(supportsConverterFollowUpSeeding({ ...monthlyRow, visitsPerYear: 6 }, {}, 'monthly')).toBe(false);
+  });
+
+  test('cadence resolution picks the seasonal walk for a 9-visit mosquito line', () => {
+    // End-to-end through inference: the seasonal label matches no cadence text,
+    // so without the explicit fallback this line resolves to 'bimonthly'.
+    expect(converterFollowUpSeedingPattern(seasonalRow, {}, null)).toBe(SEASONAL);
+    expect(converterFollowUpSeedingPattern(monthlyRow, {}, null)).toBe('monthly');
+  });
+
+  test('non-mosquito services are unaffected by the seasonal fallback', () => {
+    expect(converterFollowUpSeedingPattern(
+      { name: 'Enhanced Tree & Shrub Care Service', service: 'tree_shrub', visitsPerYear: 9 }, {}, null,
+    )).not.toBe(SEASONAL);
+  });
+});
+
 describe('supportsConverterFollowUpSeeding — tree & shrub series (six-visit mandate)', () => {
   const { supportsConverterFollowUpSeeding } = EstimateConverter;
   const standardRow = {

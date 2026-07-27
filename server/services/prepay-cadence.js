@@ -19,6 +19,9 @@ function visitsPerYearForCadence(cadence) {
     // unknown-cadence message.
     case 'monthly': case 'monthly_nth_weekday': return 12;
     case 'every_6_weeks': return 9;
+    // seasonal_feb_oct (mosquito 9x) is deliberately absent — see
+    // prepayCoverageCadenceForPattern below.
+    case 'seasonal_feb_oct': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
     case 'triannual': case 'every_4_months': return 3;
@@ -42,6 +45,14 @@ function visitsPerYearForCadence(cadence) {
 // from the stored cadence with same-day-of-month math and no nth/weekday
 // context — a "3rd Tuesday" route would get its remaining prepaid visits on
 // arbitrary dates.
+//
+// seasonal_feb_oct (mosquito 9x, 2026-07-27) is UNSUPPORTED for the same
+// reason: its gap is 1 month in season and 4 across the winter, but the
+// coverage seeder fills remaining visits with same-day-of-month math from a
+// single stored cadence — it would place prepaid visits in Nov-Jan, the exact
+// months the program excludes, and those mis-dated visits could complete-bill
+// again. Returning null downgrades the sale to a standard accept (fail closed).
+// Supporting it means teaching the coverage seeder the season first.
 function prepayCoverageCadenceForPattern(cadence) {
   switch (String(cadence || '').trim().toLowerCase().replace(/[\s-]+/g, '_')) {
     case 'monthly': return 'monthly';
