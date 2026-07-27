@@ -14,9 +14,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+const { NON_ENGAGED_LEAD_STATUSES, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
@@ -30,6 +30,33 @@ const LEAD_RESPONSE_SLA_MINUTES = 30;
 // Below this share of live customers on chargeable autopay, the coverage gap
 // itself is an action item (manual collection labor + churn risk).
 const AUTOPAY_COVERAGE_TARGET_PCT = 50;
+
+// Builder termite warranties: the pitch window for winning a new-construction
+// home onto a Waves program opens ahead of the builder coverage lapsing and
+// stays viable a while past it — the homeowner is uncovered, not committed
+// elsewhere. Window sizes are pitch-timing judgment, not a contract term.
+const BUILDER_WARRANTY_WINDOW_DAYS = 60;
+const BUILDER_WARRANTY_GRACE_DAYS = 30;
+
+// The ONE predicate for "builder warranty inside the pitch window" — the
+// alert below and the /admin/leads?builder_warranty=expiring drill both
+// apply this, so the bell count and the list the bell links to can never
+// disagree about which leads qualify (codex P2: the generic /admin/leads
+// link could page the qualifying rows out of view entirely). Column refs are
+// table-qualified so the list route's lead_sources/technicians joins stay
+// unambiguous. Status membership is POSITIVE (open statuses), not a
+// forgot-one-status whereNotIn (codex P2: unresponsive/disqualified leads
+// are closed everywhere else and must not nag here).
+function whereBuilderWarrantyExpiring(qb) {
+  const windowEnd = etDateString(addETDays(new Date(), BUILDER_WARRANTY_WINDOW_DAYS));
+  const graceStart = etDateString(addETDays(new Date(), -BUILDER_WARRANTY_GRACE_DAYS));
+  return qb
+    .whereNull('leads.deleted_at')
+    .whereNotNull('leads.builder_warranty_expires_on')
+    .whereIn('leads.status', OPEN_LEAD_STATUSES)
+    .where('leads.builder_warranty_expires_on', '>=', graceStart)
+    .where('leads.builder_warranty_expires_on', '<=', windowEnd);
+}
 
 // Severity → bell-priority mapping. The existing notification_service
 // metadata already carries `priority: urgent|high|normal|low` and the
@@ -482,6 +509,33 @@ async function computeDashboardAlertsUncached() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
 
+  // 13. Builder termite warranties expiring — open leads whose builder-provided
+  //     coverage lapses inside the pitch window (or lapsed recently enough
+  //     that the home is uncovered and still shopping). The shared
+  //     whereBuilderWarrantyExpiring predicate carries the window (ET
+  //     business-calendar boundaries, never a UTC ISO slice) and the
+  //     open-status membership; the href drill applies the SAME predicate
+  //     server-side, so the linked list shows exactly these leads.
+  try {
+    const expiringLeads = (await excludeInternalLeads(
+      whereBuilderWarrantyExpiring(db('leads')),
+    ).select('leads.id')) || [];
+    const count = expiringLeads.length;
+    if (count > 0) {
+      alerts.push({
+        id: 'builder_warranty_expiring',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        // Membership-aware: a new lead entering the window must re-surface
+        // the alert even if another left it at an unchanged count.
+        members: queueMembers(expiringLeads.map((r) => r.id)),
+        label: `${count} lead${count === 1 ? '' : 's'} with a builder termite warranty expiring soon`,
+        href: '/admin/leads?builder_warranty=expiring',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] builder_warranty_expiring: ${err.message}`); }
+
   // Duplicate customers pending review — pairs sharing a phone that haven't
   // been merged or dismissed. Green-tier pairs clear on the nightly auto-merge
   // sweep (when its gate is on); everything else needs a human verdict in the
@@ -564,4 +618,11 @@ function toNotifications(alerts) {
   }));
 }
 
-module.exports = { computeDashboardAlerts, computeDashboardAlertsUncached, toNotifications };
+module.exports = {
+  computeDashboardAlerts,
+  computeDashboardAlertsUncached,
+  toNotifications,
+  // Shared with routes/admin-leads.js so the bell's builder-warranty count
+  // and its ?builder_warranty=expiring drill list can never disagree.
+  whereBuilderWarrantyExpiring,
+};

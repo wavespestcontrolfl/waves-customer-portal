@@ -27,7 +27,29 @@ const createLeadSchema = Joi.object({
   is_residential: Joi.boolean(),
   is_commercial: Joi.boolean(),
   notes: Joi.string().trim().max(5000).allow('', null),
+  // Builder termite warranty the prospect holds today (new-construction
+  // takeover leads). Provider is a data field — competitor names belong here,
+  // never in code or customer copy. Expiry is a DATE-shaped string; the
+  // column is a calendar date, so no timestamp forms accepted — and it must
+  // be a REAL calendar date (codex P2: the shape regex alone let 2026-02-31
+  // through to a Postgres 500 instead of a 400).
+  builder_warranty_provider: Joi.string().trim().max(80).allow('', null),
+  builder_warranty_expires_on: Joi.string().trim().custom((value, helpers) => {
+    if (!isRealCalendarDate(value)) return helpers.error('any.invalid');
+    return value;
+  }).allow('', null),
 }).unknown(true);
+
+// A YYYY-MM-DD string that names a date that actually exists. JS Date
+// auto-rolls overflow (2026-02-31 → Mar 3), so the round-trip check is what
+// catches impossible dates the shape regex passes.
+function isRealCalendarDate(value) {
+  const str = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
+  const [y, m, d] = str.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
@@ -92,8 +114,10 @@ const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
 // "Open" pipeline statuses — everything still being worked (not won/lost/
 // unresponsive/disqualified/duplicate). The list route expands the virtual
-// `status=open` filter (the Pipeline table's default) to this set.
-const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
+// `status=open` filter (the Pipeline table's default) to this set — shared
+// with the dashboard alerts service so action queues use the same
+// membership.
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -676,6 +700,16 @@ router.get('/', async (req, res, next) => {
     // still being worked. Individual status values pass through unchanged.
     if (status === 'open') query = query.whereIn('leads.status', OPEN_LEAD_STATUSES);
     else if (status) query = query.where('leads.status', status);
+    // Bell drill: the builder_warranty_expiring alert links here with this
+    // param, and the SHARED predicate guarantees the list shows exactly the
+    // leads the bell counted (window + open statuses + non-deleted). The
+    // count query and the internal-lead exclusion are applied below, next to
+    // the source drill's — pagination and membership must match the bell.
+    const builderWarrantyDrill = req.query.builder_warranty === 'expiring';
+    if (builderWarrantyDrill) {
+      const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
+      query = whereBuilderWarrantyExpiring(query);
+    }
     if (source) query = query.where('leads.lead_source_id', source);
     // Drill-down from the dashboard's Marketing Attribution panel, which groups by
     // lead_sources.name — so we filter by the exact display name to match that
@@ -723,10 +757,18 @@ router.get('/', async (req, res, next) => {
     if (channel) countQuery.where('lead_sources.channel', channel);
     if (startDt && !isNaN(startDt)) countQuery.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) countQuery.where('leads.first_contact_at', '<=', endDt);
-    // Dashboard source drill: mirror /admin/dashboard/leads-by-source's
-    // excludeInternalLeads so the drilled rows match the count the owner clicked.
-    // Scoped to the drill path so the day-to-day Leads list is unchanged.
-    if (source_name && INTERNAL_TEST_CUSTOMERS.length) {
+    // Builder-warranty bell drill: the count must honor the same predicate as
+    // the rows (codex P2 — an unfiltered count renders phantom pages), and
+    // the internal-lead exclusion below must apply so the list matches the
+    // bell's membership exactly.
+    if (builderWarrantyDrill) {
+      const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
+      whereBuilderWarrantyExpiring(countQuery);
+    }
+    // Dashboard drills (source panel + builder-warranty bell): mirror
+    // excludeInternalLeads so the drilled rows match the count the owner
+    // clicked. Scoped to the drill paths so the day-to-day list is unchanged.
+    if ((source_name || builderWarrantyDrill) && INTERNAL_TEST_CUSTOMERS.length) {
       const excludeInternal = (qb) =>
         qb.whereNotIn(
           db.raw("LOWER(COALESCE(leads.first_name, '') || ' ' || COALESCE(leads.last_name, ''))"),
@@ -770,6 +812,7 @@ router.post('/', async (req, res, next) => {
       first_name, last_name, phone, email, address, city, zip,
       lead_source_id, lead_type, service_interest, urgency,
       is_residential, is_commercial, notes,
+      builder_warranty_provider, builder_warranty_expires_on,
     } = validated;
 
     const [lead] = await db('leads').insert({
@@ -781,6 +824,8 @@ router.post('/', async (req, res, next) => {
       service_interest, urgency: urgency || 'normal',
       is_residential: is_residential !== false,
       is_commercial: is_commercial === true,
+      builder_warranty_provider: builder_warranty_provider || null,
+      builder_warranty_expires_on: builder_warranty_expires_on || null,
       first_contact_at: new Date(),
       first_contact_channel: 'manual',
       status: 'new',
@@ -894,6 +939,7 @@ router.put('/:id', async (req, res, next) => {
       'disqualification_reason', 'assigned_to', 'estimate_id', 'customer_id',
       'monthly_value', 'initial_service_value', 'waveguard_tier',
       'next_follow_up_at', 'notes',
+      'builder_warranty_provider', 'builder_warranty_expires_on',
     ];
     const existingLead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!existingLead) return res.status(404).json({ error: 'Lead not found' });
@@ -904,6 +950,21 @@ router.put('/:id', async (req, res, next) => {
     }
     if (updates.status !== undefined && !LEAD_STATUS_SET.has(updates.status)) {
       return res.status(400).json({ error: 'Invalid lead status' });
+    }
+    // Mirror the create-side shape rules: clearing sends '', which stores as
+    // NULL; the expiry column is a calendar DATE, so only a date-shaped
+    // string is accepted (a timestamp would smuggle a timezone into it).
+    if (updates.builder_warranty_provider !== undefined) {
+      const provider = String(updates.builder_warranty_provider || '').trim();
+      if (provider.length > 80) return res.status(400).json({ error: 'Invalid builder warranty provider' });
+      updates.builder_warranty_provider = provider || null;
+    }
+    if (updates.builder_warranty_expires_on !== undefined) {
+      const expires = String(updates.builder_warranty_expires_on || '').trim();
+      if (expires && !isRealCalendarDate(expires)) {
+        return res.status(400).json({ error: 'builder_warranty_expires_on must be a real YYYY-MM-DD date' });
+      }
+      updates.builder_warranty_expires_on = expires || null;
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     updates.updated_at = new Date();
