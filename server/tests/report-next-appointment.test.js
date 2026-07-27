@@ -187,6 +187,10 @@ test('a rodent report never claims trap-named visits of OTHER detectable lines',
     scheduled_services: [
       // "trap" token but detectably mosquito — stays off the rodent report
       { id: 'scheduled-mosq-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Mosquito Trap Service', window_start: '08:00:00' },
+      // trapping token, pest-default line, but wildlife work — the negative
+      // guard keeps non-rodent trapping out (codex P1)
+      { id: 'scheduled-wildlife', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Wildlife Trapping', window_start: '09:00:00' },
+      { id: 'scheduled-fly-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Fly Trap Service', window_start: '11:00:00' },
       // quarterly pest visit: not rodent-related, also skipped
       { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-04', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00' },
       { id: 'scheduled-sanitation', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'Sanitation & Cleanup', window_start: '10:00:00' },

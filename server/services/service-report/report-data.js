@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, RODENT_ADJACENT_SERVICE_RE } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -2843,15 +2843,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // pest default). Owner 2026-07-27: the rodent report shows the next
     // service date if and only if it is rodent-related. The widened match
     // only claims names NO other line detects (the 'pest' fallback) — a
-    // "Mosquito Trap Service" still detects as mosquito and stays out.
-    // Other report lines keep the strict same-line match.
+    // "Mosquito Trap Service" still detects as mosquito and stays out —
+    // and isRodentAdjacentServiceType's negative guard keeps non-rodent
+    // trapping ("Wildlife Trapping") out too. Other report lines keep the
+    // strict same-line match.
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
       .find((row) => {
         const rowLine = detectServiceLine(row.service_type);
         if (rowLine === serviceLine) return true;
         return serviceLine === 'rodent'
           && rowLine === 'pest'
-          && RODENT_ADJACENT_SERVICE_RE.test(String(row.service_type || ''));
+          && isRodentAdjacentServiceType(row.service_type);
       }) || null;
     if (nextApptRow && nextApptRow.scheduled_date) {
       const rawDate = nextApptRow.scheduled_date;
@@ -3068,12 +3070,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
-    // Rodent refresh drops the coverage card everywhere (live + PDF): the
-    // trap map + typed report carry the spatial and factual story, and the
-    // zone list duplicated both (owner 2026-07-27). MUST be an explicit
+    // Rodent refresh drops the coverage card ONLY when the trap/station map
+    // actually renders in its place — the zone list duplicated it (owner
+    // 2026-07-27). That means stationMap.available AND a live view: the
+    // client only mounts StationMapCard on mode === 'live' (no satellite
+    // basemap in pdf/static per provider ToS), so PDF renders and rodent
+    // reports with no station map (exclusion/sanitation visits) keep
+    // coverage as their only spatial section. MUST be an explicit
     // `enabled: false` — a null/absent key makes the client REBUILD the
     // card from serviceLocations/serviceAreas (its legacy fallback path).
-    serviceCoverage: rodentReportRefresh ? { enabled: false } : serviceCoverage,
+    serviceCoverage: rodentReportRefresh && stationMap?.available && opts.mode === 'live'
+      ? { enabled: false }
+      : serviceCoverage,
     // Client-side switch for the refreshed rodent layout (photos in the
     // summary, next-visit row, trap-styled animated map pins).
     rodentReportRefresh: rodentReportRefresh || undefined,
