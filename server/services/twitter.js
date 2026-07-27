@@ -29,6 +29,43 @@ const TCO_URL_LENGTH = 23;
 const TWEET_LIMIT = 280;
 const ACCOUNT_CACHE_MS = 10 * 60 * 1000;
 
+// X's weighted counting (twitter-text v3): code points in these ranges weigh
+// 1; everything else — emoji, arrows, CJK — weighs 2. A naive .length check
+// under-counts: a 274-char caption with 5 emoji + 4 arrows weighs 283 and X
+// hard-rejects it (2026-07-25 Zernio post 6a4f38a4261bced1a5dee29f).
+// Counting per code point slightly over-counts ZWJ emoji sequences vs X's
+// full emoji parser; over-counting only ever trims sooner — it can never let
+// an over-limit tweet through.
+function tweetCharWeight(codePoint) {
+  return (codePoint <= 4351
+    || (codePoint >= 8192 && codePoint <= 8205)
+    || (codePoint >= 8208 && codePoint <= 8223)
+    || (codePoint >= 8242 && codePoint <= 8247)) ? 1 : 2;
+}
+
+function weightedTweetLength(text) {
+  let total = 0;
+  for (const ch of String(text || '')) total += tweetCharWeight(ch.codePointAt(0));
+  return total;
+}
+
+// Longest prefix whose weighted length fits `budget`; iterating by code point
+// never splits a surrogate pair.
+function trimToWeight(text, budget) {
+  let out = '';
+  let total = 0;
+  for (const ch of text) {
+    const weight = tweetCharWeight(ch.codePointAt(0));
+    if (total + weight > budget) break;
+    out += ch;
+    total += weight;
+  }
+  return out;
+}
+
+// U+2026 falls outside the weight-1 ranges, so the trim marker itself costs 2.
+const ELLIPSIS_WEIGHT = 2;
+
 class TwitterService {
   constructor() {
     this._account = { id: null, fetchedAt: 0 };
@@ -107,13 +144,19 @@ class TwitterService {
   }
 
   // Compose the tweet text: caption + blank line + article URL, trimming the
-  // CAPTION (never the URL) if the t.co-adjusted length would exceed 280.
+  // CAPTION (never the URL) if the t.co-adjusted WEIGHTED length would exceed
+  // 280. All budgets use X's weighted counting, not .length.
   composeTweet(text, link) {
     const caption = String(text || '').trim();
-    if (!link) return caption;
+    if (!link) {
+      if (weightedTweetLength(caption) <= TWEET_LIMIT) return caption;
+      return `${trimToWeight(caption, TWEET_LIMIT - ELLIPSIS_WEIGHT).trimEnd()}…`;
+    }
     const separator = '\n\n';
     const budget = TWEET_LIMIT - TCO_URL_LENGTH - separator.length;
-    const trimmed = caption.length > budget ? `${caption.slice(0, budget - 1).trimEnd()}…` : caption;
+    const trimmed = weightedTweetLength(caption) > budget
+      ? `${trimToWeight(caption, budget - ELLIPSIS_WEIGHT).trimEnd()}…`
+      : caption;
     return `${trimmed}${separator}${link}`;
   }
 
@@ -195,4 +238,4 @@ class TwitterService {
 }
 
 module.exports = new TwitterService();
-module.exports._test = { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT };
+module.exports._test = { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT, weightedTweetLength };
