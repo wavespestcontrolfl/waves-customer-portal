@@ -3357,6 +3357,7 @@ export function ServiceSection({
   ctaSlotMeta = null,
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
+  termiteComparison = null,
   onSelectBondTerm = null,
   bondBusy = false,
 }) {
@@ -3558,6 +3559,24 @@ export function ServiceSection({
             // Staff draft preview: render for parity, but inert (no sends).
             preview={serviceDetailsRequest.preview === true}
           />
+        ) : null}
+
+        {/* Buy-vs-rent options sheet (GATE_TERMITE_COMPARISON_SHEET, dark).
+            Same tokenized-PDF pattern as the details packet above; the
+            server's fail-closed builder 404s when the rental can't actually
+            price, so this link only ships where both columns are real. */}
+        {termiteComparison ? (
+          <div style={{ marginTop: 10, textAlign: 'center' }}>
+            <a
+              href={termiteComparison.preview ? undefined : `${API_BASE}/estimates/${termiteComparison.token}/warranty-comparison/pdf`}
+              target={termiteComparison.preview ? undefined : '_blank'}
+              rel={termiteComparison.preview ? undefined : 'noopener noreferrer'}
+              onClick={termiteComparison.preview ? (e) => e.preventDefault() : undefined}
+              style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_TEXT, textDecoration: 'underline', cursor: 'pointer' }}
+            >
+              Buying vs. renting your bait stations — see both side by side (PDF)
+            </a>
+          </div>
         ) : null}
 
         {showGetServiceCta ? (
@@ -5027,6 +5046,13 @@ function EstimateViewPageInner() {
                 // recap still omits it entirely.
                 serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly
                   ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: adminDraftPreview }
+                  : null}
+                // Buy-vs-rent options sheet link (GATE_TERMITE_COMPARISON_SHEET,
+                // dark). RAW key on purpose, like the details row above —
+                // commercial termite (commercial_termite_bait) has no rental
+                // option and must not link.
+                termiteComparison={renderFlags.showTermiteComparison && section.key === 'termite_bait' && !readOnly
+                  ? { token, preview: adminDraftPreview }
                   : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}

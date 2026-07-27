@@ -15912,6 +15912,10 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     // default — owner approved the packet copy 2026-07-11;
     // GATE_SERVICE_DETAILS_PDF=false is the kill switch).
     showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF !== 'false',
+    // Buy-vs-rent options sheet link on the termite section (dark, explicit
+    // opt-in). Gate-only flag, same pattern as showServiceDetailsRequest —
+    // the PDF route's fail-closed builder is the precise availability check.
+    showTermiteComparison: require('../services/termite-warranty-comparison').termiteComparisonGateOn(),
   };
 }
 
@@ -17670,6 +17674,46 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       .del()
       .catch(() => {});
     return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+  } catch (err) { next(err); }
+});
+
+// ── Termite options comparison sheet (dark; GATE_TERMITE_COMPARISON_SHEET) ──
+//
+// Buy-vs-rent the bait stations, priced for THIS estimate's property by two
+// deterministic engine replays, plus the bond term menu. Same bearer-token
+// contract as the service-details PDF above: token-shaped 404s, viewable
+// estimates only, no draft leak. Availability is computed fail-closed in the
+// content builder (gate, residential termite line, rental actually priced) —
+// a comparison that can only show one column 404s instead of rendering.
+router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+    if (!termiteComparisonGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+    } catch { /* unparseable → no comparison */ }
+    const data = buildTermiteComparisonData(extractEngineInputs(estData));
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');
+    const buffer = await renderTermiteComparisonPdf({
+      ...data,
+      address: estimate.address || null,
+      // Same canonical host every other estimate link uses.
+      estimateUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+    });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', 'inline; filename="Waves_Termite_Options.pdf"');
+    res.send(buffer);
   } catch (err) { next(err); }
 });
 
