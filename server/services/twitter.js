@@ -33,9 +33,6 @@ const ACCOUNT_CACHE_MS = 10 * 60 * 1000;
 // 1; everything else — emoji, arrows, CJK — weighs 2. A naive .length check
 // under-counts: a 274-char caption with 5 emoji + 4 arrows weighs 283 and X
 // hard-rejects it (2026-07-25 Zernio post 6a4f38a4261bced1a5dee29f).
-// Counting per code point slightly over-counts ZWJ emoji sequences vs X's
-// full emoji parser; over-counting only ever trims sooner — it can never let
-// an over-limit tweet through.
 function tweetCharWeight(codePoint) {
   return (codePoint <= 4351
     || (codePoint >= 8192 && codePoint <= 8205)
@@ -43,21 +40,43 @@ function tweetCharWeight(codePoint) {
     || (codePoint >= 8242 && codePoint <= 8247)) ? 1 : 2;
 }
 
-function weightedTweetLength(text) {
+// X counts each complete emoji SEQUENCE as one weight-2 character — keycaps
+// (1️⃣), variation selectors (❤️), flags (🇺🇸), skin tones and ZWJ families
+// all weigh 2, not the sum of their constituent code points. Weigh per
+// grapheme cluster: an emoji-sequence grapheme is 2, anything else is the sum
+// of its code points' range weights. (A pictographic grapheme with trailing
+// non-emoji combining marks — which X's parser would count separately — is a
+// degenerate case this accepts as 2.)
+const EMOJI_KEYCAP_RE = /^[0-9#*]\uFE0F?\u20E3$/u;
+const EMOJI_FLAG_RE = /^[\u{1F1E6}-\u{1F1FF}]{2}$/u;
+const EMOJI_LEAD_RE = /^\p{Extended_Pictographic}/u;
+const GRAPHEMES = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+function graphemeWeight(grapheme) {
+  if (EMOJI_LEAD_RE.test(grapheme) || EMOJI_KEYCAP_RE.test(grapheme) || EMOJI_FLAG_RE.test(grapheme)) {
+    return 2;
+  }
   let total = 0;
-  for (const ch of String(text || '')) total += tweetCharWeight(ch.codePointAt(0));
+  for (const ch of grapheme) total += tweetCharWeight(ch.codePointAt(0));
   return total;
 }
 
-// Longest prefix whose weighted length fits `budget`; iterating by code point
-// never splits a surrogate pair.
+function weightedTweetLength(text) {
+  let total = 0;
+  for (const { segment } of GRAPHEMES.segment(String(text || ''))) total += graphemeWeight(segment);
+  return total;
+}
+
+// Longest prefix whose weighted length fits `budget`; iterating by grapheme
+// never splits a surrogate pair, an emoji sequence, or a combining mark off
+// its base.
 function trimToWeight(text, budget) {
   let out = '';
   let total = 0;
-  for (const ch of text) {
-    const weight = tweetCharWeight(ch.codePointAt(0));
+  for (const { segment } of GRAPHEMES.segment(text)) {
+    const weight = graphemeWeight(segment);
     if (total + weight > budget) break;
-    out += ch;
+    out += segment;
     total += weight;
   }
   return out;
@@ -148,10 +167,11 @@ class TwitterService {
   // 280. All budgets use X's weighted counting, not .length.
   composeTweet(text, link) {
     const caption = String(text || '').trim();
-    if (!link) {
-      if (weightedTweetLength(caption) <= TWEET_LIMIT) return caption;
-      return `${trimToWeight(caption, TWEET_LIMIT - ELLIPSIS_WEIGHT).trimEnd()}…`;
-    }
+    // No separate link → return the text intact, never trim. Manual content
+    // here may embed its own URLs, which X counts as fixed 23-char t.co links
+    // while this counter sees the raw characters — trimming on that mismatch
+    // could slice a URL mid-string and ship a broken link.
+    if (!link) return caption;
     const separator = '\n\n';
     const budget = TWEET_LIMIT - TCO_URL_LENGTH - separator.length;
     const trimmed = weightedTweetLength(caption) > budget

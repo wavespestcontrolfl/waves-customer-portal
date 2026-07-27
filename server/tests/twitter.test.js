@@ -112,13 +112,32 @@ describe('twitter service', () => {
       expect(weightedTweetLength(trimmed)).toBeLessThanOrEqual(TWEET_LIMIT - TCO_URL_LENGTH - 2);
     });
 
-    test('trims an over-limit caption even without a link', () => {
-      const caption = '🔍'.repeat(200); // weighted 400, .length 400
-      const out = twitter.composeTweet(caption, null);
-      expect(out.endsWith('…')).toBe(true);
-      expect(weightedTweetLength(out)).toBeLessThanOrEqual(TWEET_LIMIT);
-      // Under-limit captions pass through untouched.
-      expect(twitter.composeTweet('short ☕ caption', null)).toBe('short ☕ caption');
+    test('no-link content is returned intact — embedded URLs must never be sliced', () => {
+      // Manual content can embed its own URLs, which X counts as fixed-length
+      // t.co links; trimming by raw characters could break them.
+      const urlHeavy = `Read this: https://example.com/${'a'.repeat(300)}`;
+      expect(twitter.composeTweet(urlHeavy, null)).toBe(urlHeavy);
+    });
+
+    test('multi-code-point emoji sequences weigh 2 each, like X counts them', () => {
+      expect(weightedTweetLength('1️⃣')).toBe(2); // keycap: digit + FE0F + 20E3
+      expect(weightedTweetLength('❤️')).toBe(2); // heart + variation selector
+      expect(weightedTweetLength('🇺🇸')).toBe(2); // flag: two regional indicators
+      expect(weightedTweetLength('👍🏽')).toBe(2); // skin-tone modifier
+      expect(weightedTweetLength('👨‍👩‍👧‍👦')).toBe(2); // ZWJ family
+      expect(weightedTweetLength('🇺🇸🇩🇪')).toBe(4); // adjacent flags segment separately
+      // A keycap-heavy caption fits the budget instead of being over-trimmed
+      // (per-code-point counting scored 1️⃣ as 5 and truncated ~70 of them).
+      const keycaps = '1️⃣'.repeat(70);
+      expect(weightedTweetLength(keycaps)).toBe(140);
+      expect(twitter.composeTweet(keycaps, LINK)).toBe(`${keycaps}\n\n${LINK}`);
+      // Trimming never splits a ZWJ sequence mid-family.
+      const families = '👨‍👩‍👧‍👦'.repeat(200);
+      const composed = twitter.composeTweet(families, LINK);
+      const trimmed = composed.slice(0, -(`\n\n${LINK}`.length));
+      expect(trimmed.endsWith('…')).toBe(true);
+      const body = trimmed.slice(0, -1);
+      expect(body.length % '👨‍👩‍👧‍👦'.length).toBe(0); // whole families only
     });
 
     test('weightedTweetLength matches X for the 2026-07-25 incident text', () => {
