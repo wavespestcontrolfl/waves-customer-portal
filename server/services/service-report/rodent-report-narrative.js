@@ -266,6 +266,7 @@ Rules:
 - Facts only: never invent work, counts, captures, sightings, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
 - Write every count as a numeral, exactly as it appears in the facts. Never introduce a number that is not in the facts.
 - Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof rodents are gone or the issue is resolved.
+- When a capture or bait consumption IS recorded, state it ONLY in the grounded generic form ("a capture was recorded at 2 traps", "bait consumption was observed at 1 station") — never invent species, rooms, or other details the facts do not carry.
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
 - If photo evidence is provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
@@ -439,23 +440,36 @@ const CONSUMPTION_CLAIM_RES = [
   /\bfe(?:d|eding)\s+on\b/gi,
 ];
 
+// Even SUPPORTED events only publish as grounded generic statements (codex
+// round-6 P1): with a capture on record, "we caught a rat in the kitchen"
+// still invents species/location the facts don't carry. Positive claims
+// must match the fact-shaped templates below — anything freer rejects.
+const ALLOWED_CAPTURE_PHRASE = /\b(?:(?:a|an|\d+)\s+)?captures?\s+(?:was\s+|were\s+)?recorded(?:\s+at\s+\d+\s+traps?)?\b/i;
+const ALLOWED_CONSUMPTION_PHRASE = /\b(?:bait\s+)?consumption\s+(?:was\s+|were\s+)?observed(?:\s+at\s+\d+\s+(?:bait\s+)?stations?)?\b/i;
+
+function clauseAround(text, index) {
+  const before = text.slice(0, index);
+  const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf(';'));
+  const endRel = text.slice(index).search(/[.!?;]/);
+  return text.slice(start + 1, endRel === -1 ? text.length : index + endRel);
+}
+
 function unsupportedActivityClaims(text, facts) {
   const problems = [];
   const roles = factNumbers(facts);
   const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0);
   const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0);
-  const scan = (regexes, supported, problem) => {
-    if (supported) return;
+  const scan = (regexes, supported, allowedPhrase, problem) => {
     for (const re of regexes) {
       for (const match of String(text).matchAll(new RegExp(re.source, 'gi'))) {
-        if (!claimNegated(text, match.index, match[0].length)) {
-          problems.push(problem);
-        }
+        if (claimNegated(text, match.index, match[0].length)) continue;
+        if (supported && allowedPhrase.test(clauseAround(text, match.index))) continue;
+        problems.push(problem);
       }
     }
   };
-  scan(CAPTURE_CLAIM_RES, captureSupported, 'unsupported_capture_claim');
-  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, 'unsupported_consumption_claim');
+  scan(CAPTURE_CLAIM_RES, captureSupported, ALLOWED_CAPTURE_PHRASE, 'unsupported_capture_claim');
+  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, ALLOWED_CONSUMPTION_PHRASE, 'unsupported_consumption_claim');
   return problems;
 }
 
@@ -492,6 +506,16 @@ function nextVisitProblems(text, facts) {
       && Number(day) === Number(expectedDate[3])
       && (!weekday || !expectedDate[1] || weekday.toLowerCase() === expectedDate[1].toLowerCase());
     if (!ok) problems.push(`ungrounded_date:${match[0].trim()}`);
+  }
+  // STANDALONE weekday mentions count too (codex round-6 P1): "your next
+  // visit is Tuesday" contradicts a Monday appointment without ever
+  // matching the month-day pattern. Every weekday word in the output must
+  // be the grounded visit's weekday.
+  const expectedWeekday = expectedDate && expectedDate[1] ? expectedDate[1].toLowerCase() : null;
+  for (const match of String(text).matchAll(new RegExp(`\\b(${WEEKDAY_NAMES})\\b`, 'gi'))) {
+    if (!expectedWeekday || match[1].toLowerCase() !== expectedWeekday) {
+      problems.push(`ungrounded_weekday:${match[1]}`);
+    }
   }
   return problems;
 }

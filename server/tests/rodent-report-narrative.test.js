@@ -164,6 +164,14 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('A capture was recorded at 2 traps.', swapFacts)).toEqual([]);
   expect(ungroundedClaims('2 traps were inspected today.', swapFacts)).toContain('uncorroborated_count:2 traps');
   expect(ungroundedClaims('We recorded 7 captures today.', swapFacts)).toContain('uncorroborated_count:7 captures');
+  // even a SUPPORTED capture only publishes as the grounded generic form —
+  // freeform species/room detail rejects (codex round-6 P1)
+  expect(ungroundedClaims('We caught a rat in the kitchen.', swapFacts)).toContain('unsupported_capture_claim');
+
+  // standalone weekday mentions validate against the grounded visit (codex
+  // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday
+  expect(ungroundedClaims('Your next visit is Tuesday.', facts).some((p) => p.startsWith('ungrounded_weekday'))).toBe(true);
+  expect(ungroundedClaims('We will see you Monday for the next check.', facts)).toEqual([]);
 
   // negation is judged per claim — one negated sentence can't launder a
   // positive claim elsewhere (codex round-3 P2)
