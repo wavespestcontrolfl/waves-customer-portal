@@ -54,9 +54,24 @@ function pricedBaitLine(engineResult) {
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
+// The line's FINAL customer annual: manual-discount and WaveGuard-bundle
+// participation land in manualFinalAnnual / annualAfterDiscount, and the
+// gross `annual` is only correct when neither applied (codex P1 on #3001 —
+// reading gross perApp overstated every discounted estimate's columns).
+function finalLineAnnual(li) {
+  const v = Number(li?.manualFinalAnnual ?? li?.annualAfterDiscount ?? li?.annual);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
 // Build the comparison data for one estimate's saved engine inputs.
 // Returns null whenever the sheet must not exist (see header).
-function buildTermiteComparisonData(engineInputs) {
+//
+// bondOptions (optional) is the estimate's QUOTE-TIME snapshot — the same
+// one PUT /:token/bond validates selections against — passed in by the
+// route. The replay's freshly-priced options are deliberately NOT used
+// (codex P1): after a bond-rate config change they could advertise terms or
+// rates the linked estimate cannot actually select.
+function buildTermiteComparisonData(engineInputs, { bondOptions = null } = {}) {
   if (!termiteComparisonGateOn()) return null;
   if (!engineInputs) return null;
 
@@ -83,10 +98,17 @@ function buildTermiteComparisonData(engineInputs) {
   if (rentBait.ownership !== 'rent' || !rentBait.stationRental) return null;
 
   const installToday = Number(ownBait.installation?.price);
-  const perAppOwn = Number(ownBait.perApp);
-  const upliftPerApp = Number(rentBait.stationRental.perApp);
-  const perAppRent = round2(Number(rentBait.perApp) + upliftPerApp);
   const visitsPerYear = Number(ownBait.visitsPerYear) || 4;
+  // Final DISCOUNTED per-application figures — what the estimate actually
+  // charges, not the gross monitoring rate. The rental uplift is
+  // discount-exempt by design, so it adds on top of the discounted base.
+  const ownAnnual = finalLineAnnual(ownBait);
+  const rentBaseAnnual = finalLineAnnual(rentBait);
+  if (!ownAnnual || !rentBaseAnnual) return null;
+  const perAppOwn = round2(ownAnnual / visitsPerYear);
+  const upliftPerApp = Number(rentBait.stationRental.perApp);
+  const rentBasePerApp = round2(rentBaseAnnual / visitsPerYear);
+  const perAppRent = round2(rentBasePerApp + upliftPerApp);
   if (!(installToday > 0) || !(perAppOwn > 0) || !(upliftPerApp > 0)) return null;
 
   // Five-year totals — the honest horizon: with the seeded 20-quarter
@@ -95,16 +117,16 @@ function buildTermiteComparisonData(engineInputs) {
   const fiveYearOwn = round2(installToday + perAppOwn * visitsPerYear * 5);
   const fiveYearRent = round2(perAppRent * visitsPerYear * 5);
 
-  // Bond snapshot rides the own replay (identical on both). Present only
-  // when GATE_TERMITE_BOND_OPTION emitted it — the sheet's bond section
-  // renders only for terms the customer could actually select today.
-  const bondOptions = Array.isArray(ownBait.bondOptions)
-    ? ownBait.bondOptions.map((opt) => ({
-      key: opt.key,
-      label: opt.label,
-      years: opt.years,
-      perApp: Number(opt.perApp ?? opt.quarterly) || 0,
-    }))
+  // Quote-time snapshot only (see header). Absent/empty → no bond section.
+  const bondMenu = Array.isArray(bondOptions)
+    ? bondOptions
+      .map((opt) => ({
+        key: opt.key,
+        label: opt.label,
+        years: opt.years,
+        perApp: Number(opt.perApp ?? opt.quarterly) || 0,
+      }))
+      .filter((opt) => opt.perApp > 0 && opt.label)
     : [];
 
   return {
@@ -123,12 +145,12 @@ function buildTermiteComparisonData(engineInputs) {
       hardwareValue: Number(rentBait.stationRental.retailValue) || round2(installToday),
       perApp: perAppRent,
       upliftPerApp: round2(upliftPerApp),
-      basePerApp: round2(Number(rentBait.perApp)),
+      basePerApp: rentBasePerApp,
       firstYear: round2(perAppRent * visitsPerYear),
       fiveYear: fiveYearRent,
       recoveryQuarters: Number(rentBait.stationRental.recoveryQuarters) || null,
     },
-    bondOptions,
+    bondOptions: bondMenu,
   };
 }
 

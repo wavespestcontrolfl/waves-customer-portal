@@ -96,22 +96,47 @@ describe('the numbers are the engine’s', () => {
     expect(Math.abs(data.own.fiveYear - data.rent.fiveYear)).toBeLessThanOrEqual(10);
   });
 
-  test('bond menu rides the snapshot only when the bond gate emitted it', () => {
-    const withBonds = buildTermiteComparisonData(termiteInputs());
-    expect(withBonds.bondOptions.length).toBeGreaterThan(0);
-    for (const opt of withBonds.bondOptions) {
-      expect(opt.perApp).toBeGreaterThan(0);
-      expect(opt.label).toBeTruthy();
-    }
-    // Longer terms lock lower per-application rates — the selling point the
-    // sheet states must actually hold in the snapshot.
-    const perApps = withBonds.bondOptions.map((o) => o.perApp);
-    expect([...perApps].sort((a, b) => b - a)).toEqual(perApps);
+  test('bond menu comes from the QUOTE-TIME snapshot param, never the replay', () => {
+    // The stored snapshot (what PUT /:token/bond validates against) is the
+    // only source — a config change after send must not let the sheet
+    // advertise terms the linked estimate cannot select (codex P1).
+    const storedSnapshot = [
+      { key: '1yr', label: '1-Year', years: 1, quarterly: 61, perApp: 61 },
+      { key: '10yr', label: '10-Year', years: 10, quarterly: 44 },
+      { key: 'junk', label: '', years: 0, perApp: 0 },
+    ];
+    const data = buildTermiteComparisonData(termiteInputs(), { bondOptions: storedSnapshot });
+    expect(data.bondOptions).toEqual([
+      { key: '1yr', label: '1-Year', years: 1, perApp: 61 },
+      { key: '10yr', label: '10-Year', years: 10, perApp: 44 }, // perApp ?? quarterly
+    ]);
 
-    delete process.env.GATE_TERMITE_BOND_OPTION;
-    const withoutBonds = buildTermiteComparisonData(termiteInputs());
-    expect(withoutBonds).toBeTruthy();
-    expect(withoutBonds.bondOptions).toEqual([]);
+    // No snapshot on the estimate (older saves, bond gate dark at quote
+    // time) → no bond section, regardless of live gates.
+    const withoutSnapshot = buildTermiteComparisonData(termiteInputs());
+    expect(withoutSnapshot).toBeTruthy();
+    expect(withoutSnapshot.bondOptions).toEqual([]);
+  });
+
+  test('per-application figures use the FINAL discounted annual, not the gross rate', () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    // Bundle termite with pest so the WaveGuard percentage applies; the
+    // sheet must show what the estimate actually charges (codex P1).
+    const bundled = translateV2CallToV1Input(PROFILE, ['GENERAL_PEST', 'TERMITE_BAIT'], {
+      termiteBaitSystem: 'advance',
+    });
+    const replayBait = generateEstimate(JSON.parse(JSON.stringify(bundled))).lineItems
+      .find((li) => li.service === 'termite_bait');
+    const expectedAnnual = Number(replayBait.manualFinalAnnual ?? replayBait.annualAfterDiscount ?? replayBait.annual);
+    const expectedPerApp = Math.round((expectedAnnual / replayBait.visitsPerYear) * 100) / 100;
+    expect(expectedAnnual).toBeGreaterThan(0);
+
+    const data = buildTermiteComparisonData(bundled);
+    expect(data).toBeTruthy();
+    expect(data.own.perApp).toBe(expectedPerApp);
+    // The rent column's base is the same discounted figure; the exempt
+    // uplift stacks on top.
+    expect(data.rent.perApp).toBe(Math.round((data.rent.basePerApp + data.rent.upliftPerApp) * 100) / 100);
   });
 });
 

@@ -15889,7 +15889,53 @@ function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
   return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
 }
 
-function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
+// Engine inputs for the buy-vs-rent comparison replays. Admin-builder saves
+// store the replayable payload as engineRequest = { profile,
+// selectedServices, options } (estimate_data.inputs there is the FLATTENED
+// form — svcTermiteBait etc. — which has no `services` and would fail the
+// builder's guard; codex P1 on #3001). Translate it exactly like
+// serverRecomputeFromEstimateData does, then feed the result back through
+// extractEngineInputs so the saved-floor replay overrides,
+// priorQualifyingServices, and operator price adjustment all apply the same
+// way they do for engine-shaped saves.
+function comparisonEngineInputs(estData) {
+  if (!estData || typeof estData !== 'object') return null;
+  const req = estData.engineRequest;
+  if (req && typeof req === 'object' && req.profile) {
+    try {
+      const { translateV2CallToV1Input } = require('./property-lookup-v2');
+      const base = translateV2CallToV1Input(
+        req.profile,
+        Array.isArray(req.selectedServices) ? req.selectedServices : [],
+        req.options || {},
+      );
+      if (base && typeof base === 'object') {
+        return extractEngineInputs({ ...estData, engineInputs: base });
+      }
+    } catch (_err) { /* fall through to the stored input shapes */ }
+  }
+  return extractEngineInputs(estData);
+}
+
+// Per-ESTIMATE availability for the comparison-sheet link (codex P1 on
+// #3001): the gate alone is not enough — the rental gate being off, a
+// commercial property, or an unpriceable uplift all make the builder
+// fail-closed and the PDF 404, so the link must not render. Runs the same
+// fail-closed builder the PDF route runs; cheap pre-filters keep the two
+// engine replays off every non-termite /data call.
+function termiteComparisonAvailableForEstimate(estData, services = []) {
+  const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+  if (!termiteComparisonGateOn()) return false;
+  if (!estData || typeof estData !== 'object') return false;
+  if (!services.some((section) => section?.key === 'termite_bait')) return false;
+  try {
+    return buildTermiteComparisonData(comparisonEngineInputs(estData)) != null;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
@@ -15913,9 +15959,9 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     // GATE_SERVICE_DETAILS_PDF=false is the kill switch).
     showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF !== 'false',
     // Buy-vs-rent options sheet link on the termite section (dark, explicit
-    // opt-in). Gate-only flag, same pattern as showServiceDetailsRequest —
-    // the PDF route's fail-closed builder is the precise availability check.
-    showTermiteComparison: require('../services/termite-warranty-comparison').termiteComparisonGateOn(),
+    // opt-in). Computed per estimate with the SAME fail-closed builder the
+    // PDF route runs (codex P1) — the link never renders toward a 404.
+    showTermiteComparison: termiteComparisonAvailableForEstimate(estData, services),
   };
 }
 
@@ -16051,7 +16097,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
+    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData),
     askChips,
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
@@ -16285,7 +16331,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
-    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring),
+    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData),
   };
 }
 
@@ -17689,21 +17735,30 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
+    // ONE 404 body for every branch (codex P2): gate-off, malformed token,
+    // unknown token, non-viewable row, and viewable-but-unbuildable must be
+    // indistinguishable, or the response becomes an existence oracle for
+    // bearer-token links.
+    const notFound = () => res.status(404).json({ error: 'Estimate not found' });
     const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
-    if (!termiteComparisonGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!termiteComparisonGateOn()) return notFound();
     if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
-      return res.status(404).json({ error: 'Estimate not found' });
+      return notFound();
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
-      return res.status(404).json({ error: 'Estimate not found' });
+      return notFound();
     }
     let estData = {};
     try {
       estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
     } catch { /* unparseable → no comparison */ }
-    const data = buildTermiteComparisonData(extractEngineInputs(estData));
-    if (!data) return res.status(404).json({ error: 'Not found' });
+    // engineRequest-aware replay inputs + the QUOTE-TIME bond snapshot (the
+    // same one PUT /:token/bond validates against — never live constants).
+    const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      bondOptions: termiteBondOptionsFromEstimateData(estData),
+    });
+    if (!data) return notFound();
     const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');
     const buffer = await renderTermiteComparisonPdf({
       ...data,

@@ -171,32 +171,35 @@ function ctaBand(doc, estimateUrl) {
   // The band is always the LAST element, so it may run right up to the
   // footer rule instead of ensureRoom's conservative content bound — that
   // margin exists to keep body text off the footer, not a closing panel.
-  if (doc.y + 90 > FOOTER_TOP - 8) {
+  if (doc.y + 95 > FOOTER_TOP - 6) {
     footer(doc);
     doc.addPage();
     doc.y = 48;
   }
   doc.moveDown(0.3);
   const top = doc.y;
-  const H = 80;
+  const H = 88;
   doc.save();
   doc.roundedRect(L, top, W, H, 10).fillColor(SOFT).fill();
   doc.roundedRect(L, top, W, H, 10).lineWidth(0.75).strokeColor(RULE).stroke();
+  // Copy promises only actions the estimate page actually offers (codex P1):
+  // scheduling as quoted and asking us a question live there; switching
+  // station ownership is a re-quote WE make — say so, don't imply a toggle.
   doc.font('Helvetica-Bold').fontSize(12.5).fillColor(NAVY)
-    .text('Pick the option that fits — choose ownership and a warranty term on your estimate.', L, top + 11, { width: W, align: 'center' });
+    .text('Happy with your option? Schedule from your estimate. Want the other one? Just ask — we’ll re-quote it, no obligation.', L, top + 9, { width: W, align: 'center' });
 
   const label = 'Open your estimate';
   doc.font('Helvetica-Bold').fontSize(11);
   const pillW = doc.widthOfString(label) + 44;
   const pillH = 26;
   const pillX = L + (W - pillW) / 2;
-  const pillY = top + 30;
+  const pillY = top + 42;
   doc.roundedRect(pillX, pillY, pillW, pillH, pillH / 2).fillColor(GOLD_PILL).fill();
   doc.fillColor(NAVY).text(label, pillX, pillY + 7, { width: pillW, align: 'center' });
   doc.link(pillX, pillY, pillW, pillH, estimateUrl);
 
   doc.font('Helvetica').fontSize(8.5).fillColor(MUTED)
-    .text(`Priced for your home · No obligation · Questions? Call or text ${WAVES_SUPPORT_PHONE_DISPLAY}`, L, top + H - 17, { width: W, align: 'center' });
+    .text(`Priced for your home · No obligation · Questions? Call or text ${WAVES_SUPPORT_PHONE_DISPLAY}`, L, top + H - 15, { width: W, align: 'center' });
   doc.restore();
   doc.y = top + H + 10;
 }
