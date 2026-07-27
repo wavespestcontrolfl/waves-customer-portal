@@ -308,10 +308,21 @@ async function reserveSlot({
   // No offer surface produces slots beyond MAX_SLOT_HORIZON_DAYS (the public
   // route clamps ?windowDays and the AI date search caps maxDaysOut there) —
   // EXCEPT seasonal selections in the winter gap, whose window opens at the
-  // next Feb 1 (codex r10 P2: on Nov 1–2 that is 91–92 days out). Whether the
-  // extended horizon applies needs the estimate's profile, which resolves
-  // inside the transaction, so a beyond-standard date is only NOTED here and
-  // adjudicated after profile resolution below.
+  // next Feb 1 (codex r10 P2: on Nov 1–2 that is 91–92 days out). The widest
+  // horizon ANY selection could have needs only today's date
+  // (seasonalMaxHorizonDays === the standard 90 while in season), so slots
+  // past it still reject PRE-txn with no db work; a date between the
+  // standard and seasonal ceilings is noted and adjudicated against the
+  // estimate's profile inside the transaction below.
+  const outerHorizonDays = typeof estimateSlotAvailability.seasonalMaxHorizonDays === 'function'
+    ? estimateSlotAvailability.seasonalMaxHorizonDays()
+    : MAX_SLOT_HORIZON_DAYS;
+  if (date > etDateString(addETDays(new Date(), outerHorizonDays))) {
+    const err = new Error('slot date is beyond the booking horizon');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
   const beyondStandardHorizon = date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
 
   // Numeric coerce + bound the hold window so we can safely interpolate it
@@ -380,9 +391,14 @@ async function reserveSlot({
       // selectedFrequency seasonal9, and the converter would then seed the
       // series from a Nov–Jan parent, counting a prohibited winter visit
       // toward the nine. Office/admin bookings don't come through this route.
+      // Guarded like resolveEstimateSlotProfile above — suites mock the
+      // availability module down to the functions they assert on.
       const seasonalSelection = !!serviceProfile
+        && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
         && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
-      if (seasonalSelection && !estimateSlotAvailability.inMosquitoSeason(date)) {
+      if (seasonalSelection
+        && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
+        && !estimateSlotAvailability.inMosquitoSeason(date)) {
         const err = new Error('This seasonal program runs February through October — pick an in-season date.');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
@@ -393,6 +409,7 @@ async function reserveSlot({
       // winter-gap horizon its slot list was generated with.
       if (beyondStandardHorizon) {
         const allowedDays = seasonalSelection
+          && typeof estimateSlotAvailability.seasonalMaxHorizonDays === 'function'
           ? estimateSlotAvailability.seasonalMaxHorizonDays()
           : MAX_SLOT_HORIZON_DAYS;
         if (date > etDateString(addETDays(new Date(), allowedDays))) {
