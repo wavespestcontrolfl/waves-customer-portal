@@ -8093,6 +8093,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
+            {/* Rodent refresh: the photo evidence the summary narrates renders
+                WITH the summary (owner 2026-07-27) — the bottom Field photos
+                gallery is skipped for these reports so the photos show once. */}
+            {data.rodentReportRefresh && (data.photos || []).length > 0 && (
+              <div className="sr-grid-3" style={{ marginTop: 16 }}>
+                {data.photos.map((photo) => (
+                  <div className="sr-cell" key={photo.id}>
+                    {photo.url && <img src={photo.url} alt={photo.caption || 'Service photo'} style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }} />}
+                    <div className="sr-cell-value">{photo.caption || photo.stateBadge || 'Documented during this visit'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
                 REPLACING the legacy Lawn Intelligence card + mowing block it supersedes.
                 Falls back to the legacy card when reportV2 is absent (flag off). */}
@@ -8223,8 +8236,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         ))}
 
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
-            no satellite basemap to pin against (provider ToS). */}
-        {mode === 'live' && <StationMapCard stationMap={data.stationMap} />}
+            no satellite basemap to pin against (provider ToS). Rodent refresh
+            draws trapping pins as animated snap traps. */}
+        {mode === 'live' && (
+          <StationMapCard
+            stationMap={data.stationMap}
+            trapPins={Boolean(data.rodentReportRefresh)}
+            animate={Boolean(data.rodentReportRefresh)}
+          />
+        )}
 
         {/* Lawn: program explainer drops below the factual record, just above
             Ask-Waves. Removed from the V2 report (the visit-specific dashboard
@@ -8316,7 +8336,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Legacy field photos render each photo with its per-photo vision caption
             (which can over-diagnose). When reportV2 is present, the V2 photo strip
             above replaces this with a horizontal gallery + ONE consolidated analysis. */}
-        {(data.photos || []).length > 0 && !data.reportV2 && (
+        {/* Rodent refresh renders the photos inside Visit Summary instead. */}
+        {(data.photos || []).length > 0 && !data.reportV2 && !data.rodentReportRefresh && (
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (

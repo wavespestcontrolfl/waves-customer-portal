@@ -209,9 +209,17 @@ function getServiceLineConfig(serviceLineOrType) {
   return SERVICE_LINE_CONFIGS[key] || SERVICE_LINE_CONFIGS.pest;
 }
 
+// Rodent-program companion services whose names carry no rodent token, so
+// detectServiceLine alone can't claim them ("Exclusion Service",
+// "Sanitation & Cleanup"). Used by the rodent report's next-visit pick —
+// a rodent report may disclose these as the customer's next rodent-related
+// visit. \w* covers the variants (trapping/traps, proofing).
+const RODENT_ADJACENT_SERVICE_RE = /\b(exclusion|sanitation|proof|trap)\w*/i;
+
 module.exports = {
   SERVICE_LINE_IDS,
   SERVICE_LINE_CONFIGS,
+  RODENT_ADJACENT_SERVICE_RE,
   detectServiceLine,
   getServiceLineConfig,
 };

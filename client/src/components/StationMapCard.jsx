@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { COLORS as B } from '../theme-brand';
 
 // Bait station map (station-map-v1) — numbered station pins over the live
@@ -87,8 +88,179 @@ function stationSummaryLine(summary, programMeta) {
   return parts.join(' · ');
 }
 
-export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false }) {
+// ---------------------------------------------------------------------------
+// Trap-pin rendering (rodent trapping programs, GATE_RODENT_REPORT_REFRESH).
+// Numbered pins draw as top-down snap traps so the map reads as what it is —
+// trap placements, not abstract dots (owner ask 2026-07-27). States mirror
+// the legend: armed bar open = checked/no capture, bar sprung over a rat
+// silhouette = capture recorded. A purely decorative rat scurries to a trap
+// every few seconds and the trap fires — live report views only, and every
+// animation (including the rat itself) is disabled under
+// prefers-reduced-motion. PDF/static renders never mount this card.
+// ---------------------------------------------------------------------------
+
+// Small top-down rat silhouette, drawn facing +x, ~22 units long.
+function RatGlyph({ fill = '#334155', opacity = 1 }) {
+  return (
+    <g aria-hidden="true" opacity={opacity}>
+      {/* tail */}
+      <path d="M -8 0 C -14 2, -16 -3, -21 -1" fill="none" stroke={fill} strokeWidth={1.4} strokeLinecap="round" />
+      {/* body */}
+      <ellipse cx={0} cy={0} rx={8} ry={4} fill={fill} />
+      {/* head + ears */}
+      <circle cx={8.5} cy={0} r={3} fill={fill} />
+      <circle cx={7} cy={-3} r={1.4} fill={fill} />
+      <circle cx={7} cy={3} r={1.4} fill={fill} />
+      {/* nose */}
+      <path d="M 11 0 L 13 0" stroke={fill} strokeWidth={1.2} strokeLinecap="round" />
+    </g>
+  );
+}
+
+// One snap-trap pin, centered on the station point. `sprung` lays the kill
+// bar over the base (with the caught-rat silhouette when `caught`); armed
+// traps hold the bar swung open past the hinge. `firing` re-fires the bar
+// and pops a brief flash ring (the ambient-rat cycle).
+function TrapPin({ station, meta, index, sprung, caught, firing, animate }) {
+  const snapped = sprung || firing;
+  return (
+    <g
+      className={animate ? 'trap-pin trap-pin-pop' : 'trap-pin'}
+      style={animate ? { '--trap-i': index } : undefined}
+    >
+      {/* wooden base */}
+      <rect x={-14} y={-9} width={28} height={18} rx={3} fill="#B45309" stroke="#7C2D12" strokeWidth={1.2} />
+      <rect x={-14} y={-9} width={28} height={18} rx={3} fill="none" stroke="#FDE68A" strokeWidth={0.6} opacity={0.5} />
+      {/* caught rat renders under the sprung bar */}
+      {caught && (
+        <g transform="translate(0.5, 1)">
+          <RatGlyph fill="#1F2937" />
+        </g>
+      )}
+      {/* trigger pedal (hidden once the trap is sprung over it) */}
+      {!snapped && <rect x={-3} y={1} width={6} height={5} rx={1.2} fill="#EAB308" stroke="#A16207" strokeWidth={0.8} />}
+      {/* spring coils at the hinge */}
+      <circle cx={-6.5} cy={-6.5} r={1.6} fill="none" stroke="#64748B" strokeWidth={1.1} />
+      <circle cx={6.5} cy={-6.5} r={1.6} fill="none" stroke="#64748B" strokeWidth={1.1} />
+      {/* kill bar — hinge at y=-7; drawn in sprung position, armed = scaleY(-1) */}
+      <g transform="translate(0,-7)">
+        <g className={`trap-bar${snapped ? ' trap-bar-snapped' : ''}`}>
+          {/* white underlay keeps the bar readable over dark roofs/canopy */}
+          <path
+            d="M -10 0 L -10 12 M 10 0 L 10 12 M -10 12 L 10 12"
+            fill="none"
+            stroke="#fff"
+            strokeWidth={4.2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity={0.85}
+          />
+          <path
+            d="M -10 0 L -10 12 M 10 0 L 10 12 M -10 12 L 10 12"
+            fill="none"
+            stroke="#64748B"
+            strokeWidth={2.2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </g>
+      </g>
+      {/* snap flash ring — remounts (fresh animation) on each firing */}
+      {firing && animate && <circle className="trap-flash" cx={0} cy={0} r={6} fill="none" stroke="#F87171" strokeWidth={2} />}
+      {/* number badge — the pin number stays the map's index into the legend */}
+      <g transform="translate(13,-13)">
+        <circle r={8.5} fill={meta.color} stroke="#fff" strokeWidth={2} />
+        <text y={4} textAnchor="middle" fontSize={11} fontWeight={700} fill="#fff">{station.number}</text>
+      </g>
+    </g>
+  );
+}
+
+// Decorative rat that scurries from the nearest map edge to the target trap.
+// Two-step transform (place at the edge, then transition to the trap) so CSS
+// animates the run; the parent clears it after the trap fires.
+function ScurryingRat({ from, to }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return undefined;
+    node.style.transition = 'none';
+    node.style.transform = `translate(${from.x}px, ${from.y}px) ${from.flip ? 'scale(-1,1)' : ''}`;
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => {
+      node.style.transition = 'transform 2.3s cubic-bezier(0.45, 0.05, 0.6, 0.95)';
+      node.style.transform = `translate(${to.x}px, ${to.y}px) ${from.flip ? 'scale(-1,1)' : ''}`;
+    }));
+    return () => cancelAnimationFrame(raf);
+  }, [from.x, from.y, from.flip, to.x, to.y]);
+  return (
+    <g ref={ref} className="trap-rat" aria-hidden="true">
+      <RatGlyph fill="#475569" />
+    </g>
+  );
+}
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// Cycles the ambient rat: pick the next armed trap round-robin, run the rat
+// to it (~2.3s), fire the trap, clear. Returns null when idle/disabled.
+function useAmbientRatCycle(enabled, stationCount) {
+  const [run, setRun] = useState(null); // { stationIdx, phase: 'run' | 'snap' }
+  useEffect(() => {
+    if (!enabled || !stationCount || prefersReducedMotion()) return undefined;
+    let cursor = 0;
+    const timers = new Set();
+    const later = (fn, ms) => {
+      const t = setTimeout(() => { timers.delete(t); fn(); }, ms);
+      timers.add(t);
+    };
+    const cycle = () => {
+      const stationIdx = cursor % stationCount;
+      cursor += 1;
+      setRun({ stationIdx, phase: 'run' });
+      later(() => setRun({ stationIdx, phase: 'snap' }), 2300);
+      later(() => setRun(null), 3400);
+    };
+    later(cycle, 1600);
+    const interval = setInterval(cycle, 10000);
+    return () => {
+      clearInterval(interval);
+      timers.forEach(clearTimeout);
+    };
+  }, [enabled, stationCount]);
+  return run;
+}
+
+const TRAP_PIN_STYLES = `
+  .trap-pin { transform-box: fill-box; transform-origin: center; }
+  .trap-pin-pop { animation: trap-pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) backwards; animation-delay: calc(var(--trap-i, 0) * 0.1s); }
+  @keyframes trap-pop { from { transform: scale(0); } to { transform: scale(1); } }
+  .trap-bar { transform: scaleY(-1); transition: transform 0.9s ease; }
+  .trap-bar-snapped { transform: scaleY(1); transition: transform 0.09s cubic-bezier(0.9, 0, 1, 1); }
+  .trap-flash { animation: trap-flash 0.55s ease-out forwards; }
+  @keyframes trap-flash { from { r: 6; opacity: 0.9; } to { r: 22; opacity: 0; } }
+  .trap-rat { animation: rat-scurry 0.22s linear infinite; }
+  @keyframes rat-scurry { 0%, 100% { opacity: 1; } 50% { opacity: 0.88; } }
+  .trap-rat-gone { opacity: 0; transition: opacity 0.25s ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .trap-pin-pop, .trap-flash, .trap-rat { animation: none; }
+    .trap-bar, .trap-bar-snapped { transition: none; }
+    .trap-rat { display: none; }
+  }
+`;
+
+export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
+  const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
+  // Hook runs unconditionally (Rules of Hooks) — it self-disables when the
+  // card won't render, animation is off, or reduced motion is requested.
+  const ratRun = useAmbientRatCycle(
+    useTrapPins && animate && !!stationMap?.available && !!stationMap?.image?.url,
+    stations.length,
+  );
   if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
   const plan = variant === 'plan';
   const programMeta = STATION_CARD_PROGRAM_META[stationMap.program] || STATION_CARD_PROGRAM_META.termite;
@@ -131,12 +303,33 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           style={{ display: 'block', width: '100%' }}
         >
           <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
-          {stations.map((station) => {
+          {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
+          {stations.map((station, index) => {
             const meta = STATION_STATUS_META[station.status]
               ? stationStatusMeta(station.status, programMeta, plan)
               : onFileMeta;
             const cx = station.cx * width;
             const cy = station.cy * height;
+            if (useTrapPins) {
+              const caught = station.status === 'activity';
+              const firing = !!(ratRun && ratRun.phase === 'snap' && ratRun.stationIdx === index);
+              return (
+                <g key={station.id} transform={`translate(${cx}, ${cy})`}>
+                  <title>
+                    {`Trap ${station.number}${station.label ? ` — ${station.label}` : ''}: ${meta.label}`}
+                  </title>
+                  <TrapPin
+                    station={station}
+                    meta={meta}
+                    index={index}
+                    sprung={caught}
+                    caught={caught}
+                    firing={firing}
+                    animate={animate}
+                  />
+                </g>
+              );
+            }
             return (
               <g key={station.id}>
                 <title>
@@ -149,6 +342,21 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
               </g>
             );
           })}
+          {/* decorative scurrying rat — runs from the nearest side edge to
+              the target trap, which then fires. aria-hidden, reduced-motion
+              hidden, and gone entirely when animation is off. */}
+          {useTrapPins && ratRun && ratRun.phase === 'run' && stations[ratRun.stationIdx] && (() => {
+            const target = stations[ratRun.stationIdx];
+            const tx = target.cx * width;
+            const ty = target.cy * height;
+            const fromLeft = tx < width / 2;
+            return (
+              <ScurryingRat
+                from={{ x: fromLeft ? -30 : width + 30, y: ty + 6, flip: !fromLeft }}
+                to={{ x: tx + (fromLeft ? -16 : 16), y: ty + 6 }}
+              />
+            );
+          })()}
         </svg>
         {stationMap.attributionText && (
           <div style={{ position: 'absolute', right: 6, bottom: 4, fontSize: 10, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.9)', pointerEvents: 'none' }}>

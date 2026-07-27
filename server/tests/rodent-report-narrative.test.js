@@ -1,0 +1,179 @@
+// Rodent report narrative (GATE_RODENT_REPORT_REFRESH summary enrichment).
+//
+// Load-bearing behaviors: the model NEVER speaks unguarded (banned copy,
+// out-of-bounds length, or a withheld product-name echo falls back to the
+// deterministic summary), the deterministic summary is assembled only from
+// ratified copy (snapshot Today's Result / recap) plus factual counts and a
+// plain next-visit sentence, registered pesticide products never enter the
+// prompt by name, and generation caches on the grounding-facts hash.
+
+const {
+  applyRodentReportNarrative,
+  _test,
+} = require('../services/service-report/rodent-report-narrative');
+
+const {
+  groundingFacts,
+  deterministicSummary,
+  deviceFacts,
+  isNameableDevice,
+  echoesWithheldName,
+  buildUserMessage,
+  _cache,
+} = _test;
+
+const RECAP = 'Today we completed your Rodent Trapping Service. We treated the accessible service areas. - Waves';
+
+let seq = 0;
+function input(overrides = {}) {
+  seq += 1;
+  return {
+    recap: `${RECAP} (case ${seq})`,
+    serviceTypeDisplay: 'Rodent Trapping Service',
+    typedReport: {
+      todaysResult: {
+        headline: 'Rodent activity was moderate today.',
+        body: 'We checked 7 traps today. We will return for the scheduled trap check.',
+        nextStep: 'We will return for the scheduled trap check.',
+      },
+      findings: [
+        { fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'Roof rats', value: 'Roof rat' },
+        { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '7', value: '7' },
+      ],
+    },
+    activity: { label: 'Rodent Activity', levelWord: 'Moderate activity', score: 3, maxScore: 5, isBaseline: true, trendWord: null },
+    stationSummary: { total: 7, checked: 7, activity: 0, serviced: 0, inaccessible: 0 },
+    applications: [
+      {
+        product: {
+          name: 'Victor Expanded Trigger Rat Snap Trap',
+          epa_reg: 'N/A',
+          category: 'Rodent Control',
+          service_report_summary: 'A mechanical trap or monitoring device used to detect and capture activity — it contains no pesticide.',
+        },
+      },
+    ],
+    photos: [{ caption: 'Attic insulation with a dark pellet consistent with rodent droppings visible on the wiring.' }],
+    nextAppointment: { serviceType: 'Rodent Trap Check', scheduledDate: '2026-08-03', windowStart: '08:00' },
+    ...overrides,
+  };
+}
+
+beforeEach(() => _cache.clear());
+
+test('groundingFacts keeps only usable facts', () => {
+  const facts = groundingFacts(input());
+  expect(facts.findings).toEqual([
+    { label: 'What we found', value: 'Roof rats' },
+    { label: 'Traps checked', value: '7' },
+  ]);
+  expect(facts.activity).toMatchObject({ levelWord: 'Moderate activity', score: 3, isBaseline: true });
+  expect(facts.stations).toEqual({ total: 7, checked: 7, capturesRecorded: 0, serviced: 0, inaccessible: 0 });
+  expect(facts.photoEvidence).toHaveLength(1);
+  expect(facts.nextVisit).toMatchObject({ date: 'Monday, August 3', window: '8–10 AM' });
+
+  // absent inputs drop cleanly
+  const bare = groundingFacts(input({
+    activity: null, stationSummary: null, applications: [], photos: [], nextAppointment: null,
+  }));
+  expect(bare.activity).toBeNull();
+  expect(bare.stations).toBeNull();
+  expect(bare.devices).toEqual([]);
+  expect(bare.photoEvidence).toEqual([]);
+  expect(bare.nextVisit).toBeNull();
+  // zero-station summaries hide the counts entirely
+  expect(groundingFacts(input({ stationSummary: { total: 0 } })).stations).toBeNull();
+});
+
+test('registered pesticide products never enter the prompt by name', () => {
+  const apps = [
+    { product: { name: 'Victor Rat Snap Trap', epa_reg: '', category: 'Rodent Control' } },
+    { product: { name: 'Contrac Blox Rodenticide', epa_reg: '12455-79', category: 'Rodenticide' } },
+  ];
+  const devices = deviceFacts(apps);
+  expect(devices[0]).toMatchObject({ name: 'Victor Rat Snap Trap', nameable: true });
+  expect(devices[1]).toMatchObject({ name: null, nameable: false, category: 'Rodenticide' });
+  expect(isNameableDevice({ epa_reg: 'N/A' })).toBe(true);
+  expect(isNameableDevice({ epa_reg: 'none' })).toBe(true);
+  expect(isNameableDevice({ epa_reg: '12455-79' })).toBe(false);
+
+  const message = buildUserMessage(groundingFacts(input({ applications: apps })));
+  expect(message).toContain('Victor Rat Snap Trap');
+  expect(message).not.toContain('Contrac');
+
+  // and an echo of the withheld name in model output is caught
+  expect(echoesWithheldName('We refreshed the Contrac placements.', apps)).toBe(true);
+  expect(echoesWithheldName('We checked the Victor snap traps.', apps)).toBe(false);
+});
+
+test('deterministic summary = ratified copy + factual counts + next visit', () => {
+  const text = deterministicSummary(groundingFacts(input()));
+  expect(text).toContain('Rodent activity was moderate today.');
+  expect(text).toContain('We checked 7 traps today.');
+  expect(text).toContain('7 of 7 traps were inspected, with no captures recorded.');
+  expect(text).toContain('Photos from this visit are included with this report.');
+  expect(text).toContain('Your next visit is scheduled for Monday, August 3, arriving 8–10 AM.');
+
+  // capture counts render factually
+  const captures = deterministicSummary(groundingFacts(input({
+    stationSummary: { total: 7, checked: 7, activity: 2, serviced: 0, inaccessible: 0 },
+  })));
+  expect(captures).toContain('with 2 captures recorded');
+  // without a snapshot body the recap carries the summary
+  const noSnapshot = groundingFacts(input({ typedReport: null }));
+  expect(deterministicSummary(noSnapshot)).toContain('Today we completed your Rodent Trapping Service.');
+});
+
+test('model copy is used when clean, and caches on the facts hash', async () => {
+  const callModel = jest.fn().mockResolvedValue({
+    ok: true,
+    json: { summary: 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. Your next visit is Monday, August 3, arriving 8–10 AM.' },
+  });
+  const one = input();
+  const first = await applyRodentReportNarrative(one, { callModel });
+  expect(first).toContain('sets the baseline');
+  const again = await applyRodentReportNarrative(one, { callModel });
+  expect(again).toBe(first);
+  expect(callModel).toHaveBeenCalledTimes(1);
+});
+
+test('banned copy, bad length, and withheld-name echoes fall back deterministically', async () => {
+  const fallbackFor = (summary, extra = {}) => applyRodentReportNarrative(input(extra), {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+
+  // banned vocabulary (shared list + EXTRA_FORBIDDEN)
+  for (const bad of [
+    'Great news, the rodents have been eliminated from your property for good, and every trap we checked today confirmed it.',
+    'The infestation is under control now that all seven traps have been inspected and reset around your home today.',
+  ]) {
+    const text = await fallbackFor(bad);
+    expect(text).toContain('7 of 7 traps were inspected');
+  }
+
+  // too short / too long
+  expect(await fallbackFor('Too short.')).toContain('7 of 7 traps were inspected');
+  expect(await fallbackFor('x'.repeat(1500))).toContain('7 of 7 traps were inspected');
+
+  // withheld registered-product echo
+  const withBait = await applyRodentReportNarrative(input({
+    applications: [
+      { product: { name: 'Victor Rat Snap Trap', epa_reg: 'N/A', category: 'Rodent Control' } },
+      { product: { name: 'Contrac Blox Rodenticide', epa_reg: '12455-79', category: 'Rodenticide' } },
+    ],
+  }), {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: 'We inspected all seven traps around the home today and also refreshed the Contrac bait placements at the exterior stations for continued monitoring this season.' } }),
+  });
+  expect(withBait).toContain('7 of 7 traps were inspected');
+});
+
+test('a model miss or throw falls back deterministically and never throws', async () => {
+  const missed = await applyRodentReportNarrative(input(), {
+    callModel: jest.fn().mockResolvedValue({ ok: false, reason: 'provider_down' }),
+  });
+  expect(missed).toContain('7 of 7 traps were inspected');
+  const threw = await applyRodentReportNarrative(input(), {
+    callModel: jest.fn().mockRejectedValue(new Error('boom')),
+  });
+  expect(threw).toContain('7 of 7 traps were inspected');
+});

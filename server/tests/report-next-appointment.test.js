@@ -150,3 +150,73 @@ test('payload nextAppointment is null when nothing upcoming matches the service 
 
   expect(data.nextAppointment).toBeNull();
 });
+
+// Rodent reports widen the match to the whole rodent program (owner
+// 2026-07-27: next service date if and only if it is rodent-related) —
+// exclusion/sanitation/trapping names carry no rodent token and fall to the
+// 'pest' default line, so the strict same-line match missed them.
+const RODENT_SERVICE = {
+  ...BASE_SERVICE,
+  id: 'service-rodent-next',
+  service_line: 'rodent',
+  service_type: 'Rodent Trapping Service',
+};
+
+test('a rodent report discloses a rodent-adjacent visit (Exclusion Service) as next', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // no rodent token, detects as pest — but it IS the rodent program
+      { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
+      { id: 'scheduled-rodent-later', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', window_start: '09:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-excl', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Exclusion Service',
+    scheduledDate: '2999-01-03',
+    windowStart: '08:00:00',
+  });
+});
+
+test('a rodent report never claims trap-named visits of OTHER detectable lines', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // "trap" token but detectably mosquito — stays off the rodent report
+      { id: 'scheduled-mosq-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Mosquito Trap Service', window_start: '08:00:00' },
+      // quarterly pest visit: not rodent-related, also skipped
+      { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-04', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00' },
+      { id: 'scheduled-sanitation', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'Sanitation & Cleanup', window_start: '10:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-mosq', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Sanitation & Cleanup',
+    scheduledDate: '2999-01-05',
+    windowStart: '10:00:00',
+  });
+});
+
+test('non-rodent reports keep the strict same-line match', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // pest report + rodent-adjacent name that detects pest: still matches
+      // (unchanged pest behavior), so assert with a LAWN report instead
+      { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(
+    { ...BASE_SERVICE, id: 'service-lawn-next', service_line: 'lawn', service_type: 'Lawn Care Treatment' },
+    'token-lawn-none',
+    knex,
+  );
+
+  expect(data.nextAppointment).toBeNull();
+});

@@ -220,6 +220,10 @@ module.exports = {
   // banned-copy guard) — consumed by technician-report-copy.js so tech-
   // reviewed AI report copy meets the same bar as the narrative rewrite.
   EXTRA_FORBIDDEN,
+  // Shared date/window formatters — the rodent report narrative renders the
+  // same customer-facing next-visit forms (window is ALWAYS start + 2h).
+  formatNextVisitDate,
+  formatArrivalWindow,
   // exported for tests
   _test: {
     groundingFacts,
