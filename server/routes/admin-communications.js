@@ -12,7 +12,8 @@ const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { buildRescheduleLink } = require('../services/reschedule-link');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
 const { isEnabled } = require('../config/feature-gates');
@@ -49,6 +50,10 @@ function notifyTwilioFailure(payload) {
 function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
 }
+
+// Guards raw query params destined for uuid columns — a malformed string
+// makes Postgres throw a cast error instead of returning no rows.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function maskPhone(value) {
   const digits = phoneDigits(value);
@@ -1088,6 +1093,71 @@ Write ONLY the SMS reply text. Keep it under 160 characters. No quotes or labels
     res.json({ draft });
   } catch (err) {
     logger.error(`AI draft failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/communications/reschedule-link?phone=...&customerId=...
+// Composer helper: resolve the recipient's next upcoming reschedulable visit
+// and return its self-serve /reschedule/:token short link for insertion into
+// the SMS body. customerId (when the composer knows it) wins; otherwise the
+// customer resolves by phone exactly like /ai-draft. Read-only apart from
+// the short-url row buildRescheduleLink mints. Final eligibility stays owned
+// by the public /reschedule/:token page (e.g. a missed same-day visit still
+// rebooks there) — this endpoint only picks WHICH visit the link points to.
+router.get('/reschedule-link', async (req, res) => {
+  try {
+    const { phone, customerId } = req.query;
+    let customer = null;
+    if (customerId && UUID_RE.test(String(customerId))) {
+      customer = await db('customers').where({ id: customerId }).first('id');
+    }
+    if (!customer) {
+      const cleanPhone = String(phone || '').replace(/\D/g, '').slice(-10);
+      if (!cleanPhone) return res.status(400).json({ error: 'phone or customerId required' });
+      customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first('id');
+    }
+    if (!customer) return res.status(404).json({ error: 'No customer found for that number' });
+
+    // Soonest not-yet-terminal visit today-or-later. ET day frame:
+    // scheduled_date is a DATE column, so comparing against the ET
+    // 'YYYY-MM-DD' string is exact (same comparison reschedule-public makes).
+    // The status gate mirrors RESCHEDULABLE_STATUSES there — live
+    // (en_route/on_site) and terminal rows never match.
+    const svc = await db('scheduled_services')
+      .where({ customer_id: customer.id })
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .where('scheduled_date', '>=', etDateString())
+      .orderBy([
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+      ])
+      .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
+    if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
+
+    const { url, line } = await buildRescheduleLink(svc.id, { customerId: customer.id });
+    // Null url = legacy pre-backfill row without a token (or shortener +
+    // portal-url both unavailable) — nothing usable to insert.
+    if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
+
+    // pg returns DATE columns as a JS Date or a string depending on parser
+    // config — normalize to 'YYYY-MM-DD' (same idiom as reschedule-sms).
+    const scheduledDate = svc.scheduled_date instanceof Date
+      ? svc.scheduled_date.toISOString().slice(0, 10)
+      : String(svc.scheduled_date).slice(0, 10);
+    res.json({
+      url,
+      line,
+      appointment: {
+        id: svc.id,
+        scheduledDate,
+        windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : null,
+        serviceType: svc.service_type || null,
+        status: svc.status,
+      },
+    });
+  } catch (err) {
+    logger.error(`reschedule-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

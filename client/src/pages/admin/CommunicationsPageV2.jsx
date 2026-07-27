@@ -620,6 +620,7 @@ function SmsTab() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
+  const [insertingResched, setInsertingResched] = useState(false);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1176,6 +1177,46 @@ function SmsTab() {
       alert("AI draft failed: " + e.message);
     } finally {
       setAiDrafting(false);
+    }
+  };
+
+  // Insert the recipient's self-serve reschedule link (their next upcoming
+  // visit's tokened /reschedule page) into the message body. The server
+  // resolves WHICH visit; feedback lands in the sendResult line under the
+  // buttons so the operator can see what the link points to before sending.
+  const handleInsertRescheduleLink = async () => {
+    if (!toNumber.trim() || insertingResched) return;
+    setInsertingResched(true);
+    setSendResult(null);
+    try {
+      const params = new URLSearchParams({ phone: toNumber.trim() });
+      if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+      const d = await adminFetch(
+        `/admin/communications/reschedule-link?${params.toString()}`,
+      );
+      const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
+      setMsgBody((b) =>
+        b.trim() ? `${b.replace(/\s+$/, "")}\n\n${clause}` : clause,
+      );
+      // Noon anchor keeps the Y-M-D string on its own calendar day in every
+      // US zone (same idiom as the server's reschedule confirmation copy).
+      const day = new Date(
+        `${d.appointment.scheduledDate}T12:00:00`,
+      ).toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      });
+      setSendResult({
+        ok: true,
+        text: `Reschedule link added — points to the ${day}${
+          d.appointment.serviceType ? ` ${d.appointment.serviceType}` : ""
+        } visit.`,
+      });
+    } catch (e) {
+      setSendResult({ ok: false, text: e.message });
+    } finally {
+      setInsertingResched(false);
     }
   };
 
@@ -1889,7 +1930,7 @@ function SmsTab() {
             )}
           />
         )}
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap gap-2 items-center">
           {/* Plus — attachment menu */}
           <div className="relative">
             {" "}
@@ -1976,6 +2017,14 @@ function SmsTab() {
             disabled={aiDrafting || !toNumber.trim()}
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
+          </Button>{" "}
+          <Button
+            variant="secondary"
+            onClick={handleInsertRescheduleLink}
+            disabled={insertingResched || !toNumber.trim()}
+            title="Insert this customer's self-serve reschedule link"
+          >
+            {insertingResched ? "Adding…" : "Reschedule Link"}
           </Button>{" "}
         </div>
         {sendResult && (
