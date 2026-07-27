@@ -1448,9 +1448,17 @@ export function LeadsSection() {
                 type="button"
                 aria-label="Clear builder warranty filter"
                 title="Clear builder warranty filter"
-                onClick={() =>
-                  setFilters((f) => ({ ...f, builder_warranty: "", page: 1 }))
-                }
+                onClick={() => {
+                  setFilters((f) => ({ ...f, builder_warranty: "", page: 1 }));
+                  // Strip the drill param too (codex P2): a remount or
+                  // refresh re-reads the URL, so state-only clearing would
+                  // silently re-apply the filter.
+                  const sp = new URLSearchParams(window.location.search);
+                  if (sp.has("builder_warranty")) {
+                    sp.delete("builder_warranty");
+                    setSearchParams(sp, { replace: true });
+                  }
+                }}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",

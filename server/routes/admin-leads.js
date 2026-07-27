@@ -702,8 +702,11 @@ router.get('/', async (req, res, next) => {
     else if (status) query = query.where('leads.status', status);
     // Bell drill: the builder_warranty_expiring alert links here with this
     // param, and the SHARED predicate guarantees the list shows exactly the
-    // leads the bell counted (window + open statuses + non-deleted).
-    if (req.query.builder_warranty === 'expiring') {
+    // leads the bell counted (window + open statuses + non-deleted). The
+    // count query and the internal-lead exclusion are applied below, next to
+    // the source drill's — pagination and membership must match the bell.
+    const builderWarrantyDrill = req.query.builder_warranty === 'expiring';
+    if (builderWarrantyDrill) {
       const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
       query = whereBuilderWarrantyExpiring(query);
     }
@@ -754,10 +757,18 @@ router.get('/', async (req, res, next) => {
     if (channel) countQuery.where('lead_sources.channel', channel);
     if (startDt && !isNaN(startDt)) countQuery.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) countQuery.where('leads.first_contact_at', '<=', endDt);
-    // Dashboard source drill: mirror /admin/dashboard/leads-by-source's
-    // excludeInternalLeads so the drilled rows match the count the owner clicked.
-    // Scoped to the drill path so the day-to-day Leads list is unchanged.
-    if (source_name && INTERNAL_TEST_CUSTOMERS.length) {
+    // Builder-warranty bell drill: the count must honor the same predicate as
+    // the rows (codex P2 — an unfiltered count renders phantom pages), and
+    // the internal-lead exclusion below must apply so the list matches the
+    // bell's membership exactly.
+    if (builderWarrantyDrill) {
+      const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
+      whereBuilderWarrantyExpiring(countQuery);
+    }
+    // Dashboard drills (source panel + builder-warranty bell): mirror
+    // excludeInternalLeads so the drilled rows match the count the owner
+    // clicked. Scoped to the drill paths so the day-to-day list is unchanged.
+    if ((source_name || builderWarrantyDrill) && INTERNAL_TEST_CUSTOMERS.length) {
       const excludeInternal = (qb) =>
         qb.whereNotIn(
           db.raw("LOWER(COALESCE(leads.first_name, '') || ' ' || COALESCE(leads.last_name, ''))"),
