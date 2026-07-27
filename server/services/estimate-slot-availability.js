@@ -517,6 +517,31 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   return rows;
 }
 
+// A seasonal (Feb–Oct) mosquito selection must never book its FIRST visit in
+// the Nov–Jan gap: the converter seeds the series from the booked date, and a
+// winter parent counts as one of the nine — one prohibited winter treatment
+// and only eight in-season (codex r8 P1). The profile's services carry the
+// SELECTED frequency's rows, so a mosquito row at nine visits/year identifies
+// the seasonal program (the converter forces the same rule at seeding).
+// Admin/office bookings don't come through this service and keep their
+// explicit override.
+function seasonalSelectionProfile(serviceProfile = {}) {
+  if (serviceProfile.serviceMode === 'one_time') return false;
+  return (serviceProfile.services || []).some(
+    (row) => row.service === 'mosquito' && Number(row.visitsPerYear) === 9,
+  );
+}
+
+function inMosquitoSeason(dateStr) {
+  const month = Number(String(dateStr || '').slice(5, 7));
+  return month >= 2 && month <= 10;
+}
+
+function filterSeasonalSlots(slots = [], serviceProfile) {
+  if (!seasonalSelectionProfile(serviceProfile)) return slots;
+  return slots.filter((slot) => inMosquitoSeason(slot.date));
+}
+
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -1397,7 +1422,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
     const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
-    const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const bookable = filterSeasonalSlots(
+      filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
+      serviceProfile,
+    );
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
@@ -1469,7 +1497,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Trim any window that has already passed (or is inside the booking lead
   // time) on today's date — covers route-aware and spread-reassigned slots
   // that buildAsapCapacitySlots' own guard never saw.
-  const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+  const bookable = filterSeasonalSlots(
+    filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
+    serviceProfile,
+  );
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL, {
@@ -1658,6 +1689,8 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  seasonalSelectionProfile,
+  inMosquitoSeason,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.
   SLOT_DAY_START_MINUTES,
@@ -1665,6 +1698,7 @@ module.exports = {
   MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
+    filterSeasonalSlots,
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,

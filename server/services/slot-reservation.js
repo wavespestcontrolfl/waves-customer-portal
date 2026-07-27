@@ -371,6 +371,21 @@ async function reserveSlot({
           durationMinutes,
         })
         : null;
+      // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
+      // is season-filtered for a seasonal mosquito selection, but the offer
+      // HMAC does not bind the frequency — a list fetched under monthly12
+      // (where winter dates are legitimately offered) could be redeemed with
+      // selectedFrequency seasonal9, and the converter would then seed the
+      // series from a Nov–Jan parent, counting a prohibited winter visit
+      // toward the nine. Office/admin bookings don't come through this route.
+      if (serviceProfile
+        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile)
+        && !estimateSlotAvailability.inMosquitoSeason(date)) {
+        const err = new Error('This seasonal program runs February through October — pick an in-season date.');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
       const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;

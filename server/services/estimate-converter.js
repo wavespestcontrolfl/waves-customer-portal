@@ -2198,7 +2198,28 @@ const EstimateConverter = {
           // never seed a series don't take the lock or write skip notes.
           // Guard re-check + seeding share one locked transaction
           // (runSeedingStep) so concurrent creators serialize.
-          if (converterFollowUpSeedingPattern(seedSvc || {}, reservedStart, inferredFrequencyKey)) {
+          const reservedSeedingPattern = converterFollowUpSeedingPattern(seedSvc || {}, reservedStart, inferredFrequencyKey);
+          // Codex r8 P1 (last hole in the class): the slot list and reserve
+          // are season-filtered for seasonal selections, but the reservation
+          // is not re-validated when the FREQUENCY changes after reserving —
+          // a slot held under monthly12 (winter dates legitimately offered)
+          // then accepted as seasonal9 would seed the series from a Nov–Jan
+          // parent, counting a prohibited winter visit toward the nine.
+          // Refuse and roll the accept back; the customer re-picks a date
+          // (the hold expires on its own). Office/admin bookings never come
+          // through the reservation path.
+          if (reservedSeedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+            const reservedMonth = Number(String(scheduledDateOnly(reservedStart.scheduled_date) || '').slice(5, 7));
+            if (reservedMonth < 2 || reservedMonth > 10) {
+              const err = new Error('This seasonal program runs February through October — pick an in-season visit date to finish accepting.');
+              err.code = 'SEASONAL_RESERVATION_OFF_SEASON';
+              err.isOperational = true;
+              err.status = 409;
+              err.statusCode = 409;
+              throw err;
+            }
+          }
+          if (reservedSeedingPattern) {
             const outcome = await runSeedingStep(async (trx) => {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
@@ -2322,16 +2343,37 @@ const EstimateConverter = {
               .map((s) => s.name || s.serviceName || s.service_name || recurringServiceKey(s))
               .join(' + ')} — one visit, one report.`
             : '';
+          // Codex r5 P1: an auto-picked Nov–Jan first date on a seasonal plan
+          // would put a winter treatment on a Feb–Oct program AND count toward
+          // the nine, leaving only eight in-season visits. Roll it to February;
+          // every other unit keeps the picked date. (Office-booked off-season
+          // parents are the operator's choice and are not moved.) Codex r8 P2:
+          // pickFirstServiceDate's blackout/weekday validation ran on the
+          // ORIGINAL date, so re-nudge the rolled date off closed days and
+          // weekends — bounded and fail-open like the fallback nudge, and a
+          // February date + 14 days can never leave the season.
+          let unitFirstDate = firstServiceDate;
+          if (seasonalUnit) {
+            unitFirstDate = RecurringAppointmentSeeder.firstInSeasonDate(firstServiceDate);
+            if (unitFirstDate !== firstServiceDate) {
+              try {
+                const { isBlackoutDate } = require('./scheduling/blackout-dates');
+                for (let nudge = 0; nudge < 14; nudge++) {
+                  const day = new Date(`${unitFirstDate}T12:00:00`).getDay();
+                  const closed = day === 0 || day === 6 || (await isBlackoutDate(unitFirstDate));
+                  if (!closed) break;
+                  const next = new Date(`${unitFirstDate}T12:00:00`);
+                  next.setDate(next.getDate() + 1);
+                  unitFirstDate = next.toISOString().split('T')[0];
+                }
+              } catch (nudgeErr) {
+                logger.warn(`[estimate-converter] rolled-date closed-day nudge failed (failing open): ${nudgeErr.message}`);
+              }
+            }
+          }
           const row = {
             customer_id: customerId,
-            // Codex r5 P1: an auto-picked Nov–Jan first date on a seasonal
-            // plan would put a winter treatment on a Feb–Oct program AND count
-            // toward the nine, leaving only eight in-season visits. Roll it to
-            // February; every other unit keeps the picked date. (Office-booked
-            // off-season parents are the operator's choice and are not moved.)
-            scheduled_date: seasonalUnit
-              ? RecurringAppointmentSeeder.firstInSeasonDate(firstServiceDate)
-              : firstServiceDate,
+            scheduled_date: unitFirstDate,
             service_type: serviceName,
             status: 'pending',
             notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}.${combinedNote}`,

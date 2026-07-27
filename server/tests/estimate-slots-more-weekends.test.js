@@ -471,3 +471,55 @@ describe('estimate slot weekend and expander behavior', () => {
     expect(slotAvailabilityInternals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
   });
 });
+
+describe('seasonal (Feb–Oct) mosquito slot filtering (codex r8 P1)', () => {
+  // A seasonal selection must never be OFFERED a Nov–Jan first-visit date:
+  // the converter seeds the series from the booked date and a winter parent
+  // counts as one of the nine. reserveSlot re-checks at redemption because
+  // the offer HMAC does not bind the frequency.
+  const { seasonalSelectionProfile, inMosquitoSeason } = require('../services/estimate-slot-availability');
+  const seasonalProfile = {
+    serviceMode: 'recurring',
+    services: [{ service: 'mosquito', label: 'Seasonal Mosquito Control', visitsPerYear: 9 }],
+  };
+
+  test('identifies the seasonal selection and only it', () => {
+    expect(seasonalSelectionProfile(seasonalProfile)).toBe(true);
+    // Monthly mosquito (12x), T&S 9x, and one-time mode all book year-round.
+    expect(seasonalSelectionProfile({
+      serviceMode: 'recurring',
+      services: [{ service: 'mosquito', visitsPerYear: 12 }],
+    })).toBe(false);
+    expect(seasonalSelectionProfile({
+      serviceMode: 'recurring',
+      services: [{ service: 'tree_shrub', visitsPerYear: 9 }],
+    })).toBe(false);
+    expect(seasonalSelectionProfile({
+      serviceMode: 'one_time',
+      services: [{ service: 'mosquito', visitsPerYear: 9 }],
+    })).toBe(false);
+  });
+
+  test('inMosquitoSeason bounds are Feb 1 and Oct 31', () => {
+    expect(inMosquitoSeason('2026-02-01')).toBe(true);
+    expect(inMosquitoSeason('2026-10-31')).toBe(true);
+    expect(inMosquitoSeason('2026-11-01')).toBe(false);
+    expect(inMosquitoSeason('2027-01-31')).toBe(false);
+  });
+
+  test('the slot list drops Nov–Jan days for a seasonal selection only', () => {
+    const slots = [
+      { slotId: 'a', date: '2026-10-30' },
+      { slotId: 'b', date: '2026-11-02' },
+      { slotId: 'c', date: '2027-01-15' },
+      { slotId: 'd', date: '2027-02-02' },
+    ];
+    expect(slotAvailabilityInternals.filterSeasonalSlots(slots, seasonalProfile)
+      .map((s) => s.slotId)).toEqual(['a', 'd']);
+    // Non-seasonal profiles keep the full list.
+    expect(slotAvailabilityInternals.filterSeasonalSlots(slots, {
+      serviceMode: 'recurring',
+      services: [{ service: 'mosquito', visitsPerYear: 12 }],
+    })).toHaveLength(4);
+  });
+});

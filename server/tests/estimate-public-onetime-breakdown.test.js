@@ -2124,6 +2124,13 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).toContain('How long does each visit last?');
     expect(payload.askChips).toContain('What about my pool area?');
     expect(payload.askChips).not.toContain('What products do you use?');
+    // Seasonal mosquito (codex r8): annual prepay is NOT offered (the
+    // converter would fail it closed), but the $99 setup is still charged at
+    // accept — so the card renders NON-waivable instead of disappearing.
+    expect(payload.firstVisitFees).toEqual([
+      expect.objectContaining({ service: 'waveguard_setup', waivedWithPrepay: false }),
+    ]);
+    expect(payload.setupFee).toEqual(expect.objectContaining({ service: 'waveguard_setup' }));
   });
 
   test('German Roach Cleanout contract surfaces roach specialty chips, not generic ant chips', async () => {
@@ -7433,6 +7440,14 @@ describe('public estimate one-time breakdown', () => {
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'mosquito', name: 'Mosquito' },
     ], [])).toBe(true);
+    // …EXCEPT seasonal mosquito (9x Feb–Oct, codex r8 P1): the converter fails
+    // that prepay closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED) after a
+    // deposit may already be collected, so the shared gate — SSR CTA, /data
+    // flag, accept preflight, /deposit-intent — must never offer it. Monthly
+    // mosquito (12x) stays eligible above.
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 },
+    ], [])).toBe(false);
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
       { service: 'palm_injection', name: 'Palm Injection' },
