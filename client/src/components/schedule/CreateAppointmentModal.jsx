@@ -1039,21 +1039,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         lines: [primary, ...sorted.filter((s) => s !== primary)],
       };
     };
-    // Seasonal (Feb–Oct) lines can share a parent with year-round services in
-    // NEITHER direction (codex r19 P1): as parent they'd starve companions of
-    // Nov–Jan visits (addons attach only to parent-generated dates); as an
-    // addon they'd ride winter dates. Each seasonal line books its own
-    // series; everything else keeps the single-parent grouping.
+    // Seasonal (Feb–Oct) lines can share a parent with year-round RECURRING
+    // services in NEITHER direction (codex r19 P1): as parent they'd starve
+    // companions of Nov–Jan visits (addons attach only to parent-generated
+    // dates); as an addon they'd ride winter dates. Each seasonal line books
+    // its own series. ONE-TIME lines are different (codex r23 P2): they ride
+    // whichever group carries the first visit as add-ons — the server's
+    // lineDueOnRecurringDate already excludes one_time add-ons from
+    // follow-ups — so a seasonal + one-time save stays ONE dispatch job.
     const seasonalRows = rows.filter((s) => s.cadence === 'seasonal_feb_oct');
-    const yearRoundRows = rows.filter((s) => s.cadence !== 'seasonal_feb_oct');
-    if (!seasonalRows.length || !yearRoundRows.length) {
+    if (!seasonalRows.length) {
       const solo = buildGroup(rows);
       return solo ? [solo] : [];
     }
-    return [
-      buildGroup(yearRoundRows),
-      ...seasonalRows.map((row) => buildGroup([row])),
-    ].filter(Boolean);
+    const oneTimeRows = rows.filter((s) => (s.cadence || 'one_time') === 'one_time');
+    const yearRoundRecurring = rows.filter(
+      (s) => s.cadence !== 'seasonal_feb_oct' && (s.cadence || 'one_time') !== 'one_time',
+    );
+    const groups = [];
+    if (yearRoundRecurring.length) {
+      groups.push(buildGroup([...yearRoundRecurring, ...oneTimeRows]));
+    }
+    const [firstSeasonal, ...restSeasonal] = seasonalRows;
+    groups.push(buildGroup(yearRoundRecurring.length
+      ? [firstSeasonal]
+      : [firstSeasonal, ...oneTimeRows]));
+    restSeasonal.forEach((row) => groups.push(buildGroup([row])));
+    return groups.filter(Boolean);
   };
 
   // Tracks cadence-group keys already POSTed during this modal session.
