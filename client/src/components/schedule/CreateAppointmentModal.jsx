@@ -200,14 +200,22 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   }
   // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
   // to a plain month delta so day semantics match the other month cadences.
-  // Mirrors the server's seasonalFebOctDate.
+  // Mirrors the server's seasonalFebOctDate INCLUDING seasonOrdinalForBase's
+  // off-season normalization — Nov/Dec/Jan anchors all sit one slot before
+  // the coming February, so occurrence 1 lands on that February (a raw month
+  // offset made a December anchor preview March while the server saved Feb).
   if (pattern === 'seasonal_feb_oct') {
+    if (i === 0) return base; // the anchor itself is never renormalized for display
     const SEASON_MONTHS = 9; // Feb..Oct
     const m1 = base.getMonth() + 1;
-    const ordinal = base.getFullYear() * SEASON_MONTHS + (m1 - 2) + i;
+    const y = base.getFullYear();
+    const baseOrdinal = m1 < 2 ? y * SEASON_MONTHS - 1
+      : m1 > 10 ? (y + 1) * SEASON_MONTHS - 1
+        : y * SEASON_MONTHS + (m1 - 2);
+    const ordinal = baseOrdinal + i;
     const targetYear = Math.floor(ordinal / SEASON_MONTHS);
     const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
-    return addCalendarMonthsByWeekday(base, (targetYear - base.getFullYear()) * 12 + (targetMonth1 - m1));
+    return addCalendarMonthsByWeekday(base, (targetYear - y) * 12 + (targetMonth1 - m1));
   }
   const monthIntervals = { monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4, semiannual: 6, biannual: 6, annual: 12, yearly: 12 };
   if (monthIntervals[pattern]) {

@@ -890,15 +890,24 @@ function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   }
   // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
   // to a plain month delta so day semantics match the other month cadences.
-  // Mirrors the server's seasonalFebOctDate; without this the editor previews
-  // the 91-day fallback for a seasonal mosquito series.
+  // Mirrors the server's seasonalFebOctDate INCLUDING seasonOrdinalForBase's
+  // off-season normalization — Nov/Dec/Jan anchors all sit one slot before
+  // the coming February, so occurrence 1 lands on that February. Without this
+  // the editor previewed the 91-day fallback for a seasonal mosquito series.
   if (pattern === "seasonal_feb_oct") {
+    // The preview's first chip is the anchor itself — display it as booked,
+    // never renormalized (an off-season office booking is the operator's).
+    if (i === 0) return base;
     const SEASON_MONTHS = 9; // Feb..Oct
     const m1 = base.getMonth() + 1;
-    const ordinal = base.getFullYear() * SEASON_MONTHS + (m1 - 2) + i;
+    const y = base.getFullYear();
+    const baseOrdinal = m1 < 2 ? y * SEASON_MONTHS - 1
+      : m1 > 10 ? (y + 1) * SEASON_MONTHS - 1
+        : y * SEASON_MONTHS + (m1 - 2);
+    const ordinal = baseOrdinal + i;
     const targetYear = Math.floor(ordinal / SEASON_MONTHS);
     const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
-    const monthDelta = (targetYear - base.getFullYear()) * 12 + (targetMonth1 - m1);
+    const monthDelta = (targetYear - y) * 12 + (targetMonth1 - m1);
     const d = new Date(base);
     const nthOfBase = Math.ceil(d.getDate() / 7);
     const target = editNthWeekdayOfMonth(
