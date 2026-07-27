@@ -167,6 +167,27 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // even a SUPPORTED capture only publishes as the grounded generic form —
   // freeform species/room detail rejects (codex round-6 P1)
   expect(ungroundedClaims('We caught a rat in the kitchen.', swapFacts)).toContain('unsupported_capture_claim');
+  // a NEGATED claim against a positive record is a contradiction (codex
+  // round-7 P1): "no captures" must reject when a capture IS recorded
+  expect(ungroundedClaims('No captures were recorded on this visit.', swapFacts))
+    .toContain('contradicted_capture_negative');
+
+  // totality quantifiers are validated without digits (codex round-7 P1)
+  expect(ungroundedClaims('All traps were inspected today.', facts)).toEqual([]); // 7 of 7 — true
+  const partialFacts = groundingFacts(input({
+    stationSummary: { total: 7, checked: 5, activity: 0, serviced: 0, inaccessible: 2 },
+    typedReport: {
+      todaysResult: { headline: 'Rodent activity was moderate today.', body: 'We checked 5 traps today.', nextStep: null },
+      findings: [
+        { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '5', value: '5' },
+        { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '0', value: '0' },
+      ],
+    },
+  }));
+  expect(ungroundedClaims('All traps were inspected today.', partialFacts)).toContain('uncorroborated_totality:All traps');
+  expect(ungroundedClaims('Both traps were checked today.', facts)).toContain('uncorroborated_totality:Both traps');
+  // roster references without a role verb claim nothing
+  expect(ungroundedClaims('The service covers all of the traps around your home.', facts)).toEqual([]);
 
   // standalone weekday mentions validate against the grounded visit (codex
   // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday
@@ -268,6 +289,31 @@ test('deterministic summary = ratified copy + factual counts + next visit', () =
   })));
   expect(typedPositive).toContain('7 of 7 traps were inspected, with 3 captures recorded.');
   expect(typedPositive).not.toContain('no captures');
+
+  // bait programs mirror the sourcing rule (codex round-7 P1): a zero
+  // claim comes only from the typed bait-consumption finding
+  const baitInput = (findings, activity = 0) => input({
+    stationProgram: 'rodent',
+    stationSummary: { total: 4, checked: 4, activity, serviced: 0, inaccessible: 0 },
+    typedReport: {
+      todaysResult: { headline: 'Bait stations were checked today.', body: null, nextStep: null },
+      findings,
+    },
+  });
+  // typed positive + zero flagged pins → consumption still speaks, never "no"
+  const baitPositive = deterministicSummary(groundingFacts(baitInput([
+    { fieldKey: 'bait_consumption', customerLabel: 'Bait consumption', customerValueLabel: 'Moderate', value: 'Moderate' },
+  ])));
+  expect(baitPositive).toContain('4 of 4 bait stations were inspected, with bait consumption observed.');
+  expect(baitPositive).not.toContain('no bait consumption');
+  // typed "None" grounds the zero claim
+  expect(deterministicSummary(groundingFacts(baitInput([
+    { fieldKey: 'bait_consumption', customerLabel: 'Bait consumption', customerValueLabel: 'None', value: 'None' },
+  ])))).toContain('with no bait consumption observed.');
+  // NO typed consumption record → zero is never inferred from pin statuses
+  const baitUnreconciled = deterministicSummary(groundingFacts(baitInput([])));
+  expect(baitUnreconciled).toContain('4 of 4 bait stations were inspected.');
+  expect(baitUnreconciled).not.toContain('consumption');
 
   // traps-with-capture counts render as locations, never capture totals
   // (one trap can hold multiple captures — codex P1)

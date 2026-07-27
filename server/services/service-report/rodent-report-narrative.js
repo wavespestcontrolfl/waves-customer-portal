@@ -197,13 +197,23 @@ function groundingFacts({
   };
 }
 
-// The typed snapshot's own capture record ("Captures: 2"), when the tech
-// recorded one — the only source that may ground a capture TOTAL or a
-// zero-captures claim.
+// The typed snapshot's own activity record ("Captures: 2", "Bait
+// consumption: Moderate"), when the tech recorded one — the only source
+// that may ground a positive total or a zero claim. `positive` is null
+// when no finding exists, true for a positive count or non-"none" text,
+// false for 0/none.
+function typedActivityState(facts, labelRe) {
+  const finding = (facts.findings || []).find((item) => labelRe.test(item.label));
+  if (!finding) return { present: false, count: null, positive: null };
+  const raw = String(finding.value).trim();
+  const n = Number(raw);
+  if (Number.isFinite(n)) return { present: true, count: n, positive: n > 0 };
+  return { present: true, count: null, positive: !/^(none|no\b|n\/a)/i.test(raw) };
+}
+
 function typedCaptureCount(facts) {
-  const finding = (facts.findings || []).find((item) => /captur/i.test(item.label)
-    && Number.isFinite(Number(String(item.value).trim())));
-  return finding ? Number(String(finding.value).trim()) : null;
+  const state = typedActivityState(facts, /captur/i);
+  return state.count;
 }
 
 // The always-safe summary, assembled only from copy that already passed a
@@ -227,21 +237,35 @@ function deterministicSummary(facts) {
       // with no flagged pin is a permitted state (trapCaptureConflict only
       // rejects the reverse), and claiming "no captures" against it would
       // contradict the ratified Today's Result (codex round-3 P1).
-      const typedCaptures = typedCaptureCount(facts);
+      const typedCaptures = typedActivityState(facts, /captur/i);
       let clause = null;
       if (s.trapsWithCaptureRecorded > 0) {
         clause = `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
-      } else if (typedCaptures > 0) {
-        clause = `${typedCaptures} capture${typedCaptures === 1 ? '' : 's'} recorded`;
-      } else if (typedCaptures === 0) {
+      } else if (typedCaptures.count > 0) {
+        clause = `${typedCaptures.count} capture${typedCaptures.count === 1 ? '' : 's'} recorded`;
+      } else if (typedCaptures.positive === true) {
+        clause = 'captures recorded'; // typed positive without a count
+      } else if (typedCaptures.positive === false) {
         clause = 'no captures recorded';
       }
       parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
     } else if (s.program === 'rodent') {
-      const clause = s.stationsWithBaitConsumption === 0
-        ? 'no bait consumption observed'
-        : `bait consumption observed at ${s.stationsWithBaitConsumption} station${s.stationsWithBaitConsumption === 1 ? '' : 's'}`;
-      parts.push(`${s.checked} of ${s.total} bait station${s.total === 1 ? '' : 's'} were inspected, with ${clause}.`);
+      // Same sourcing rule as captures (codex round-7 P1, mirroring the
+      // round-3 trapping fix): a zero-consumption claim is grounded only in
+      // the typed bait-consumption finding — a positive typed record with
+      // no activity-status pin is a permitted state
+      // (rodentConsumptionConflict rejects only the inverse), so pin
+      // statuses alone never produce "no bait consumption observed".
+      const typedConsumption = typedActivityState(facts, /consum/i);
+      let clause = null;
+      if (s.stationsWithBaitConsumption > 0) {
+        clause = `bait consumption observed at ${s.stationsWithBaitConsumption} station${s.stationsWithBaitConsumption === 1 ? '' : 's'}`;
+      } else if (typedConsumption.positive === true) {
+        clause = 'bait consumption observed';
+      } else if (typedConsumption.positive === false) {
+        clause = 'no bait consumption observed';
+      }
+      parts.push(`${s.checked} of ${s.total} bait station${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
     } else {
       parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected.`);
     }
@@ -398,6 +422,34 @@ function contextualCountProblems(text, facts) {
   while ((match = capRe.exec(text)) !== null) {
     if (!roles.captureTotals.has(Number(match[1]))) problems.push(`uncorroborated_count:${match[0].trim()}`);
   }
+  // Totality quantifiers claim counts without digits (codex round-7 P1):
+  // "All traps were inspected" asserts checked === total, "both" asserts a
+  // roster of exactly 2 — on a partially-checked roster these are false
+  // and must not slip past the digit-anchored validator above. Quantified
+  // mentions with no role verb ("all the traps around your home") claim
+  // nothing and pass.
+  const s = facts.stations || {};
+  const totalityRe = /\b(all|both|every|each)\b(?:\s+of)?(?:\s+(?:the|your|our))?((?:\s+[a-z-]+){0,2}?)\s+(traps?|stations?|devices?)\b/gi;
+  while ((match = totalityRe.exec(text)) !== null) {
+    const quantifier = match[1].toLowerCase();
+    const lead = text.slice(Math.max(0, match.index - 30), match.index);
+    const trail = text.slice(match.index + match[0].length, match.index + match[0].length + 30);
+    // VERB forms only — the bare noun "service" appears in harmless roster
+    // references ("the service covers all of the traps") and must not read
+    // as a serviced-count claim.
+    const totalityRole = (str) => {
+      if (/\binspect\w*|\bcheck\w*/i.test(str)) return s.checked;
+      if (/\bservic(?:ed|ing)\b/i.test(str)) return s.serviced;
+      if (/\baccess/i.test(str)) return s.inaccessible;
+      return null;
+    };
+    const roleValue = totalityRole(trail) ?? totalityRole(lead);
+    if (roleValue == null) continue; // no role claimed — roster reference only
+    const ok = typeof s.total === 'number'
+      && roleValue === s.total
+      && (quantifier !== 'both' || s.total === 2);
+    if (!ok) problems.push(`uncorroborated_totality:${match[0].trim()}`);
+  }
   return problems;
 }
 
@@ -457,19 +509,29 @@ function clauseAround(text, index) {
 function unsupportedActivityClaims(text, facts) {
   const problems = [];
   const roles = factNumbers(facts);
-  const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0);
-  const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0);
-  const scan = (regexes, supported, allowedPhrase, problem) => {
+  const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0)
+    || typedActivityState(facts, /captur/i).positive === true;
+  const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0)
+    || typedActivityState(facts, /consum/i).positive === true;
+  const scan = (regexes, supported, allowedPhrase, positiveProblem, negativeProblem) => {
     for (const re of regexes) {
       for (const match of String(text).matchAll(new RegExp(re.source, 'gi'))) {
-        if (claimNegated(text, match.index, match[0].length)) continue;
+        if (claimNegated(text, match.index, match[0].length)) {
+          // A NEGATED claim against a positive record is just as false as
+          // an invented positive: "No captures were recorded" must reject
+          // when the facts record one (codex round-7 P1).
+          if (supported) problems.push(negativeProblem);
+          continue;
+        }
         if (supported && allowedPhrase.test(clauseAround(text, match.index))) continue;
-        problems.push(problem);
+        problems.push(positiveProblem);
       }
     }
   };
-  scan(CAPTURE_CLAIM_RES, captureSupported, ALLOWED_CAPTURE_PHRASE, 'unsupported_capture_claim');
-  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, ALLOWED_CONSUMPTION_PHRASE, 'unsupported_consumption_claim');
+  scan(CAPTURE_CLAIM_RES, captureSupported, ALLOWED_CAPTURE_PHRASE,
+    'unsupported_capture_claim', 'contradicted_capture_negative');
+  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, ALLOWED_CONSUMPTION_PHRASE,
+    'unsupported_consumption_claim', 'contradicted_consumption_negative');
   return problems;
 }
 
