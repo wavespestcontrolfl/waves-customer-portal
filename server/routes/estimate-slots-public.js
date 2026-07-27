@@ -566,11 +566,14 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       if (resolveEstimateInvoiceMode(estimate, estData)) {
         return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
       }
-      // Tier-aware (codex r10 P1): the mosquito ladder's SELECTED tier
-      // carries its own eligibility (stamped by finalizePricingBundle) —
+      // Tier-aware (codex r10 P1 + r13 P0): the mosquito ladder's SELECTED
+      // tier carries its own eligibility (stamped by finalizePricingBundle) —
       // seasonal9 must refuse the deposit even when the stored default row is
       // monthly, and monthly12 may proceed even when the stored row is
-      // seasonal. Old clients that omit selectedFrequency keep the
+      // seasonal. The selection can arrive as the top-level frequency OR as a
+      // bundle combo axis (serviceCadences.mosquito), and an unmatched
+      // nonempty key is an acceptance shape /accept rejects — never collect
+      // money for either. Old clients that omit both fields keep the
       // stored-mix rule (fail-closed for seasonal-default estimates).
       const prepayFreqKey = typeof req.body?.selectedFrequency === 'string'
         ? req.body.selectedFrequency.trim()
@@ -581,9 +584,18 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
           ...(Array.isArray(pricingBundle?.hiddenLawnFrequencies) ? pricingBundle.hiddenLawnFrequencies : []),
         ].find((f) => f?.key === prepayFreqKey)
         : null;
-      const prepayEligibleHere = prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean'
-        ? prepayFreq.annualPrepayEligible
-        : annualPrepayEligibleForEstimateData(estData);
+      if (prepayFreqKey && !prepayFreq) {
+        return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+      }
+      const rawCadences = req.body?.serviceCadences;
+      const cadenceRequestsSeasonal = !!rawCadences && typeof rawCadences === 'object'
+        && !Array.isArray(rawCadences)
+        && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+          .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
+      const prepayEligibleHere = !cadenceRequestsSeasonal
+        && (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean'
+          ? prepayFreq.annualPrepayEligible
+          : annualPrepayEligibleForEstimateData(estData));
       if (!prepayEligibleHere) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }

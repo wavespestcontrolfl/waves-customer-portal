@@ -8201,12 +8201,22 @@ router.put('/:token/accept', async (req, res, next) => {
     // that flag decides for the SELECTED tier — the stored-mix rule remains
     // for everything else. Runs before any billing side effects.
     if (annualPrepaySelected) {
+      // A bundle combo axis can request the seasonal mosquito cadence via
+      // serviceCadences even when the top-level frequency is something else
+      // (codex r13 P0) — reject it here with the same 400 the deposit route
+      // uses, BEFORE the converter is reached.
+      const rawCadences = req.body?.serviceCadences;
+      const cadenceRequestsSeasonal = !!rawCadences && typeof rawCadences === 'object'
+        && !Array.isArray(rawCadences)
+        && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+          .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
       const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
         ? selectedFrequency.annualPrepayEligible
         : null;
-      const prepayMixEligible = tierPrepayFlag != null
-        ? tierPrepayFlag
-        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+      const prepayMixEligible = !cadenceRequestsSeasonal
+        && (tierPrepayFlag != null
+          ? tierPrepayFlag
+          : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList));
       if (!prepayMixEligible) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }

@@ -4562,12 +4562,14 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/deposit-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          // selectedFrequency lets the server apply per-tier prepay rules
-          // (mosquito seasonal9 refuses the prepay deposit BEFORE money moves).
+          // selectedFrequency + serviceCadences let the server apply per-tier
+          // prepay rules (mosquito seasonal9 — top-level OR a bundle combo
+          // axis — refuses the prepay deposit BEFORE money moves).
           body: JSON.stringify({
             serviceMode,
             paymentMethodPreference: paymentPreference,
             ...(selectedFrequency ? { selectedFrequency } : {}),
+            ...(serviceCadences ? { serviceCadences } : {}),
           }),
         });
         const body = await r.json().catch(() => ({}));
