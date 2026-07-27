@@ -1021,6 +1021,14 @@ function mapV1ToLegacyShape(v1Result) {
       annualBeforeDiscount: suppressRecurringTotals ? 0 : recurringAnnualBefore,
       grandTotal: suppressRecurringTotals ? 0 : year2Monthly,
       monthlyTotal: suppressRecurringTotals ? 0 : recurringMonthly,
+      // EXACT full recurring annual (codex P2 on #2998 round 3): the
+      // persistence path's deriveTotalsFromEstimateData prefers
+      // recurring.annualTotal and previously fell through to
+      // round(year2/12) * 12, which drifts whenever a line's annual isn't
+      // divisible by 12 (station rental: $100/yr rides as $8.33/mo →
+      // $519.96 persisted vs the $520 the line items promise, and
+      // conversion then bills $129.99/application instead of $130).
+      annualTotal: suppressRecurringTotals ? 0 : year2,
       annualAfterDiscount: suppressRecurringTotals ? 0 : recurringAnnual,
       savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,

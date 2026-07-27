@@ -133,6 +133,15 @@ describe('engine + mapper emission', () => {
     expect(rentMapped.recurring.services.find((s) => s.service === 'termite_bait'))
       .toMatchObject({ mo: 35, perTreatment: 105, visitsPerYear: 4 });
     expect(rentBait.installation.retailValue).toBe(ownBait.installation.price);
+
+    // EXACT annual survives the mapped totals (codex P2 round 3): the
+    // persistence path prefers recurring.annualTotal, and without it the
+    // $100 rider riding as a rounded $8.33/mo reconstructs to $519.96 —
+    // converting to $129.99/application against line items promising $130.
+    const exactAnnual = rentBait.annual + rental.annual;
+    expect(rentMapped.recurring.annualTotal).toBe(exactAnnual);
+    expect(rentMapped.recurring.annualTotal)
+      .not.toBe(Math.round((rentMapped.recurring.grandTotal * 12) * 100) / 100);
   });
 
   test('rental reaches parity with buying at the amortization horizon', () => {
@@ -328,6 +337,34 @@ describe('service-details guide reflects who owns the stations', () => {
 });
 
 // ── fail-closed pricing (codex P1) ────────────────────────────────────────────
+
+describe('dark-gate save guard (client-priced payloads)', () => {
+  test('a rental row cannot be persisted while GATE_TERMITE_STATION_RENTAL is off', () => {
+    const { assertNoDarkTermiteRentalPayload } = require('../services/admin-estimate-persistence');
+    const rentData = {
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteOwnership: 'rent' }))),
+    };
+    const ownData = {
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput())),
+    };
+    const prev = process.env.GATE_TERMITE_STATION_RENTAL;
+    delete process.env.GATE_TERMITE_STATION_RENTAL;
+    try {
+      // The engine enforces the gate only when IT prices; a client-priced
+      // fallback payload skips the engine, so the save must fail closed —
+      // same posture as assertNoDarkTermiteBondPayload.
+      expect(() => assertNoDarkTermiteRentalPayload(rentData)).toThrow(/GATE_TERMITE_STATION_RENTAL/);
+      let status;
+      try { assertNoDarkTermiteRentalPayload(rentData); } catch (err) { status = err.statusCode || err.status; }
+      expect(status).toBe(422);
+      expect(() => assertNoDarkTermiteRentalPayload(ownData)).not.toThrow();
+    } finally {
+      process.env.GATE_TERMITE_STATION_RENTAL = prev;
+    }
+  });
+});
 
 describe('an unpriceable uplift reverts the quote to purchase', () => {
   const { TERMITE } = require('../services/pricing-engine/constants');

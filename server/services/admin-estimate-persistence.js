@@ -806,6 +806,30 @@ function assertNoDarkTermiteBondPayload(estimateData) {
   }
 }
 
+// Station-rental twin of the bond guard above (codex P2, #2998 round 3):
+// the engine enforces GATE_TERMITE_STATION_RENTAL only when IT prices, but
+// client-priced payloads (no replayable engineRequest) fall back to their
+// embedded result — without this check a fallback-shaped payload carrying a
+// termite_station_rental row could be persisted, sent, accepted, and billed
+// while the kill switch is off. Scans both the mapped rows and raw engine
+// line items, same sweep as the bond selector.
+function selectedTermiteStationRentalRows(estimateData) {
+  const mapped = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  const raw = [estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  return [...mapped, ...raw].filter((svc) => String(svc?.service || '').toLowerCase() === 'termite_station_rental'
+    || /termite station rental/i.test(String(svc?.name || '')));
+}
+
+function assertNoDarkTermiteRentalPayload(estimateData) {
+  const gateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
+  if (gateOn) return;
+  if (selectedTermiteStationRentalRows(estimateData).length > 0) {
+    throw errorWithStatus('Termite station rental is disabled (GATE_TERMITE_STATION_RENTAL) — switch the estimate to purchased stations and save again.', 422);
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -895,6 +919,7 @@ async function resolveEstimateWritePayload({
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
+  assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
@@ -1406,6 +1431,7 @@ async function reviseAdminEstimate({
 module.exports = {
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
+  assertNoDarkTermiteRentalPayload,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,

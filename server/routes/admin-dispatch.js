@@ -1698,7 +1698,7 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
         code: 'termite_stations_invalid',
       });
     }
-    const entriesError = TermiteStations.validateStationEntriesBody(entries, { allowStatus: false });
+    const entriesError = TermiteStations.validateStationEntriesBody(entries, { allowStatus: false, program });
     if (entriesError) {
       return res.status(400).json({ error: entriesError, code: 'termite_stations_invalid' });
     }

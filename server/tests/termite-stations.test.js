@@ -1014,7 +1014,7 @@ test('an explicit ownedBy on a create overrides the program/customer default', a
   expect(state.stations.map((row) => row.owned_by)).toEqual(['waves', 'customer']);
 });
 
-test('ownedBy is create-only and vocabulary-checked', async () => {
+test('ownedBy is create-only, vocabulary-checked, and termite-only', async () => {
   // Re-stamping an existing row from a routine geometry save is how a bought
   // station would silently become a rented one.
   expect(validateStationEntriesBody([{ id: 'st-1', shape: pin(0.1, 0.1), ownedBy: 'waves' }]))
@@ -1023,6 +1023,25 @@ test('ownedBy is create-only and vocabulary-checked', async () => {
     .toMatch(/ownedBy must be one of/);
   expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1), ownedBy: 'waves' }])).toBeNull();
   expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1) }])).toBeNull();
+  // Rodent/trapping hardware is never sold — an ownedBy there would relabel
+  // company traps as customer property (codex P2 round 3).
+  for (const program of ['rodent', 'trapping']) {
+    expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1), ownedBy: 'customer' }], { program }))
+      .toMatch(/termite bait stations only/);
+    expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1) }], { program })).toBeNull();
+  }
+  expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1), ownedBy: 'customer' }], { program: 'termite' }))
+    .toBeNull();
+});
+
+test('the insert path itself refuses a non-termite ownedBy override (completion validates without program)', async () => {
+  const { db, state } = makeFakeDb({ customers: [RENTER] });
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    program: 'rodent',
+    entries: [{ shape: pin(0.3, 0.3), ownedBy: 'customer' }],
+  });
+  expect(state.stations.map((row) => row.owned_by)).toEqual(['waves']);
 });
 
 test('moving or retiring an existing station never rewrites its ownership', async () => {

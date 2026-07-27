@@ -25,12 +25,13 @@ exports.up = async function up(knex) {
     .update({ owned_by: 'waves' });
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('termite_stations'))) return;
-  if (!(await knex.schema.hasColumn('termite_stations', 'owned_by'))) return;
-  // Restores the state 000002's blanket backfill left behind.
-  await knex('termite_stations')
-    .whereIn('program', ['rodent', 'trapping'])
-    .where({ owned_by: 'waves' })
-    .update({ owned_by: 'customer' });
+exports.down = async function down(knex) {  
+  // Deliberate no-op (codex P2, round 3). A symmetric reversal
+  // (waves → customer on rodent/trapping) cannot distinguish the rows THIS
+  // migration corrected from genuinely Waves-owned rows the service layer
+  // created after it ran — reverting would relabel live company hardware as
+  // customer property and corrupt the recovery inventory. The forward state
+  // is also simply the business truth (that hardware is never sold), so the
+  // correction stands even if the surrounding schema migrations roll back;
+  // 000002's own down() drops the column entirely if the lane is unwound.
 };

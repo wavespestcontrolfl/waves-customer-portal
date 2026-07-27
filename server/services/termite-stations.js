@@ -173,7 +173,7 @@ function sanitizeActions(value) {
 // string (400 material) or null when acceptable. `allowStatus: false` is the
 // office desk flow — there is no visit to hang a check on, so a status there
 // would silently vanish; reject it instead.
-function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
+function validateStationEntriesBody(entries, { allowStatus = true, program = null } = {}) {
   if (entries == null) return null;
   if (!Array.isArray(entries)) return 'termiteStations must be an array';
   if (entries.length > MAX_STATION_ENTRIES) {
@@ -230,10 +230,18 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
       // rental customer can have an added station recorded as one they
       // BOUGHT (codex P2 — the mixed-set case the schema documents). Creates
       // only: re-stamping an existing row from a routine geometry save is
-      // how a bought station would silently become a rented one.
+      // how a bought station would silently become a rented one. Termite
+      // only (codex P2, round 3): rodent/trapping hardware is never sold, so
+      // an ownedBy on those programs would relabel company traps as customer
+      // property and drop them from the recovery index. The insert path
+      // enforces the same rule unconditionally for callers that validate
+      // without program context.
       if (entry.ownedBy != null) {
         if (hasId) {
           return 'station ownership is set when the station is created — it cannot be changed by a move or status save';
+        }
+        if (program && program !== 'termite') {
+          return 'station ownedBy applies to termite bait stations only — rodent and trapping hardware is always Waves-owned';
         }
         if (!STATION_OWNERS.includes(entry.ownedBy)) {
           return `station ownedBy must be one of: ${STATION_OWNERS.join(', ')}`;
@@ -481,8 +489,13 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
         label: normalizeLabel(entry.label),
         geometry_image: JSON.stringify(shape),
         // Validated per-entry override wins over the program/customer
-        // default; absent, the default applies.
-        owned_by: STATION_OWNERS.includes(entry.ownedBy) ? entry.ownedBy : createdOwnedBy,
+        // default; absent, the default applies. TERMITE ONLY (codex P2,
+        // round 3): enforced here as well as in the validator, because the
+        // completion path validates without program context — rodent and
+        // trapping hardware must never be recordable as customer property.
+        owned_by: (stationProgram === 'termite' && STATION_OWNERS.includes(entry.ownedBy))
+          ? entry.ownedBy
+          : createdOwnedBy,
       })
       .returning('*');
     nextNumber += 1;
