@@ -830,6 +830,29 @@ function assertNoDarkTermiteRentalPayload(estimateData) {
   }
 }
 
+// Rental twin of assertLiveTermiteBondRates (codex P1, round 4): a
+// client-priced save without a replayable engineRequest carries the uplift
+// the CLIENT computed — if pricing_config.termite_rental changed since that
+// bundle loaded, the stale horizon would be persisted and billed. The
+// unconditional syncConstantsFromDB has already refreshed
+// TERMITE.rental.recoveryQuarters; fail the save closed on any mismatch
+// between the row's uplift and round(retailValue / live horizon) — never
+// silently rewrite a line the operator saw priced.
+function assertLiveTermiteRentalRates(estimateData) {
+  const { TERMITE } = require('./pricing-engine/constants');
+  const rentalRows = selectedTermiteStationRentalRows(estimateData);
+  if (!rentalRows.length) return;
+  const staleError = () => errorWithStatus('Termite station rental pricing has changed — recalculate the estimate before saving.', 422);
+  const quarters = Number(TERMITE.rental?.recoveryQuarters);
+  if (!(quarters > 0)) throw staleError();
+  for (const row of rentalRows) {
+    const retail = Number(row.retailValue);
+    const rowPerApp = Number(row.perTreatment ?? row.perApp);
+    if (!(retail > 0) || !(rowPerApp > 0)) throw staleError();
+    if (Math.abs(rowPerApp - Math.round(retail / quarters)) > 0.005) throw staleError();
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -921,6 +944,7 @@ async function resolveEstimateWritePayload({
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
+  assertLiveTermiteRentalRates(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -1432,6 +1456,7 @@ module.exports = {
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,
+  assertLiveTermiteRentalRates,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,

@@ -2996,6 +2996,16 @@ export function calculateEstimate(inputs) {
       ra += R.tmBond.annual;
       lineItems.push({ name: R.tmBond.name, service: 'termite_bond', ann: R.tmBond.annual, discountable: false });
     }
+    // Station rental rider (codex P2, #2998 round 4): same posture as the
+    // bond — in the recurring annual (EXACT line annual, so a $100/yr
+    // rider doesn't decay to $99.96 via its rounded monthly), no tier
+    // count, no bundle % discount. Without this the fallback's totals
+    // omitted the rental entirely, so a client-priced save persisted and
+    // displayed less than the rows promise.
+    if (R.tmBait.stationRental) {
+      ra += R.tmBait.stationRental.annual;
+      lineItems.push({ name: 'Termite Station Rental', service: 'termite_station_rental', ann: R.tmBait.stationRental.annual, discountable: false });
+    }
   }
   // Recurring Foam: standalone — flows into the recurring annual/monthly total
   // but does NOT count toward the WaveGuard tier (no ac++) and is not discountable
@@ -3229,6 +3239,11 @@ export function calculateEstimate(inputs) {
       monthlyTotal: mm,
       annualBeforeDiscount: ra,
       annualAfterDiscount: ad,
+      // EXACT full recurring annual, mirroring the server mapper (codex P2,
+      // #2998 round 4): deriveTotalsFromEstimateData prefers this ahead of
+      // reconstructing round(monthly) * 12, which drifts whenever a line's
+      // annual isn't divisible by 12 (the station-rental rider).
+      annualTotal: y2,
       waveGuardTier: wt,
       discount: wd,
       savings: da,

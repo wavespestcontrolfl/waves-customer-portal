@@ -1314,6 +1314,42 @@ function isTermiteBillingRiderLine(svc = {}) {
   return key.startsWith('termite_bond') || key === 'termite_station_rental';
 }
 
+// Drop the rental rider from the conversion set WITHOUT losing its money
+// (codex P1, round 4). The rider is never a scheduling unit — but on a
+// multi-unit plan (pest + termite) the whole-plan per_application_fee and
+// row prices go per-row/manual, and a silently-dropped rental line left no
+// billing carrier for the uplift: termite completions could never collect
+// the hardware-recovery charge. Fold the rider's amounts into the bait
+// line's billing fields FIRST (per-application, monthly, exact annual), so
+// every downstream reader of the bait unit — row pricing, manual
+// allocation, seeding — sees the true bait+rental amount, then drop the
+// rider row. Single-unit plans are unaffected: their fee derives from the
+// plan-level totals, which always included the uplift.
+function foldTermiteRentalIntoBait(services = []) {
+  const rental = services.find(isTermiteStationRentalLine);
+  const rest = services.filter((svc) => !isTermiteStationRentalLine(svc));
+  if (!rental) return rest;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const upliftPerApp = Number(rental.perTreatment ?? rental.perApp) || 0;
+  const upliftAnnual = Number(rental.annual)
+    || round2(upliftPerApp * (Number(rental.visitsPerYear) || 4));
+  const upliftMonthly = Number(rental.mo ?? rental.monthly) || 0;
+  return rest.map((svc) => {
+    if (recurringServiceKey(svc) !== 'termite_bait') return svc;
+    return {
+      ...svc,
+      perTreatment: round2((Number(svc.perTreatment) || 0) + upliftPerApp),
+      mo: round2((Number(svc.mo ?? svc.monthly) || 0) + upliftMonthly),
+      monthly: round2((Number(svc.monthly ?? svc.mo) || 0) + upliftMonthly),
+      // Exact-annual sum (the rider's annual is exact even when its rounded
+      // monthly is not — same drift the mapper's annualTotal fix addresses).
+      annual: round2((Number(svc.annual) || 0) + upliftAnnual),
+      // Audit breadcrumb: how much of this line is hardware recovery.
+      termiteStationRentalFoldedPerApp: upliftPerApp,
+    };
+  });
+}
+
 // The customers.termite_stations_rented patch for an accept (owner
 // 2026-07-26; codex P1 rounds 1+2). Three-way, evidence-driven:
 //   rental line present        → true  (the accepted agreement is the only
@@ -1575,12 +1611,13 @@ const EstimateConverter = {
     // Station Rental" appointment, the plan reads as multi-unit so
     // riderAwareSingleUnitVisits returns null, and per_application_fee +
     // both rows' estimated_price go null — completion then invoices
-    // NOTHING, monitoring included. Dropping it here costs no money: the
-    // uplift is already inside estimate.monthly_total / annual_total, and
-    // the per-application charge divides that whole-plan annual.
+    // NOTHING, monitoring included. But a bare drop loses the uplift on
+    // MULTI-unit plans (codex P1 round 4), so the rider's amounts are
+    // folded into the bait line's billing fields before the row goes —
+    // single-unit fees still derive from the rental-inclusive plan totals.
     const recurringServicesForConversion = suppressRecurringConversion
       ? []
-      : recurringServices.filter((svc) => !isTermiteStationRentalLine(svc));
+      : foldTermiteRentalIntoBait(recurringServices);
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -3029,6 +3066,7 @@ module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
+module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.

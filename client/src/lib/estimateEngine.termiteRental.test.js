@@ -78,6 +78,27 @@ describe("termite station rental — client fallback engine", () => {
     expect(row.retailValue).toBe(own.results.tmBait.ai);
   });
 
+  it("the rental rides the recurring totals at its EXACT annual (codex P2 round 4)", () => {
+    const own = calculateEstimate(termiteInput());
+    const rent = calculateEstimate(termiteInput({ termiteOwnership: "rent" }));
+    const row = rentalRow(rent);
+
+    // The rider is IN the totals (it used to be omitted entirely)...
+    expect(rent.recurring.annualAfterDiscount).toBe(
+      Math.round((own.recurring.annualAfterDiscount + row.annual) * 100) / 100,
+    );
+    // ...and the exact aggregate survives for persistence: annualTotal must
+    // equal totals.year2 and must NOT be the rounded-monthly reconstruction
+    // ($8.33/mo × 12 = $99.96 would decay a $100 rider).
+    expect(rent.recurring.annualTotal).toBe(rent.totals.year2);
+    expect(rent.recurring.annualTotal).toBe(
+      Math.round((own.totals.year2 + row.annual) * 100) / 100,
+    );
+    expect(rent.recurring.annualTotal).not.toBe(
+      Math.round(rent.recurring.monthlyTotal * 12 * 100) / 100,
+    );
+  });
+
   it("amortizes the Trelona price when Trelona is the selected system", () => {
     const own = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
     const rent = calculateEstimate(

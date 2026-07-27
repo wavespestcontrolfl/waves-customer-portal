@@ -217,6 +217,29 @@ describe('conversion treats the rental as a billing rider, not a unit', () => {
   const bondRow = { name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr', mo: 15, perTreatment: 45, visitsPerYear: 4 };
   const rentRow = { name: 'Termite Station Rental', service: 'termite_station_rental', mo: 8.33, perTreatment: 25, visitsPerYear: 4 };
 
+  test('the dropped rental rider folds its money into the bait line first (codex P1 round 4)', () => {
+    const { foldTermiteRentalIntoBait } = EstimateConverter;
+    const pestRow = { name: 'General Pest Control', service: 'pest_control', mo: 45, perTreatment: 135, annual: 540 };
+    const baitFull = { ...baitRow, annual: 420 };
+    const rentFull = { ...rentRow, annual: 100, retailValue: 500 };
+
+    // Multi-service plan: the rider row goes, its amounts land on the bait
+    // line — per-application, monthly, and EXACT annual — so per-row billing
+    // and manual allocation see the true bait+rental amount.
+    const folded = foldTermiteRentalIntoBait([pestRow, baitFull, rentFull]);
+    expect(folded.some((svc) => svc.service === 'termite_station_rental')).toBe(false);
+    expect(folded.find((svc) => svc.service === 'pest_control')).toEqual(pestRow);
+    expect(folded.find((svc) => svc.service === 'termite_bait')).toMatchObject({
+      perTreatment: 130, // 105 + 25
+      annual: 520,       // 420 + 100 EXACT (not 12 × rounded monthly)
+      termiteStationRentalFoldedPerApp: 25,
+    });
+
+    // No rider → untouched rows, nothing invented.
+    expect(foldTermiteRentalIntoBait([pestRow, baitFull]))
+      .toEqual([pestRow, baitFull]);
+  });
+
   test('termite_stations_rented stamp is three-way: rent → true, purchased bait → false, unrelated → untouched', () => {
     const { termiteStationsRentedUpdate } = EstimateConverter;
     const pestRow = { name: 'General Pest Control', service: 'pest_control', mo: 45 };
@@ -363,6 +386,31 @@ describe('dark-gate save guard (client-priced payloads)', () => {
     } finally {
       process.env.GATE_TERMITE_STATION_RENTAL = prev;
     }
+  });
+});
+
+describe('stale fallback rental rates are rejected at save', () => {
+  test('a client-priced rental row must match the LIVE horizon (codex P1 round 4)', () => {
+    const { assertLiveTermiteRentalRates } = require('../services/admin-estimate-persistence');
+    const fresh = {
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteOwnership: 'rent' }))),
+    };
+    // Rows priced at the live 20-quarter horizon pass...
+    expect(() => assertLiveTermiteRentalRates(fresh)).not.toThrow();
+    // ...a payload priced under a DIFFERENT horizon (admin tuned
+    // recovery_quarters after the client bundle loaded) fails closed.
+    const stale = JSON.parse(JSON.stringify(fresh));
+    const staleRow = stale.result.recurring.services.find((s) => s.service === 'termite_station_rental');
+    staleRow.perTreatment = Math.round(staleRow.retailValue / 16); // old 16-quarter uplift
+    let status;
+    try { assertLiveTermiteRentalRates(stale); } catch (err) { status = err.statusCode || err.status; }
+    expect(status).toBe(422);
+    // Purchase payloads carry no rental rows — never blocked.
+    expect(() => assertLiveTermiteRentalRates({
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput())),
+    })).not.toThrow();
   });
 });
 
