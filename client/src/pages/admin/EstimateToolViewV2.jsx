@@ -3909,6 +3909,27 @@ export default function EstimateToolViewV2({
         result.modifiers = mods;
       }
 
+      // Stale rental gate (codex P1, round 2): the availability probe runs
+      // once at mount, so GATE_TERMITE_STATION_RENTAL flipped OFF mid-session
+      // (a deploy under an open tab) still sends termiteOwnership='rent' —
+      // and the server silently prices a purchase while the form shows
+      // "Rented". The calculation RESPONSE is the live truth: a rent request
+      // on a selected termite program that comes back with no rental line
+      // means the server no longer honors the feature. Reset to purchase,
+      // hide the control, and drop this result so the operator regenerates
+      // and SEES the purchase quote they would actually send.
+      if (
+        options.termiteOwnership === "rent"
+        && selectedServices.includes("TERMITE_BAIT")
+        && !(result?.recurring?.services || []).some((svc) => svc.service === "termite_station_rental")
+      ) {
+        setTermiteRentalAvailable(false);
+        setForm((f) => ({ ...f, termiteOwnership: "own" }));
+        setEstimate(null);
+        alert("The server did not price this quote as a station rental (the rental option is off or not priceable for this configuration). The form has been reset to purchased stations — generate again to see the purchase quote.");
+        return null;
+      }
+
       // Stash the exact engine request so the server can replay it on save and
       // be the authority on the persisted price (Decision #2). This is the same
       // payload sent to /calculate-estimate above.

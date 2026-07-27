@@ -1314,6 +1314,29 @@ function isTermiteBillingRiderLine(svc = {}) {
   return key.startsWith('termite_bond') || key === 'termite_station_rental';
 }
 
+// The customers.termite_stations_rented patch for an accept (owner
+// 2026-07-26; codex P1 rounds 1+2). Three-way, evidence-driven:
+//   rental line present        → true  (the accepted agreement is the only
+//                                place that knows Waves keeps title; the
+//                                install visit that creates the pins can't
+//                                see it)
+//   purchased bait, no rental  → false (a former renter buying outright must
+//                                not keep the renter flag — new pins would
+//                                stamp owned_by='waves' and mark customer
+//                                hardware for "recovery")
+//   no termite line at all     → {}    (an unrelated accept is not an owner
+//                                action on station title)
+// Read from the UNfiltered recurring lines — conversion drops the rental
+// rider from its service set before scheduling, so this must run first.
+function termiteStationsRentedUpdate(recurringServices = [], { suppressRecurringConversion = false } = {}) {
+  if (suppressRecurringConversion) return {};
+  if (recurringServices.some(isTermiteStationRentalLine)) return { termite_stations_rented: true };
+  if (recurringServices.some((svc) => recurringServiceKey(svc) === 'termite_bait')) {
+    return { termite_stations_rented: false };
+  }
+  return {};
+}
+
 // The per-application charge divides the plan annual by the SINGLE unit's
 // visit count. Termite riders are unit-count-exempt, so the single unit is
 // the non-rider line set (codex #2915 r6) — bait+bond derives 4 from the
@@ -1561,8 +1584,7 @@ const EstimateConverter = {
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
-    const acceptedTermiteStationRental = !suppressRecurringConversion
-      && recurringServices.some(isTermiteStationRentalLine);
+    const stationsRentedPatch = termiteStationsRentedUpdate(recurringServices, { suppressRecurringConversion });
     // FAIL-CLOSED money guard: annual-prepay coverage is a per-TERM fact and an
     // annual_prepay_terms row carries exactly ONE coverage service
     // (coverage_service_type / coverage_visit_count / coverage_cadence). A
@@ -1804,11 +1826,10 @@ const EstimateConverter = {
           // stations themselves are not created until the install visit — a
           // completion-sync/office code path with no view of this estimate.
           // Stamping the customer here is what lets upsertStationsForCustomer
-          // default new stations to owned_by='waves' (codex P1). Only ever
-          // set TRUE from an accept: a customer who later buys their stations
-          // is an owner action, not an estimate side effect, so an accept
-          // without a rental line must not silently flip a renter back.
-          ...(acceptedTermiteStationRental ? { termite_stations_rented: true } : {}),
+          // default new stations to owned_by='waves' (codex P1). See
+          // termiteStationsRentedUpdate for the three-way rule (rental →
+          // true, purchased bait → false, no termite line → untouched).
+          ...stationsRentedPatch,
           // Reactivating to active_customer — clear any churn stamp so a former
           // (churned/dormant) customer who accepts a recurring estimate isn't
           // still counted as churned by churned_at-based queries (e.g. MRR trend).
@@ -3007,6 +3028,7 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.

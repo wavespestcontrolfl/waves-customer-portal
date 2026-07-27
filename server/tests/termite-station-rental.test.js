@@ -19,6 +19,7 @@ const {
   priceTermiteBait,
   priceTermiteStationRental,
 } = require('../services/pricing-engine/service-pricing');
+const { termiteStationsRentedUpdate } = require('../services/estimate-converter');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
@@ -206,6 +207,22 @@ describe('conversion treats the rental as a billing rider, not a unit', () => {
   const baitRow = { name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35, perTreatment: 105, visitsPerYear: 4 };
   const bondRow = { name: 'Termite Bond (10-Year Term)', service: 'termite_bond_10yr', bondTerm: '10yr', mo: 15, perTreatment: 45, visitsPerYear: 4 };
   const rentRow = { name: 'Termite Station Rental', service: 'termite_station_rental', mo: 8.33, perTreatment: 25, visitsPerYear: 4 };
+
+  test('termite_stations_rented stamp is three-way: rent → true, purchased bait → false, unrelated → untouched', () => {
+    const { termiteStationsRentedUpdate } = EstimateConverter;
+    const pestRow = { name: 'General Pest Control', service: 'pest_control', mo: 45 };
+    // Rental accept stamps the renter flag.
+    expect(termiteStationsRentedUpdate([baitRow, rentRow])).toEqual({ termite_stations_rented: true });
+    // Purchased-bait accept positively CLEARS it (codex P1 round 2): a former
+    // renter who buys outright must not have new pins stamped Waves-owned.
+    expect(termiteStationsRentedUpdate([baitRow])).toEqual({ termite_stations_rented: false });
+    expect(termiteStationsRentedUpdate([baitRow, bondRow])).toEqual({ termite_stations_rented: false });
+    // An accept with no termite line is not an owner action on station title.
+    expect(termiteStationsRentedUpdate([pestRow])).toEqual({});
+    expect(termiteStationsRentedUpdate([])).toEqual({});
+    // Suppressed conversions never touch the flag.
+    expect(termiteStationsRentedUpdate([baitRow, rentRow], { suppressRecurringConversion: true })).toEqual({});
+  });
 
   test('the rental line keys distinctly and never collides with the bait line', () => {
     expect(recurringServiceKey(rentRow)).toBe('termite_station_rental');
