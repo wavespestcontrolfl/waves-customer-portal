@@ -16352,11 +16352,20 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // estimate-level flag reflects the STORED default row, but seasonal9 can't
   // prepay while monthly12 can — stamp each mosquito frequency so the client
   // resolves the option from the SELECTED tier. Accept and /deposit-intent
-  // enforce the same per-tier rule server-side.
-  if (Array.isArray(withQuoteState.frequencies)) {
+  // enforce the same per-tier rule server-side. The sellable-incentive gate
+  // applies to tiers too (codex r12 P1): an operator-waived setup fee leaves
+  // monthly-mosquito prepay with NO benefit, and the tier flag must not
+  // resurrect an option the global gate correctly disabled.
+  if (Array.isArray(withQuoteState.frequencies)
+    && withQuoteState.frequencies.some(frequencyIsMosquitoTier)) {
+    const tierIncentive = annualPrepayHasSellableIncentive(estimate, estData, withQuoteState);
     withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
       frequencyIsMosquitoTier(frequency)
-        ? { ...frequency, annualPrepayEligible: annualPrepayEligibleForMosquitoTier(estData, frequency) }
+        ? {
+          ...frequency,
+          annualPrepayEligible: tierIncentive
+            && annualPrepayEligibleForMosquitoTier(estData, frequency),
+        }
         : frequency));
   }
   // After the contract attaches sections, hide floor-clamped lawn cadences on
