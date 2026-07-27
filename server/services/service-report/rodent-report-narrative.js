@@ -111,13 +111,15 @@ function findingFacts(typedReport = {}) {
     .slice(0, 8);
 }
 
+// Words only — the raw score/maxScore NEVER enter the facts. The customer-
+// copy contract (activity-indicators.js) forbids the numeric score in
+// customer copy, and the ActivityCard deliberately leads with wording; a
+// model fed "3 out of 5" will echo it (codex round-5 P2).
 function activityFacts(activity = null) {
   if (!activity || activity.score == null) return null;
   return {
     label: cleanText(activity.label) || 'Rodent Activity',
     levelWord: cleanText(activity.levelWord) || null,
-    score: activity.score,
-    maxScore: activity.maxScore || 5,
     lowerIsBetter: true,
     isBaseline: !!activity.isBaseline,
     trendWord: cleanText(activity.trendWord) || null,
@@ -257,7 +259,7 @@ function deterministicSummary(facts) {
 
 const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control rodent service report.
 
-You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a 0-5 index where lower is better), trap/station check counts, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled rodent visit.
+You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/station check counts, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled rodent visit.
 
 Rules:
 - 4 to 7 short sentences in one or two short paragraphs. Plain, calm, professional language. No greeting, no headings, no markdown, no bullet lists.
@@ -416,19 +418,44 @@ function claimNegated(text, index, tokenLength) {
   return /^\S*\s+(?:were|was|are|is)?\s*(?:not|never|none)\b/i.test(tail);
 }
 
+// Synonym coverage (codex round-5 P1): "we caught a rat", "a rodent was
+// removed", "bait was eaten" claim the same events without the captur/
+// consum stems, so each family scans its equivalent wording. Removal only
+// counts when a rodent noun sits nearby — "we removed debris" is not a
+// capture claim.
+const RODENT_NOUN = '(?:rats?|rodents?|mouse|mice)';
+const CAPTURE_CLAIM_RES = [
+  /\bcaptur\w*/gi,
+  /\bcaught\b/gi,
+  /\bcatch(?:es|ing)?\b/gi,
+  /\btrapped\b/gi,
+  new RegExp(`\\bremov\\w*[^.!?]{0,25}\\b${RODENT_NOUN}\\b`, 'gi'),
+  new RegExp(`\\b${RODENT_NOUN}\\b[^.!?]{0,25}\\bremov\\w*`, 'gi'),
+];
+const CONSUMPTION_CLAIM_RES = [
+  /\bconsum\w*/gi,
+  /\beaten\b/gi,
+  /\bbait\s+take\b/gi,
+  /\bfe(?:d|eding)\s+on\b/gi,
+];
+
 function unsupportedActivityClaims(text, facts) {
   const problems = [];
   const roles = factNumbers(facts);
   const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0);
   const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0);
-  for (const match of String(text).matchAll(/\b(captur|consum)\w*/gi)) {
-    const isCapture = /^captur/i.test(match[1]);
-    if (isCapture && captureSupported) continue;
-    if (!isCapture && consumptionSupported) continue;
-    if (!claimNegated(text, match.index, match[0].length)) {
-      problems.push(isCapture ? 'unsupported_capture_claim' : 'unsupported_consumption_claim');
+  const scan = (regexes, supported, problem) => {
+    if (supported) return;
+    for (const re of regexes) {
+      for (const match of String(text).matchAll(new RegExp(re.source, 'gi'))) {
+        if (!claimNegated(text, match.index, match[0].length)) {
+          problems.push(problem);
+        }
+      }
     }
-  }
+  };
+  scan(CAPTURE_CLAIM_RES, captureSupported, 'unsupported_capture_claim');
+  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, 'unsupported_consumption_claim');
   return problems;
 }
 
@@ -487,22 +514,46 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
   problems.push(...nextVisitProblems(text, facts));
+  // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
+  // customer-copy contract keeps raw activity scores out of prose (the
+  // facts no longer carry them, and grounded numerals like a day-of-month
+  // must not be composable into a fake reading — codex round-5 P2).
+  for (const match of String(text).matchAll(/\b\d+\s*(?:out\s+of|\/)\s*\d+\b/gi)) {
+    problems.push(`score_ratio_phrasing:${match[0].trim()}`);
+  }
   return problems;
 }
 
 // True when the copy echoes a product name the facts withheld (registered
 // products) — prompt rules are enforced, not just requested. Token match on
-// 4+ letter name parts, same posture as completion-recap's guard.
+// 4+ letter name parts, same posture as completion-recap's guard. Generic
+// vocabulary is exempt (codex round-5 P2): "Contrac Blox Rodenticide" must
+// not make a compliant "a rodenticide was used" summary fail — only the
+// DISTINCTIVE tokens of the name are withheld, never words that are also
+// the product's permitted generic category or common product-class terms.
+const GENERIC_PRODUCT_TOKENS = new Set([
+  'rodenticide', 'insecticide', 'herbicide', 'fungicide', 'bait', 'baits',
+  'trap', 'traps', 'station', 'stations', 'block', 'blocks', 'rodent',
+  'rodents', 'control', 'pest', 'granular', 'liquid', 'concentrate',
+  'spray', 'dust', 'weather', 'resistant', 'soft', 'grain', 'place',
+  'packs', 'pack',
+]);
+
 function echoesWithheldName(text, applications = []) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
   return (Array.isArray(applications) ? applications : [])
     .filter((app) => !isNameableDevice(app?.product || {}))
-    .some((app) => cleanText(app?.product?.name)
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((token) => token.length >= 4)
-      .some((token) => hay.includes(token)));
+    .some((app) => {
+      const categoryTokens = new Set(cleanText(app?.product?.category).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+      return cleanText(app?.product?.name)
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length >= 4
+          && !GENERIC_PRODUCT_TOKENS.has(token)
+          && !categoryTokens.has(token))
+        .some((token) => hay.includes(token));
+    });
 }
 
 /**

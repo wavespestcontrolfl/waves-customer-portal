@@ -194,6 +194,27 @@ test('gated: a rodent report discloses a rodent-adjacent visit (Exclusion Servic
   });
 });
 
+test('gated: a service_id-linked rodent-catalog visit is disclosed even under a customized label', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [{ id: 'svc-exclusion', name: 'Exclusion Service', category: 'rodent' }],
+    scheduled_services: [
+      // admin renamed the label; service_id still points at the rodent
+      // catalog row — the link is the authority (codex round-5 P2)
+      { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Custom Attic Program', service_id: 'svc-exclusion', window_start: '08:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-linked', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Custom Attic Program',
+    scheduledDate: '2999-01-03',
+    windowStart: '08:00:00',
+  });
+});
+
 test('gate dark: the strict same-line pick is unchanged (kill switch restores old behavior)', async () => {
   const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-dark', makeKnex(RODENT_PROGRAM_FIXTURES));
 

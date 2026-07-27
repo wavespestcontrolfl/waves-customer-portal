@@ -72,7 +72,11 @@ test('groundingFacts keeps only usable facts', () => {
     { label: 'Traps checked', value: '7' },
     { label: 'Captures', value: '0' },
   ]);
-  expect(facts.activity).toMatchObject({ levelWord: 'Moderate activity', score: 3, isBaseline: true });
+  // wording only — the raw score/maxScore never enter the facts (customer
+  // copy must never carry the numeric activity score)
+  expect(facts.activity).toMatchObject({ levelWord: 'Moderate activity', isBaseline: true });
+  expect(facts.activity.score).toBeUndefined();
+  expect(facts.activity.maxScore).toBeUndefined();
   // trapping names the fact for what the number IS: traps carrying a
   // capture status, never a capture total (codex P1)
   expect(facts.stations).toEqual({ program: 'trapping', total: 7, checked: 7, trapsWithCaptureRecorded: 0, serviced: 0, inaccessible: 0 });
@@ -120,12 +124,19 @@ test('only explicit mechanical devices are nameable — unknown products fail cl
   // and an echo of the withheld name in model output is caught
   expect(echoesWithheldName('We refreshed the Contrac placements.', apps)).toBe(true);
   expect(echoesWithheldName('We checked the Victor snap traps.', apps)).toBe(false);
+  // ...but generic/category vocabulary in a withheld name never blocks
+  // compliant copy (codex round-5 P2): "Rodenticide" is the permitted
+  // generic description, not the product's identity
+  expect(echoesWithheldName('A rodenticide was secured in tamper-resistant stations.', apps)).toBe(false);
 });
 
 test('ungrounded numbers and unsupported capture/consumption claims are rejected', () => {
   const facts = groundingFacts(input());
-  // every numeral in clean copy is grounded (7 traps, activity 3/5, Aug 3, 8–10 window)
-  expect(ungroundedClaims('We inspected all 7 traps; activity was 3 out of 5. Next visit Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
+  // every numeral in clean copy is grounded (7 traps, Aug 3, 8–10 window)
+  expect(ungroundedClaims('We inspected all 7 traps. Next visit Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
+  // score-ratio phrasing is banned outright (raw activity scores never
+  // reach customer copy — codex round-5 P2)
+  expect(ungroundedClaims('Rodent activity was 3 out of 5 today.', facts).some((p) => p.startsWith('score_ratio_phrasing'))).toBe(true);
   // a changed count is caught
   expect(ungroundedClaims('We inspected 9 traps today.', facts)).toContain('ungrounded_number:9');
   // an invented capture (zero traps carry the status) is caught even without digits
@@ -163,6 +174,16 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('No droppings were observed, but we removed a capture from the garage.', facts))
     .toContain('unsupported_capture_claim');
   expect(ungroundedClaims('Captures were not recorded on this visit.', facts)).toEqual([]);
+
+  // capture/consumption SYNONYMS are covered (codex round-5 P1): caught,
+  // trapped, rodent-removal, and eaten-bait wording all claim the events
+  expect(ungroundedClaims('We caught a rat near the garage entry.', facts)).toContain('unsupported_capture_claim');
+  expect(ungroundedClaims('A rodent was removed from the attic during service.', facts)).toContain('unsupported_capture_claim');
+  expect(ungroundedClaims('One rodent was trapped at the rear station.', facts)).toContain('unsupported_capture_claim');
+  expect(ungroundedClaims('The bait had been eaten at the rear placement.', facts)).toContain('unsupported_consumption_claim');
+  // negated synonym forms stay clean; removal of non-rodent things is not a claim
+  expect(ungroundedClaims('No rodents were caught on this visit.', facts)).toEqual([]);
+  expect(ungroundedClaims('We removed debris from the trap line area.', facts)).toEqual([]);
 
   // station count ROLES stay separate (codex round-4 P1): with 7 total, 5
   // checked, 2 inaccessible, an inaccessible count can't pose as inspected

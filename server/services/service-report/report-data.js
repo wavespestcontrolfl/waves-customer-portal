@@ -2855,27 +2855,36 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // and isRodentAdjacentServiceType's negative guard keeps non-rodent
     // trapping ("Wildlife Trapping") out too. Other report lines keep the
     // strict same-line match.
-    // Name shape alone is NOT rodent evidence (codex round-4 P2): a
+    // Name shape alone is NOT rodent evidence (codex round-4/5 P2): a
     // generic "Sanitation & Cleanup" booking that has nothing to do with
     // the rodent program would satisfy the regex. The catalog is the
-    // authority — a widened candidate must ALSO be a services row whose
-    // category is 'rodent'. Best-effort: an unavailable catalog just keeps
+    // authority: a candidate whose scheduled_services.service_id points at
+    // a services row with category 'rodent' is rodent-related regardless
+    // of its (possibly customized/renamed) service_type label; unlinked
+    // legacy rows fall back to exact catalog-NAME matching plus the
+    // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
     // the strict same-line match.
+    let rodentCatalogIds = null;
     let rodentCatalogNames = null;
     if (rodentReportRefresh) {
       try {
-        const catalogRows = await knex('services').where({ category: 'rodent' }).select('name');
+        const catalogRows = await knex('services').where({ category: 'rodent' }).select('id', 'name');
+        rodentCatalogIds = new Set((Array.isArray(catalogRows) ? catalogRows : [])
+          .map((row) => String(row.id || '')).filter(Boolean));
         rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
           .map((row) => String(row.name || '').trim().toLowerCase())
           .filter(Boolean));
-      } catch { rodentCatalogNames = null; }
+      } catch { rodentCatalogIds = null; rodentCatalogNames = null; }
     }
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
       .find((row) => {
         const rowLine = detectServiceLine(row.service_type);
         if (rowLine === serviceLine) return true;
-        return rodentReportRefresh
-          && rowLine === 'pest'
+        if (!rodentReportRefresh) return false;
+        // catalog link is authoritative — survives label customization
+        if (rodentCatalogIds && row.service_id && rodentCatalogIds.has(String(row.service_id))) return true;
+        // unlinked legacy rows: exact rodent-catalog name + adjacent shape
+        return rowLine === 'pest'
           && isRodentAdjacentServiceType(row.service_type)
           && !!rodentCatalogNames
           && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
