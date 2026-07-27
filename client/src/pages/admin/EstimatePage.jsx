@@ -12,7 +12,6 @@ import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
   applyServerTermiteBondPricingConfig,
-  applyServerMosquitoPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1310,23 +1309,17 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, mosquitoRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
-        fetchConfigRow("mosquito_base_prices"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
       // Bond rates are save-validated against the live DB values, so the
       // fallback preview must price from them too (pre-push P1 on #2915).
       if (bondRow.ok) applyServerTermiteBondPricingConfig(bondRow.data);
-      // Mosquito per-visit card is admin-editable in Pricing Logic, and a save
-      // the server can't replay persists this preview as the price
-      // (CLIENT_FALLBACK). Compiled defaults would go stale on the next reprice
-      // (pre-push P0 on #2996).
-      if (mosquitoRow.ok) applyServerMosquitoPricingConfig(mosquitoRow.data);
-      return lawnRow.ok && pestRow.ok && bondRow.ok && mosquitoRow.ok;
+      return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
     return run;

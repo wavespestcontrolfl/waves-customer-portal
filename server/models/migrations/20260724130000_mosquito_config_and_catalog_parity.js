@@ -250,6 +250,19 @@ exports.down = async function (knex) {
     const rewritten = Array.isArray(snapshot.rewrittenBuckets) ? snapshot.rewrittenBuckets : [];
     const applied = parseJson(lotUp.new_value) || {};
     const current = await readConfig(knex, LOT_SIZES_KEY);
+    // Close the cycle no matter what. If the row was deleted or is unreadable we
+    // cannot restore it, but leaving the UP record uncancelled means a later
+    // no-op reapplication could consume this snapshot and reimpose legacy
+    // acreage thresholds on a row it never touched.
+    if (!current || !rewritten.length) {
+      await knex('pricing_config_audit').insert({
+        config_key: LOT_SIZES_KEY,
+        old_value: JSON.stringify(applied),
+        new_value: JSON.stringify({ reverted: [] }),
+        changed_by: MIGRATION_TAG,
+        reason: `${DOWN_REASON} — target row unavailable, nothing restored`,
+      });
+    }
     if (current && rewritten.length) {
       const next = { ...current };
       const reverted = [];
@@ -332,7 +345,17 @@ exports.down = async function (knex) {
         const row = await knex('services')
           .where({ service_key: key })
           .first('base_price');
-        if (!row) continue;
+        if (!row) {
+          // Service row gone: nothing to restore, but the cycle must still close.
+          await knex('pricing_config_audit').insert({
+            config_key: CATALOG_AUDIT_KEY,
+            old_value: JSON.stringify(appliedFields),
+            new_value: JSON.stringify({}),
+            changed_by: MIGRATION_TAG,
+            reason: `${CATALOG_DOWN_REASON} — service row absent, nothing restored`,
+          });
+          continue;
+        }
         // Restore field-by-field, and only where the current value is still the
         // one up() applied — an owner edit made after the migration wins.
         const patch = {};
