@@ -66,7 +66,10 @@ function remotePartyDigits(direction, from, to) {
 // Atomically claim the alert window for this key. Exactly one concurrent
 // caller gets a row back; everyone else is inside an open window and skips.
 // Any DB error fails OPEN — a broken dedupe layer must never eat a failure
-// alert, only ever allow a duplicate.
+// alert, only ever allow a duplicate. `owned` distinguishes "we hold the row"
+// from "we're alerting despite a broken claim": only an owned claim may be
+// released later, otherwise a dispatch failure here could delete a valid
+// in-window row established by an earlier, successfully delivered alert.
 async function claimAlertWindow(dedupeKey) {
   try {
     const result = await db.raw(
@@ -78,10 +81,11 @@ async function claimAlertWindow(dedupeKey) {
        RETURNING dedupe_key`,
       [dedupeKey, DEDUPE_WINDOW_HOURS]
     );
-    return (result.rows || []).length > 0;
+    const claimed = (result.rows || []).length > 0;
+    return { claimed, owned: claimed };
   } catch (err) {
     logger.warn(`[twilio-alerts] dedupe claim failed (alerting anyway): ${err.message}`);
-    return true;
+    return { claimed: true, owned: false };
   }
 }
 
@@ -104,6 +108,11 @@ function pruneStaleDedupeRows() {
       logger.warn(`[twilio-alerts] dedupe prune failed: ${err.message}`);
     });
 }
+
+// In-flight dispatches by dedupe key, so an overlapping same-key caller can
+// observe the outcome instead of returning "duplicate" against a claim whose
+// delivery later fails and gets released.
+const pendingDispatches = new Map();
 
 async function alertTwilioFailure(input = {}) {
   const {
@@ -132,7 +141,19 @@ async function alertTwilioFailure(input = {}) {
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
 
-  if (!(await claimAlertWindow(dedupeKey))) return { skipped: true, reason: 'duplicate' };
+  // A same-key dispatch may already be in flight in this process. Wait for it
+  // to settle before trying to claim: if it delivered, our claim attempt
+  // correctly reports duplicate; if it failed and released the window, we
+  // take over instead of having been skipped before its outcome was known.
+  // (Cross-process overlap still resolves through the atomic claim; the
+  // portal runs as a single service instance, so in-flight overlap is an
+  // in-process phenomenon.)
+  while (pendingDispatches.has(dedupeKey)) {
+    await pendingDispatches.get(dedupeKey).catch(() => {});
+  }
+
+  const claim = await claimAlertWindow(dedupeKey);
+  if (!claim.claimed) return { skipped: true, reason: 'duplicate' };
   pruneStaleDedupeRows();
 
   logger.warn(
@@ -141,37 +162,46 @@ async function alertTwilioFailure(input = {}) {
     `from=${maskPhone(from)} to=${maskPhone(to)}`
   );
 
-  let result;
-  try {
-    result = await triggerNotification('twilio_failure', {
-      channel,
-      direction,
-      phase,
-      status: normalizedStatus,
-      sidMasked: maskSid(sid),
-      errorCode,
-      errorMessage: safeErrorMessage,
-      fromMasked: maskPhone(from),
-      toMasked: maskPhone(to),
-      link,
-      dedupeKey,
-    });
-  } catch (err) {
-    await releaseAlertWindow(dedupeKey);
-    throw err;
-  }
+  const dispatch = (async () => {
+    let result;
+    try {
+      result = await triggerNotification('twilio_failure', {
+        channel,
+        direction,
+        phase,
+        status: normalizedStatus,
+        sidMasked: maskSid(sid),
+        errorCode,
+        errorMessage: safeErrorMessage,
+        fromMasked: maskPhone(from),
+        toMasked: maskPhone(to),
+        link,
+        dedupeKey,
+      });
+    } catch (err) {
+      if (claim.owned) await releaseAlertWindow(dedupeKey);
+      throw err;
+    }
 
-  // triggerNotification never throws — dispatch failures come back as
-  // { bellWritten: false, push: null, error }. If the alert reached no
-  // channel, give the window back so the next occurrence still alerts.
-  // A deliberate internal-test suppression counts as handled, not failed.
-  const delivered = !!result && (
-    result.suppressed === true ||
-    result.bellWritten === true ||
-    Number(result.push?.sent || 0) > 0
-  );
-  if (!delivered) await releaseAlertWindow(dedupeKey);
-  return result;
+    // triggerNotification never throws — dispatch failures come back as
+    // { bellWritten: false, push: null, error }. If the alert reached no
+    // channel, give the window back so the next occurrence still alerts.
+    // A deliberate internal-test suppression counts as handled, not failed.
+    const delivered = !!result && (
+      result.suppressed === true ||
+      result.bellWritten === true ||
+      Number(result.push?.sent || 0) > 0
+    );
+    if (!delivered && claim.owned) await releaseAlertWindow(dedupeKey);
+    return result;
+  })();
+
+  pendingDispatches.set(dedupeKey, dispatch);
+  try {
+    return await dispatch;
+  } finally {
+    pendingDispatches.delete(dedupeKey);
+  }
 }
 
 module.exports = {

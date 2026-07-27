@@ -587,13 +587,16 @@ async function triggerNotification(triggerKey, payload = {}) {
       if (userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
-          await NotificationService.notifyAdmin(
+          // NotificationService.create catches insert errors and returns null
+          // (deliberate suppression returns a truthy sentinel) — bellWritten
+          // must reflect the actual outcome, not that the call returned.
+          const created = await NotificationService.notifyAdmin(
             trigger.category,
             built.title,
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload } }
           );
-          bellWritten = true;
+          if (created) bellWritten = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
         }

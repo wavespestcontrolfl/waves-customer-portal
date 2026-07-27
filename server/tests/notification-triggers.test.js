@@ -1,4 +1,23 @@
-const { TRIGGER_REGISTRY, __private } = require('../services/notification-triggers');
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
+}));
+jest.mock('../services/push-notifications', () => ({
+  sendToAdminUsers: jest.fn(async () => ({ subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] })),
+}));
+
+const db = require('../models/db');
+const NotificationService = require('../services/notification-service');
+const { TRIGGER_REGISTRY, __private, triggerNotification } = require('../services/notification-triggers');
+
+function tableMock(rows) {
+  const chain = {
+    where: jest.fn(() => chain),
+    select: jest.fn(() => Promise.resolve(rows)),
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+  };
+  return chain;
+}
 
 describe('notification trigger push tags', () => {
   test('SMS replies get unique tags so iOS does not silently replace prior alerts', () => {
@@ -204,5 +223,31 @@ describe('notification trigger push tags', () => {
         body: 'Email l***@example.com',
       },
     });
+  });
+});
+
+describe('triggerNotification bell outcome', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
+    ));
+  });
+
+  test('reports bellWritten false when the notification insert fails', async () => {
+    // NotificationService.create catches insert errors and returns null —
+    // callers deciding whether an alert was delivered must see the truth.
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' });
+
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+    expect(result.bellWritten).toBe(false);
+  });
+
+  test('reports bellWritten true when the insert succeeds', async () => {
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' });
+
+    expect(result.bellWritten).toBe(true);
   });
 });
