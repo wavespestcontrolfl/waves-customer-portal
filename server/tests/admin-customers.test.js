@@ -571,6 +571,24 @@ describe('admin customers route helpers', () => {
     expect(fallbackLine.cadence).toBe('seasonal_feb_oct');
     expect(fallbackLine.serviceId).toBe(null);
     expect(fallbackLine.serviceKey).not.toBe('mosquito_monthly');
+    // Accepted seasonal selections are restamped as { service: 'mosquito',
+    // serviceKey: 'mosquito_seasonal' } with a shortened name — the explicit
+    // serviceKey must be its own FIRST match candidate or the fuzzy matcher
+    // lands on mosquito_monthly (codex r17 P2).
+    const restamped = {
+      id: 'estimate-mq-restamped',
+      monthly_total: 82.5,
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'mosquito', serviceKey: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9, mo: 82.5 }],
+          },
+        },
+      },
+    };
+    const [restampedLine] = scheduleLinesFromEstimate(restamped, index);
+    expect(restampedLine.serviceKey).toBe('mosquito_seasonal');
+    expect(restampedLine.serviceId).toBe(11);
   });
 
   test('does not create fallback schedule lines from billing-only estimate rows', () => {

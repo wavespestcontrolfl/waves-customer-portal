@@ -1974,6 +1974,38 @@ const EstimateConverter = {
               await addUnit(reservedStart.service_type, null, reservedStart.service_id || null);
               for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             }
+            // Promoted `remaining` units (termite/bond + mosquito) take their
+            // series locks inside the reservation loop — they must join this
+            // sorted pre-pass union or two concurrent accepts can invert
+            // family lock order and deadlock (codex r17 P2: one reserves
+            // termite and promotes mosquito while the other does the
+            // reverse). Mirrors the loop's own name/key derivations.
+            for (const svc of remaining) {
+              const key = String(recurringServiceKey(svc) || '');
+              if ((key === 'termite_bait' || key.startsWith('termite_bond'))
+                && visitsPerYearForRecurringService(svc) === 4) {
+                const isBond = key.startsWith('termite_bond');
+                await addUnit(
+                  svc.name || svc.serviceName || svc.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
+                  isBond ? (svc.service || null) : 'termite_bait',
+                );
+                continue;
+              }
+              if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito') {
+                const svcName = svc.name || svc.serviceName || svc.service_name || 'Mosquito';
+                const mosquitoPattern = converterFollowUpSeedingPattern(
+                  svc, { service_type: svcName }, inferredFrequencyKey,
+                );
+                if (mosquitoPattern) {
+                  await addUnit(
+                    svcName,
+                    mosquitoPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT
+                      ? 'mosquito_seasonal'
+                      : 'mosquito_monthly',
+                  );
+                }
+              }
+            }
           } else {
             for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
@@ -2081,7 +2113,12 @@ const EstimateConverter = {
             const seasonal = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey)
               === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
             return {
-              service: line,
+              // Normalized name ON the unit (codex r17 P1): the insert below
+              // reads only unit.service.name, and a line carrying its label in
+              // serviceName/service_name would insert a NULL service_type —
+              // an error the per-unit catch swallows, completing an accept
+              // that bills mosquito while scheduling nothing.
+              service: { ...line, name: lineName },
               catalogServiceKey: seasonal ? 'mosquito_seasonal' : 'mosquito_monthly',
               seasonalMosquito: seasonal,
               noteKind: 'mosquito program',

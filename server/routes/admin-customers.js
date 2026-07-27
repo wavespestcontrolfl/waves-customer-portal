@@ -304,11 +304,19 @@ function indexServicesForSchedule(rows = []) {
 }
 
 function serviceCatalogMatch(line, serviceIndex) {
-  const rawKey = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  // The explicit serviceKey is its own candidate, tried FIRST (codex r17
+  // P2): an accepted seasonal selection is restamped as { service:
+  // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
+  // into a service-wins fallback made the exact seasonal row unreachable —
+  // the fuzzy matcher then returned mosquito_monthly.
+  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.key || '');
+  const rawKey = normalizeServiceKey(line?.service || '');
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [
+    explicitKey,
     rawKey,
     labelKey,
+    ...(SERVICE_KEY_ALIASES[explicitKey] || []),
     ...(SERVICE_KEY_ALIASES[rawKey] || []),
     ...(SERVICE_KEY_ALIASES[labelKey] || []),
   ].filter(Boolean);
