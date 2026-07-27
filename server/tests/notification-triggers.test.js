@@ -1,4 +1,23 @@
-const { TRIGGER_REGISTRY, __private } = require('../services/notification-triggers');
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
+}));
+jest.mock('../services/push-notifications', () => ({
+  sendToAdminUsers: jest.fn(async () => ({ subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] })),
+}));
+
+const db = require('../models/db');
+const NotificationService = require('../services/notification-service');
+const { TRIGGER_REGISTRY, __private, triggerNotification } = require('../services/notification-triggers');
+
+function tableMock(rows) {
+  const chain = {
+    where: jest.fn(() => chain),
+    select: jest.fn(() => Promise.resolve(rows)),
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+  };
+  return chain;
+}
 
 describe('notification trigger push tags', () => {
   test('SMS replies get unique tags so iOS does not silently replace prior alerts', () => {
@@ -153,6 +172,39 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/dashboard');
   });
 
+  test('phone redaction leaves digit runs inside identifiers alone', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      // Hashed dedupe keys and hex digests contain 10+ digit runs ~3% of the
+      // time; masking them corrupted the stored key so dedupe never matched.
+      dedupeKey: 'twilio:1a2345678901bcde',
+      requestId: 'req-1234567890abcdef',
+      message: 'twilio:1234567890abcdef retry +19415551234 later',
+    });
+
+    expect(safe.dedupeKey).toBe('twilio:1a2345678901bcde');
+    expect(safe.requestId).toBe('req-1234567890abcdef');
+    // Digit run glued to hex tail is preserved; the real phone still masks.
+    expect(safe.message).toBe('twilio:1234567890abcdef retry ***1234 later');
+  });
+
+  test('phone redaction masks extension-suffixed numbers by the PHONE last four', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      message: 'call +19415551234x123 or 19415552222 ext 99 today',
+    });
+
+    // The identifying suffix comes from the phone itself, never the
+    // extension digits; the extension is consumed and dropped.
+    expect(safe.message).toBe('call ***1234 or ***2222 today');
+  });
+
+  test('phone redaction still masks URL-encoded numbers', () => {
+    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+      message: 'Lookup phone=%2B19415551212&Fields=caller_name failed',
+    });
+
+    expect(safe.message).toBe('Lookup phone=***1212&Fields=caller_name failed');
+  });
+
   test('notification metadata payload sanitizer does not persist raw contact fields', () => {
     const safe = __private.sanitizeNotificationPayload('new_lead', {
       phone: '+18182079399',
@@ -173,5 +225,31 @@ describe('notification trigger push tags', () => {
         body: 'Email l***@example.com',
       },
     });
+  });
+});
+
+describe('triggerNotification bell outcome', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
+    ));
+  });
+
+  test('reports bellWritten false when the notification insert fails', async () => {
+    // NotificationService.create catches insert errors and returns null —
+    // callers deciding whether an alert was delivered must see the truth.
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' });
+
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+    expect(result.bellWritten).toBe(false);
+  });
+
+  test('reports bellWritten true when the insert succeeds', async () => {
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' });
+
+    expect(result.bellWritten).toBe(true);
   });
 });
