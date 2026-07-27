@@ -2845,7 +2845,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     // Merge notes
     const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
-    const monthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+    // seasonal_feb_oct derives its anchor from the date like every other
+    // month-based cadence; monthly_nth_weekday stays raw passthrough because
+    // there the operator supplies nth/weekday explicitly.
+    const monthAnchorOpts = (isRecurring
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
 

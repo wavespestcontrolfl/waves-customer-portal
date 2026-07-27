@@ -259,6 +259,17 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  // Seasonal mosquito (9 visits): its quote rows carry frequency
+  // 'every_6_weeks' (the estimate-public tier map), but nine mosquito visits
+  // have exactly ONE valid cadence — the Feb–Oct walk. Without this the modal
+  // pre-fill books a custom 42-day series (including winter visits), and the
+  // converter's forced resolver never runs because the booking route creates
+  // the series itself (skipAutoSchedule). Same rule as
+  // converterFollowUpSeedingPattern / annualPrepayCoverageCadence.
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  if (RecurringAppointmentSeeder.serviceKeyFor(line || {}) === 'mosquito' && visits === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
   // Before the month-based buckets: an every-6-weeks plan (9 visits/year) has
   // no month-based cadence — without this it fell to the quarterly fallback,
   // so a 6-week quote pre-filled the modal as quarterly and the prepay

@@ -406,6 +406,33 @@ describe('admin customers route helpers', () => {
     expect(cadenceFromEstimateLine({ frequency: 'Monthly' }, 'quarterly')).toBe('monthly');
   });
 
+  test('seasonal mosquito (9 visits) maps to the seasonal cadence, not custom/42 (codex r5 P1)', () => {
+    // The seasonal9 tier's rows carry frequency 'every_6_weeks'; the modal
+    // pre-fill was booking a 42-day series (incl. winter visits) because the
+    // booking route creates the series itself and never reaches the
+    // converter's forced resolver.
+    expect(cadenceFromEstimateLine({
+      service: 'mosquito_seasonal',
+      name: 'Seasonal Mosquito Control',
+      frequency: 'every_6_weeks',
+      visitsPerYear: 9,
+    }, 'quarterly')).toBe('seasonal_feb_oct');
+    // Scoped to mosquito: T&S 9x keeps the every-6-weeks → custom/42 mapping.
+    expect(cadenceFromEstimateLine({
+      service: 'tree_shrub',
+      name: 'Enhanced Tree & Shrub Care Service',
+      frequency: 'every_6_weeks',
+      visitsPerYear: 9,
+    }, 'quarterly')).toBe('every_6_weeks');
+    // Monthly mosquito is unaffected.
+    expect(cadenceFromEstimateLine({
+      service: 'mosquito_monthly',
+      name: 'Monthly Mosquito Control',
+      frequency: 'monthly',
+      visitsPerYear: 12,
+    }, 'quarterly')).toBe('monthly');
+  });
+
   test('does not treat one-time or none tiers as memberships', () => {
     expect(hasMembership({ tier: 'One-Time', monthlyRate: 0 })).toBe(false);
     expect(hasMembership({ waveguard_tier: 'one_time', monthly_rate: 0 })).toBe(false);

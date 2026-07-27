@@ -81,6 +81,7 @@ const CADENCE_OPTIONS = [
   { value: 'semiannual', label: 'Semiannual' },
   { value: 'annual', label: 'Annual' },
   { value: 'monthly_nth_weekday', label: 'Monthly (Nth weekday)' },
+  { value: 'seasonal_feb_oct', label: 'Seasonal (Feb–Oct, monthly)' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
@@ -136,6 +137,14 @@ function inferServiceCadence(service) {
     .replace(/[\s-]+/g, '_');
   const visitsPerYear = Number(typeof service === 'object' ? service?.visits_per_year : null);
   if (billingType && billingType !== 'recurring') return { cadence: 'one_time', intervalDays: 30 };
+  // Seasonal mosquito (9 visits) before the every-6-weeks checks: its rows
+  // carry frequency 'every_6_weeks', but nine mosquito visits have exactly one
+  // valid cadence — the Feb–Oct walk. Mirrors the server's forced rule
+  // (cadenceFromEstimateLine / converterFollowUpSeedingPattern).
+  if (/mosquito/.test(name) && (visitsPerYear === 9 || /\bseasonal\b/.test(name))) {
+    return { cadence: 'seasonal_feb_oct', intervalDays: 30 };
+  }
+  if (frequency === 'seasonal_feb_oct') return { cadence: 'seasonal_feb_oct', intervalDays: 30 };
   if (/\bevery[_\s-]*6[_\s-]*weeks?\b/.test(frequency)) return { cadence: 'custom', intervalDays: 42 };
   if (['bimonthly', 'bi_monthly', 'every_2_months'].includes(frequency)) return { cadence: 'bimonthly', intervalDays: 30 };
   if (['quarterly', 'every_3_months'].includes(frequency)) return { cadence: 'quarterly', intervalDays: 30 };
@@ -189,6 +198,17 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const d = nthWeekdayOfMonth(base.getFullYear(), base.getMonth() + i, nthNum, wdayNum);
     return isNaN(d.getTime()) ? base : d;
   }
+  // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
+  // to a plain month delta so day semantics match the other month cadences.
+  // Mirrors the server's seasonalFebOctDate.
+  if (pattern === 'seasonal_feb_oct') {
+    const SEASON_MONTHS = 9; // Feb..Oct
+    const m1 = base.getMonth() + 1;
+    const ordinal = base.getFullYear() * SEASON_MONTHS + (m1 - 2) + i;
+    const targetYear = Math.floor(ordinal / SEASON_MONTHS);
+    const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
+    return addCalendarMonthsByWeekday(base, (targetYear - base.getFullYear()) * 12 + (targetMonth1 - m1));
+  }
   const monthIntervals = { monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4, semiannual: 6, biannual: 6, annual: 12, yearly: 12 };
   if (monthIntervals[pattern]) {
     return addCalendarMonthsByWeekday(base, monthIntervals[pattern] * i);
@@ -214,6 +234,26 @@ function shiftPastWeekendClient(d, skip, direction) {
   return out;
 }
 
+// Client mirror of the server's clampDateToSeason: a weekend-shifted seasonal
+// date that crossed the season edge (Oct 31 Sat → Nov 2) walks back into
+// Feb–Oct so the preview chips match the saved dates.
+function clampSeasonClient(d, pattern, skip) {
+  if (pattern !== 'seasonal_feb_oct' || !d || isNaN(d.getTime())) return d;
+  const m = d.getMonth(); // 0-indexed: Feb=1 … Oct=9
+  if (m >= 1 && m <= 9) return d;
+  const step = m === 0 ? 1 : -1; // Jan undershoot → forward; Nov/Dec → back
+  const out = new Date(d);
+  for (let n = 0; n < 75; n++) {
+    out.setDate(out.getDate() + step);
+    const mm = out.getMonth();
+    if (mm < 1 || mm > 9) continue;
+    const day = out.getDay();
+    if (skip && (day === 0 || day === 6)) continue;
+    return out;
+  }
+  return d;
+}
+
 export function findScheduleEstimateById(estimates = [], estimateId) {
   return estimates.find((estimate) => String(estimate?.id) === String(estimateId)) || null;
 }
@@ -232,6 +272,9 @@ function visitsPerYearForCadence(cadence) {
     // NO monthly_nth_weekday case: one-step prepay doesn't support it (the
     // server's coverage seeder can't reproduce an nth-weekday schedule), and
     // a null here is what disables the prepay choice for that cadence.
+    // NO seasonal_feb_oct case either: prepay coverage can't represent the
+    // Feb–Oct walk (the server rejects it the same way), so seasonal series
+    // fall to the null default and the prepay choice stays disabled.
     case 'monthly': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
@@ -944,6 +987,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const months = {
       monthly: 30,
       monthly_nth_weekday: 30,
+      seasonal_feb_oct: 30, // monthly in season — ranks with the monthly cadences
       bimonthly: 60,
       quarterly: 90,
       triannual: 120,
@@ -1025,7 +1069,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const opts = { intervalDays: group.intervalDays, nth: group.nth, weekday: group.weekday };
         const raw = nextRecurringDate(apptDate, group.cadence, attempt, opts);
         attempt++;
-        const shifted = shiftPastWeekendClient(raw, !!skipWeekends, dir);
+        const shifted = clampSeasonClient(
+          shiftPastWeekendClient(raw, !!skipWeekends, dir), group.cadence, !!skipWeekends,
+        );
         const key = shifted.toISOString().split('T')[0];
         if (seen.has(key)) continue;
         seen.add(key);

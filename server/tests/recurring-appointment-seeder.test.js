@@ -236,6 +236,46 @@ describe('seasonal_feb_oct cadence (mosquito seasonal 9x, owner 2026-07-27)', ()
   });
 });
 
+describe('firstInSeasonDate — converter first-visit roll (codex r5 P1)', () => {
+  // The estimate converter picks the auto-scheduled first date itself; a
+  // Nov–Jan pick on a seasonal plan must roll to February so the parent is
+  // in-season and counts as visit 1 of 9. Office-booked parents are not
+  // moved — this helper is only applied on the auto-schedule path.
+  const roll = RecurringAppointmentSeeder.firstInSeasonDate;
+
+  test('in-season dates pass through untouched', () => {
+    for (const d of ['2026-02-01', '2026-06-15', '2026-10-31']) {
+      expect(roll(d)).toBe(d);
+    }
+  });
+
+  test('Nov and Dec roll to the FOLLOWING February (nth-weekday anchored)', () => {
+    // addETMonthsByWeekday keeps the base's nth-weekday-of-month, the same
+    // semantics every other month-based cadence uses — not raw day-of-month.
+    expect(roll('2026-11-10')).toBe('2027-02-09'); // 2nd Tue → 2nd Tue
+    expect(roll('2026-12-08')).toBe('2027-02-09'); // 2nd Tue → 2nd Tue
+  });
+
+  test('January rolls forward to its own February', () => {
+    expect(roll('2027-01-06')).toBe('2027-02-03'); // 1st Wed → 1st Wed
+  });
+
+  test('a rolled base seeds a full nine-visit Feb–Oct year', () => {
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: roll('2026-11-10'),
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: false,
+    });
+    expect(rows).toHaveLength(8);
+    expect([roll('2026-11-10'), ...rows.map((r) => r.scheduled_date)].map((d) => d.slice(0, 7))).toEqual([
+      '2027-02', '2027-03', '2027-04', '2027-05', '2027-06',
+      '2027-07', '2027-08', '2027-09', '2027-10',
+    ]);
+  });
+});
+
 describe('clampDateToSeason — shared season clamp for external callers (pre-push P1 r4)', () => {
   // admin-schedule's creation/rewrite/extension paths weekend-shift series
   // dates OUTSIDE the seeder; they clamp through this export so a shifted

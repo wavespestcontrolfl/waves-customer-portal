@@ -60,6 +60,25 @@ function seasonalFebOctDate(baseDateStr, i, opts = {}) {
   return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
 }
 
+// First in-season date for a seasonal series whose chosen start falls in the
+// Nov–Jan gap: Nov/Dec roll to the FOLLOWING February, January to its own
+// February, keeping the base's day-of-month/weekday semantics. In-season bases
+// pass through untouched. Exported for the estimate converter, which picks the
+// auto-scheduled first visit date itself — an office-booked off-season parent
+// is deliberately NOT moved (that date is the operator's), but an auto-created
+// one would otherwise put a winter treatment on a Feb–Oct program and leave
+// only eight in-season visits.
+function firstInSeasonDate(baseDateStr, opts = {}) {
+  const safe = dateOnly(baseDateStr) || etDateString();
+  const base = parseETDateTime(`${safe}T12:00`);
+  if (isNaN(base.getTime())) return safe;
+  const { year, month } = etParts(base);
+  if (month >= SEASON_FIRST_MONTH && month <= SEASON_LAST_MONTH) return safe;
+  const targetYear = month > SEASON_LAST_MONTH ? year + 1 : year;
+  const monthDelta = (targetYear - year) * 12 + (SEASON_FIRST_MONTH - month);
+  return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
+}
+
 // Weekend shifts and blackout nudges move dates across the season edge (a
 // forward-shifted Oct 31 lands Nov 2; a back-shifted Feb 1 lands Jan 30),
 // breaking the seasonal cadence's no-Nov-Jan contract. Walk back INTO the
@@ -730,6 +749,7 @@ module.exports = {
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
   clampDateToSeason,
+  firstInSeasonDate,
   markParentRecurring,
   normalizeRecurringPattern,
   patternFromVisitsPerYear,

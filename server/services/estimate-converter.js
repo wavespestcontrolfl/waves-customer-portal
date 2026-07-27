@@ -2295,7 +2295,18 @@ const EstimateConverter = {
           // the plan cadence (codex #2911 r3 P1).
           fallbackFrequency: cadenceFallbackForSeeding(svc, inferredFrequencyKey),
         });
-        const frequency = svc.frequency || pattern || 'monthly';
+        // The pattern the seeder will ACTUALLY use — for seasonal mosquito the
+        // forced rule diverges from raw inference (the row carries
+        // every_6_weeks). Resolved against the prospective parent's
+        // service_type, which is exactly what seedRecurringFollowUpsForParent
+        // sees after the insert below.
+        const seedingPattern = converterFollowUpSeedingPattern(
+          svc, { service_type: serviceName }, inferredFrequencyKey,
+        );
+        const seasonalUnit = seedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+        // Row notes are customer-visible — say "seasonal (Feb–Oct)", not the
+        // raw every_6_weeks the quote row carries or the internal token.
+        const frequency = seasonalUnit ? 'seasonal (Feb–Oct)' : (svc.frequency || pattern || 'monthly');
         // recurringUnitCount, not raw line count (Codex P1): with a
         // standalone bait unit beside one pest line, stamping the whole
         // plan amount on BOTH rows would double-charge at completion.
@@ -2313,7 +2324,14 @@ const EstimateConverter = {
             : '';
           const row = {
             customer_id: customerId,
-            scheduled_date: firstServiceDate,
+            // Codex r5 P1: an auto-picked Nov–Jan first date on a seasonal
+            // plan would put a winter treatment on a Feb–Oct program AND count
+            // toward the nine, leaving only eight in-season visits. Roll it to
+            // February; every other unit keeps the picked date. (Office-booked
+            // off-season parents are the operator's choice and are not moved.)
+            scheduled_date: seasonalUnit
+              ? RecurringAppointmentSeeder.firstInSeasonDate(firstServiceDate)
+              : firstServiceDate,
             service_type: serviceName,
             status: 'pending',
             notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}.${combinedNote}`,
