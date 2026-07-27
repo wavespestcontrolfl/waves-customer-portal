@@ -1420,21 +1420,21 @@ function cadenceFallbackForSeeding(svc = {}, fallbackFrequency) {
     && visitsPerYearForRecurringService(svc)) {
     return null;
   }
-  // Seasonal mosquito carries no cadence TEXT the inference can read — its
-  // label is "Seasonal Mosquito Program (9 visits)", which matches no pattern —
-  // so without this it falls through to the numeric rule and resolves to
-  // 'bimonthly'. Supply the explicit seasonal cadence as the fallback. It is
-  // the LAST inference candidate, so a line that does carry real cadence text
-  // still wins; if that text disagrees with the 9-visit count,
-  // supportsConverterFollowUpSeeding declines and the office schedules.
-  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
-    && visitsPerYearForRecurringService(svc) === 9) {
-    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
-  }
   return fallbackFrequency;
 }
 
 function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency) {
+  // A 9-visit mosquito line has exactly ONE valid cadence, so resolve it before
+  // generic inference rather than as a fallback. Inference reads cadence FIELDS
+  // and display text first, so any stray or legacy frequency on the row —
+  // 'bimonthly' from the numeric rule, an every_6_weeks copied from the T&S
+  // restamp, anything — would otherwise win and then be rejected by the gate
+  // below, silently leaving the plan with no series at all. Nine visits at any
+  // other cadence is wrong by construction, so there is nothing to preserve.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+    && visitsPerYearForRecurringService(svc) === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),

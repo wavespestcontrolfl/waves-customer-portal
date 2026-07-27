@@ -324,6 +324,10 @@ function sanitizeServiceType(serviceType) {
   return normalizeServiceType(serviceType);
 }
 
+// Seasonal mosquito cadence lives in the seeder — single source of truth for
+// the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
+const { SEASONAL_FEB_OCT, seasonalFebOctDate } = require('../services/recurring-appointment-seeder');
+
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
@@ -384,6 +388,12 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
+  // Seasonal mosquito (9x Feb-Oct) is neither a month-interval nor a fixed
+  // day-gap cadence — its gap is 1 month in season and 4 across the winter.
+  // Delegate to the seeder so extension/reschedule here cannot drift from the
+  // dates the series was seeded with (it would otherwise take the generic
+  // 91-day fallback below and schedule winter visits).
+  if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safeBaseStr, i, opts);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }

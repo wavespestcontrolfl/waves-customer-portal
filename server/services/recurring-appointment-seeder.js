@@ -40,6 +40,26 @@ function seasonOrdinalForBase(year, month) {
   return year * SEASON_MONTHS_PER_YEAR + (month - SEASON_FIRST_MONTH);
 }
 
+// The i-th seasonal occurrence after a base date. Exported because
+// admin-schedule.js and rebooker.js each keep their own nextRecurringDate for
+// series extension/rescheduling; without this they fall through to the generic
+// 91-day gap and would corrupt the cadence (and land visits in winter).
+function seasonalFebOctDate(baseDateStr, i, opts = {}) {
+  const safe = dateOnly(baseDateStr) || etDateString();
+  const base = parseETDateTime(`${safe}T12:00`);
+  if (isNaN(base.getTime())) return safe;
+  // Walk the Feb..Oct timeline, then convert back to a plain month delta so the
+  // shared helper keeps this cadence's day-of-month/weekday semantics identical
+  // to every other month-based pattern.
+  const baseEt = etParts(base);
+  const target = seasonOrdinalForBase(baseEt.year, baseEt.month) + i;
+  const targetYear = Math.floor(target / SEASON_MONTHS_PER_YEAR);
+  const targetMonth = (((target % SEASON_MONTHS_PER_YEAR) + SEASON_MONTHS_PER_YEAR) % SEASON_MONTHS_PER_YEAR)
+    + SEASON_FIRST_MONTH;
+  const monthDelta = (targetYear - baseEt.year) * 12 + (targetMonth - baseEt.month);
+  return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
+}
+
 const DEFAULT_ONE_YEAR_COUNTS = {
   monthly: 12,
   every_6_weeks: 9,
@@ -217,18 +237,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
-  if (pattern === SEASONAL_FEB_OCT) {
-    // Walk the Feb..Oct timeline, then convert back to a plain month delta so
-    // the shared helper keeps this cadence's day-of-month/weekday semantics
-    // identical to every other month-based pattern.
-    const baseEt = etParts(base);
-    const target = seasonOrdinalForBase(baseEt.year, baseEt.month) + i;
-    const targetYear = Math.floor(target / SEASON_MONTHS_PER_YEAR);
-    const targetMonth = (((target % SEASON_MONTHS_PER_YEAR) + SEASON_MONTHS_PER_YEAR) % SEASON_MONTHS_PER_YEAR)
-      + SEASON_FIRST_MONTH;
-    const monthDelta = (targetYear - baseEt.year) * 12 + (targetMonth - baseEt.month);
-    return etDateString(addETMonthsByWeekday(base, monthDelta, opts));
-  }
+  if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -717,6 +726,7 @@ module.exports = {
   seriesCreateLockKeys,
   inferRecurringPattern,
   SEASONAL_FEB_OCT,
+  seasonalFebOctDate,
   markParentRecurring,
   normalizeRecurringPattern,
   patternFromVisitsPerYear,

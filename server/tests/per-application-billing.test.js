@@ -154,9 +154,28 @@ describe('supportsConverterFollowUpSeeding — mosquito series (owner 2026-07-27
 
   test('cadence resolution picks the seasonal walk for a 9-visit mosquito line', () => {
     // End-to-end through inference: the seasonal label matches no cadence text,
-    // so without the explicit fallback this line resolves to 'bimonthly'.
+    // so generic inference would resolve this line to 'bimonthly'.
     expect(converterFollowUpSeedingPattern(seasonalRow, {}, null)).toBe(SEASONAL);
     expect(converterFollowUpSeedingPattern(monthlyRow, {}, null)).toBe('monthly');
+  });
+
+  test('a stray cadence field on a 9-visit mosquito line cannot suppress the series', () => {
+    // Inference reads cadence FIELDS before anything else, so any legacy or
+    // copied frequency would win and then be rejected by the gate — leaving the
+    // plan with NO series, the exact bug this lane fixes (pre-push P1 r3).
+    // Nine visits at any other cadence is wrong by construction.
+    for (const frequency of ['every_6_weeks', 'bimonthly', 'monthly', 'quarterly', '9x']) {
+      expect(converterFollowUpSeedingPattern({ ...seasonalRow, frequency }, {}, null)).toBe(SEASONAL);
+    }
+    expect(converterFollowUpSeedingPattern({ ...seasonalRow, recurring_pattern: 'bimonthly' }, {}, null))
+      .toBe(SEASONAL);
+  });
+
+  test('the forced seasonal resolution is scoped to mosquito', () => {
+    // T&S also has a 9-visit program; it must keep its own 42-day cadence.
+    expect(converterFollowUpSeedingPattern(
+      { service: 'tree_shrub', frequency: 'every_6_weeks', visitsPerYear: 9 }, {}, null,
+    )).toBe('every_6_weeks');
   });
 
   test('non-mosquito services are unaffected by the seasonal fallback', () => {
