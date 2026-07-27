@@ -248,12 +248,23 @@ function buildPestReportV2({
 function pestReportV2PdfSignature(service = {}) {
   if (process.env.PEST_REPORT_V2 !== 'true') return '';
   const line = service.service_line || detectServiceLine(service.service_type);
+  if (line !== 'pest') return '';
+  // Cockroach typed reports dropped the V2 dashboard entirely (owner
+  // 2026-07-27) — their PDFs compose from the typed record instead, so a
+  // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
+  // dashboard on permanent links. Distinct suffix re-renders each once.
+  try {
+    const data = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    if (data?.typedReportSnapshot?.type === 'cockroach') return '-roachtyped1';
+  } catch { /* fall through to the line suffix */ }
   // 'b' = the typed-activity composition (owner ruling 2026-07-14): typed
   // pest PDFs now render the ActivityCard alongside the dashboard, so PDFs
   // cached under '-pestv2' would keep hiding the gauge/chart/progress chip
   // on permanent links (codex P2). Bump this suffix whenever the pest-line
   // report COMPOSITION changes — each pest PDF re-renders once on next view.
-  return line === 'pest' ? '-pestv2b' : '';
+  return '-pestv2b';
 }
 
 module.exports = {

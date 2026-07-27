@@ -341,9 +341,17 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // plus a seasonal "what to expect" forecast resolved from the property zip.
   // Pest service line only; best-effort so a forecast/network hiccup never blocks
   // the report. Flows to the client via the `...data` spread below.
+  // Cockroach typed reports opt OUT of the V2 dashboard entirely (owner
+  // 2026-07-27): its perimeter-protection story — "Where we protected",
+  // entry/lanai/pool-pad rows, "no perimeter application was logged" — is
+  // wrong for an interior cleanout and read as filler. Without the V2
+  // shell the report composes from the typed record instead: Visit
+  // Summary (narrative slot), the What-we-found tiles, and the activity
+  // gauge, all of which the dashboard would otherwise suppress.
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
+    && data.typedReport?.type !== 'cockroach'
     && dynamicContext.premiumExperience
   ) {
     try {

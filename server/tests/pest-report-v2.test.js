@@ -131,6 +131,17 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
     process.env.PEST_REPORT_V2 = 'true';
     expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2b');
     expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2b');
+    // Cockroach typed records dropped the dashboard (owner 2026-07-27) —
+    // their PDFs carry a distinct suffix so cached dashboard renders
+    // re-render once on next view.
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
+    })).toBe('-roachtyped1');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'bed_bug' } }),
+    })).toBe('-pestv2b');
     // Other lines keep their keys — the pest gate must not invalidate
     // cached lawn/mosquito/termite report PDFs.
     expect(pestReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');
