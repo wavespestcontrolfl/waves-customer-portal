@@ -182,8 +182,11 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
     billingEmail: prefs.billing_email || '',
     billingContactName: prefs.billing_contact_name || '',
     paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
-    appointmentNotifyPrimary: prefs.appointment_notify_primary === true,
-    serviceReportNotifyPrimary: prefs.service_report_notify_primary === true,
+    // `!== false` matches getAppointmentContacts' opt-OUT semantics — a strict
+    // `=== true` here would render the portal/admin toggle OFF for rows where
+    // the send path actually includes the holder (NULL / no prefs row).
+    appointmentNotifyPrimary: prefs.appointment_notify_primary !== false,
+    serviceReportNotifyPrimary: prefs.service_report_notify_primary !== false,
     ...(includeChannels ? {
       // Per-notification delivery channel (sms | email | both)
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
@@ -382,7 +385,8 @@ async function ensurePrefs(customerId) {
       seasonal_tips: true,
       sms_enabled: true,
       email_enabled: true,
-      appointment_notify_primary: false,
+      appointment_notify_primary: true,
+      service_report_notify_primary: true,
     }).returning('*');
   }
   return prefs;

@@ -48,18 +48,24 @@ describe('customer contact recipient routing', () => {
     }));
   });
 
-  test('routes service reports to distinct service contact unless owner copy is enabled', () => {
+  test('service reports include the account holder BY DEFAULT alongside the service contact', () => {
+    // Opt-OUT semantics — see 20260725000003/4. Three real accounts were
+    // receiving none of their own reports under the old opt-in default.
     expect(getServiceReportEmailRecipients(customer, {})).toEqual([
-      expect.objectContaining({
-        email: 'terry@example.com',
-        role: 'service_contact',
-      }),
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+      expect.objectContaining({ email: 'lana@example.com', role: 'primary' }),
     ]);
 
     expect(getServiceReportEmailRecipients(customer, { service_report_notify_primary: true }))
       .toEqual([
         expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
         expect.objectContaining({ email: 'lana@example.com', role: 'primary' }),
+      ]);
+
+    // Only an EXPLICIT false opts the holder out.
+    expect(getServiceReportEmailRecipients(customer, { service_report_notify_primary: false }))
+      .toEqual([
+        expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
       ]);
   });
 
@@ -87,9 +93,9 @@ describe('customer contact recipient routing', () => {
       }),
     ]);
 
-    // With a distinct service contact and owner copy off, the billing
-    // recipient is still appended.
-    expect(getServiceReportEmailRecipients(customer, prefs)).toEqual([
+    // With a distinct service contact and owner copy explicitly OFF, the
+    // billing recipient is still appended.
+    expect(getServiceReportEmailRecipients(customer, { ...prefs, service_report_notify_primary: false })).toEqual([
       expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
       expect.objectContaining({ email: 'christine@example.com', role: 'billing_contact' }),
     ]);
@@ -98,29 +104,42 @@ describe('customer contact recipient routing', () => {
   test('billing report copy is a no-op without a billing email or when it duplicates a recipient', () => {
     // Toggle on but no billing_email set: the payer IS the primary, which the
     // notify-primary toggle already covers.
-    expect(getServiceReportEmailRecipients(customer, { service_report_notify_billing: true }))
-      .toEqual([
-        expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
-      ]);
+    expect(getServiceReportEmailRecipients(customer, {
+      service_report_notify_billing: true,
+      service_report_notify_primary: false,
+    })).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+    ]);
 
     // Billing email matching an existing recipient is deduped.
     expect(getServiceReportEmailRecipients(customer, {
       billing_email: 'Terry@example.com',
       service_report_notify_billing: true,
+      service_report_notify_primary: false,
     })).toEqual([
       expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
     ]);
   });
 
-  test('appointment contacts keep service contact primary unless owner SMS copy is enabled', () => {
+  test('appointment contacts include the account holder BY DEFAULT alongside the service contact', () => {
+    // Opt-OUT semantics: no stored preference means the holder is included.
+    // The old opt-in default silently dropped them the moment a contact was
+    // named — see 20260725000001_notify_primary_default_on.
     expect(getAppointmentContacts(customer, {})).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
     ]);
 
     expect(getAppointmentContacts(customer, { appointment_notify_primary: true }))
       .toEqual([
         expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
         expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+      ]);
+
+    // Only an EXPLICIT false opts the holder out.
+    expect(getAppointmentContacts(customer, { appointment_notify_primary: false }))
+      .toEqual([
+        expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       ]);
   });
 
@@ -135,7 +154,7 @@ describe('customer contact recipient routing', () => {
   };
 
   test('appointment contacts fan out across all distinct service contact slots', () => {
-    expect(getAppointmentContacts(multiContactCustomer, {})).toEqual([
+    expect(getAppointmentContacts(multiContactCustomer, { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
       expect.objectContaining({ phone: '+15554440000', role: 'service_contact_3' }),
@@ -158,13 +177,20 @@ describe('customer contact recipient routing', () => {
       service_contact3_name: 'Dup Of Tenant',
       service_contact3_phone: '+15552220000',
     };
+    expect(getAppointmentContacts(withDupes, { appointment_notify_primary: false })).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+    // The 2026-07-24 incident shape: the holder's OWN number sitting in a
+    // contact slot is de-duped away, so with the holder opted IN they appear
+    // exactly once, as primary — never twice.
     expect(getAppointmentContacts(withDupes, {})).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
     ]);
   });
 
   test('service reports fan out across all distinct service contact emails', () => {
-    expect(getServiceReportEmailRecipients(multiContactCustomer, {})).toEqual([
+    expect(getServiceReportEmailRecipients(multiContactCustomer, { service_report_notify_primary: false })).toEqual([
       expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
       expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
       expect.objectContaining({ email: 'pat@example.com', role: 'service_contact_3' }),
@@ -190,10 +216,10 @@ describe('customer contact recipient routing', () => {
       service_contact2_email: 'sam@example.com',
       service_contacts_consent_at: '2026-07-22T00:00:00Z',
     };
-    expect(getAppointmentContacts(onlySlot2, {})).toEqual([
+    expect(getAppointmentContacts(onlySlot2, { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15553330000', role: 'service_contact_2' }),
     ]);
-    expect(getServiceReportEmailRecipients(onlySlot2, {})).toEqual([
+    expect(getServiceReportEmailRecipients(onlySlot2, { service_report_notify_primary: false })).toEqual([
       expect.objectContaining({ email: 'sam@example.com', role: 'service_contact_2' }),
     ]);
   });
@@ -204,8 +230,11 @@ describe('customer contact recipient routing', () => {
     expect(getAppointmentContacts(unstamped, {})).toEqual([
       expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
     ]);
-    // Email routing is NOT part of the SMS consent gate.
-    expect(getServiceReportEmailRecipients(unstamped, {})).toEqual([
+    // Email routing is NOT part of the SMS consent gate. Holder explicitly
+    // opted out so this asserts the gate alone — and note that BEFORE
+    // 20260725000003 this ungated path dropped the holder even with no consent
+    // artifact, which is why it was the more exposed of the two.
+    expect(getServiceReportEmailRecipients(unstamped, { service_report_notify_primary: false })).toEqual([
       expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
     ]);
   });
@@ -233,11 +262,47 @@ describe('customer contact recipient routing', () => {
     }));
   });
 
+  test('an EXPLICIT opt-out wins even when there is no other recipient (codex #2992 P1)', () => {
+    // The old `!contacts.length ||` safety net overrode a stored false, so
+    // unchecking the toggle did nothing for an account with no distinct
+    // consented contact — the UI promised an opt-out the send path ignored.
+    const noContacts = {
+      id: 'cust-9', first_name: 'Solo', phone: '+15551110000', email: 'solo@example.com',
+    };
+    expect(getAppointmentContacts(noContacts, {})).toEqual([
+      expect.objectContaining({ phone: '+15551110000', role: 'primary' }),
+    ]);
+    expect(getAppointmentContacts(noContacts, { appointment_notify_primary: false })).toEqual([]);
+    expect(getServiceReportEmailRecipients(noContacts, { service_report_notify_primary: false })).toEqual([]);
+
+    // Consent artifact missing => service contacts drop, but an explicit
+    // opt-out must still not resurrect the holder.
+    const unstamped = { ...customer, service_contacts_consent_at: null };
+    expect(getAppointmentContacts(unstamped, { appointment_notify_primary: false })).toEqual([]);
+  });
+
+  test('a FAILED preference lookup fails closed, not default-on (codex #2992 P1)', () => {
+    const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+    // A transient DB error must not be read as "no preference stored" and
+    // silently override a customer's opt-out.
+    expect(getAppointmentContacts(customer, PREFS_UNAVAILABLE)).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+    expect(getServiceReportEmailRecipients(customer, PREFS_UNAVAILABLE)).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+    ]);
+    // Every OTHER field still reads exactly like the `{}` callers passed before,
+    // so nothing beyond the notify-primary decision changes.
+    expect(PREFS_UNAVAILABLE.sms_enabled).toBeUndefined();
+  });
+
   test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';
     try {
-      expect(getAppointmentContacts(unstamped, {})).toEqual([
+      // Holder explicitly opted out so this asserts the CONSENT gate alone —
+      // with the default (opt-in) they would also appear as primary.
+      expect(getAppointmentContacts(unstamped, { appointment_notify_primary: false })).toEqual([
         expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
       ]);
     } finally {

@@ -13,7 +13,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
-const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS } = require('../customer-contact');
+const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
@@ -420,7 +420,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   if (!shouldSendServiceReportV1Delivery(service)) {
     return { ok: false, skipped: true, error: 'Not a completed service report v1 record' };
   }
-  const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
   const recipients = getServiceReportEmailRecipients({
     id: service.customer_id,
     first_name: service.first_name,
