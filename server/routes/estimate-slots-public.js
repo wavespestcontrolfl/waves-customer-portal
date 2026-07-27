@@ -40,9 +40,6 @@ const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
-  annualPrepayEligibleForMosquitoTier,
-  annualPrepayHasSellableIncentive,
-  mosquitoTierForAxisToken,
   buildPricingBundle,
   commercialAcceptDepositExempt,
   isCommercialAutoAcceptEstimate,
@@ -631,9 +628,10 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       const depositCombos = Array.isArray(pricingBundle?.serviceCadenceCombos)
         ? pricingBundle.serviceCadenceCombos
         : [];
+      let depositMatchedCombo = null;
       if (depositServiceCadences && depositCombos.length) {
         const requestedNonPest = Object.keys(depositServiceCadences);
-        const matchedCombo = depositCombos.find((c) => {
+        depositMatchedCombo = depositCombos.find((c) => {
           const sel = c.selection || {};
           const comboNonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
           if (comboNonPest.length !== requestedNonPest.length) return false;
@@ -641,28 +639,23 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
           if (sel.pest_control) return sel.pest_control === prepayFreqKey;
           return true;
         }) || null;
-        if (!matchedCombo) {
+        if (!depositMatchedCombo) {
           return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
         }
       }
       const cadenceRequestsSeasonal = !!depositServiceCadences
         && Object.values(depositServiceCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
-      // A monthly12 axis on a seasonal-default estimate is a VALID prepay —
-      // the stored-mix fallback would wrongly reject it (codex r16 P2).
-      // Mirrors accept's adjudication order exactly.
-      const depositAxisTier = depositServiceCadences
-        ? mosquitoTierForAxisToken(depositServiceCadences.mosquito)
-        : null;
+      // Axis eligibility comes ONLY from a matched combo's server-stamped
+      // flag (codex r21 P0): with no combos, accept IGNORES serviceCadences
+      // and books the DEFAULT tier, so a crafted monthly12 axis on a
+      // seasonal-default solo estimate must not buy a deposit for an
+      // acceptance that books (and then rejects) the seasonal plan. The
+      // adjudication order mirrors accept exactly.
       let prepayEligibleHere;
       if (cadenceRequestsSeasonal) prepayEligibleHere = false;
-      else if (depositAxisTier) {
-        // Mix eligibility AND the sellable-incentive gate — mirrors accept
-        // (codex r18 P1): no deposit for a prepay finalizePricingBundle
-        // deliberately disabled.
-        prepayEligibleHere = annualPrepayEligibleForMosquitoTier(estData, depositAxisTier)
-          && annualPrepayHasSellableIncentive(estimate, estData, pricingBundle || {});
-      } else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
+      else if (depositMatchedCombo) prepayEligibleHere = depositMatchedCombo.annualPrepayEligible === true;
+      else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
         prepayEligibleHere = prepayFreq.annualPrepayEligible;
       } else prepayEligibleHere = annualPrepayEligibleForEstimateData(estData);
       if (!prepayEligibleHere) {

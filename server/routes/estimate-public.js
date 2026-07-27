@@ -8212,21 +8212,17 @@ router.put('/:token/accept', async (req, res, next) => {
         && !Array.isArray(rawCadences)
         && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
-      const axisTier = rawCadences && typeof rawCadences === 'object' && !Array.isArray(rawCadences)
-        ? mosquitoTierForAxisToken(rawCadences.mosquito)
-        : null;
+      // No unproven axis adjudication here (codex r21 P0): with no combos,
+      // this route IGNORES serviceCadences and books the DEFAULT tier, so
+      // eligibility follows the selected frequency's stamped flag or the
+      // stored mix. A MATCHED combo's stamped flag is enforced right after
+      // combo resolution below.
       const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
         ? selectedFrequency.annualPrepayEligible
         : null;
       let prepayMixEligible;
       if (cadenceRequestsSeasonal) prepayMixEligible = false;
-      else if (axisTier) {
-        // Mix eligibility AND the sellable-incentive gate (codex r18 P1) —
-        // a crafted monthly12 axis must not buy a prepay finalizePricingBundle
-        // deliberately disabled (operator-waived setup, no discount headroom).
-        prepayMixEligible = annualPrepayEligibleForMosquitoTier(estData, axisTier)
-          && annualPrepayHasSellableIncentive(estimate, estData, pricingBundle || {});
-      } else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
+      else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
       else prepayMixEligible = isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
       if (!prepayMixEligible) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
@@ -8264,6 +8260,13 @@ router.put('/:token/accept', async (req, res, next) => {
       }) || null;
       if (!selectedCombo) {
         return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+      }
+      // A matched combo's server-stamped prepay flag is authoritative
+      // (codex r21 P0): combos span multiple recurring services and
+      // multi-service prepay is hard-blocked downstream, so an accept that
+      // selected one must not carry prepay past this point.
+      if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the

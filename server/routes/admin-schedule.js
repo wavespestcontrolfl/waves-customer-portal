@@ -4290,7 +4290,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     let editAnchorDate = scheduledDate;
-    if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
+    // seasonal_feb_oct included (codex r21 P1): a partial edit without a
+    // scheduledDate would otherwise leave editAnchorDate undefined and
+    // recurrenceOrdinalOptions falls back to TODAY, overwriting the
+    // recurring_nth/weekday anchors and drifting the series.
+    if (isRecurring && !editAnchorDate
+      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT)) {
       const existingService = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('scheduled_date');
