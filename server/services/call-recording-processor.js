@@ -2765,12 +2765,17 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, details: merged };
 }
 
-async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null) {
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
   if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
   if (!customer.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
-  if (!customer.phone && (extracted.phone || callerPhone)) updates.phone = extracted.phone || callerPhone;
+  // suppressPhone: the caller-phone identity check flagged that this call's
+  // ANI isn't on any of the linked customer's phone slots — writing the
+  // number here would permanently save an UNVERIFIED phone to a possibly
+  // wrong account before the office gets the review the advisory card
+  // promises (codex P1). The rest of the backfill still runs.
+  if (!customer.phone && (extracted.phone || callerPhone) && !suppressPhone) updates.phone = extracted.phone || callerPhone;
   if (!customer.email && extracted.email) updates.email = extracted.email;
   if (!customer.address_line1 && extracted.address_line1) updates.address_line1 = extracted.address_line1;
   if (!customer.city && extracted.city) updates.city = extracted.city;
@@ -5161,6 +5166,15 @@ const CallRecordingProcessor = {
             if (n.city) extracted.city = n.city;
             if (n.state) extracted.state = n.state;
             if (n.postal_code) extracted.zip = n.postal_code;
+            // The canonical V2 blob was serialized to ai_extraction_enriched
+            // BEFORE this normalization (right after extraction) — re-persist
+            // it so enriched-blob consumers (the estimator context-builder
+            // prefers it over ai_extraction) see the normalized address too,
+            // not the raw model spelling (codex P2). Best-effort: a failed
+            // rewrite leaves the pre-adoption blob, which is the old behavior.
+            await db('call_log').where({ id: call.id })
+              .update({ ai_extraction_enriched: JSON.stringify(v2Extraction) })
+              .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.message}`));
           }
 
           if (!routingResult.allowed) {
@@ -5787,19 +5801,25 @@ const CallRecordingProcessor = {
 
     // Phone-verification lane (owner directive 2026-07-27): when a call ends
     // up linked to an EXISTING customer whose on-file numbers do NOT include
-    // the caller's number, the link came from something weaker than the phone
-    // (a pre-set call.customer_id, a name/context match) — never trust it
-    // silently. Advisory card carries the number + the matched identity so
-    // the office confirms it's really them and saves the number to the
-    // account (future calls then hard-match by phone). Skips brand-new
-    // customers (their phone IS this call's) and outbound dials. Best-effort:
-    // a failed check must never break call processing.
-    if (customerId && phone && !createdCustomerFromCall && !isOutboundCall(call)) {
+    // the number the caller actually dialed from, the link came from
+    // something weaker than the phone (a pre-set call.customer_id, a
+    // name/context match) — never trust it silently. Advisory card carries
+    // the number + the matched identity so the office confirms it's really
+    // them and saves the number to the account (future calls then hard-match
+    // by phone). Identity compares the inbound ANI (call.from_phone), NOT
+    // resolveCallContactPhone's result — that helper prefers a DICTATED
+    // callback number, which says nothing about who is on the line (codex
+    // P2). Skips brand-new customers (their phone IS this call's) and
+    // outbound dials. Best-effort: a failed check must never break call
+    // processing.
+    let callerPhoneUnverified = false;
+    if (customerId && call.from_phone && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
         const linked = await db('customers').where({ id: customerId })
           .first(['first_name', 'last_name', ...CONTACT_MATCH_PHONE_COLS]);
-        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(phone, linked[col]));
+        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(call.from_phone, linked[col]));
         if (linked && !phoneOnFile) {
+          callerPhoneUnverified = true;
           await db('triage_items')
             .insert(buildTriageItem({
               callLogId: call.id,
@@ -5807,14 +5827,14 @@ const CallRecordingProcessor = {
               extraction: v2CanonicalExtraction,
               severity: 'advisory',
               extraPayload: {
-                caller_phone: phone,
+                caller_phone: call.from_phone,
                 matched_customer_name: [linked.first_name, linked.last_name].filter(Boolean).join(' ') || null,
                 on_file_phone: linked.phone || null,
               },
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore();
-          logger.info(`[call-proc] Caller number not on any phone slot of linked customer ${customerId} — advisory identity-confirm card opened for ${maskSid(callSid)}`);
+          logger.info(`[call-proc] Caller ANI not on any phone slot of linked customer ${customerId} — advisory identity-confirm card opened for ${maskSid(callSid)}`);
         }
       } catch (e) {
         logger.warn(`[call-proc] caller-phone-on-file check skipped: ${e.message}`);
@@ -6964,7 +6984,7 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone);
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           if (!customerValidation.ok) {
             appointmentResult = {
