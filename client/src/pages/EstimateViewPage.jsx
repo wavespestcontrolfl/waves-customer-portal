@@ -5050,8 +5050,12 @@ function EstimateViewPageInner() {
                 // Buy-vs-rent options sheet link (GATE_TERMITE_COMPARISON_SHEET,
                 // dark). RAW key on purpose, like the details row above —
                 // commercial termite (commercial_termite_bait) has no rental
-                // option and must not link.
-                termiteComparison={renderFlags.showTermiteComparison && section.key === 'termite_bait' && !readOnly
+                // option and must not link. Unsplit bundles carry the real
+                // services in memberKeys, so a bundled termite program still
+                // links from its bundle card (codex P2).
+                termiteComparison={renderFlags.showTermiteComparison && !readOnly
+                  && (section.key === 'termite_bait'
+                    || (Array.isArray(section.memberKeys) && section.memberKeys.includes('termite_bait')))
                   ? { token, preview: adminDraftPreview }
                   : null}
                 afterPrice={afterPrice}

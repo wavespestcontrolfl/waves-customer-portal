@@ -67,6 +67,22 @@ describe('availability is fail-closed', () => {
     expect(buildTermiteComparisonData(termiteInputs(), { selectedTier: null })).toBeTruthy();
   });
 
+  test('a quote-time tier discount the live replay does not reproduce fails the sheet closed (codex P1)', () => {
+    const { WAVEGUARD } = require('../services/pricing-engine/constants');
+    const liveBronze = Number(WAVEGUARD.tiers.bronze.discount) || 0;
+    // Snapshot matches live config → renders.
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      selectedTier: 'Bronze',
+      expectedTierDiscount: liveBronze,
+    })).toBeTruthy();
+    // Admin changed the tier discount after send: the estimate page keeps
+    // the quoted rate, the replay prices at the new one → no sheet.
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      selectedTier: 'Bronze',
+      expectedTierDiscount: liveBronze + 0.05,
+    })).toBeNull();
+  });
+
   test('the saved inputs are never mutated by the replays', () => {
     const inputs = termiteInputs();
     const before = JSON.stringify(inputs);

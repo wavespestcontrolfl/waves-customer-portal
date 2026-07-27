@@ -15922,21 +15922,39 @@ function comparisonEngineInputs(estData) {
 // commercial property, or an unpriceable uplift all make the builder
 // fail-closed and the PDF 404, so the link must not render. Runs the same
 // fail-closed builder the PDF route runs; cheap pre-filters keep the two
-// engine replays off every non-termite /data call.
+// engine replays off every non-termite /data call, and a per-request memo
+// (keyed on the parsed estData object) keeps repeat buildRenderFlags calls
+// on the same payload — attach + finalize, cached bundles included — from
+// replaying the engine again (codex P2, round 3).
+const termiteComparisonAvailabilityMemo = new WeakMap();
 function termiteComparisonAvailableForEstimate(estData, services = [], estimate = null) {
   const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
   if (!termiteComparisonGateOn()) return false;
   if (!estData || typeof estData !== 'object') return false;
-  if (!services.some((section) => section?.key === 'termite_bait')) return false;
+  // Unsplit multi-service estimates render ONE 'bundle' section carrying
+  // the real services in memberKeys (codex P2, round 3) — a bundled
+  // termite program must still offer the sheet.
+  const hasTermiteSection = services.some((section) => section?.key === 'termite_bait'
+    || (Array.isArray(section?.memberKeys) && section.memberKeys.includes('termite_bait')));
+  if (!hasTermiteSection) return false;
+  if (termiteComparisonAvailabilityMemo.has(estData)) {
+    return termiteComparisonAvailabilityMemo.get(estData);
+  }
+  let available = false;
   try {
-    // Same selectedTier guard as the PDF route — a tier-committed estimate
-    // the replay can't reproduce must hide the link, not 404 it.
-    return buildTermiteComparisonData(comparisonEngineInputs(estData), {
+    // Same selectedTier + quote-time discount guards as the PDF route — a
+    // quote the replay can't reproduce must hide the link, not 404 it.
+    available = buildTermiteComparisonData(comparisonEngineInputs(estData), {
       selectedTier: estimate?.waveguard_tier || null,
+      expectedTierDiscount: estimate?.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
     }) != null;
   } catch (_err) {
-    return false;
+    available = false;
   }
+  termiteComparisonAvailabilityMemo.set(estData, available);
+  return available;
 }
 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null, estimate = null) {
@@ -17753,6 +17771,11 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return notFound();
     }
+    // Same membership reconciliation /data performs before pricing (codex
+    // P2, round 3): a linked customer whose plan lapsed leaves stale
+    // existing-member artifacts in estimate_data, and replaying them would
+    // print lower totals than the estimate page shows.
+    await reconcileFrozenMembershipSnapshot(estimate);
     let estData = {};
     try {
       estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
@@ -17762,14 +17785,18 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
     // root-mapped blob — codex P2), passed ONLY while the live bond gate is
     // on: with the kill switch off the selector hides and PUT /:token/bond
     // 403s, so the sheet must not advertise terms the customer can't pick.
-    // The row's persisted waveguard_tier rides along so a customer-selected
-    // tier the replay can't derive fails the sheet closed instead of
-    // misprinting discounted figures.
+    // The row's persisted waveguard_tier + quote-time tier discount ride
+    // along so a quote the replay can't reproduce (customer-selected tier,
+    // or a tier-discount config change after send) fails the sheet closed
+    // instead of misprinting discounted figures.
     const storedBondSnapshot = termiteBondOptionsFromEstimateData(estData)
       || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
     const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
       bondOptions: termiteBondOptionGateOn() ? storedBondSnapshot : null,
       selectedTier: estimate.waveguard_tier || null,
+      expectedTierDiscount: estimate.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
     });
     if (!data) return notFound();
     const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');

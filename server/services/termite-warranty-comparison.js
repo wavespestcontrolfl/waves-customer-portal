@@ -76,7 +76,15 @@ function finalLineAnnual(li) {
 // natural service count derives, storing the choice on the row — a replay
 // can't see it, so its discounted figures would misstate the selected quote
 // (codex P2). Fail closed on a mismatch: no sheet beats a wrong-priced one.
-function buildTermiteComparisonData(engineInputs, { bondOptions = null, selectedTier = null } = {}) {
+//
+// expectedTierDiscount (optional) is the QUOTE-TIME tier discount the
+// estimate page preserves (sendSnapshot.tierDiscounts via
+// tierDiscountForEstimate) — same WAVEGUARD.tiers unit as the engine's
+// waveGuard.discount. A live-config change after send means the replay
+// prices at a different percentage than the customer-visible quote (codex
+// P1); the name-only tier guard can't see that, so the rate itself is
+// checked and any mismatch fails the sheet closed.
+function buildTermiteComparisonData(engineInputs, { bondOptions = null, selectedTier = null, expectedTierDiscount = null } = {}) {
   if (!termiteComparisonGateOn()) return null;
   if (!engineInputs) return null;
 
@@ -102,6 +110,13 @@ function buildTermiteComparisonData(engineInputs, { bondOptions = null, selected
   if (selectedTier) {
     const replayTier = String(ownResult?.waveGuard?.tier || '').toLowerCase();
     if (!replayTier || replayTier !== String(selectedTier).toLowerCase()) return null;
+  }
+  if (expectedTierDiscount != null) {
+    const replayDiscount = Number(ownResult?.waveGuard?.discount);
+    if (!Number.isFinite(replayDiscount)
+      || Math.abs(replayDiscount - Number(expectedTierDiscount)) > 1e-9) {
+      return null;
+    }
   }
   // The rent replay must have ACTUALLY priced as a rental: with
   // GATE_TERMITE_STATION_RENTAL off the engine silently re-prices 'rent' as
