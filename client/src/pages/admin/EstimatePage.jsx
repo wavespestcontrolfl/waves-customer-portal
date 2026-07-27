@@ -12,6 +12,7 @@ import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
   applyServerTermiteBondPricingConfig,
+  applyServerTermiteRentalPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1300,25 +1301,41 @@ function EstimateToolView() {
             headers: authHeaders,
             signal: ctrl.signal,
           });
-          if (r.status === 404) return { ok: true, data: null };
-          if (!r.ok) return { ok: false, data: null };
-          return { ok: true, data: (await r.json())?.data ?? null };
+          if (r.status === 404) return { ok: true, data: null, featureAvailable: false };
+          if (!r.ok) return { ok: false, data: null, featureAvailable: false };
+          const body = await r.json();
+          // featureAvailable is the SERVER's word on whether the engine will
+          // honor this feature (env gate), distinct from the row existing.
+          // Absent on ungated keys → treat as available.
+          return {
+            ok: true,
+            data: body?.data ?? null,
+            featureAvailable: body?.featureAvailable !== false,
+          };
         } catch {
-          return { ok: false, data: null }; /* last applied state stands */
+          return { ok: false, data: null, featureAvailable: false }; /* last applied state stands */
         } finally {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
+        fetchConfigRow("termite_rental"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
       // Bond rates are save-validated against the live DB values, so the
       // fallback preview must price from them too (pre-push P1 on #2915).
       if (bondRow.ok) applyServerTermiteBondPricingConfig(bondRow.data);
+      // Rental horizon: same reason as the bond rates — the fallback preview
+      // has to amortize over what the server will use. NOT part of the
+      // readiness return: termite_rental is a new key, so an env that has not
+      // run the seed migration yet would otherwise report pricing config
+      // permanently unready and block every estimate, not just termite ones.
+      // A missing row leaves the in-code default in place.
+      if (rentalRow.ok) applyServerTermiteRentalPricingConfig(rentalRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;

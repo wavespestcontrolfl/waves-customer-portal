@@ -437,6 +437,41 @@ export function applyServerTermiteBondPricingConfig(config) {
   return { ...TERMITE_BOND_RATES };
 }
 
+// Station rental amortization horizon — DB-tunable via
+// pricing_config.termite_rental (db-bridge synced server-side). Same
+// live-rates posture as the bond table above: the fallback engine must
+// preview what the server will price, or an admin horizon change silently
+// diverges the fallback quote from the saved one. Absent/invalid resets the
+// in-code default (kill-value pattern). Whole quarters only, matching the
+// bridge — a fractional horizon has no business meaning.
+const TERMITE_RENTAL_DEFAULT_QUARTERS = 20;
+let TERMITE_RENTAL_QUARTERS = TERMITE_RENTAL_DEFAULT_QUARTERS;
+
+export function applyServerTermiteRentalPricingConfig(config) {
+  const n = Number(config?.recovery_quarters ?? config?.recoveryQuarters);
+  TERMITE_RENTAL_QUARTERS = Number.isFinite(n) && n > 0
+    ? Math.round(n)
+    : TERMITE_RENTAL_DEFAULT_QUARTERS;
+  return TERMITE_RENTAL_QUARTERS;
+}
+
+// Mirrors server priceTermiteStationRental: whole-dollar per-application
+// uplift, annual = x4. Returns null when there is nothing worth billing.
+function termiteStationRentalLine(installPrice) {
+  const price = Number(installPrice);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const perApp = Math.round(price / TERMITE_RENTAL_QUARTERS);
+  if (perApp <= 0) return null;
+  const annual = Math.round(perApp * 4 * 100) / 100;
+  return {
+    perApp,
+    annual,
+    monthly: Math.round((annual / 12) * 100) / 100,
+    retailValue: Math.round(price),
+    recoveryQuarters: TERMITE_RENTAL_QUARTERS,
+  };
+}
+
 function termiteBondOptionsTable() {
   return ['1yr', '5yr', '10yr'].map((key) => {
     const quarterly = TERMITE_BOND_RATES[key];
@@ -1351,6 +1386,7 @@ export function calculateEstimate(inputs) {
     termiteBaitSystem,
     termiteMonitoringTier,
     termiteBondTerm,
+    termiteOwnership,
     trenchingPerimeterLF: _trenchingPerimeterLF,
     trenchingConcreteLF: _trenchingConcreteLF,
     trenchingDirtLF: _trenchingDirtLF,
@@ -2198,6 +2234,34 @@ export function calculateEstimate(inputs) {
           countsTowardWaveGuardTier: false,
         });
       }
+      // Station rental (owner 2026-07-26) — mirrors the server: renting
+      // zeroes the one-time install (see tmInstall below, which reads
+      // R.tmBait.rented) and recovers it as its own per-application line.
+      // NOT tier-counted and NOT bundle-discountable: this is hardware cost
+      // recovery on stations Waves still owns.
+      const rentsStations = String(termiteOwnership || '').toLowerCase() === 'rent';
+      R.tmBait.ownership = rentsStations ? 'rent' : 'own';
+      R.tmBait.stationsOwnedBy = rentsStations ? 'waves' : 'customer';
+      if (rentsStations) {
+        const rental = termiteStationRentalLine(termiteBaitSystem === 'trelona' ? ti : ai);
+        if (rental) {
+          R.tmBait.rented = true;
+          R.tmBait.stationRental = rental;
+          wgServices.push({
+            name: 'Termite Station Rental',
+            service: 'termite_station_rental',
+            mo: rental.monthly,
+            perTreatment: rental.perApp,
+            visitsPerYear: 4,
+            annual: rental.annual,
+            retailValue: rental.retailValue,
+            discountable: false,
+            discountEligible: false,
+            waveGuardDiscountEligible: false,
+            countsTowardWaveGuardTier: false,
+          });
+        }
+      }
     } else {
       R.tmBait = {
         quoteRequired: true,
@@ -2932,6 +2996,16 @@ export function calculateEstimate(inputs) {
       ra += R.tmBond.annual;
       lineItems.push({ name: R.tmBond.name, service: 'termite_bond', ann: R.tmBond.annual, discountable: false });
     }
+    // Station rental rider (codex P2, #2998 round 4): same posture as the
+    // bond — in the recurring annual (EXACT line annual, so a $100/yr
+    // rider doesn't decay to $99.96 via its rounded monthly), no tier
+    // count, no bundle % discount. Without this the fallback's totals
+    // omitted the rental entirely, so a client-priced save persisted and
+    // displayed less than the rows promise.
+    if (R.tmBait.stationRental) {
+      ra += R.tmBait.stationRental.annual;
+      lineItems.push({ name: 'Termite Station Rental', service: 'termite_station_rental', ann: R.tmBait.stationRental.annual, discountable: false });
+    }
   }
   // Recurring Foam: standalone — flows into the recurring annual/monthly total
   // but does NOT count toward the WaveGuard tier (no ac++) and is not discountable
@@ -3121,7 +3195,12 @@ export function calculateEstimate(inputs) {
   let ot = 0;
   otItems.forEach(i => ot += i.price);
   specItems.forEach(s => { if (!s.onProg) ot += s.price; });
-  let tmInstall = R.tmBait ? ((termiteBaitSystem === 'trelona' ? R.tmBait.ti : R.tmBait.ai) || 0) : 0;
+  // Rented stations are never billed as an install — the cost rides the
+  // recurring termite_station_rental line instead (mirrors the server, where
+  // installation.price is zeroed while retailValue keeps the hardware value).
+  let tmInstall = R.tmBait && !R.tmBait.rented
+    ? ((termiteBaitSystem === 'trelona' ? R.tmBait.ti : R.tmBait.ai) || 0)
+    : 0;
   ot = Math.round(ot * 100) / 100;
 
   const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
@@ -3160,6 +3239,11 @@ export function calculateEstimate(inputs) {
       monthlyTotal: mm,
       annualBeforeDiscount: ra,
       annualAfterDiscount: ad,
+      // EXACT full recurring annual, mirroring the server mapper (codex P2,
+      // #2998 round 4): deriveTotalsFromEstimateData prefers this ahead of
+      // reconstructing round(monthly) * 12, which drifts whenever a line's
+      // annual isn't divisible by 12 (the station-rental rider).
+      annualTotal: y2,
       waveGuardTier: wt,
       discount: wd,
       savings: da,

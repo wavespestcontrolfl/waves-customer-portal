@@ -389,6 +389,7 @@ function mapV1ToLegacyShape(v1Result) {
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
   const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
+  const tbRentLI = lineItems.find(l => l.service === 'termite_station_rental');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
   const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
   // Commercial auto-priced recurring lines (guard on .annual so a manual
@@ -704,6 +705,23 @@ function mapV1ToLegacyShape(v1Result) {
         countsTowardWaveGuardTier: false,
       });
     }
+    // Station rental uplift (owner 2026-07-26) — same posture as the bond
+    // rider: standalone recurring line, in the totals, but never tier-counted
+    // and never bundle-discountable. This is hardware cost recovery on
+    // stations Waves still owns, so a WaveGuard percentage applied here would
+    // discount the stations themselves rather than a margin.
+    if (tbRentLI) {
+      svcAdd(tbRentLI.name || 'Termite Station Rental', tbRentLI, {
+        service: 'termite_station_rental',
+        annual: Number(tbRentLI.annual) || null,
+        detail: `${tbLI.stations} rented stations · Waves-owned`,
+        retailValue: tbRentLI.retailValue,
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+      });
+    }
   }
   // Recurring Foam — standalone recurring line (cadence-discounted). Stays in
   // summary.recurringAnnual* (so it's part of monthlyTotal/year totals) but does
@@ -1003,6 +1021,14 @@ function mapV1ToLegacyShape(v1Result) {
       annualBeforeDiscount: suppressRecurringTotals ? 0 : recurringAnnualBefore,
       grandTotal: suppressRecurringTotals ? 0 : year2Monthly,
       monthlyTotal: suppressRecurringTotals ? 0 : recurringMonthly,
+      // EXACT full recurring annual (codex P2 on #2998 round 3): the
+      // persistence path's deriveTotalsFromEstimateData prefers
+      // recurring.annualTotal and previously fell through to
+      // round(year2/12) * 12, which drifts whenever a line's annual isn't
+      // divisible by 12 (station rental: $100/yr rides as $8.33/mo →
+      // $519.96 persisted vs the $520 the line items promise, and
+      // conversion then bills $129.99/application instead of $130).
+      annualTotal: suppressRecurringTotals ? 0 : year2,
       annualAfterDiscount: suppressRecurringTotals ? 0 : recurringAnnual,
       savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,

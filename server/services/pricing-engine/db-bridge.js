@@ -1041,6 +1041,19 @@ async function syncConstantsFromDB(dbInstance) {
       if (tb5) constants.TERMITE.bond['5yr'].quarterly = tb5;
       if (tb10) constants.TERMITE.bond['10yr'].quarterly = tb10;
     }
+    if (config.termite_rental) {
+      // Amortization horizon for the station-rental uplift. Same posture as
+      // the bond rates: only a strictly-positive finite value overwrites the
+      // runtime constant, so a hand-edited row can never sync a zero (which
+      // would divide the install price by nothing) or a negative (which would
+      // pay the customer to rent). Whole quarters — a fractional horizon has
+      // no business meaning and would only add rounding noise to the uplift.
+      const quarters = Number(config.termite_rental.recovery_quarters
+        ?? config.termite_rental.recoveryQuarters);
+      if (Number.isFinite(quarters) && quarters > 0) {
+        constants.TERMITE.rental.recoveryQuarters = Math.round(quarters);
+      }
+    }
 
     // ── Rodent ───────────────────────────────────────────────
     // Bait stations (recurring monthly)

@@ -1301,15 +1301,87 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+// Termite billing riders ride the bait visit instead of being units of
+// their own: the bond via its combined route, the station rental with no
+// row at all. Both must stay out of every unit count, or a bait+rider plan
+// reads as multi-unit and nulls the whole-plan per-application fee.
+function isTermiteStationRentalLine(svc = {}) {
+  return recurringServiceKey(svc) === 'termite_station_rental';
+}
+
+function isTermiteBillingRiderLine(svc = {}) {
+  const key = String(recurringServiceKey(svc) || '');
+  return key.startsWith('termite_bond') || key === 'termite_station_rental';
+}
+
+// Drop the rental rider from the conversion set WITHOUT losing its money
+// (codex P1, round 4). The rider is never a scheduling unit — but on a
+// multi-unit plan (pest + termite) the whole-plan per_application_fee and
+// row prices go per-row/manual, and a silently-dropped rental line left no
+// billing carrier for the uplift: termite completions could never collect
+// the hardware-recovery charge. Fold the rider's amounts into the bait
+// line's billing fields FIRST (per-application, monthly, exact annual), so
+// every downstream reader of the bait unit — row pricing, manual
+// allocation, seeding — sees the true bait+rental amount, then drop the
+// rider row. Single-unit plans are unaffected: their fee derives from the
+// plan-level totals, which always included the uplift.
+function foldTermiteRentalIntoBait(services = []) {
+  const rental = services.find(isTermiteStationRentalLine);
+  const rest = services.filter((svc) => !isTermiteStationRentalLine(svc));
+  if (!rental) return rest;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const upliftPerApp = Number(rental.perTreatment ?? rental.perApp) || 0;
+  const upliftAnnual = Number(rental.annual)
+    || round2(upliftPerApp * (Number(rental.visitsPerYear) || 4));
+  const upliftMonthly = Number(rental.mo ?? rental.monthly) || 0;
+  return rest.map((svc) => {
+    if (recurringServiceKey(svc) !== 'termite_bait') return svc;
+    return {
+      ...svc,
+      perTreatment: round2((Number(svc.perTreatment) || 0) + upliftPerApp),
+      mo: round2((Number(svc.mo ?? svc.monthly) || 0) + upliftMonthly),
+      monthly: round2((Number(svc.monthly ?? svc.mo) || 0) + upliftMonthly),
+      // Exact-annual sum (the rider's annual is exact even when its rounded
+      // monthly is not — same drift the mapper's annualTotal fix addresses).
+      annual: round2((Number(svc.annual) || 0) + upliftAnnual),
+      // Audit breadcrumb: how much of this line is hardware recovery.
+      termiteStationRentalFoldedPerApp: upliftPerApp,
+    };
+  });
+}
+
+// The customers.termite_stations_rented patch for an accept (owner
+// 2026-07-26; codex P1 rounds 1+2). Three-way, evidence-driven:
+//   rental line present        → true  (the accepted agreement is the only
+//                                place that knows Waves keeps title; the
+//                                install visit that creates the pins can't
+//                                see it)
+//   purchased bait, no rental  → false (a former renter buying outright must
+//                                not keep the renter flag — new pins would
+//                                stamp owned_by='waves' and mark customer
+//                                hardware for "recovery")
+//   no termite line at all     → {}    (an unrelated accept is not an owner
+//                                action on station title)
+// Read from the UNfiltered recurring lines — conversion drops the rental
+// rider from its service set before scheduling, so this must run first.
+function termiteStationsRentedUpdate(recurringServices = [], { suppressRecurringConversion = false } = {}) {
+  if (suppressRecurringConversion) return {};
+  if (recurringServices.some(isTermiteStationRentalLine)) return { termite_stations_rented: true };
+  if (recurringServices.some((svc) => recurringServiceKey(svc) === 'termite_bait')) {
+    return { termite_stations_rented: false };
+  }
+  return {};
+}
+
 // The per-application charge divides the plan annual by the SINGLE unit's
-// visit count. Termite-bond riders are unit-count-exempt, so the single
-// unit is the non-bond line set (codex #2915 r6) — bait+bond derives 4
-// from the bait line; true multi-unit plans still return null.
+// visit count. Termite riders are unit-count-exempt, so the single unit is
+// the non-rider line set (codex #2915 r6) — bait+bond derives 4 from the
+// bait line; true multi-unit plans still return null.
 function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
-  const nonBond = (Array.isArray(recurringLines) ? recurringLines : [])
-    .filter((svc) => !String(recurringServiceKey(svc) || '').startsWith('termite_bond'));
-  if (nonBond.length !== 1 || supplementUnitCount !== 0) return null;
-  return visitsPerYearForRecurringService(nonBond[0]);
+  const nonRider = (Array.isArray(recurringLines) ? recurringLines : [])
+    .filter((svc) => !isTermiteBillingRiderLine(svc));
+  if (nonRider.length !== 1 || supplementUnitCount !== 0) return null;
+  return visitsPerYearForRecurringService(nonRider[0]);
 }
 
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
@@ -1526,7 +1598,30 @@ const EstimateConverter = {
       recurringServices,
       estimateData,
     });
-    const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
+    // Station rental (owner 2026-07-26) is a pure BILLING rider, and unlike
+    // the bond rider it is NOT a scheduling unit under any route. The bond
+    // needs a visit identity — its "%Termite Bond% (N-Year Term)" name is
+    // the termite_bonds lifecycle-sync contract — so it rides a combined
+    // route. The rental has no lifecycle table and no name contract: the
+    // stations it pays for are checked on the bait visit that already
+    // exists, so there is nothing for a second row to do.
+    //
+    // Leaving the line in the conversion set breaks billing three ways
+    // (codex P0 on this PR): scheduling turns it into a phantom "Termite
+    // Station Rental" appointment, the plan reads as multi-unit so
+    // riderAwareSingleUnitVisits returns null, and per_application_fee +
+    // both rows' estimated_price go null — completion then invoices
+    // NOTHING, monitoring included. But a bare drop loses the uplift on
+    // MULTI-unit plans (codex P1 round 4), so the rider's amounts are
+    // folded into the bait line's billing fields before the row goes —
+    // single-unit fees still derive from the rental-inclusive plan totals.
+    const recurringServicesForConversion = suppressRecurringConversion
+      ? []
+      : foldTermiteRentalIntoBait(recurringServices);
+    // Read BEFORE the filter drops the line — this is the only signal that
+    // the sold program rents its stations, and it has to outlive conversion
+    // (see the customers.termite_stations_rented stamp below).
+    const stationsRentedPatch = termiteStationsRentedUpdate(recurringServices, { suppressRecurringConversion });
     // FAIL-CLOSED money guard: annual-prepay coverage is a per-TERM fact and an
     // annual_prepay_terms row carries exactly ONE coverage service
     // (coverage_service_type / coverage_visit_count / coverage_cadence). A
@@ -1562,6 +1657,8 @@ const EstimateConverter = {
     // flip a bait+bond plan to "multi-unit" and null out the whole-plan
     // per-application fee/row price that the single combined visit must
     // carry ($150/application = monitoring + bond, whole plan ÷ 4).
+    // (Station-rental lines are already filtered out of
+    // recurringServicesForConversion above — they are never units.)
     const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
     const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
     const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
@@ -1761,6 +1858,15 @@ const EstimateConverter = {
           } : {}),
           active: true,
           deleted_at: null,
+          // Station rental (owner 2026-07-26): the accepted agreement is the
+          // only place that knows Waves keeps title to the hardware, and the
+          // stations themselves are not created until the install visit — a
+          // completion-sync/office code path with no view of this estimate.
+          // Stamping the customer here is what lets upsertStationsForCustomer
+          // default new stations to owned_by='waves' (codex P1). See
+          // termiteStationsRentedUpdate for the three-way rule (rental →
+          // true, purchased bait → false, no termite line → untouched).
+          ...stationsRentedPatch,
           // Reactivating to active_customer — clear any churn stamp so a former
           // (churned/dormant) customer who accepts a recurring estimate isn't
           // still counted as churned by churned_at-based queries (e.g. MRR trend).
@@ -2959,6 +3065,8 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
+module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.
@@ -2974,7 +3082,10 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
   // prepay deposit that acceptance later 422s (Codex r2 on the pest+rodent
   // removal). Same source of truth: recurring lines + fromSupplement
   // standalone units (combine dedupes a line + duplicate scalar to one).
-  const recurring = recurringServicesFromEstimateData(estimateData);
+  // The rental rider is folded/dropped exactly as conversion does (codex P1
+  // round 5): counting the raw rider row read a rental-only bait estimate
+  // as a two-unit plan and rejected the prepay conversion actually allows.
+  const recurring = foldTermiteRentalIntoBait(recurringServicesFromEstimateData(estimateData));
   const { standalone } = combineRecurringServicesForScheduling(recurring, {
     acceptFrequency: estimateData?.customerSelection?.frequency || null,
     supplementalCompanions: supplementalCompanionLines(estimateData),

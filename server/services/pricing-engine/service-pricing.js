@@ -3872,14 +3872,60 @@ function priceTermiteBond(term) {
   };
 }
 
+// Station rental uplift (owner 2026-07-26). The customer pays $0 to install;
+// the install price they did NOT pay is recovered as a fixed per-application
+// charge on the same quarterly station check the monitoring rides.
+//
+// Deliberately a SEPARATE line item rather than a bump to the monitoring
+// rate, mirroring priceTermiteBond: termite_bait is WaveGuard-tier-counting
+// and bundle-discountable, so folding hardware recovery into its monthly
+// would let a Platinum bundle discount eat the station cost. This line is
+// registered in excludedFromPercentDiscount instead.
+//
+// The uplift does not expire — recoveryQuarters is the amortization horizon
+// used to size it, not a term after which it stops (owner ruling).
+function priceTermiteStationRental(installPrice) {
+  const quarters = Number(TERMITE.rental?.recoveryQuarters);
+  const price = Number(installPrice);
+  if (!Number.isFinite(quarters) || quarters <= 0) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
+  // Whole dollars: this is a doorstep line on a customer-facing quote, and
+  // the annual/monthly derivations below stay exact only if perApp is clean.
+  const perApp = Math.round(price / quarters);
+  if (perApp <= 0) return null;
+  const visitsPerYear = TERMITE.monitoringVisitsPerYear;
+  const annual = Math.round(perApp * visitsPerYear * 100) / 100;
+  return {
+    service: 'termite_station_rental',
+    name: 'Termite Station Rental',
+    perApp,
+    annual,
+    monthly: Math.round((annual / 12) * 100) / 100,
+    visitsPerYear,
+    // What the stations would have cost to buy outright — drives the
+    // "$0 today / $NNN value" framing on the options comparison.
+    retailValue: Math.round(price),
+    recoveryQuarters: quarters,
+    // Waves owns the hardware; cancelling ends the rental and the stations
+    // come out of the ground. Load-bearing for the agreement copy.
+    retainedOwnership: true,
+    discountable: false,
+  };
+}
+
 function priceTermiteBait(property, options = {}) {
   const {
     // Default switched to Advance Apr 2026 (was 'trelona') for competitive
     // doorstep pricing. Trelona remains available as the premium upgrade.
     system = 'advance',
     monitoringTier = 'basic',
+    // 'own' (customer buys the stations, one-time install charge) or 'rent'
+    // (Waves retains ownership, $0 install, recovery rides the quarterly).
+    // Anything unrecognized falls back to 'own' — the long-standing behavior.
+    ownership: requestedOwnership = 'own',
     modifiers = {},
   } = options;
+  const ownership = String(requestedOwnership).toLowerCase() === 'rent' ? 'rent' : 'own';
 
   property = property || {};
   const systemResolution = normalizeTermiteSystem(system);
@@ -3940,6 +3986,7 @@ function priceTermiteBait(property, options = {}) {
       monitoringTier: selectedMonitoringTier,
       selectedMonitoringTier,
       requestedMonitoringTier: monitoringResolution.requestedMonitoringTier,
+      ownership,
       complexity,
       footprintSqFt: footprintResolution.value,
       footprintSource: footprintResolution.source,
@@ -3997,6 +4044,14 @@ function priceTermiteBait(property, options = {}) {
   const installCost = installMaterialCost + installLabor;
   const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;
+  // Rental: the customer is charged nothing to install. The full install
+  // price stays on the line as installation.retailValue so the options sheet
+  // can show what the stations are worth, and so the rental uplift has an
+  // amount to amortize — but installation.price is what the one-time mapper
+  // reads (it only emits a line when price > 0), so zeroing it here is what
+  // actually drops the charge.
+  const isRentedStations = ownership === 'rent';
+  const billedInstallPrice = isRentedStations ? 0 : installPrice;
 
   const monitoringMonthly = mon.monthly;
   const monitoringAnnual = monitoringMonthly * 12;
@@ -4009,6 +4064,10 @@ function priceTermiteBait(property, options = {}) {
     monitoringTier: selectedMonitoringTier,
     selectedMonitoringTier,
     requestedMonitoringTier: monitoringResolution.requestedMonitoringTier,
+    ownership,
+    // Who owns the in-ground hardware. Carried onto the persisted estimate so
+    // conversion can stamp termite_stations.owned_by at install time.
+    stationsOwnedBy: isRentedStations ? 'waves' : 'customer',
     complexity,
     footprintSqFt: footprintResolution.value,
     footprintSource: footprintResolution.source,
@@ -4038,7 +4097,11 @@ function priceTermiteBait(property, options = {}) {
       materialCost: Math.round(installMaterialCost),
       laborCost: Math.round(installLabor),
       totalCost: Math.round(installCost),
-      price: installPrice,
+      price: billedInstallPrice,
+      // Undiscounted install price regardless of ownership — on a rental
+      // this is the "$0 today, $NNN of hardware" figure, and it is the base
+      // priceTermiteStationRental amortizes.
+      retailValue: installPrice,
       margin: Math.round(installMargin * 1000) / 1000,
     },
     monitoring: {
@@ -7762,7 +7825,8 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceRodentBait, priceRodentTrapping,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
