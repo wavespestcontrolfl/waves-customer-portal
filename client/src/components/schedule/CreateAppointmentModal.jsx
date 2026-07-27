@@ -1169,7 +1169,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // own confirmation (codex r20 P2). Same first-group rule the
       // card-on-file link already uses.
       const firstGroupOfBooking = results.length === 0 && createdGroupKeysRef.current.size === 0;
-      let body = null;
       try {
         const [primary, ...extras] = group.lines;
         const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
@@ -1211,7 +1210,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           && extras.length === 0 && !groupHasBoosters
           && visitsPerYearForCadence(prepayCadenceKey(group.cadence, group.intervalDays)) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
-        body = {
+        const body = {
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary.name,
@@ -1319,29 +1318,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (ownSeriesCount > 0) {
           // The guard matches by service FAMILY, so with multiple seasonal
           // lines the first sibling's series also conflicts with the second
-          // group (codex r26 P1). This group's series exists only when the
-          // owned-series count exceeds its position among same-family
-          // groups; otherwise the guard is merely seeing the earlier
-          // sibling and this DISTINCT series still needs creating — re-post
-          // with the guard's own intentional-second-program escape.
+          // group (codex r26 P1). Recovery skips ONLY when the owned-series
+          // count exceeds this group's position among same-family groups —
+          // that count proves this group's own series exists. When it
+          // doesn't, the duplicate error surfaces with the server's guidance
+          // (extend the series, or intentionally run a second program) —
+          // never an automatic allowDuplicateSeries override, whose
+          // client-side count proof is not atomic and could double-book
+          // under concurrent retries (codex r27 P0). Multiple same-family
+          // seasonal lines on one estimate are not producible by the
+          // estimate builder today, so this conservative surface is the
+          // operator-decides path, not a workflow regression.
           const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
           if (ownSeriesCount > familyIndex) {
             createdGroupKeysRef.current.add(key);
             continue;
-          }
-          if (body) {
-            try {
-              const r2 = await adminFetch('/admin/schedule', {
-                method: 'POST',
-                body: JSON.stringify({ ...body, allowDuplicateSeries: true }),
-              });
-              createdGroupKeysRef.current.add(key);
-              results.push(r2);
-              continue;
-            } catch (e2) {
-              firstError = { label: groupLabel(group), message: e2.message };
-              break;
-            }
           }
         }
         firstError = { label: groupLabel(group), message: e.message };
