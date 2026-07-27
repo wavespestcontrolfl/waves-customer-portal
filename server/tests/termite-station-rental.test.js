@@ -231,3 +231,140 @@ describe('conversion treats the rental as a billing rider, not a unit', () => {
     expect(riderAwareSingleUnitVisits([rentRow], 0)).toBeNull();
   });
 });
+
+// ── customer-facing guide copy (codex P1) ─────────────────────────────────────
+//
+// The termite service-details guide ships to BOTH purchase and rental
+// customers. Its purchase copy makes hard promises — "they stay your
+// property", "nobody digs them up if you ever stop service", and an FAQ that
+// says outright "You own them" while disparaging leased systems. Sending that
+// to a renter misrepresents the sale and undercuts Waves' right to recover
+// its own hardware after cancellation.
+
+describe('service-details guide reflects who owns the stations', () => {
+  const { buildServiceDetailsContent } = require('../services/estimate-service-details');
+
+  const rentalEstimate = {
+    estimate_data: JSON.stringify({
+      recurring: { services: [
+        { service: 'termite_bait', name: 'Termite Bait' },
+        { service: 'termite_station_rental', name: 'Termite Station Rental' },
+      ] },
+    }),
+  };
+  const purchaseEstimate = {
+    estimate_data: JSON.stringify({
+      recurring: { services: [{ service: 'termite_bait', name: 'Termite Bait' }] },
+    }),
+  };
+
+  const textOf = (content) => [
+    ...(content.process || []),
+    ...(content.faq || []).map((f) => `${f.q} ${f.a}`),
+    ...((content.systemBox?.rows) || []).map((r) => (Array.isArray(r) ? r.join(' ') : String(r))),
+  ].join('\n');
+
+  test('purchase guide keeps the ownership promises', async () => {
+    const text = textOf(await buildServiceDetailsContent('termite_bait', purchaseEstimate));
+    expect(text).toContain('The stations are YOURS');
+    expect(text).toContain('nobody digs them up');
+    expect(text).toContain('Yours — purchased once with installation');
+    expect(text).not.toContain('stay Waves property');
+  });
+
+  test('rental guide never claims the customer owns the stations', async () => {
+    const content = await buildServiceDetailsContent('termite_bait', rentalEstimate);
+    const text = textOf(content);
+    // None of the purchase-only promises survive.
+    expect(text).not.toContain('The stations are YOURS');
+    expect(text).not.toContain('nobody digs them up');
+    expect(text).not.toContain('You own them.');
+    expect(text).not.toContain('Yours — purchased once with installation');
+    // ...and the rental reality is stated instead, including removal.
+    expect(text).toContain('stay Waves property');
+    expect(text).toMatch(/Waves-owned/);
+    expect(text).toMatch(/remove them|pull them back out/);
+    // Exactly one ownership FAQ either way — no duplicate question.
+    const ownershipFaqs = (content.faq || []).filter((f) => /Do I own the bait stations/.test(f.q));
+    expect(ownershipFaqs).toHaveLength(1);
+    // The marker never reaches renderers.
+    expect(content.faq.every((f) => f.ownership === undefined)).toBe(true);
+    expect(content.process.every((step) => typeof step === 'string')).toBe(true);
+    expect((content.systemBox.rows || []).every((r) => !Array.isArray(r) || r.length === 2)).toBe(true);
+  });
+
+  test('the raw engine shape (bait line stamped ownership) is recognized too', async () => {
+    const raw = { estimate_data: JSON.stringify({ engineResult: { lineItems: [
+      { service: 'termite_bait', ownership: 'rent' },
+    ] } }) };
+    expect(textOf(await buildServiceDetailsContent('termite_bait', raw))).toContain('stay Waves property');
+  });
+
+  test('unreadable or absent estimate data falls back to the purchase copy', async () => {
+    // Safe direction: telling a RENTER they own the stations is the failure
+    // that costs Waves its hardware, so rental copy needs a signal we can see.
+    for (const est of [{}, { estimate_data: 'not json' }, { estimate_data: null }]) {
+      expect(textOf(await buildServiceDetailsContent('termite_bait', est)))
+        .toContain('The stations are YOURS');
+    }
+  });
+});
+
+// ── fail-closed pricing (codex P1) ────────────────────────────────────────────
+
+describe('an unpriceable uplift reverts the quote to purchase', () => {
+  const { TERMITE } = require('../services/pricing-engine/constants');
+
+  test('a horizon that rounds the uplift to zero must not give the stations away', () => {
+    const original = TERMITE.rental.recoveryQuarters;
+    try {
+      // Reachable from a legal admin config before the route's upper bound
+      // existed; the engine must still refuse to sell free hardware.
+      TERMITE.rental.recoveryQuarters = 100000;
+      const est = generateEstimate(termiteInput({ termiteOwnership: 'rent' }));
+      const bait = est.lineItems.find((l) => l.service === 'termite_bait');
+      expect(est.lineItems.some((l) => l.service === 'termite_station_rental')).toBe(false);
+      // The install charge comes BACK — the whole point.
+      expect(bait.installation.price).toBe(bait.installation.retailValue);
+      expect(bait.installation.price).toBeGreaterThan(0);
+      expect(bait.ownership).toBe('own');
+      expect(bait.stationsOwnedBy).toBe('customer');
+      expect(bait.requiresManualReview).toBe(true);
+      expect(bait.manualReviewReasons).toContain('termite_rental_uplift_unpriceable');
+    } finally {
+      TERMITE.rental.recoveryQuarters = original;
+    }
+  });
+});
+
+// ── admin config validation ───────────────────────────────────────────────────
+
+describe('recovery_quarters validation', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  const check = (v) => validatePricingConfigData('termite_rental', { recovery_quarters: v }).ok;
+
+  test('accepts whole quarters inside the sane band', () => {
+    expect(check(20)).toBe(true);
+    expect(check(1)).toBe(true);
+    expect(check(120)).toBe(true);
+  });
+
+  test('rejects values that would zero or invert the uplift', () => {
+    // 0 divides by nothing; negatives would pay the customer to rent.
+    expect(check(0)).toBe(false);
+    expect(check(-4)).toBe(false);
+    // The upper bound is the real hazard: round(installPrice / quarters)
+    // hits zero and the stations go out free with no recovery at all.
+    expect(check(121)).toBe(false);
+    expect(check(10000)).toBe(false);
+    // Fractions would disagree with the rounded value that actually prices.
+    expect(check(20.5)).toBe(false);
+    expect(check('twenty')).toBe(false);
+    expect(validatePricingConfigData('termite_rental', {}).ok).toBe(false);
+  });
+
+  test('the seeded default sits inside the accepted band', () => {
+    const { TERMITE } = require('../services/pricing-engine/constants');
+    expect(check(TERMITE.rental.recoveryQuarters)).toBe(true);
+  });
+});

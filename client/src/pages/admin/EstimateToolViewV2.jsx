@@ -2911,6 +2911,14 @@ export default function EstimateToolViewV2({
   const [discountPresets, setDiscountPresets] = useState([]);
   const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
   const [fleaPricingConfig, setFleaPricingConfig] = useState(null);
+  // Whether the SERVER will actually honor a rented-stations selection.
+  // GATE_TERMITE_STATION_RENTAL defaults off and the engine silently reprices
+  // a dark 'rent' to outright purchase — so offering the control while the
+  // gate is down lets an operator pick "Rented" and send a purchase quote
+  // carrying the install charge. The first server calculation already ignored
+  // the choice, so the save-time recompute check sees no drift to warn about
+  // (codex P1). Fail closed: null/false hides the control entirely.
+  const [termiteRentalAvailable, setTermiteRentalAvailable] = useState(false);
   useEffect(() => {
     (async () => {
       try {
@@ -2941,6 +2949,27 @@ export default function EstimateToolViewV2({
         if (active) setFleaPricingConfig(row?.data || null);
       } catch {
         /* ignore */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/termite_rental");
+        if (!r.ok) return;
+        const row = await r.json();
+        // Explicit true only — a 404 (row not seeded), a transport failure,
+        // or an older server that does not send the field all keep the
+        // rental choice hidden rather than offering an option the engine
+        // would silently discard.
+        if (active) setTermiteRentalAvailable(row?.featureAvailable === true);
+      } catch {
+        /* ignore — stays unavailable */
       }
     })();
     return () => {
@@ -3505,7 +3534,12 @@ export default function EstimateToolViewV2({
         termiteBaitSystem: form.termiteBaitSystem || "advance",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBondTerm: form.termiteBondTerm || "none",
-        termiteOwnership: form.termiteOwnership || "own",
+        // Hard floor to purchase when the server has not advertised the
+        // rental feature: a prefilled/edited draft or a gate flipped OFF
+        // mid-session can still carry termiteOwnership='rent' in form state
+        // after the control stops rendering, and sending that would quote a
+        // rental the engine will reprice as a purchase.
+        termiteOwnership: (termiteRentalAvailable && form.termiteOwnership === "rent") ? "rent" : "own",
         termiteBaitComplexity: form.termiteBaitComplexity || "",
         termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
         termiteFootprintSqFt,
@@ -6026,7 +6060,7 @@ export default function EstimateToolViewV2({
                             so no rate is spelled out here. Residential only —
                             commercial routes hardware through the manual-quote
                             scope split below. */}
-                        {!isCommercialEstimateInput(form) && (
+                        {!isCommercialEstimateInput(form) && termiteRentalAvailable && (
                           <FieldV2 label="Stations">
                             <SelectV2
                               k="termiteOwnership"

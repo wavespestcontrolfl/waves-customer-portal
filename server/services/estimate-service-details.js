@@ -282,7 +282,15 @@ const SERVICE_DETAILS_COPY = {
         ['Bond term options', '1-, 5-, or 10-year warranty bond — pick the term on your estimate, priced per application', { requiresTermiteBondGate: true }],
         ['Repair coverage', 'Up to $1,000,000 for new covered WDO damage'],
         ['Transferable', 'Yes \u2014 to a new homeowner ($250 + transfer inspection)'],
-        ['Station ownership', 'Yours \u2014 purchased once with installation'],
+        // Station ownership (owner 2026-07-26): the guide ships to BOTH
+        // purchase and rental customers, and the purchase copy below makes
+        // hard promises ("they stay your property", "nobody digs them up")
+        // that are the opposite of the rental agreement \u2014 shipping it to a
+        // renter would misrepresent the sale and undercut Waves' right to
+        // recover its own hardware. Resolved per estimate; the marker
+        // element never reaches renderers.
+        ['Station ownership', 'Yours \u2014 purchased once with installation', { requiresStationOwnership: 'own' }],
+        ['Station ownership', 'Waves-owned \u2014 installed at no charge and maintained as part of your program', { requiresStationOwnership: 'rent' }],
       ],
       note: 'Your signed termite agreement controls the covered structures, covered organisms, warranty type, renewal, limitations, and exclusions — this guide explains how the program works.',
     },
@@ -294,7 +302,8 @@ const SERVICE_DETAILS_COPY = {
     ],
     process: [
       'We install Trelona\u00ae ATBS Annual Bait Stations in accessible soil around the perimeter of the covered structure. Placement follows the product label and your property\u2019s realities — construction features, utilities, hardscape, moisture, and safe access — and your installation report shows the actual number and location of every station, including any perimeter sections that could not be accessed.',
-      'The stations are YOURS. You buy them once and they stay your property — unlike leased bait systems, nobody digs them up if you ever stop service.',
+      { ownership: 'own', text: 'The stations are YOURS. You buy them once and they stay your property — unlike leased bait systems, nobody digs them up if you ever stop service.' },
+      { ownership: 'rent', text: 'The stations stay Waves property. You pay nothing to have them installed — the hardware cost is spread across your quarterly station check instead of charged up front — and if you ever end the program, we come pull them back out. Your inspection and activity history stays in your app either way. If you would rather own the stations outright so they stay in the ground no matter what, we can price that instead; just ask.' },
       'How the bait works: foraging termites discover and feed on the novaluron bait, which interferes with the termite molting process; effects spread through the colony via continued feeding and normal colony behavior. Bait control is intentionally not instantaneous — discovery and colony impact vary with colony location, competing food, soil moisture, season, and other site conditions. No honest bait program promises a colony-elimination date.',
       'We check every accessible station quarterly and document each check in your service report: station condition, any activity found, and bait consumption. Cartridges are replaced when consumption or condition meets the manufacturer\u2019s replacement criteria — such as more than a third of the bait consumed or excessive decay — not simply because a calendar date passed. Intact cartridges stay effective for years.',
       'If activity is found, we document it with photos, evaluate consumption, inspect accessible areas of the covered structure, replace bait per the label criteria, and determine whether additional stations, an earlier follow-up visit, or a localized supplemental treatment is the right call.',
@@ -318,8 +327,14 @@ const SERVICE_DETAILS_COPY = {
         a: 'You choose a 1-, 5-, or 10-year term, priced per application on the same quarterly station check — longer terms lock a lower per-application rate, fixed for the term you pick. The guarantee is transferable to a new homeowner with a transfer inspection and a $250 transfer fee, which is a genuine selling point when you list the house: the buyer inherits active termite protection with its history documented in the app.',
       },
       {
+        ownership: 'own',
         q: 'Do I own the bait stations, or am I renting them?',
         a: 'You own them. The Trelona\u00ae stations we install are bought once with your installation and stay your property permanently. Some competing systems are leased — stop paying and the stations come out of your yard, taking the protection history with them. Yours stay in the ground, and your monitoring records stay in your app.',
+      },
+      {
+        ownership: 'rent',
+        q: 'Do I own the bait stations, or am I renting them?',
+        a: 'You are renting them, which is why the installation cost you nothing up front — the hardware is recovered a little at a time on your quarterly station check instead. The Trelona\u00ae stations stay Waves property: if you end the program we remove them, so the protection ends with the service. Your inspection and activity history stays in your app either way. Buying the stations outright is the alternative — more at the start, but they stay in the ground permanently and the quarterly rate drops. Ask and we will price both side by side.',
       },
       {
         q: 'Are the stations safe around kids and pets?',
@@ -772,9 +787,54 @@ async function fetchRegistryProducts(serviceKey) {
   }
 }
 
+// Does this estimate sell RENTED bait stations (owner 2026-07-26)? The guide
+// is one document shipped to both kinds of customer, and the purchase copy
+// makes promises ("they stay your property", "nobody digs them up") that are
+// the exact opposite of the rental agreement. Read off the persisted estimate
+// rather than the customer flag: the packet describes what THIS estimate
+// sold, and a customer can hold both a bought set and a later rented one.
+//
+// Fail-soft to 'own' — unparseable data keeps the long-standing copy, which
+// is also the safe direction: telling a renter they own stations is the
+// failure that costs Waves its hardware, and that only happens on an
+// explicit rental signal we can actually see.
+function estimateStationOwnership(estimate = {}) {
+  const raw = estimate && estimate.estimate_data;
+  if (!raw) return 'own';
+  let data = raw;
+  if (typeof raw === 'string') {
+    try { data = JSON.parse(raw); } catch (_err) { return 'own'; }
+  }
+  if (!data || typeof data !== 'object') return 'own';
+  let found = false;
+  const seen = new Set();
+  const walk = (node, depth) => {
+    if (found || depth > 6 || !node || typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    const key = String(node.service || node.key || '').toLowerCase();
+    if (key === 'termite_station_rental') { found = true; return; }
+    // Raw engine line items stamp the bait line itself.
+    if (String(node.ownership || '').toLowerCase() === 'rent'
+      && String(node.service || '').toLowerCase() === 'termite_bait') { found = true; return; }
+    for (const value of Object.values(node)) walk(value, depth + 1);
+  };
+  walk(data, 0);
+  return found ? 'rent' : 'own';
+}
+
 async function buildServiceDetailsContent(serviceKey, estimate = {}) {
   const copy = SERVICE_DETAILS_COPY[serviceKey];
   if (!copy) return null;
+  // Ownership-marked entries (systemBox rows, process steps, FAQ) keep only
+  // the variant matching this estimate; unmarked entries always render. The
+  // marker never reaches renderers.
+  const stationOwnership = estimateStationOwnership(estimate);
+  const ownershipMatches = (marker) => marker == null || marker === stationOwnership;
   const products = await fetchRegistryProducts(serviceKey);
   const documentation = copy.documentationOverride || {
     heading: DOCUMENTATION_SECTION.heading,
@@ -797,8 +857,14 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
     address: estimate.address || null,
     estimateSlug: estimate.estimate_slug || null,
     included: copy.included,
-    process: copy.process,
-    faq: copy.faq || [],
+    process: (copy.process || []).reduce((acc, step) => {
+      if (typeof step === 'string') { acc.push(step); return acc; }
+      if (step && typeof step === 'object' && ownershipMatches(step.ownership)) acc.push(step.text);
+      return acc;
+    }, []),
+    faq: (copy.faq || [])
+      .filter((entry) => ownershipMatches(entry && entry.ownership))
+      .map(({ ownership: _ownership, ...entry }) => entry),
     documentation,
     illustrations: copy.illustrations || [],
     safety: copy.safetyOverride || SAFETY_SECTION,
@@ -830,6 +896,8 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
       const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
       const rows = (copy.systemBox.rows || [])
         .filter((row) => bondGateOn || !(Array.isArray(row) && row[2] && row[2].requiresTermiteBondGate))
+        .filter((row) => !(Array.isArray(row) && row[2])
+          || ownershipMatches(row[2].requiresStationOwnership))
         .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
       return { ...copy.systemBox, rows };
     })(),

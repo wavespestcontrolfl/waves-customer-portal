@@ -987,14 +987,42 @@ test('purchased program (and unknown customer) leaves stations customer-owned', 
   }
 });
 
-test('ownership is termite-only — rodent hardware is Waves’ either way, never stamped from the bait rental', async () => {
+test('rodent and trapping hardware is ALWAYS Waves-owned, rental flag or not', async () => {
+  // That hardware is never sold — it is placed, serviced, and retrieved by
+  // us, so it belongs in the Waves-owned asset/recovery set unconditionally.
+  for (const program of ['rodent', 'trapping']) {
+    for (const customers of [[RENTER], [BUYER], []]) {
+      const { db, state } = makeFakeDb({ customers });
+      await upsertStationsForCustomer(db, {
+        customerId: CUSTOMER,
+        program,
+        entries: [{ shape: pin(0.4, 0.4) }],
+      });
+      expect(state.stations.map((row) => row.owned_by)).toEqual(['waves']);
+    }
+  }
+});
+
+test('an explicit ownedBy on a create overrides the program/customer default', async () => {
+  // The mixed-set case the schema documents: a rental customer who BUYS an
+  // added station has to be recordable as the owner of that one.
   const { db, state } = makeFakeDb({ customers: [RENTER] });
   await upsertStationsForCustomer(db, {
     customerId: CUSTOMER,
-    program: 'rodent',
-    entries: [{ shape: pin(0.4, 0.4) }],
+    entries: [{ shape: pin(0.2, 0.2) }, { shape: pin(0.5, 0.5), ownedBy: 'customer' }],
   });
-  expect(state.stations.map((row) => row.owned_by)).toEqual(['customer']);
+  expect(state.stations.map((row) => row.owned_by)).toEqual(['waves', 'customer']);
+});
+
+test('ownedBy is create-only and vocabulary-checked', async () => {
+  // Re-stamping an existing row from a routine geometry save is how a bought
+  // station would silently become a rented one.
+  expect(validateStationEntriesBody([{ id: 'st-1', shape: pin(0.1, 0.1), ownedBy: 'waves' }]))
+    .toMatch(/set when the station is created/);
+  expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1), ownedBy: 'landlord' }]))
+    .toMatch(/ownedBy must be one of/);
+  expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1), ownedBy: 'waves' }])).toBeNull();
+  expect(validateStationEntriesBody([{ shape: pin(0.1, 0.1) }])).toBeNull();
 });
 
 test('moving or retiring an existing station never rewrites its ownership', async () => {

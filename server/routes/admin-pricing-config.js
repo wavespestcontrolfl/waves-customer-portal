@@ -235,9 +235,15 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     // and a negative would pay the customer to rent. Whole quarters only —
     // the db-bridge rounds, and accepting a fraction here would just make the
     // stored value disagree with the one that actually prices.
+    // Upper bound matters as much as the lower one (codex P1): the uplift is
+    // round(install price / quarters), so a large-but-"valid" horizon rounds
+    // it to zero — the customer would get the stations free AND pay nothing
+    // back. 120 quarters is 30 years, already far past any real agreement,
+    // and keeps the uplift positive for every install price we quote. The
+    // engine ALSO fails closed if an uplift ever comes out unpriceable.
     const quarters = num(data?.recovery_quarters);
-    if (!Number.isInteger(quarters) || quarters < 1) {
-      return fail('termite_rental.recovery_quarters must be a whole number of quarters (>= 1)');
+    if (!Number.isInteger(quarters) || quarters < 1 || quarters > 120) {
+      return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
@@ -838,11 +844,30 @@ router.post('/margin-check', async (req, res) => {
 // --- Wildcard routes below ---
 
 // GET /:key — single config by key
+// Pricing keys whose FEATURE is env-gated as well as DB-configured. The row
+// existing does not mean the engine will honor it, so the response carries
+// the gate state too — otherwise the estimator renders a control the server
+// silently ignores, and the operator sends a quote that does not match what
+// they picked (codex P1 on the station-rental PR).
+const CONFIG_KEY_FEATURE_GATES = {
+  termite_rental: 'GATE_TERMITE_STATION_RENTAL',
+};
+
+function configKeyFeatureAvailable(key) {
+  const gate = CONFIG_KEY_FEATURE_GATES[key];
+  if (!gate) return true;
+  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
+}
+
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
     if (!config) return res.status(404).json({ error: 'Config not found' });
-    res.json(normalizePricingConfigRow(config));
+    res.json({
+      ...normalizePricingConfigRow(config),
+      // Read at request time so a gate flip needs no redeploy of the client.
+      featureAvailable: configKeyFeatureAvailable(req.params.key),
+    });
   } catch (err) { next(err); }
 });
 

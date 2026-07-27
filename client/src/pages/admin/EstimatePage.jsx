@@ -1301,11 +1301,19 @@ function EstimateToolView() {
             headers: authHeaders,
             signal: ctrl.signal,
           });
-          if (r.status === 404) return { ok: true, data: null };
-          if (!r.ok) return { ok: false, data: null };
-          return { ok: true, data: (await r.json())?.data ?? null };
+          if (r.status === 404) return { ok: true, data: null, featureAvailable: false };
+          if (!r.ok) return { ok: false, data: null, featureAvailable: false };
+          const body = await r.json();
+          // featureAvailable is the SERVER's word on whether the engine will
+          // honor this feature (env gate), distinct from the row existing.
+          // Absent on ungated keys → treat as available.
+          return {
+            ok: true,
+            data: body?.data ?? null,
+            featureAvailable: body?.featureAvailable !== false,
+          };
         } catch {
-          return { ok: false, data: null }; /* last applied state stands */
+          return { ok: false, data: null, featureAvailable: false }; /* last applied state stands */
         } finally {
           clearTimeout(timer);
         }

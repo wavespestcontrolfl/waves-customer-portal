@@ -980,6 +980,24 @@ function generateEstimate(input) {
               retailValue: rental.retailValue,
               recoveryQuarters: rental.recoveryQuarters,
             };
+          } else {
+            // FAIL CLOSED (codex P1). The bait line has ALREADY been priced
+            // as a rental — install zeroed — so simply omitting the recovery
+            // line would hand over the stations for free AND collect nothing
+            // back, forever. That is reachable from a legal admin config: an
+            // absurd-but-accepted recovery_quarters makes
+            // round(installPrice / quarters) zero. Revert the whole quote to
+            // outright purchase (the install charge comes back) and flag it
+            // for review rather than quietly selling free hardware.
+            result.ownership = 'own';
+            result.stationsOwnedBy = 'customer';
+            result.installation.price = result.installation.retailValue;
+            result.stationRental = null;
+            result.requiresManualReview = true;
+            result.manualReviewReasons = [...new Set([
+              ...(result.manualReviewReasons || []),
+              'termite_rental_uplift_unpriceable',
+            ])];
           }
         }
         // Termite bond rider (owner 2026-07-20): only alongside a PRICED
