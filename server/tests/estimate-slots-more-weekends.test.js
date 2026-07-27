@@ -522,6 +522,35 @@ describe('seasonal (Feb–Oct) mosquito slot filtering (codex r8 P1)', () => {
     expect(seasonalMaxHorizonDays(new Date('2027-01-31T12:00:00-05:00'))).toBe(90);
   });
 
+  test('resolveEstimateSlotProfile honors the SELECTED mosquito tier, not the stored row (codex r13 P0)', () => {
+    // Mosquito ladder selections carry no perServiceTreatments, so the row
+    // fallback reported the STORED tier — a monthly-default estimate selected
+    // as seasonal9 profiled 12 visits and slipped past every seasonal guard
+    // (winter slots listed, reserved, and seeded).
+    const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+    const estimateWith = (visits, name) => ({
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'mosquito', name, visitsPerYear: visits }] },
+        },
+      },
+    });
+    const monthlyDefault = estimateWith(12, 'Monthly Mosquito Program');
+    const seasonalDefault = estimateWith(9, 'Seasonal Mosquito Program');
+    const profileOf = (estimate, selectedFrequency) => resolveEstimateSlotProfile(estimate, { selectedFrequency });
+
+    // Tier switch in BOTH directions overrides the stored row.
+    expect(seasonalSelectionProfile(profileOf(monthlyDefault, 'seasonal9'))).toBe(true);
+    expect(seasonalSelectionProfile(profileOf(seasonalDefault, 'monthly12'))).toBe(false);
+    // No selection: the stored default decides.
+    expect(seasonalSelectionProfile(profileOf(monthlyDefault, ''))).toBe(false);
+    expect(seasonalSelectionProfile(profileOf(seasonalDefault, ''))).toBe(true);
+    // One-time mode books year-round regardless.
+    expect(seasonalSelectionProfile(resolveEstimateSlotProfile(seasonalDefault, {
+      serviceMode: 'one_time', selectedFrequency: 'seasonal9',
+    }))).toBe(false);
+  });
+
   test('the slot list drops Nov–Jan days for a seasonal selection only', () => {
     const slots = [
       { slotId: 'a', date: '2026-10-30' },

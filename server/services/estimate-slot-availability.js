@@ -573,7 +573,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
 
-  const services = serviceMode === 'one_time'
+  let services = serviceMode === 'one_time'
     ? oneTimeProfileServices(estimate, estData)
     : recurringRowsForEstimate(estimate, estData, selectedFrequency)
       .map((row) => {
@@ -586,6 +586,23 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         };
       })
       .filter((row) => row.service && row.label);
+  // Mosquito ladder selections (seasonal9 / monthly12) carry no
+  // perServiceTreatments, so recurringRowsForEstimate falls back to the
+  // STORED row — a monthly-default estimate selected as seasonal9 would
+  // profile 12 visits and slip past every seasonal guard downstream (winter
+  // slots listed, reserved, and seeded — codex r13 P0). Override the mosquito
+  // row's visit count from the selected tier token itself.
+  if (serviceMode !== 'one_time') {
+    const selToken = normalizeSelectionToken(selectedFrequency);
+    const tierVisits = selToken === 'seasonal9' || selToken === 'seasonal_feb_oct' ? 9
+      : selToken === 'monthly12' ? 12
+        : null;
+    if (tierVisits != null) {
+      services = services.map((row) => (row.service === 'mosquito'
+        ? { ...row, visitsPerYear: tierVisits }
+        : row));
+    }
+  }
 
   // Owner directive (2026-07-03): every service call books at the flat
   // 60-minute default — techs adjust individual appointments afterward.
