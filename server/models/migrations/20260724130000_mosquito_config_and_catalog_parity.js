@@ -1,9 +1,9 @@
 /**
- * Bring the mosquito DB rows back in line with the live pricing engine.
+ * Restate `pricing_config.mosquito_lot_sizes` in treatable sf.
  *
- * Two drifts, both found by auditing prod against the engine:
+ * One drift, found by auditing prod against the engine:
  *
- * 1. `pricing_config.mosquito_lot_sizes` still held the original April 2026
+ * `pricing_config.mosquito_lot_sizes` still held the original April 2026
  *    seed, which stored GROSS lot acreage (1/4 acre = 10889 ... 1 acre = 43559).
  *    `MOSQUITO.lotCategories` brackets TREATABLE sf (footprint and hardscape
  *    already subtracted): 7999 / 11999 / 17999 / 34999 / unbounded. db-bridge
@@ -15,13 +15,21 @@
  *    shows what the engine uses, and makes the guard inert. Labels carry
  *    "treatable sf" so nobody re-enters acreage by hand.
  *
- * 2. `services.mosquito_one_time.base_price` was $250.00 — a pre-2026-06 number
- *    (the June reprice moved one-time mosquito to $99-$269 by treatable area,
- *    `pricing_config.onetime_mosquito`). The row is `pricing_type='variable'`,
- *    so the engine prices it and base_price is only a fallback; a stale $250
- *    fallback can book or invoice the wrong amount. The other three mosquito
- *    rows already carry NULL. Blank, never $0 (a literal 0 becomes a real $0
- *    charge via the admin-schedule base_price fallback).
+ * NOT DONE HERE — clearing `services.mosquito_one_time.base_price` ($250). An
+ * earlier revision cleared it as a stale pre-June leftover. That premise was
+ * WRONG: `20260606000001` set it to $99, then `20260704000010` blanket-nulled
+ * base_price on EVERY service row (2026-07-04), and then on 2026-07-09 SIX
+ * services were given round base prices in one batch — cockroach_control $350,
+ * pest_initial_german_knockdown $450, one_time_pest_control $250,
+ * mosquito_one_time $250, wdo_inspection $250, rodent_inspection $75. That is a
+ * deliberate scheduling-default set, not drift, and singling mosquito out of it
+ * would undo an owner decision.
+ *
+ * It may still be wrong on the merits — $250 is neither the $99 entry price nor
+ * any bracket ($129/159/199/239/269) — and `admin-schedule.js:1005` prefers
+ * `serviceRecord.base_price` over the estimate, so a hand-scheduled one-time
+ * mosquito bills $250 regardless of area. Flagged for the owner as its own
+ * decision (and it likely applies to the whole 07-09 batch, not just mosquito).
  *
  * NOT DONE HERE — activating `services.mosquito_seasonal`. It is `is_active =
  * false` while priceMosquito RECOMMENDS `seasonal9` for every low-pressure
@@ -79,14 +87,6 @@ const LEGACY_MAX_BY_BUCKET = {
 // one bucket alone is not evidence that the row is the acreage seed.
 const MIN_LEGACY_BUCKETS_TO_REWRITE = 2;
 
-const ONE_TIME_KEY = 'mosquito_one_time';
-const STALE_ONE_TIME_BASE_PRICE = 250;
-// Provenance marker for the `services` edits. `pricing_config_audit` is the only
-// migration-audit table available, and down() needs to know which catalog fields
-// this migration actually changed — not just their current values.
-const CATALOG_AUDIT_KEY = 'mosquito_catalog_parity';
-const CATALOG_UP_REASON = 'Mosquito catalog parity: cleared stale pre-2026-06 one-time base_price';
-const CATALOG_DOWN_REASON = 'Rollback: restored pre-migration mosquito one-time base_price';
 
 function bucketMax(bucket) {
   if (!bucket || typeof bucket !== 'object') return undefined;
@@ -205,32 +205,6 @@ exports.up = async function (knex) {
       }
     }
   }
-
-  if (await knex.schema.hasTable('services')) {
-    // Snapshot the VALUE, not the row object: the update below runs before the
-    // audit insert, and holding a row reference across it is a trap.
-    const priorBasePrice = (
-      await knex('services').where({ service_key: ONE_TIME_KEY }).first('base_price')
-    )?.base_price ?? null;
-    // Only clear the specific stale value, so a deliberate later edit survives.
-    const clearedOneTime = await knex('services')
-      .where({ service_key: ONE_TIME_KEY })
-      .where('base_price', STALE_ONE_TIME_BASE_PRICE)
-      .update({ base_price: null, updated_at: knex.fn.now() });
-
-    // Record what this migration actually changed. down() restores it only while
-    // it still holds the applied value: on an env where base_price was already
-    // NULL, an ungated rollback would stamp a stale $250 onto a correct row.
-    if (clearedOneTime && await knex.schema.hasTable('pricing_config_audit')) {
-      await knex('pricing_config_audit').insert({
-        config_key: CATALOG_AUDIT_KEY,
-        old_value: JSON.stringify({ [ONE_TIME_KEY]: { base_price: priorBasePrice } }),
-        new_value: JSON.stringify({ [ONE_TIME_KEY]: { base_price: null } }),
-        changed_by: MIGRATION_TAG,
-        reason: CATALOG_UP_REASON,
-      });
-    }
-  }
 };
 
 exports.down = async function (knex) {
@@ -325,62 +299,6 @@ exports.down = async function (knex) {
           new_value: JSON.stringify({ reverted: [] }),
           changed_by: MIGRATION_TAG,
           reason: `${DOWN_REASON} — nothing to revert (all buckets edited since up)`,
-        });
-      }
-    }
-  }
-
-  if (await knex.schema.hasTable('services')) {
-    const catalogUp = await latestUncancelledUp(knex, {
-      configKey: CATALOG_AUDIT_KEY,
-      upReasonPrefix: CATALOG_UP_REASON,
-      downReasonPrefix: CATALOG_DOWN_REASON,
-    });
-    if (catalogUp) {
-      const prior = parseJson(catalogUp.old_value) || {};
-      const applied = parseJson(catalogUp.new_value) || {};
-      for (const key of [ONE_TIME_KEY]) {
-        const appliedFields = applied[key];
-        if (!appliedFields || !prior[key]) continue;
-        const row = await knex('services')
-          .where({ service_key: key })
-          .first('base_price');
-        if (!row) {
-          // Service row gone: nothing to restore, but the cycle must still close.
-          await knex('pricing_config_audit').insert({
-            config_key: CATALOG_AUDIT_KEY,
-            old_value: JSON.stringify(appliedFields),
-            new_value: JSON.stringify({}),
-            changed_by: MIGRATION_TAG,
-            reason: `${CATALOG_DOWN_REASON} — service row absent, nothing restored`,
-          });
-          continue;
-        }
-        // Restore field-by-field, and only where the current value is still the
-        // one up() applied — an owner edit made after the migration wins.
-        const patch = {};
-        for (const [field, appliedValue] of Object.entries(appliedFields)) {
-          const currentValue = row[field];
-          const stillApplied = appliedValue === null
-            ? (currentValue === null || currentValue === undefined)
-            : String(currentValue) === String(appliedValue);
-          if (stillApplied) patch[field] = prior[key][field];
-        }
-        if (Object.keys(patch).length) {
-          await knex('services')
-            .where({ service_key: key })
-            .update({ ...patch, updated_at: knex.fn.now() });
-        }
-        // Cycle-closing marker, written whether or not a field was restored —
-        // see the lot-size branch above for why an unconditional marker matters.
-        await knex('pricing_config_audit').insert({
-          config_key: CATALOG_AUDIT_KEY,
-          old_value: JSON.stringify(appliedFields),
-          new_value: JSON.stringify(patch),
-          changed_by: MIGRATION_TAG,
-          reason: Object.keys(patch).length
-            ? CATALOG_DOWN_REASON
-            : `${CATALOG_DOWN_REASON} — nothing to restore (edited since up)`,
         });
       }
     }
