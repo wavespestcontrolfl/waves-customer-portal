@@ -31,6 +31,7 @@ function makeConn(cfg = {}) {
       orWhereRaw: (sql, bindings) => { calls.push({ table, op: 'orWhereRaw', arg: { sql, bindings } }); return qb; },
       whereNot: (arg) => { calls.push({ table, op: 'whereNot', arg }); return qb; },
       whereNull: () => qb,
+      whereNotExists: () => { calls.push({ table, op: 'whereNotExists' }); return qb; },
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
       select: () => qb,
@@ -158,9 +159,11 @@ describe('propagateCustomerNameChange', () => {
     });
     await propagateCustomerNameChange({ before: NAME_BEFORE, after: NAME_AFTER }, conn);
     const estUpdates = conn.__updates('estimates');
-    // guarded attempt, fallback attempt, then the 'sending' sync.
-    expect(estUpdates[1].arg.estimate_data.__raw).toBe("estimate_data - 'proposalDelivery'");
-    expect(estUpdates[1].arg.estimate_data.__raw).not.toContain('preparedFor');
+    // guarded attempt, fallback attempt, then the 'sending' sync. The
+    // fallback is COLUMN-ONLY — the concurrent save's fresh proposal (and any
+    // delivery marker it stamped) must not be rewritten from a stale read.
+    expect(estUpdates[1].arg.customer_name).toBe('Cathy Nunes Furao');
+    expect(estUpdates[1].arg.estimate_data).toBeUndefined();
   });
 });
 
@@ -171,7 +174,7 @@ const ZERO_PHONE_COUNTS = { leads: 0, estimates: 0, contracts: 0, promoters: 0, 
 describe('propagateCustomerPhoneChange', () => {
   test('syncs lead, estimate, contract, promoter, and booking-intent copies', async () => {
     const conn = makeConn({
-      referral_promoters: { firstQueue: [{ id: 7, customer_phone: '9415551234' }, null] },
+      referral_promoters: { firstQueue: [{ id: 7, customer_phone: '9415551234' }] },
     });
     const counts = await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
     expect(counts).toEqual({ leads: 1, estimates: 1, contracts: 1, promoters: 1, promoterSkipped: 0, bookingIntents: 1 });
@@ -192,16 +195,20 @@ describe('propagateCustomerPhoneChange', () => {
 
   test('skips the promoter sync when another promoter row already holds the new number', async () => {
     // Promoter rows carry reward balances — a collision is never merged by a
-    // fan-out; it is logged and left for the owner.
+    // fan-out; the update's NOT EXISTS guard makes it a no-op (n=0), logged
+    // and left for the owner instead of raising 23505 into the caller's
+    // transaction.
     const conn = makeConn({
       referral_promoters: {
-        firstQueue: [{ id: 7, customer_phone: '9415551234' }, { id: 9, customer_phone: '+19415556789' }],
+        firstQueue: [{ id: 7, customer_phone: '9415551234' }],
+        updateCount: 0,
       },
     });
     const counts = await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
     expect(counts.promoters).toBe(0);
     expect(counts.promoterSkipped).toBe(1);
-    expect(conn.__updates('referral_promoters')).toHaveLength(0);
+    // The conflict check is INSIDE the update statement, not a separate read.
+    expect(conn.__calls.some((c) => c.table === 'referral_promoters' && c.op === 'whereNotExists')).toBe(true);
   });
 
   test('no-ops on a formatting-only change (same digits)', async () => {

@@ -187,17 +187,15 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     });
     counts.estimates += n;
     if (!n && patchPreparedFor) {
-      // The proposal moved under us — apply the column sync alone and leave
-      // the fresh proposal be.
+      // The proposal moved under us — sync the column alone and leave the
+      // fresh proposal (and any delivery marker the concurrent save just
+      // stamped) untouched. COLUMN-ONLY: dropping proposalDelivery here
+      // would be acting on the stale read the guard just rejected.
       counts.estimates += await conn('estimates')
         .where({ id: row.id, customer_id: customerId, customer_name: row.customer_name })
         .whereIn('status', OPEN_ESTIMATE_STATUSES)
         .whereNull('archived_at')
-        .update({
-          customer_name: newFull.slice(0, 100),
-          estimate_data: conn.raw("estimate_data - 'proposalDelivery'"),
-          updated_at: now,
-        });
+        .update({ customer_name: newFull.slice(0, 100), updated_at: now });
     }
   }
 
@@ -343,17 +341,29 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
   ).first();
   if (ownPromoter) {
     const newVariants = phoneDigitVariants(newPhone);
-    const conflict = await conn('referral_promoters')
-      .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${newVariants.map(() => '?').join(', ')})`, newVariants)
-      .whereNot({ id: ownPromoter.id })
-      .first();
-    if (conflict) {
+    // The conflict check lives INSIDE the update statement (NOT EXISTS), so a
+    // promoter row claiming the new number between a separate select and this
+    // update can no longer force a 23505 that aborts the caller's whole edit.
+    // n=0 means either a conflict or a concurrently moved own-row — both are
+    // "leave it alone". Residual: a conflict row committing mid-statement can
+    // still surface the unique violation and roll the edit back whole — same
+    // accepted rarity as the email fan-out's newsletter move (half-synced is
+    // worse).
+    const n = await conn('referral_promoters')
+      .where({ id: ownPromoter.id, customer_phone: ownPromoter.customer_phone })
+      .whereNotExists(
+        conn('referral_promoters')
+          .select(conn.raw('1'))
+          .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${newVariants.map(() => '?').join(', ')})`, newVariants)
+          .whereNot({ id: ownPromoter.id })
+      )
+      .update({ customer_phone: newPhone.slice(0, 20), updated_at: now });
+    counts.promoters += n;
+    if (!n) {
+      // Promoter rows carry reward balances — a collision is never merged by
+      // a fan-out; it is logged and left for the owner.
       counts.promoterSkipped += 1;
-      logger.warn(`[contact-fanout] customer ${customerId}: promoter phone NOT synced — another promoter row already holds the new number (promoter ${ownPromoter.id} vs ${conflict.id}); merge is an owner decision`);
-    } else {
-      counts.promoters += await conn('referral_promoters')
-        .where({ id: ownPromoter.id, customer_phone: ownPromoter.customer_phone })
-        .update({ customer_phone: newPhone.slice(0, 20), updated_at: now });
+      logger.warn(`[contact-fanout] customer ${customerId}: promoter phone NOT synced — another promoter row already holds the new number (or promoter ${ownPromoter.id} moved concurrently); merge is an owner decision`);
     }
   }
 
