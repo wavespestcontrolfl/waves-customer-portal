@@ -83,7 +83,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -562,6 +562,7 @@ const CONFIRM_REASON_TEXT = {
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
   secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
+  caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -1604,6 +1605,9 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // spouses/tenants into those slots, and matching that ignored them forked a
 // duplicate customer the next time that person called (audit #7/F1).
 const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+// Canonical persisted-schema county spellings, keyed by normalizeCounty()
+// output (the schema enum is Proper-case; "DeSoto" has interior caps).
+const AV_COUNTY_ENUM = { manatee: 'Manatee', sarasota: 'Sarasota', charlotte: 'Charlotte', desoto: 'DeSoto' };
 // Slot roles that identify the HOUSEHOLD/account vs people who serve many
 // accounts and must never auto-link on a slot-phone hit alone. lender is
 // agent-type (schema 1.7.0): a loan officer/title coordinator arranges
@@ -5160,7 +5164,13 @@ const CallRecordingProcessor = {
               ...(n.city ? { city: n.city } : {}),
               ...(n.state ? { state: n.state } : {}),
               ...(n.postal_code ? { postal_code: n.postal_code } : {}),
-              ...(addressValidation.county ? { county: addressValidation.county } : {}),
+              // The reverse geocoder returns long names ("Manatee County") but
+              // the persisted schema's county enum allows only the four short
+              // names — writing the raw value would leave ai_extraction_enriched
+              // schema-invalid while v2_extraction_status still says valid
+              // (codex round-2 P2). Unmappable → omit, keep whatever was there.
+              ...(AV_COUNTY_ENUM[normalizeCounty(addressValidation.county)]
+                ? { county: AV_COUNTY_ENUM[normalizeCounty(addressValidation.county)] } : {}),
             };
             if (n.street_line_1) extracted.address_line1 = n.street_line_1;
             if (n.city) extracted.city = n.city;
@@ -5820,9 +5830,14 @@ const CallRecordingProcessor = {
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
+        // CONTACT_MATCH_PHONE_COLS plus secondary_phone: the matcher's column
+        // set omits it deliberately, but for IDENTITY an ANI stored in the
+        // admin-editable secondary slot is on file — flagging it would ask the
+        // office to save a number the account already has (codex round-2 P2).
+        const identityPhoneCols = [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone'];
         const linked = await db('customers').where({ id: customerId })
-          .first(['first_name', 'last_name', ...CONTACT_MATCH_PHONE_COLS]);
-        const phoneOnFile = !!linked && CONTACT_MATCH_PHONE_COLS.some((col) => samePhone(verifiableAni, linked[col]));
+          .first(['first_name', 'last_name', ...identityPhoneCols]);
+        const phoneOnFile = !!linked && identityPhoneCols.some((col) => samePhone(verifiableAni, linked[col]));
         if (linked && !phoneOnFile) {
           callerPhoneUnverified = true;
           await db('triage_items')
@@ -5839,6 +5854,14 @@ const CallRecordingProcessor = {
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore();
+          // Mirror into the bridge list: the finalizer sets
+          // call_log.review_status='open' from bridgeNeedsConfirmation, and
+          // the lead timeline's CONFIRM-BEFORE-DISPATCH note reads it too —
+          // without this, a mismatch-only call looks fully processed
+          // (codex round-2 P2).
+          if (!bridgeNeedsConfirmation.includes('caller_phone_not_on_file')) {
+            bridgeNeedsConfirmation.push('caller_phone_not_on_file');
+          }
           logger.info(`[call-proc] Caller ANI not on any phone slot of linked customer ${customerId} — advisory identity-confirm card opened for ${maskSid(callSid)}`);
         }
       } catch (e) {
