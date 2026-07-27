@@ -838,11 +838,18 @@ function assertNoDarkTermiteRentalPayload(estimateData) {
 // TERMITE.rental.recoveryQuarters; fail the save closed on any mismatch
 // between the row's uplift and round(retailValue / live horizon) — never
 // silently rewrite a line the operator saw priced.
-function assertLiveTermiteRentalRates(estimateData) {
+function assertLiveTermiteRentalRates(estimateData, { liveConfigVerified = false } = {}) {
   const { TERMITE } = require('./pricing-engine/constants');
   const rentalRows = selectedTermiteStationRentalRows(estimateData);
   if (!rentalRows.length) return;
   const staleError = () => errorWithStatus('Termite station rental pricing has changed — recalculate the estimate before saving.', 422);
+  // Fail closed when the live config could not be loaded (codex P1, round
+  // 5): with the sync down, the cached recoveryQuarters may itself be the
+  // stale value another pod already replaced — "matches the cache" proves
+  // nothing. Same unverifiable-config posture as the pest floor normalizer.
+  if (!liveConfigVerified) {
+    throw errorWithStatus('Live rental pricing could not be verified — try the save again in a moment.', 422);
+  }
   const quarters = Number(TERMITE.rental?.recoveryQuarters);
   if (!(quarters > 0)) throw staleError();
   for (const row of rentalRows) {
@@ -944,7 +951,7 @@ async function resolveEstimateWritePayload({
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
-  assertLiveTermiteRentalRates(trustedEstimateData);
+  assertLiveTermiteRentalRates(trustedEstimateData, { liveConfigVerified });
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);

@@ -397,20 +397,45 @@ describe('stale fallback rental rates are rejected at save', () => {
       result: mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteOwnership: 'rent' }))),
     };
     // Rows priced at the live 20-quarter horizon pass...
-    expect(() => assertLiveTermiteRentalRates(fresh)).not.toThrow();
+    expect(() => assertLiveTermiteRentalRates(fresh, { liveConfigVerified: true })).not.toThrow();
     // ...a payload priced under a DIFFERENT horizon (admin tuned
     // recovery_quarters after the client bundle loaded) fails closed.
     const stale = JSON.parse(JSON.stringify(fresh));
     const staleRow = stale.result.recurring.services.find((s) => s.service === 'termite_station_rental');
     staleRow.perTreatment = Math.round(staleRow.retailValue / 16); // old 16-quarter uplift
     let status;
-    try { assertLiveTermiteRentalRates(stale); } catch (err) { status = err.statusCode || err.status; }
+    try { assertLiveTermiteRentalRates(stale, { liveConfigVerified: true }); } catch (err) { status = err.statusCode || err.status; }
     expect(status).toBe(422);
-    // Purchase payloads carry no rental rows — never blocked.
+    // Unverifiable live config fails closed too (codex P1 round 5): with the
+    // sync down, "matches the cache" proves nothing — another pod may have
+    // already replaced the horizon.
+    let unverifiedStatus;
+    try { assertLiveTermiteRentalRates(fresh, { liveConfigVerified: false }); } catch (err) { unverifiedStatus = err.statusCode || err.status; }
+    expect(unverifiedStatus).toBe(422);
+    // Purchase payloads carry no rental rows — never blocked, verified or not.
     expect(() => assertLiveTermiteRentalRates({
       inputs: { svcTermiteBait: true },
       result: mapV1ToLegacyShape(generateEstimate(termiteInput())),
-    })).not.toThrow();
+    }, { liveConfigVerified: false })).not.toThrow();
+  });
+});
+
+describe('prepay unit mirror matches conversion (codex P1 round 5)', () => {
+  test('a rental-only bait estimate counts ONE unit — the rider never blocks annual prepay', () => {
+    const { annualPrepayRecurringUnitCount } = require('../services/estimate-converter');
+    const rentData = {
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteOwnership: 'rent' }))),
+    };
+    // Two raw recurring rows (bait + rider) must still read as one unit,
+    // exactly as convertEstimate's folded count does.
+    expect(rentData.result.recurring.services.filter((s) => s.mo || s.monthly).length).toBeGreaterThanOrEqual(2);
+    expect(annualPrepayRecurringUnitCount(rentData)).toBe(1);
+    // Purchase bait stays one unit too (no behavior change).
+    expect(annualPrepayRecurringUnitCount({
+      inputs: { svcTermiteBait: true },
+      result: mapV1ToLegacyShape(generateEstimate(termiteInput())),
+    })).toBe(1);
   });
 });
 

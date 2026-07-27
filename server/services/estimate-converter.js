@@ -3082,7 +3082,10 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
   // prepay deposit that acceptance later 422s (Codex r2 on the pest+rodent
   // removal). Same source of truth: recurring lines + fromSupplement
   // standalone units (combine dedupes a line + duplicate scalar to one).
-  const recurring = recurringServicesFromEstimateData(estimateData);
+  // The rental rider is folded/dropped exactly as conversion does (codex P1
+  // round 5): counting the raw rider row read a rental-only bait estimate
+  // as a two-unit plan and rejected the prepay conversion actually allows.
+  const recurring = foldTermiteRentalIntoBait(recurringServicesFromEstimateData(estimateData));
   const { standalone } = combineRecurringServicesForScheduling(recurring, {
     acceptFrequency: estimateData?.customerSelection?.frequency || null,
     supplementalCompanions: supplementalCompanionLines(estimateData),
