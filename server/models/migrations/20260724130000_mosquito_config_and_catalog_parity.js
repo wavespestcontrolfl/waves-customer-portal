@@ -115,13 +115,18 @@ async function latestUncancelledUp(knex, { configKey, upReasonPrefix, downReason
 
 // Mirrors validatePestPricingConfig's MOSQUITO.lotCategories check: thresholds
 // must ascend in the engine's bucket order, with the terminal bucket unbounded.
+// STRICTLY increasing, not merely non-descending: resolveMosquitoLotCategory
+// takes the FIRST bucket whose max covers the area, so two equal endpoints make
+// the later bucket unreachable and quote its properties at the earlier bucket's
+// rate. A tuned SMALL=11999 next to a legacy QUARTER=14519 would otherwise
+// rewrite to SMALL=11999, QUARTER=11999 and silently misprice.
 const BUCKET_ORDER = ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE'];
-function isAscending(row) {
+function isStrictlyAscending(row) {
   let previous = -Infinity;
   for (const bucket of BUCKET_ORDER) {
     const max = bucketMax(row[bucket]);
     const value = max === undefined ? Infinity : max;
-    if (value < previous) return false;
+    if (value <= previous) return false;
     previous = value;
   }
   return true;
@@ -189,13 +194,14 @@ exports.up = async function (knex) {
         rewritten.push(bucket);
       }
       // A per-bucket rewrite can cross a NEIGHBOUR an admin tuned and leave the
-      // row descending — e.g. SMALL=13000 (tuned) with QUARTER=14519 legacy
-      // becomes 13000, 11999. `validatePestPricingConfig` then fails the WHOLE
+      // row descending or duplicated — e.g. SMALL=13000 (tuned) with
+      // QUARTER=14519 legacy becomes 13000, 11999; SMALL=11999 becomes a
+      // duplicate 11999, 11999 that makes QUARTER unreachable. `validatePestPricingConfig` then fails the WHOLE
       // sync ("lotCategories must be sorted ascending") and
       // `restorePricingConstants` reverts EVERY pricing constant to in-code
       // defaults, so one mosquito row would silently disable DB-authoritative
       // pricing across all services. Never write a row that cannot load.
-      if (rewritten.length && isAscending(next)) {
+      if (rewritten.length && isStrictlyAscending(next)) {
         const reason = skipped.length
           ? `${UP_REASON} — left non-legacy bucket(s) alone: ${skipped.join(', ')}`
           : UP_REASON;
