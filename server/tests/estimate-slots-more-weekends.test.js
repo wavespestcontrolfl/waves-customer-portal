@@ -514,12 +514,59 @@ describe('seasonal (Feb–Oct) mosquito slot filtering (codex r8 P1)', () => {
     expect(nextSeasonStartFrom('2026-12-25')).toBe('2027-02-01');
     expect(nextSeasonStartFrom('2027-01-05')).toBe('2027-02-01');
     // Nov 1: Feb 1 is 92 days out — past the standard 90-day horizon, which
-    // made a seasonal first visit unbookable online — plus the browse window.
-    expect(seasonalMaxHorizonDays(new Date('2026-11-01T12:00:00-05:00'))).toBe(92 + 14);
+    // made a seasonal first visit unbookable online — through Feb 15 (the
+    // window's 14-day in-season complement).
+    expect(seasonalMaxHorizonDays(new Date('2026-11-01T12:00:00-05:00'))).toBe(106);
     // In season, the standard horizon applies untouched.
     expect(seasonalMaxHorizonDays(new Date('2026-06-15T12:00:00-04:00'))).toBe(90);
     // Late January: the gap is short, so the standard horizon still dominates.
     expect(seasonalMaxHorizonDays(new Date('2027-01-31T12:00:00-05:00'))).toBe(90);
+  });
+
+  test('the season\'s last days extend the window and horizon across the gap (codex #3000 post-merge P2)', () => {
+    const { seasonalWindowEnd, seasonalMaxHorizonDays } = require('../services/estimate-slot-availability');
+    // Mid-season: identical to the plain start + windowDays shape.
+    expect(seasonalWindowEnd('2026-06-15', 14)).toBe('2026-06-29');
+    // Oct 31 has ONE remaining in-season day — the window crosses to Feb.
+    expect(seasonalWindowEnd('2026-10-31', 14)).toBe('2027-02-14');
+    // Oct 25: seven tail days, then the balance lands in early February.
+    expect(seasonalWindowEnd('2026-10-25', 14)).toBe('2027-02-08');
+    // Off-season starts count from the season opener (window-shift parity).
+    expect(seasonalWindowEnd('2026-11-05', 14)).toBe('2027-02-15');
+    // Horizon follows: Oct 31 and Oct 25 both reach their February window end;
+    // Oct 10 still has a full in-season window and keeps the standard horizon.
+    expect(seasonalMaxHorizonDays(new Date('2026-10-31T12:00:00-04:00'))).toBe(106);
+    expect(seasonalMaxHorizonDays(new Date('2026-10-25T12:00:00-04:00'))).toBe(106);
+    expect(seasonalMaxHorizonDays(new Date('2026-10-10T12:00:00-04:00'))).toBe(90);
+  });
+
+  test('a tier switch restamps the profile label, not just the visit count (codex #3000 post-merge P2)', () => {
+    const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+    const monthlyDefault = {
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12 }] },
+        },
+      },
+    };
+    const switched = resolveEstimateSlotProfile(monthlyDefault, { selectedFrequency: 'seasonal9' });
+    expect(switched.services[0]).toEqual(expect.objectContaining({
+      visitsPerYear: 9,
+      label: 'Seasonal Mosquito Control',
+    }));
+    // And the reverse: seasonal default selected as monthly12.
+    const seasonalDefault = {
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'mosquito', name: 'Seasonal Mosquito Control', visitsPerYear: 9 }] },
+        },
+      },
+    };
+    const back = resolveEstimateSlotProfile(seasonalDefault, { selectedFrequency: 'monthly12' });
+    expect(back.services[0]).toEqual(expect.objectContaining({
+      visitsPerYear: 12,
+      label: 'Monthly Mosquito Control',
+    }));
   });
 
   test('resolveEstimateSlotProfile honors the SELECTED mosquito tier, not the stored row (codex r13 P0)', () => {

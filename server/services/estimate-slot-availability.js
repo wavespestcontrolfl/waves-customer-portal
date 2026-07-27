@@ -552,20 +552,40 @@ function nextSeasonStartFrom(dateStr) {
   return `${m === 1 ? y : y + 1}-02-01`;
 }
 
-// How many days out the seasonal offer surfaces may reach. In season this is
-// the standard horizon. In the Nov–Jan gap the standard 90-day horizon can
-// end BEFORE the season opens (Feb 1 is 91–92 days out on Nov 1–2), which
-// would make a seasonal first visit unbookable online for those days — so the
-// horizon extends across the gap to the season opener plus the default
-// browse window (codex r10 P2). Bounded: at worst ~Feb 1 + windowDays.
+// The end of a seasonal browse window opening at `from`: the date reached
+// after consuming `days` further IN-SEASON days (Nov–Jan don't count), so the
+// window always carries a full complement of offerable days. Matches
+// etDateRange's `start + windowDays` shape when the tail is long enough, and
+// crosses the winter gap when it isn't — an Oct 31 start would otherwise
+// hold a single filtered day (codex #3000 post-merge P2). Bounded walk.
+function seasonalWindowEnd(from, days) {
+  const target = Math.max(1, Number(days) || DEFAULT_OPTS.windowDays) + 1;
+  let at = parseETDateTime(`${String(from).slice(0, 10)}T12:00`);
+  let counted = 0;
+  for (let i = 0; i < 220; i++) {
+    const dateStr = etDateString(at);
+    if (inMosquitoSeason(dateStr)) {
+      counted += 1;
+      if (counted >= target) return dateStr;
+    }
+    at = addETDays(at, 1);
+  }
+  return etDateString(at);
+}
+
+// How many days out the seasonal offer surfaces may reach: far enough to
+// cover the seasonal browse window's END. In mid-season this equals the
+// standard horizon; in the Nov–Jan gap AND in the season's last days (when
+// the remaining tail is shorter than the browse window) it extends across
+// the gap to early February (codex r10 P2 + #3000 post-merge P2). Bounded:
+// at worst ~Feb + windowDays.
 function seasonalMaxHorizonDays(now = new Date()) {
   const today = etDateString(now);
-  const seasonStart = nextSeasonStartFrom(today);
-  if (seasonStart === today) return MAX_SLOT_HORIZON_DAYS;
-  const gapDays = Math.round(
-    (new Date(`${seasonStart}T12:00:00Z`) - new Date(`${today}T12:00:00Z`)) / 86400000,
+  const windowEnd = seasonalWindowEnd(nextSeasonStartFrom(today), DEFAULT_OPTS.windowDays);
+  const daysOut = Math.round(
+    (new Date(`${windowEnd}T12:00:00Z`) - new Date(`${today}T12:00:00Z`)) / 86400000,
   );
-  return Math.max(MAX_SLOT_HORIZON_DAYS, gapDays + DEFAULT_OPTS.windowDays);
+  return Math.max(MAX_SLOT_HORIZON_DAYS, daysOut);
 }
 
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
@@ -606,7 +626,16 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         : null;
     if (tierVisits != null) {
       services = services.map((row) => (row.service === 'mosquito'
-        ? { ...row, visitsPerYear: tierVisits }
+        ? {
+          ...row,
+          visitsPerYear: tierVisits,
+          // Restamp the LABEL with the selected tier too (codex #3000
+          // post-merge P2): the stored default's label would otherwise
+          // produce profiles like "9x Monthly Mosquito Control", which
+          // slot-reservation persists into the appointment notes dispatch
+          // reads.
+          label: tierVisits === 9 ? 'Seasonal Mosquito Control' : 'Monthly Mosquito Control',
+        }
         : row));
     }
   }
@@ -1454,20 +1483,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   let { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
     ? { dateFrom: opts.dateFrom, dateTo: opts.dateTo }
     : etDateRange(opts.windowDays);
-  // Seasonal selection in the Nov–Jan gap: the rolling window would sit
-  // entirely inside the gap and filter to ZERO offerable days. Open the
-  // DEFAULT window at the season start instead so the first in-season dates
-  // are bookable all winter (codex r10 P2). Explicit/AI windows keep their
-  // requested dates — an all-winter search legitimately returns nothing.
+  // Seasonal selection: the DEFAULT rolling window opens at the season start
+  // (bookable all winter — codex r10 P2) and always ENDS on the date that
+  // gives it a full complement of in-season days, crossing the Nov–Jan gap
+  // when the season's tail is shorter than the window (an Oct 31 start would
+  // otherwise filter down to a single, usually lead-time-blocked day —
+  // codex #3000 post-merge P2). Explicit/AI windows keep their requested
+  // dates — an all-winter search legitimately returns nothing.
   if (!(opts.dateFrom && opts.dateTo) && seasonalSelectionProfile(serviceProfile)) {
-    const seasonStart = nextSeasonStartFrom(dateFrom);
-    if (seasonStart !== dateFrom) {
-      dateFrom = seasonStart;
-      dateTo = etDateString(addETDays(
-        parseETDateTime(`${seasonStart}T12:00`),
-        Math.max(1, Number(opts.windowDays) || DEFAULT_OPTS.windowDays),
-      ));
-    }
+    dateFrom = nextSeasonStartFrom(dateFrom);
+    dateTo = seasonalWindowEnd(dateFrom, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
   }
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every
@@ -1782,6 +1807,7 @@ module.exports = {
   seasonalSelectionProfile,
   inMosquitoSeason,
   nextSeasonStartFrom,
+  seasonalWindowEnd,
   seasonalMaxHorizonDays,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.
