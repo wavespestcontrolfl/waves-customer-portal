@@ -2792,6 +2792,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               { before: lockedBefore, after: lockedAfter, source: 'Customer 360 edit' }, trx
             );
           }
+          // Name and phone have the same snapshot problem (leads, estimates,
+          // contracts, promoter, booking recovery, automation greetings) —
+          // both diff-gated inside the service, so an unchanged full-form
+          // resave is a no-op.
+          if (updates.first_name !== undefined || updates.last_name !== undefined) {
+            await require('../services/customer-contact-fanout').propagateCustomerNameChange(
+              { before: lockedBefore, after: lockedAfter }, trx
+            );
+          }
+          if (updates.phone !== undefined) {
+            await require('../services/customer-contact-fanout').propagateCustomerPhoneChange(
+              { before: lockedBefore, after: lockedAfter }, trx
+            );
+          }
         });
       } catch (e) {
         if (e && e.code === '23505') {

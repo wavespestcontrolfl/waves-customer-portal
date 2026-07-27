@@ -16,6 +16,7 @@ const {
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
+const { CONTACT_FANOUT_DISCLOSURE } = require('../customer-contact-fanout');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -189,7 +190,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
   {
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
-Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Mention this ripple when proposing an email change.
+Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise ${CONTACT_FANOUT_DISCLOSURE}. Mention the ripple when proposing an email, name, or phone change.
 IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
     input_schema: {
       type: 'object',
@@ -1040,6 +1041,19 @@ async function updateCustomer(customerId, updates) {
         // inside the service — an unchanged resave is a no-op.
         emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
           { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar update_customer' }, trx
+        );
+      }
+      // Name and phone snapshots (leads, estimates, contracts, promoter,
+      // booking recovery, automation greetings) sync too — diff-gated inside
+      // the service, so an unchanged resave is a no-op.
+      if (clean.first_name !== undefined || clean.last_name !== undefined) {
+        await require('../customer-contact-fanout').propagateCustomerNameChange(
+          { before: lockedBefore, after: lockedMerged }, trx
+        );
+      }
+      if (clean.phone !== undefined) {
+        await require('../customer-contact-fanout').propagateCustomerPhoneChange(
+          { before: lockedBefore, after: lockedMerged }, trx
         );
       }
     });
