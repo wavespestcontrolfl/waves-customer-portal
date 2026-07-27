@@ -2855,13 +2855,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // and isRodentAdjacentServiceType's negative guard keeps non-rodent
     // trapping ("Wildlife Trapping") out too. Other report lines keep the
     // strict same-line match.
+    // Name shape alone is NOT rodent evidence (codex round-4 P2): a
+    // generic "Sanitation & Cleanup" booking that has nothing to do with
+    // the rodent program would satisfy the regex. The catalog is the
+    // authority — a widened candidate must ALSO be a services row whose
+    // category is 'rodent'. Best-effort: an unavailable catalog just keeps
+    // the strict same-line match.
+    let rodentCatalogNames = null;
+    if (rodentReportRefresh) {
+      try {
+        const catalogRows = await knex('services').where({ category: 'rodent' }).select('name');
+        rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
+          .map((row) => String(row.name || '').trim().toLowerCase())
+          .filter(Boolean));
+      } catch { rodentCatalogNames = null; }
+    }
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
       .find((row) => {
         const rowLine = detectServiceLine(row.service_type);
         if (rowLine === serviceLine) return true;
         return rodentReportRefresh
           && rowLine === 'pest'
-          && isRodentAdjacentServiceType(row.service_type);
+          && isRodentAdjacentServiceType(row.service_type)
+          && !!rodentCatalogNames
+          && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
       }) || null;
     if (nextApptRow && nextApptRow.scheduled_date) {
       const rawDate = nextApptRow.scheduled_date;

@@ -154,10 +154,59 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('2 traps were inspected today.', swapFacts)).toContain('uncorroborated_count:2 traps');
   expect(ungroundedClaims('We recorded 7 captures today.', swapFacts)).toContain('uncorroborated_count:7 captures');
 
-  // negation is judged per sentence — one negated sentence can't launder a
+  // negation is judged per claim — one negated sentence can't launder a
   // positive claim elsewhere (codex round-3 P2)
   expect(ungroundedClaims('No captures were recorded in the attic. We removed a capture from the garage trap.', facts))
     .toContain('unsupported_capture_claim');
+  // ...and an unrelated negative in the SAME sentence can't either (codex
+  // round-4 P1): the negator must sit in the claim's own clause
+  expect(ungroundedClaims('No droppings were observed, but we removed a capture from the garage.', facts))
+    .toContain('unsupported_capture_claim');
+  expect(ungroundedClaims('Captures were not recorded on this visit.', facts)).toEqual([]);
+
+  // station count ROLES stay separate (codex round-4 P1): with 7 total, 5
+  // checked, 2 inaccessible, an inaccessible count can't pose as inspected
+  const roleFacts = groundingFacts(input({
+    stationSummary: { total: 7, checked: 5, activity: 0, serviced: 0, inaccessible: 2 },
+    typedReport: {
+      todaysResult: { headline: 'Rodent activity was moderate today.', body: 'We checked 5 traps today.', nextStep: null },
+      findings: [
+        { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '5', value: '5' },
+        { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '0', value: '0' },
+      ],
+    },
+  }));
+  expect(ungroundedClaims('2 traps were inspected today.', roleFacts)).toContain('uncorroborated_count:2 traps');
+  expect(ungroundedClaims('5 of 7 traps were inspected, and 2 traps were not accessible.', roleFacts)).toEqual([]);
+
+  // the next visit is validated as TEXT, not just numerals (codex round-4
+  // P1): a flipped meridiem or wrong weekday/month rejects
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 PM.', facts))
+    .toContain('ungrounded_window:8–10 PM');
+  expect(ungroundedClaims('Your next visit is Tuesday, August 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Tuesday, August 3');
+  expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
+  // with no grounded next visit, any window/date mention rejects
+  const noVisit = groundingFacts(input({ nextAppointment: null }));
+  expect(ungroundedClaims('We will arrive 8–10 AM.', noVisit).some((p) => p.startsWith('ungrounded_window'))).toBe(true);
+});
+
+test('withheld product identity partitions the narrative cache', async () => {
+  const clean = 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. Your next visit is Monday, August 3, arriving 8–10 AM.';
+  const callModel = jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } });
+  const base = input();
+  const withBait = (name) => ({
+    ...base,
+    applications: [
+      ...base.applications,
+      { product: { name, epa_reg: '12455-79', category: 'Rodenticide' } },
+    ],
+  });
+  // identical grounding facts (withheld names never enter them), different
+  // withheld products — the cache must NOT share the entry (codex round-4 P2)
+  await applyRodentReportNarrative(withBait('Contrac Blox Rodenticide'), { callModel });
+  await applyRodentReportNarrative(withBait('Ditrac All-Weather Blox'), { callModel });
+  expect(callModel).toHaveBeenCalledTimes(2);
 });
 
 test('deterministic summary = ratified copy + factual counts + next visit', () => {

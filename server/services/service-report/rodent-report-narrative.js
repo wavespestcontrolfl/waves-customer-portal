@@ -267,7 +267,7 @@ Rules:
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
 - If photo evidence is provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
-- If a next visit is provided, close with it, including the date (and arrival window if given).
+- If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
 
 Return JSON: {"summary": "<the summary>"}`;
@@ -326,35 +326,36 @@ function groundedNumberSet(facts) {
   return set;
 }
 
-// Per-noun fact mapping (codex round-3 P1): every count claim validates
-// against the fact it DESCRIBES, so trapsWithCaptureRecorded can't
-// corroborate "2 traps were inspected" and the roster size can't
-// corroborate "7 captures were recorded" — a shared pool would let the
-// model swap the two customer-facing facts.
+// Per-role fact mapping (codex round-3/round-4 P1): every count claim
+// validates against the fact it DESCRIBES — checked can't corroborate a
+// roster claim, inaccessible can't corroborate an inspected claim,
+// trapsWithCaptureRecorded can't corroborate "2 traps were inspected", and
+// the roster size can't corroborate "7 captures were recorded". Shared
+// pools would let the model swap customer-facing facts.
 function factNumbers(facts) {
   const s = facts.stations || {};
-  const placement = new Set(); // traps/stations/devices counted as places
-  ['total', 'checked', 'serviced', 'inaccessible'].forEach((key) => {
-    if (typeof s[key] === 'number') placement.add(s[key]);
-  });
-  const capturesAt = new Set(); // "a capture recorded at N traps"
-  if (typeof s.trapsWithCaptureRecorded === 'number') capturesAt.add(s.trapsWithCaptureRecorded);
-  const consumptionAt = new Set(); // "bait consumption observed at N stations"
-  if (typeof s.stationsWithBaitConsumption === 'number') consumptionAt.add(s.stationsWithBaitConsumption);
+  const roleSet = (value) => new Set(typeof value === 'number' ? [value] : []);
+  const total = roleSet(s.total);
+  const checked = roleSet(s.checked);
+  const serviced = roleSet(s.serviced);
+  const inaccessible = roleSet(s.inaccessible);
+  const capturesAt = roleSet(s.trapsWithCaptureRecorded); // "a capture recorded at N traps"
+  const consumptionAt = roleSet(s.stationsWithBaitConsumption); // "consumption observed at N stations"
   const captureTotals = new Set(); // "N captures" — only a typed finding grounds this
   (facts.findings || []).forEach((finding) => {
     const n = Number(String(finding.value).trim());
     if (!Number.isFinite(n)) return;
     if (/captur/i.test(finding.label)) captureTotals.add(n);
-    else if (/trap|station|device|check/i.test(finding.label)) placement.add(n);
+    else if (/check|inspect/i.test(finding.label)) checked.add(n);
+    else if (/trap|station|device/i.test(finding.label)) total.add(n);
   });
-  return { placement, capturesAt, consumptionAt, captureTotals };
+  return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, captureTotals };
 }
 
-// "N traps" / "N of M stations" claims validated per noun and context —
-// with 7 traps checked and captures at 2 of them, "we checked 5 traps",
-// "2 traps were inspected", and "7 captures" must ALL fail. Runs on
-// word-number-normalized text so "five traps" is checked too; partitive
+// "N traps" / "N of M stations" claims validated per noun, role, and
+// context — with 7 total, 5 checked, 2 inaccessible, "2 traps were
+// inspected" must fail even though 2 is a real (inaccessible) count. Runs
+// on word-number-normalized text so "five traps" is checked too; partitive
 // phrasing without a count ("one of the traps") is exempt via the filler
 // check.
 const PLACE_NOUN_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(traps?|stations?|devices?)\b/gi;
@@ -362,50 +363,108 @@ const CAPTURE_COUNT_RE = /\b(\d+)\s+captures?\b/gi;
 
 function contextualCountProblems(text, facts) {
   const problems = [];
-  const { placement, capturesAt, consumptionAt, captureTotals } = factNumbers(facts);
+  const roles = factNumbers(facts);
   const placeRe = new RegExp(PLACE_NOUN_RE.source, 'gi');
   let match;
   while ((match = placeRe.exec(text)) !== null) {
-    const [, first, second, filler] = match;
+    const [full, first, second, filler] = match;
     if (/\bof\b/i.test(filler || '')) continue; // "1 of the traps" — no count claimed
-    // The ~30 chars before the number decide WHICH fact this count claims:
-    // "a capture recorded at 2 traps" counts capture locations, "bait
-    // consumption observed at 1 station" counts consumption locations,
-    // anything else is a placement/roster count.
+    // The surrounding context decides WHICH fact this count claims: capture
+    // and consumption cues sit BEFORE the number ("a capture recorded at 2
+    // traps"); role verbs bind tighter when they TRAIL the noun ("2 traps
+    // were not accessible" must not inherit an "inspected" from the
+    // previous clause), so the trailing window is consulted first.
     const lead = text.slice(Math.max(0, match.index - 30), match.index);
-    const allowed = /captur/i.test(lead)
-      ? capturesAt
-      : (/consum/i.test(lead) ? consumptionAt : placement);
-    if (!allowed.has(Number(first))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    const trail = text.slice(match.index + full.length, match.index + full.length + 30);
+    const roleFrom = (str) => {
+      if (/inspect|check/i.test(str)) return roles.checked;
+      if (/servic/i.test(str)) return roles.serviced;
+      if (/access/i.test(str)) return roles.inaccessible;
+      return null;
+    };
+    let allowed;
+    if (/captur/i.test(lead)) allowed = roles.capturesAt;
+    else if (/consum/i.test(lead)) allowed = roles.consumptionAt;
+    // bare roster claims ("your 7 traps") fall through to the roster size
+    else allowed = roleFrom(trail) || roleFrom(lead) || roles.total;
+    if (!allowed.has(Number(first))) problems.push(`uncorroborated_count:${full.trim()}`);
     // the "of M" half is always the roster size
-    if (second != null && !placement.has(Number(second))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    if (second != null && !roles.total.has(Number(second))) problems.push(`uncorroborated_count:${full.trim()}`);
   }
   const capRe = new RegExp(CAPTURE_COUNT_RE.source, 'gi');
   while ((match = capRe.exec(text)) !== null) {
-    if (!captureTotals.has(Number(match[1]))) problems.push(`uncorroborated_count:${match[0].trim()}`);
+    if (!roles.captureTotals.has(Number(match[1]))) problems.push(`uncorroborated_count:${match[0].trim()}`);
   }
   return problems;
 }
 
-// Capture/consumption mentions are judged PER SENTENCE (codex round-3 P2):
-// one negated sentence must not launder a positive claim elsewhere in the
-// same output ("No captures in the attic. We removed a capture from the
-// garage." must still reject when nothing records a capture). A positive
-// claim is supported by capture locations on the map OR a positive typed
-// capture finding.
+// Capture/consumption mentions are judged PER CLAIM (codex round-4 P1): the
+// negation must sit in the claim's own clause — "No droppings were
+// observed, but we removed a capture from the garage" is a positive capture
+// claim regardless of the unrelated negative earlier in the sentence. A
+// claim is negated when a negator appears within the ~30 chars before the
+// token WITHOUT an intervening clause break (.,!?; or a contrastive
+// conjunction), or when the token itself is followed by "not/never/none"
+// ("captures were not recorded"). Positive claims are supported by capture
+// locations on the map OR a positive typed capture finding.
+function claimNegated(text, index, tokenLength) {
+  let lead = text.slice(Math.max(0, index - 30), index);
+  const breakMatch = [...lead.matchAll(/[.!?;]|\b(?:but|however|yet)\b/gi)].pop();
+  if (breakMatch) lead = lead.slice(breakMatch.index + breakMatch[0].length);
+  if (/\b(no|not|without|zero|none|never)\b/i.test(lead)) return true;
+  const tail = text.slice(index + tokenLength, index + tokenLength + 25);
+  return /^\S*\s+(?:were|was|are|is)?\s*(?:not|never|none)\b/i.test(tail);
+}
+
 function unsupportedActivityClaims(text, facts) {
   const problems = [];
-  const { capturesAt, consumptionAt, captureTotals } = factNumbers(facts);
-  const captureSupported = [...capturesAt, ...captureTotals].some((n) => n > 0);
-  const consumptionSupported = [...consumptionAt].some((n) => n > 0);
-  for (const sentence of String(text).split(/[.!?]+/)) {
-    const negated = /\b(no|not|without|zero|none|never)\b/i.test(sentence);
-    if (!captureSupported && /\bcaptur/i.test(sentence) && !negated) {
-      problems.push('unsupported_capture_claim');
+  const roles = factNumbers(facts);
+  const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0);
+  const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0);
+  for (const match of String(text).matchAll(/\b(captur|consum)\w*/gi)) {
+    const isCapture = /^captur/i.test(match[1]);
+    if (isCapture && captureSupported) continue;
+    if (!isCapture && consumptionSupported) continue;
+    if (!claimNegated(text, match.index, match[0].length)) {
+      problems.push(isCapture ? 'unsupported_capture_claim' : 'unsupported_consumption_claim');
     }
-    if (!consumptionSupported && /\bconsum/i.test(sentence) && !negated) {
-      problems.push('unsupported_consumption_claim');
+  }
+  return problems;
+}
+
+// Next-visit copy is validated as TEXT, not just numerals (codex round-4
+// P1): "8–10 PM" contains only grounded numbers but contradicts an 8–10 AM
+// appointment. Any arrival-window or month-day mention in the output must
+// match the grounded next visit exactly (weekday too, when written); with
+// no grounded next visit, mentioning either rejects.
+const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
+const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
+const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
+const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b`, 'gi');
+
+function normalizeWindowText(value) {
+  return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+function nextVisitProblems(text, facts) {
+  const problems = [];
+  const expected = facts.nextVisit;
+  const expectedWindow = expected?.window ? normalizeWindowText(expected.window) : null;
+  for (const match of String(text).matchAll(new RegExp(WINDOW_TEXT_RE.source, 'gi'))) {
+    if (!expectedWindow || normalizeWindowText(match[0]) !== expectedWindow) {
+      problems.push(`ungrounded_window:${match[0].trim()}`);
     }
+  }
+  const expectedDate = expected?.date
+    ? new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i').exec(String(expected.date).trim())
+    : null;
+  for (const match of String(text).matchAll(new RegExp(DATE_TEXT_RE.source, 'gi'))) {
+    const [, weekday, month, day] = match;
+    const ok = expectedDate
+      && month.toLowerCase() === expectedDate[2].toLowerCase()
+      && Number(day) === Number(expectedDate[3])
+      && (!weekday || !expectedDate[1] || weekday.toLowerCase() === expectedDate[1].toLowerCase());
+    if (!ok) problems.push(`ungrounded_date:${match[0].trim()}`);
   }
   return problems;
 }
@@ -427,6 +486,7 @@ function ungroundedClaims(rawText, facts) {
   }
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
+  problems.push(...nextVisitProblems(text, facts));
   return problems;
 }
 
@@ -455,7 +515,18 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
   if (!facts.recap && !facts.todaysResult) return cleanText(input.recap);
 
   const fallback = deterministicSummary(facts);
-  const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
+  // Withheld (registered) product names never enter the facts, so two
+  // reports with different withheld products would otherwise share a cache
+  // entry — and a summary that cleared the echo guard for one could be
+  // served to the other without rerunning it (codex round-4 P2). Their
+  // identity joins the key WITHOUT joining the prompt.
+  const withheldSig = (Array.isArray(input.applications) ? input.applications : [])
+    .filter((app) => !isNameableDevice(app?.product || {}))
+    .map((app) => cleanText(app?.product?.name).toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}|withheld:${withheldSig}`).digest('hex');
   const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 

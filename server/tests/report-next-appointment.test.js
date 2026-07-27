@@ -169,6 +169,13 @@ afterEach(() => { delete process.env.GATE_RODENT_REPORT_REFRESH; });
 
 const RODENT_PROGRAM_FIXTURES = {
   ...BASE_FIXTURES,
+  // the catalog is the rodent evidence: a widened candidate must be a
+  // services row with category 'rodent' — name shape alone is not enough
+  // (codex round-4 P2)
+  services: [
+    { id: 'svc-exclusion', name: 'Exclusion Service', category: 'rodent' },
+    { id: 'svc-sanitation', name: 'Sanitation & Cleanup', category: 'rodent' },
+  ],
   scheduled_services: [
     // no rodent token, detects as pest — but it IS the rodent program
     { id: 'scheduled-exclusion', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Exclusion Service', window_start: '08:00:00' },
@@ -197,17 +204,25 @@ test('gate dark: the strict same-line pick is unchanged (kill switch restores ol
   });
 });
 
-test('a rodent report never claims trap-named visits of OTHER detectable lines', async () => {
+test('a rodent report never claims trap-named visits of OTHER detectable lines or outside the rodent catalog', async () => {
   process.env.GATE_RODENT_REPORT_REFRESH = 'true';
   const knex = makeKnex({
     ...BASE_FIXTURES,
+    // only Sanitation & Cleanup is a rodent-category catalog service here
+    services: [
+      { id: 'svc-sanitation', name: 'Sanitation & Cleanup', category: 'rodent' },
+      { id: 'svc-wildlife', name: 'Wildlife Trapping', category: 'specialty' },
+    ],
     scheduled_services: [
       // "trap" token but detectably mosquito — stays off the rodent report
       { id: 'scheduled-mosq-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Mosquito Trap Service', window_start: '08:00:00' },
       // trapping token, pest-default line, but wildlife work — the negative
-      // guard keeps non-rodent trapping out (codex P1)
+      // guard AND the catalog keep non-rodent trapping out (codex P1)
       { id: 'scheduled-wildlife', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Wildlife Trapping', window_start: '09:00:00' },
       { id: 'scheduled-fly-trap', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Fly Trap Service', window_start: '11:00:00' },
+      // adjacent-shaped name with NO rodent catalog row — name shape alone
+      // is not rodent evidence (codex round-4 P2)
+      { id: 'scheduled-postcon', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Post-Construction Exclusion', window_start: '12:00:00' },
       // quarterly pest visit: not rodent-related, also skipped
       { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-04', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00' },
       { id: 'scheduled-sanitation', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'Sanitation & Cleanup', window_start: '10:00:00' },
