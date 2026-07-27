@@ -333,15 +333,24 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // backward, because the season's edge is the whole point.
   const clampToSeason = (dateStr) => {
     if (pattern !== SEASONAL_FEB_OCT || !dateStr) return dateStr;
+    const drifted = Number(dateStr.slice(5, 7));
+    // Already in season: the weekend/blackout passes above have run, so this
+    // date is good — never move it.
+    if (drifted >= SEASON_FIRST_MONTH && drifted <= SEASON_LAST_MONTH) return dateStr;
+    // Direction depends on WHICH edge we fell off. A forward weekend/blackout
+    // nudge overshoots October into Nov/Dec -> pull back to October. A BACKWARD
+    // weekend shift (weekendShift: 'back') undershoots February into January ->
+    // push forward to February. Clamping the wrong way would cross the whole
+    // winter and land the visit ~4 months from where the cadence put it.
+    const step = drifted < SEASON_FIRST_MONTH ? 1 : -1;
     let candidate = dateStr;
-    for (let back = 0; back < 45; back++) {
+    for (let i = 0; i < 75; i++) {
+      candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), step));
       const month = Number(candidate.slice(5, 7));
-      if (month >= SEASON_FIRST_MONTH && month <= SEASON_LAST_MONTH) {
-        const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
-        const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
-        if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
-      }
-      candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), -1));
+      if (month < SEASON_FIRST_MONTH || month > SEASON_LAST_MONTH) continue;
+      const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+      const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+      if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
     }
     return dateStr;
   };

@@ -164,6 +164,43 @@ describe('seasonal_feb_oct cadence (mosquito seasonal 9x, owner 2026-07-27)', ()
     }
   });
 
+  test('a BACKWARD weekend shift cannot pull a February visit into January', () => {
+    // Mirror of the October edge (pre-push P1 r2). weekendShift:'back' moves
+    // dates earlier, so February is the dangerous edge — a 2024-10-05 parent
+    // produced 2025-01-31 before the clamp learned direction. Clamping the
+    // wrong way here would cross the whole winter and land it ~4 months off.
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: '2024-10-05',
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: true,
+      weekendShift: 'back',
+    });
+    expect(rows).toHaveLength(8);
+    expect(rows.map((r) => r.scheduled_date).filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7)))))
+      .toEqual([]);
+    // Pushed FORWARD into February, not back to the previous October.
+    expect(rows[0].scheduled_date.slice(0, 7)).toBe('2025-02');
+  });
+
+  test('both weekend-shift directions keep every start month out of winter', () => {
+    for (const weekendShift of ['forward', 'back']) {
+      for (let month = 1; month <= 12; month++) {
+        const base = `2026-${String(month).padStart(2, '0')}-15`;
+        const bad = RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+          id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: base,
+        }, {
+          pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+          visitsPerYear: 9,
+          skipWeekends: true,
+          weekendShift,
+        }).map((r) => r.scheduled_date).filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7))));
+        expect({ weekendShift, base, bad }).toEqual({ weekendShift, base, bad: [] });
+      }
+    }
+  });
+
   test('the weekend shift and blackout nudge cannot push an October visit into November', () => {
     // Both adjustments move dates FORWARD, so the season's last month is the
     // dangerous edge: a blacked-out Oct 31 would otherwise seed Nov 1 and break
