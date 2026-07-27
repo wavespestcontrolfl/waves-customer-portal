@@ -326,11 +326,31 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     return candidate;
   };
 
+  // The weekend shift and blackout nudge both move dates FORWARD, which can
+  // push an October visit into November and break the seasonal cadence's
+  // no-Nov-Jan contract (a blacked-out Oct 31 would seed Nov 1). Walk back to
+  // the nearest in-season day that is also clear of weekends and blackouts —
+  // backward, because the season's edge is the whole point.
+  const clampToSeason = (dateStr) => {
+    if (pattern !== SEASONAL_FEB_OCT || !dateStr) return dateStr;
+    let candidate = dateStr;
+    for (let back = 0; back < 45; back++) {
+      const month = Number(candidate.slice(5, 7));
+      if (month >= SEASON_FIRST_MONTH && month <= SEASON_LAST_MONTH) {
+        const { dayOfWeek } = etParts(parseETDateTime(`${candidate}T12:00`));
+        const weekendClear = !skipWeekends || (dayOfWeek !== 0 && dayOfWeek !== 6);
+        if (weekendClear && !(blackoutDates && blackoutDates.has(candidate))) return candidate;
+      }
+      candidate = etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), -1));
+    }
+    return dateStr;
+  };
+
   let attempt = 1;
   while (rows.length < targetNewRows && attempt < maxAttempts) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
-    const nextDateStr = clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir));
+    const nextDateStr = clampToSeason(clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir)));
     if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
     if (existingDates.has(nextDateStr)) continue;
     existingDates.add(nextDateStr);

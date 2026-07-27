@@ -163,6 +163,40 @@ describe('seasonal_feb_oct cadence (mosquito seasonal 9x, owner 2026-07-27)', ()
       expect({ base, bad }).toEqual({ base, bad: [] });
     }
   });
+
+  test('the weekend shift and blackout nudge cannot push an October visit into November', () => {
+    // Both adjustments move dates FORWARD, so the season's last month is the
+    // dangerous edge: a blacked-out Oct 31 would otherwise seed Nov 1 and break
+    // the cadence's contract (pre-push P1). The clamp walks BACK to the nearest
+    // in-season day that is also clear of weekends and blackouts.
+    const seeded = (opts) => RecurringAppointmentSeeder.buildRecurringFollowUpRows({
+      id: 'parent-mq9', customer_id: 'customer-1', scheduled_date: '2028-02-29',
+    }, {
+      pattern: RecurringAppointmentSeeder.SEASONAL_FEB_OCT,
+      visitsPerYear: 9,
+      skipWeekends: true,
+      weekendShift: 'forward',
+      ...opts,
+    });
+
+    for (const blackoutDates of [
+      null,
+      new Set(['2028-10-31']),
+      new Set(['2028-10-31', '2028-10-30', '2028-10-27']),
+    ]) {
+      const rows = seeded(blackoutDates ? { blackoutDates } : {});
+      const offSeason = rows
+        .map((r) => r.scheduled_date)
+        .filter((d) => [11, 12, 1].includes(Number(d.slice(5, 7))));
+      expect(offSeason).toEqual([]);
+      // The plan must still be whole — clamping trims dates, never visits.
+      expect(rows).toHaveLength(8);
+      // And never onto a blacked-out day.
+      if (blackoutDates) {
+        expect(rows.filter((r) => blackoutDates.has(r.scheduled_date))).toEqual([]);
+      }
+    }
+  });
 });
 
 describe('every_6_weeks cadence (T&S 9x Enhanced, un-retired 2026-07-24)', () => {
