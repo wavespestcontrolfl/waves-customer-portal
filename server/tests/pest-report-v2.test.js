@@ -138,6 +138,15 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
     })).toBe('-roachtyped1');
+    // the whole roach FAMILY shares the opt-out (codex P1 #3007)
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown' } }),
+    })).toBe('-roachtyped1');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'palmetto_roach_knockdown' } }),
+    })).toBe('-roachtyped1');
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'bed_bug' } }),

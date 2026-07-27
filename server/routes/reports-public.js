@@ -341,21 +341,23 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // plus a seasonal "what to expect" forecast resolved from the property zip.
   // Pest service line only; best-effort so a forecast/network hiccup never blocks
   // the report. Flows to the client via the `...data` spread below.
-  // Cockroach typed reports opt OUT of the V2 dashboard entirely (owner
+  // Cockroach-FAMILY typed reports (generic cockroach + the roach
+  // knockdown cleanouts) opt OUT of the V2 dashboard entirely (owner
   // 2026-07-27): its perimeter-protection story — "Where we protected",
   // entry/lanai/pool-pad rows, "no perimeter application was logged" — is
   // wrong for an interior cleanout and read as filler. Without the V2
   // shell the report composes from the typed record instead: Visit
   // Summary (narrative slot), the What-we-found tiles, and the activity
-  // gauge, all of which the dashboard would otherwise suppress.
+  // gauge, all of which the dashboard would otherwise suppress. The same
+  // classifier drives the PDF cache suffix (pest-report-v2.js).
+  const { buildPestReportV2, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
-    && data.typedReport?.type !== 'cockroach'
+    && !isCockroachTypedReportType(data.typedReport?.type)
     && dynamicContext.premiumExperience
   ) {
     try {
-      const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
       const forecast = await fetchSeasonalForecastSafe(service.zip);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,

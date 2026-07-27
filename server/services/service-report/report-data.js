@@ -417,7 +417,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     .replace(/[^a-z0-9]+/g, ' ');
   // Area chips are a controlled vocabulary and remain a valid scope signal.
   const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
+  // fence/trash cover the controlled pest-area chips "Fence line" and
+  // "Trash area" — clearly exterior choices that previously fell through
+  // and (under the explicit-exterior rule) would wrongly zero the
+  // customer's dry-down timer (codex P1 #3007).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);

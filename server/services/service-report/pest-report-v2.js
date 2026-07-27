@@ -245,11 +245,20 @@ function buildPestReportV2({
 // PDFs cached before the pest V2 flip still serve the pre-dashboard render
 // on permanent links; including the gate re-renders each once on next view.
 // Scoped to pest-line records so nothing else mass-invalidates.
+// The whole cockroach FAMILY of typed reports (generic `cockroach` plus the
+// `german_roach_knockdown` / `palmetto_roach_knockdown` cleanouts — all
+// share the roach_activity indicator) opts out of the V2 perimeter
+// dashboard (owner 2026-07-27). One classifier feeds both the render gate
+// and the PDF cache key so they can never disagree (codex P1 #3007).
+function isCockroachTypedReportType(type) {
+  return /roach/i.test(String(type || ''));
+}
+
 function pestReportV2PdfSignature(service = {}) {
   if (process.env.PEST_REPORT_V2 !== 'true') return '';
   const line = service.service_line || detectServiceLine(service.service_type);
   if (line !== 'pest') return '';
-  // Cockroach typed reports dropped the V2 dashboard entirely (owner
+  // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
   // dashboard on permanent links. Distinct suffix re-renders each once.
@@ -257,7 +266,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (data?.typedReportSnapshot?.type === 'cockroach') return '-roachtyped1';
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return '-roachtyped1';
   } catch { /* fall through to the line suffix */ }
   // 'b' = the typed-activity composition (owner ruling 2026-07-14): typed
   // pest PDFs now render the ActivityCard alongside the dashboard, so PDFs
@@ -270,6 +279,7 @@ function pestReportV2PdfSignature(service = {}) {
 module.exports = {
   buildPestReportV2,
   pestReportV2PdfSignature,
+  isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,
   buildForecast,

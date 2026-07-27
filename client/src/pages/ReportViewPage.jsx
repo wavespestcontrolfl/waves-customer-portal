@@ -2377,10 +2377,12 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
       {body && <p className="ai-summary-body">{body}</p>}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't.
-          The narrative override always carries the follow-up itself (the
-          prompt requires it verbatim in meaning), so the bullet would read
-          as a paraphrased duplicate under it — suppressed. */}
-      {result.nextStep && !bodyOverride && !(body || '').includes(result.nextStep) && (
+          This containment rule applies to the narrative override too: the
+          prompt asks the narrative to carry the follow-up, but only actual
+          containment may hide the explicit instruction — a paraphrase
+          keeps the bullet (mild repetition beats a dropped care step,
+          codex P2 #3007). */}
+      {result.nextStep && !(body || '').includes(result.nextStep) && (
         <div className="ai-summary-bullets">
           <div className="ai-summary-bullet">{result.nextStep}</div>
         </div>

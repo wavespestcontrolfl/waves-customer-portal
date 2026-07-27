@@ -94,7 +94,11 @@ function deviceFacts(applications = []) {
         // Registered products reach the model only as a generic category —
         // the name never enters the prompt, so it cannot leak into copy.
         name: nameable ? name : null,
-        category: cleanText(product.category) || 'rodent control product',
+        // Service-neutral fallback: this engine serves every typed line
+        // now, and the catalog category is nullable — a cockroach or
+        // termite report must never describe its product as rodent
+        // control (codex P2 #3007).
+        category: cleanText(product.category) || 'treatment product',
         summary: nameable ? cleanText(product.service_report_summary).slice(0, 200) || null : null,
         nameable,
       };
@@ -273,7 +277,13 @@ function deterministicSummary(facts) {
       }
       parts.push(`${s.checked} of ${s.total} bait station${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
     } else {
-      parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected.`);
+      // Generic station programs (termite bait): a positive activity-status
+      // count is map-recorded fact and renders; zero adds no claim (the
+      // typed report's ratified copy owns absence wording — codex P2 #3007).
+      const activityClause = s.stationsWithActivity > 0
+        ? `, with activity observed at ${s.stationsWithActivity} station${s.stationsWithActivity === 1 ? '' : 's'}`
+        : '';
+      parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected${activityClause}.`);
     }
   }
   if (facts.photoEvidence.length) {
@@ -376,6 +386,7 @@ function factNumbers(facts) {
   const inaccessible = roleSet(s.inaccessible);
   const capturesAt = roleSet(s.trapsWithCaptureRecorded); // "a capture recorded at N traps"
   const consumptionAt = roleSet(s.stationsWithBaitConsumption); // "consumption observed at N stations"
+  const activityAt = roleSet(s.stationsWithActivity); // "activity observed at N stations" (termite bait)
   const captureTotals = new Set(); // "N captures" — only a typed finding grounds this
   (facts.findings || []).forEach((finding) => {
     const n = Number(String(finding.value).trim());
@@ -384,7 +395,7 @@ function factNumbers(facts) {
     else if (/check|inspect/i.test(finding.label)) checked.add(n);
     else if (/trap|station|device/i.test(finding.label)) total.add(n);
   });
-  return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, captureTotals };
+  return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, activityAt, captureTotals };
 }
 
 // "N traps" / "N of M stations" claims validated per noun, role, and
@@ -420,6 +431,9 @@ function contextualCountProblems(text, facts) {
     let allowed;
     if (/captur/i.test(lead)) allowed = roles.capturesAt;
     else if (/consum/i.test(lead)) allowed = roles.consumptionAt;
+    // "termite activity was observed at 2 stations" — the activity-status
+    // location count on termite bait maps (codex P2 #3007)
+    else if (/activit/i.test(lead)) allowed = roles.activityAt;
     // bare roster claims ("your 7 traps") fall through to the roster size
     else allowed = roleFrom(trail) || roleFrom(lead) || roles.total;
     if (!allowed.has(Number(first))) problems.push(`uncorroborated_count:${full.trim()}`);
@@ -645,6 +659,95 @@ function nextVisitProblems(text, facts) {
   return problems;
 }
 
+// ---------------------------------------------------------------------------
+// Domain-term grounding (codex P1 #3007): with the engine generalized to
+// every typed line, the facts-only contract must cover PEST NAMES,
+// TREATMENT ACTIONS, and LOCATIONS — a bed-bug report whose model output
+// claims "German cockroaches in the attic" or "gel bait was applied" must
+// fall back even though no numeral, banned word, or product name appears.
+// Each recognized term in the OUTPUT must match somewhere in the grounding
+// facts (JSON-serialized, normalized); `out` finds the claim, `corpus`
+// checks the facts. Fail-closed: an unmatched term rejects the summary.
+// ---------------------------------------------------------------------------
+const DOMAIN_TERMS = [
+  // pests
+  { kind: 'pest', out: /\b(?:cock)?roach(?:es)?\b/i, corpus: /\b(?:cock)?roach/ },
+  { kind: 'pest', out: /\bbed\s*bugs?\b/i, corpus: /\bbed\s*bug/ },
+  { kind: 'pest', out: /\btermites?\b/i, corpus: /\btermite/ },
+  { kind: 'pest', out: /\brodents?\b/i, corpus: /\brodent/ },
+  { kind: 'pest', out: /\brats?\b/i, corpus: /\brat\b|\brats\b/ },
+  { kind: 'pest', out: /\bmice\b|\bmouse\b/i, corpus: /\bmice\b|\bmouse\b/ },
+  { kind: 'pest', out: /\bants?\b/i, corpus: /\bants?\b/ },
+  { kind: 'pest', out: /\bspiders?\b/i, corpus: /\bspider/ },
+  { kind: 'pest', out: /\bwasps?\b/i, corpus: /\bwasp/ },
+  { kind: 'pest', out: /\bmosquito(?:es)?\b/i, corpus: /\bmosquito/ },
+  { kind: 'pest', out: /\bfleas?\b/i, corpus: /\bflea/ },
+  { kind: 'pest', out: /\bticks?\b/i, corpus: /\btick/ },
+  { kind: 'pest', out: /\bsilverfish\b/i, corpus: /\bsilverfish/ },
+  { kind: 'pest', out: /\bearwigs?\b/i, corpus: /\bearwig/ },
+  { kind: 'pest', out: /\bcrickets?\b/i, corpus: /\bcricket/ },
+  { kind: 'pest', out: /\bbeetles?\b/i, corpus: /\bbeetle/ },
+  { kind: 'pest', out: /\bscorpions?\b/i, corpus: /\bscorpion/ },
+  // treatment actions
+  { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
+  { kind: 'action', out: /\bbait(?:s|ed)?\b/i, corpus: /\bbait/ },
+  { kind: 'action', out: /\bgrowth\s+regulator/i, corpus: /\bgrowth\s+regulator/ },
+  { kind: 'action', out: /\bcracks?\s*(?:and|&)\s*crevices?/i, corpus: /\bcrack\w*\s+(?:and\s+)?crevice/ },
+  { kind: 'action', out: /\bflush[-\s]?out\b/i, corpus: /\bflush\s*out/ },
+  { kind: 'action', out: /\bexclusion\b/i, corpus: /\bexclusion/ },
+  { kind: 'action', out: /\bsanitation\b/i, corpus: /\bsanitation/ },
+  { kind: 'action', out: /\bdust(?:ed|ing)?\b/i, corpus: /\bdust/ },
+  { kind: 'action', out: /\bfog(?:ged|ging)?\b/i, corpus: /\bfog/ },
+  { kind: 'action', out: /\bspray(?:ed|ing)?\b/i, corpus: /\bspray/ },
+  { kind: 'action', out: /\bheat\s+treat/i, corpus: /\bheat\s+treat/ },
+  { kind: 'action', out: /\bsteam(?:ed|ing)?\b/i, corpus: /\bsteam/ },
+  { kind: 'action', out: /\bvacuum/i, corpus: /\bvacuum/ },
+  { kind: 'action', out: /\bencasements?\b/i, corpus: /\bencasement/ },
+  { kind: 'action', out: /\binject/i, corpus: /\binject/ },
+  { kind: 'action', out: /\bgranular\b/i, corpus: /\bgranular/ },
+  { kind: 'action', out: /\bbarrier\b/i, corpus: /\bbarrier/ },
+  { kind: 'action', out: /\btraps?\b|\btrapped\b|\btrapping\b/i, corpus: /\btrap/ },
+  { kind: 'action', out: /\bmonitors?\b|\bmonitoring\b/i, corpus: /\bmonitor/ },
+  // locations
+  { kind: 'location', out: /\bkitchens?\b/i, corpus: /\bkitchen/ },
+  { kind: 'location', out: /\bbath(?:room)?s?\b/i, corpus: /\bbath/ },
+  { kind: 'location', out: /\bbedrooms?\b/i, corpus: /\bbedroom/ },
+  { kind: 'location', out: /\battics?\b/i, corpus: /\battic/ },
+  { kind: 'location', out: /\bgarages?\b/i, corpus: /\bgarage/ },
+  { kind: 'location', out: /\blaundry\b/i, corpus: /\blaundry/ },
+  { kind: 'location', out: /\bpantry\b/i, corpus: /\bpantry/ },
+  { kind: 'location', out: /\bclosets?\b/i, corpus: /\bcloset/ },
+  { kind: 'location', out: /\bbasements?\b/i, corpus: /\bbasement/ },
+  { kind: 'location', out: /\bcrawl\s*space/i, corpus: /\bcrawl\s*space/ },
+  { kind: 'location', out: /\blanai\b/i, corpus: /\blanai/ },
+  { kind: 'location', out: /\bpatios?\b/i, corpus: /\bpatio/ },
+  { kind: 'location', out: /\bpools?\b/i, corpus: /\bpool/ },
+  { kind: 'location', out: /\bdriveways?\b/i, corpus: /\bdriveway/ },
+  { kind: 'location', out: /\bperimeters?\b/i, corpus: /\bperimeter/ },
+  { kind: 'location', out: /\bfoundations?\b/i, corpus: /\bfoundation/ },
+  { kind: 'location', out: /\beaves\b|\bsoffits?\b/i, corpus: /\beaves\b|\bsoffit/ },
+  { kind: 'location', out: /\bdishwashers?\b/i, corpus: /\bdishwasher/ },
+  { kind: 'location', out: /\brefrigerators?\b|\bfridge\b/i, corpus: /\brefrigerator|\bfridge/ },
+  { kind: 'location', out: /\bstoves?\b|\bovens?\b/i, corpus: /\bstove|\boven/ },
+  { kind: 'location', out: /\bsinks?\b/i, corpus: /\bsink/ },
+  { kind: 'location', out: /\bbaseboards?\b/i, corpus: /\bbaseboard/ },
+  { kind: 'location', out: /\bwall\s*voids?\b/i, corpus: /\bwall\s*void/ },
+  { kind: 'location', out: /\bstations?\b/i, corpus: /\bstation/ },
+  { kind: 'location', out: /\bfence\b/i, corpus: /\bfence/ },
+];
+
+function ungroundedDomainTerms(text, facts) {
+  const problems = [];
+  const corpus = ` ${JSON.stringify(facts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  for (const term of DOMAIN_TERMS) {
+    const match = String(text).match(new RegExp(term.out.source, 'i'));
+    if (match && !term.corpus.test(corpus)) {
+      problems.push(`ungrounded_${term.kind}:${match[0].toLowerCase()}`);
+    }
+  }
+  return problems;
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -663,6 +766,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
   problems.push(...nextVisitProblems(text, facts));
+  problems.push(...ungroundedDomainTerms(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month

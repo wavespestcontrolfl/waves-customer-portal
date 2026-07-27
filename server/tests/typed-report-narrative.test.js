@@ -86,6 +86,41 @@ test('follow-up windows from the ratified copy ground their own numerals', () =>
   expect(ungroundedClaims('A capture was recorded at the kitchen monitor.', facts)).toContain('unsupported_capture_claim');
 });
 
+test('cross-domain claims reject: pests, actions, and locations must exist in the facts', () => {
+  const facts = groundingFacts(roachInput());
+  // grounded control — everything below appears in the typed facts
+  expect(ungroundedClaims('We treated cracks and crevices in the kitchen and completed a flush-out treatment.', facts)).toEqual([]);
+  // invented action + invented location reject
+  expect(ungroundedClaims('We applied gel bait in the kitchen.', facts)).toContain('ungrounded_action:gel bait');
+  expect(ungroundedClaims('Activity was documented in the attic.', facts)).toContain('ungrounded_location:attic');
+  // a DIFFERENT pest on this report rejects (the codex bed-bug example,
+  // inverted: bed bugs claimed on a cockroach report)
+  expect(ungroundedClaims('We also inspected for bed bugs during the visit.', facts)).toContain('ungrounded_pest:bed bugs');
+});
+
+test('termite bait maps ground activity-status counts by their own role', () => {
+  const termiteFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Termite Bait Station Monitoring',
+    reportTypeLabel: 'Termite Bait Station Check',
+    typedReport: {
+      reportTypeLabel: 'Termite Bait Station Check',
+      todaysResult: { headline: 'Stations were checked today.', body: 'We checked 10 bait stations today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'Subterranean termites', value: 'subterranean' }],
+    },
+    activity: null,
+    stationSummary: { total: 10, checked: 10, activity: 2, serviced: 0, inaccessible: 0 },
+    stationProgram: 'termite',
+    applications: [],
+    photos: [],
+  }));
+  expect(termiteFacts.stations).toMatchObject({ program: 'termite', stationsWithActivity: 2 });
+  // the accurate activity-count sentence survives; role swaps reject
+  expect(ungroundedClaims('Termite activity was observed at 2 stations.', termiteFacts)).toEqual([]);
+  expect(ungroundedClaims('2 stations were inspected today.', termiteFacts)).toContain('uncorroborated_count:2 stations');
+  // deterministic fallback carries the map-recorded activity count
+  expect(deterministicSummary(termiteFacts)).toContain('10 of 10 stations were inspected, with activity observed at 2 stations.');
+});
+
 test('clean model copy is accepted; a withheld pesticide echo falls back', async () => {
   const clean = 'Cockroach activity was high today, with German cockroaches noted in the kitchen, bathrooms, and under the sink. We applied an insect growth regulator, treated cracks and crevices, and completed a flush-out treatment. Photo evidence documented droppings and cast skins under the kitchen sink. A follow-up visit in 10–14 days is recommended, and your next visit is scheduled for Monday, August 3, arriving 3–5 PM.';
   const accepted = await applyTypedReportNarrative(roachInput(), {
