@@ -2864,25 +2864,34 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // legacy rows fall back to exact catalog-NAME matching plus the
     // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
     // the strict same-line match.
-    let rodentCatalogIds = null;
+    let serviceCategoryById = null;
     let rodentCatalogNames = null;
     if (rodentReportRefresh) {
       try {
-        const catalogRows = await knex('services').where({ category: 'rodent' }).select('id', 'name');
-        rodentCatalogIds = new Set((Array.isArray(catalogRows) ? catalogRows : [])
-          .map((row) => String(row.id || '')).filter(Boolean));
+        const catalogRows = await knex('services').select('id', 'name', 'category');
+        serviceCategoryById = new Map((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => row && row.id)
+          .map((row) => [String(row.id), String(row.category || '')]));
         rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => String(row?.category || '') === 'rodent')
           .map((row) => String(row.name || '').trim().toLowerCase())
           .filter(Boolean));
-      } catch { rodentCatalogIds = null; rodentCatalogNames = null; }
+      } catch { serviceCategoryById = null; rodentCatalogNames = null; }
     }
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
       .find((row) => {
+        // A resolvable catalog link is authoritative in BOTH directions
+        // (codex round-8 P2): it admits a rodent-category visit under any
+        // label AND vetoes a rodent-sounding label linked to a non-rodent
+        // service. Label matching only ever judges unlinked/unresolvable
+        // rows.
+        const linkedCategory = rodentReportRefresh && serviceCategoryById && row.service_id
+          ? serviceCategoryById.get(String(row.service_id)) || null
+          : null;
+        if (linkedCategory) return linkedCategory === 'rodent';
         const rowLine = detectServiceLine(row.service_type);
         if (rowLine === serviceLine) return true;
         if (!rodentReportRefresh) return false;
-        // catalog link is authoritative — survives label customization
-        if (rodentCatalogIds && row.service_id && rodentCatalogIds.has(String(row.service_id))) return true;
         // unlinked legacy rows: exact rodent-catalog name + adjacent shape
         return rowLine === 'pest'
           && isRodentAdjacentServiceType(row.service_type)

@@ -450,6 +450,22 @@ function contextualCountProblems(text, facts) {
       && (quantifier !== 'both' || s.total === 2);
     if (!ok) problems.push(`uncorroborated_totality:${match[0].trim()}`);
   }
+  // Post-nominal totality (codex round-8 P1): "The traps were all
+  // inspected" places the quantifier after the noun and dodges the
+  // noun-first pattern above. Same role rules, verb required in the same
+  // clause segment.
+  const postNominalRe = /\b(traps?|stations?|devices?)\b[^.!?;,]{0,25}?\b(all|both|each|every)\b[^.!?;,]{0,25}?\b(inspect\w*|check\w*|servic(?:ed|ing)|access\w*)/gi;
+  while ((match = postNominalRe.exec(text)) !== null) {
+    const quantifier = match[2].toLowerCase();
+    const verb = match[3];
+    const roleValue = /^(inspect|check)/i.test(verb)
+      ? s.checked
+      : (/^servic/i.test(verb) ? s.serviced : s.inaccessible);
+    const ok = typeof s.total === 'number'
+      && roleValue === s.total
+      && (quantifier !== 'both' || s.total === 2);
+    if (!ok) problems.push(`uncorroborated_totality:${match[0].trim()}`);
+  }
   return problems;
 }
 
@@ -494,26 +510,44 @@ const CONSUMPTION_CLAIM_RES = [
 
 // Even SUPPORTED events only publish as grounded generic statements (codex
 // round-6 P1): with a capture on record, "we caught a rat in the kitchen"
-// still invents species/location the facts don't carry. Positive claims
-// must match the fact-shaped templates below — anything freer rejects.
-const ALLOWED_CAPTURE_PHRASE = /\b(?:(?:a|an|\d+)\s+)?captures?\s+(?:was\s+|were\s+)?recorded(?:\s+at\s+\d+\s+traps?)?\b/i;
-const ALLOWED_CONSUMPTION_PHRASE = /\b(?:bait\s+)?consumption\s+(?:was\s+|were\s+)?observed(?:\s+at\s+\d+\s+(?:bait\s+)?stations?)?\b/i;
+// still invents species/location the facts don't carry. The templates are
+// ANCHORED over the whole comma-delimited clause (codex round-8 P1) — "a
+// capture was recorded in the kitchen" contains the safe substring but the
+// invented location suffix must fail the match, so the clause may carry
+// only an optional leading connective and an optional trailing time-frame
+// phrase around the grounded statement.
+const CLAIM_TAIL = '(?:\\s+(?:today|this\\s+visit|on\\s+(?:this|today’s|today\'s)\\s+visit|during\\s+(?:this|the)\\s+visit))?';
+const ALLOWED_CAPTURE_PHRASE = new RegExp(`^(?:(?:and|with|plus)\\s+)?(?:(?:a|an|\\d+)\\s+)?captures?\\s+(?:was\\s+|were\\s+)?recorded(?:\\s+at\\s+\\d+\\s+traps?)?${CLAIM_TAIL}$`, 'i');
+const ALLOWED_CONSUMPTION_PHRASE = new RegExp(`^(?:(?:and|with|plus)\\s+)?(?:bait\\s+)?consumption\\s+(?:was\\s+|were\\s+)?observed(?:\\s+at\\s+\\d+\\s+(?:bait\\s+)?stations?)?${CLAIM_TAIL}$`, 'i');
 
+// Comma included: the template anchors over the smallest clause, so "…were
+// inspected, with a capture recorded at 2 traps" isolates the claim.
 function clauseAround(text, index) {
   const before = text.slice(0, index);
-  const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf(';'));
-  const endRel = text.slice(index).search(/[.!?;]/);
-  return text.slice(start + 1, endRel === -1 ? text.length : index + endRel);
+  const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf(';'), before.lastIndexOf(','));
+  const endRel = text.slice(index).search(/[.!?;,]/);
+  return text.slice(start + 1, endRel === -1 ? text.length : index + endRel).trim();
 }
 
 function unsupportedActivityClaims(text, facts) {
   const problems = [];
   const roles = factNumbers(facts);
+  const stations = facts.stations || {};
+  const captureState = typedActivityState(facts, /captur/i);
+  const consumptionState = typedActivityState(facts, /consum/i);
   const captureSupported = [...roles.capturesAt, ...roles.captureTotals].some((n) => n > 0)
-    || typedActivityState(facts, /captur/i).positive === true;
+    || captureState.positive === true;
   const consumptionSupported = [...roles.consumptionAt].some((n) => n > 0)
-    || typedActivityState(facts, /consum/i).positive === true;
-  const scan = (regexes, supported, allowedPhrase, positiveProblem, negativeProblem) => {
+    || consumptionState.positive === true;
+  // A NEGATIVE claim needs explicit zero EVIDENCE (codex round-8 P1): a
+  // typed zero/"None" finding, or a station map that recorded the status
+  // with zero flagged locations. With neither, "no captures were recorded"
+  // asserts something nothing recorded and rejects.
+  const captureZeroRecorded = captureState.positive === false
+    || typeof stations.trapsWithCaptureRecorded === 'number';
+  const consumptionZeroRecorded = consumptionState.positive === false
+    || typeof stations.stationsWithBaitConsumption === 'number';
+  const scan = (regexes, supported, zeroRecorded, allowedPhrase, positiveProblem, negativeProblem, ungroundedNegative) => {
     for (const re of regexes) {
       for (const match of String(text).matchAll(new RegExp(re.source, 'gi'))) {
         if (claimNegated(text, match.index, match[0].length)) {
@@ -521,6 +555,7 @@ function unsupportedActivityClaims(text, facts) {
           // an invented positive: "No captures were recorded" must reject
           // when the facts record one (codex round-7 P1).
           if (supported) problems.push(negativeProblem);
+          else if (!zeroRecorded) problems.push(ungroundedNegative);
           continue;
         }
         if (supported && allowedPhrase.test(clauseAround(text, match.index))) continue;
@@ -528,10 +563,10 @@ function unsupportedActivityClaims(text, facts) {
       }
     }
   };
-  scan(CAPTURE_CLAIM_RES, captureSupported, ALLOWED_CAPTURE_PHRASE,
-    'unsupported_capture_claim', 'contradicted_capture_negative');
-  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, ALLOWED_CONSUMPTION_PHRASE,
-    'unsupported_consumption_claim', 'contradicted_consumption_negative');
+  scan(CAPTURE_CLAIM_RES, captureSupported, captureZeroRecorded, ALLOWED_CAPTURE_PHRASE,
+    'unsupported_capture_claim', 'contradicted_capture_negative', 'ungrounded_capture_negative');
+  scan(CONSUMPTION_CLAIM_RES, consumptionSupported, consumptionZeroRecorded, ALLOWED_CONSUMPTION_PHRASE,
+    'unsupported_consumption_claim', 'contradicted_consumption_negative', 'ungrounded_consumption_negative');
   return problems;
 }
 
@@ -578,6 +613,26 @@ function nextVisitProblems(text, facts) {
     if (!expectedWeekday || match[1].toLowerCase() !== expectedWeekday) {
       problems.push(`ungrounded_weekday:${match[1]}`);
     }
+  }
+  // STANDALONE clock times too (codex round-8 P1): "at 8 PM" reformats the
+  // grounded 8–10 AM range into a wrong single time whose numeral is
+  // grounded. Range mentions are removed first (the window check above
+  // already judged them); every remaining clock time must be one of the
+  // grounded window's boundaries, meridiem included.
+  const allowedTimes = new Set();
+  if (expectedWindow) {
+    const win = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*–\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/.exec(expectedWindow);
+    if (win) {
+      const endMeridiem = win[6];
+      const startMeridiem = win[3] || endMeridiem;
+      allowedTimes.add(`${Number(win[1])}:${win[2] || '00'} ${startMeridiem}`);
+      allowedTimes.add(`${Number(win[4])}:${win[5] || '00'} ${endMeridiem}`);
+    }
+  }
+  const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
+  for (const match of withoutRanges.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/gi)) {
+    const normalized = `${Number(match[1])}:${match[2] || '00'} ${match[3].toUpperCase()}`;
+    if (!allowedTimes.has(normalized)) problems.push(`ungrounded_time:${match[0].trim()}`);
   }
   return problems;
 }

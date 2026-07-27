@@ -171,6 +171,22 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // round-7 P1): "no captures" must reject when a capture IS recorded
   expect(ungroundedClaims('No captures were recorded on this visit.', swapFacts))
     .toContain('contradicted_capture_negative');
+  // the allowed template is ANCHORED over the clause (codex round-8 P1):
+  // an invented location suffix on a safe phrase rejects
+  expect(ungroundedClaims('A capture was recorded in the kitchen.', swapFacts))
+    .toContain('unsupported_capture_claim');
+  expect(ungroundedClaims('7 of 7 traps were inspected, with a capture recorded at 2 traps.', swapFacts)).toEqual([]);
+  // a NEGATIVE claim needs explicit zero evidence (codex round-8 P1): with
+  // no typed capture finding AND no station map, nothing recorded a zero
+  const noRecord = groundingFacts(input({
+    stationSummary: null,
+    typedReport: {
+      todaysResult: { headline: 'Rodent activity was moderate today.', body: 'We completed the rodent service today.', nextStep: null },
+      findings: [{ fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '7', value: '7' }],
+    },
+  }));
+  expect(ungroundedClaims('No captures were recorded on this visit.', noRecord))
+    .toContain('ungrounded_capture_negative');
 
   // totality quantifiers are validated without digits (codex round-7 P1)
   expect(ungroundedClaims('All traps were inspected today.', facts)).toEqual([]); // 7 of 7 — true
@@ -186,8 +202,17 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   }));
   expect(ungroundedClaims('All traps were inspected today.', partialFacts)).toContain('uncorroborated_totality:All traps');
   expect(ungroundedClaims('Both traps were checked today.', facts)).toContain('uncorroborated_totality:Both traps');
+  // post-nominal quantifiers count too (codex round-8 P1)
+  expect(ungroundedClaims('The traps were all inspected today.', partialFacts).some((p) => p.startsWith('uncorroborated_totality'))).toBe(true);
+  expect(ungroundedClaims('The traps were all inspected today.', facts)).toEqual([]);
   // roster references without a role verb claim nothing
   expect(ungroundedClaims('The service covers all of the traps around your home.', facts)).toEqual([]);
+
+  // standalone clock times validate against the window boundaries (codex
+  // round-8 P1): a reformatted single time keeps the meridiem honest
+  expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts)).toEqual([]);
 
   // standalone weekday mentions validate against the grounded visit (codex
   // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday

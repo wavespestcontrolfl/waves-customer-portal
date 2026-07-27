@@ -215,6 +215,31 @@ test('gated: a service_id-linked rodent-catalog visit is disclosed even under a 
   });
 });
 
+test('gated: a rodent-sounding label linked to a NON-rodent catalog service is vetoed', async () => {
+  process.env.GATE_RODENT_REPORT_REFRESH = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-lawn', name: 'Lawn Aeration', category: 'lawn_care' },
+      { id: 'svc-trap-check', name: 'Rodent Trap Check', category: 'rodent' },
+    ],
+    scheduled_services: [
+      // stale rodent label, but the catalog link says lawn — the link is
+      // authoritative in BOTH directions (codex round-8 P2)
+      { id: 'scheduled-stale-label', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Rodent Check-Up', service_id: 'svc-lawn', window_start: '08:00:00' },
+      { id: 'scheduled-real-rodent', customer_id: 'customer-1', scheduled_date: '2999-02-01', status: 'confirmed', service_type: 'Rodent Trap Check', service_id: 'svc-trap-check', window_start: '09:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-veto', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Rodent Trap Check',
+    scheduledDate: '2999-02-01',
+    windowStart: '09:00:00',
+  });
+});
+
 test('gate dark: the strict same-line pick is unchanged (kill switch restores old behavior)', async () => {
   const data = await buildReportV1Data(RODENT_SERVICE, 'token-rodent-dark', makeKnex(RODENT_PROGRAM_FIXTURES));
 
