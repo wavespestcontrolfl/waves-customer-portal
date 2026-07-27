@@ -125,7 +125,15 @@ function isStrictlyAscending(row) {
   let previous = -Infinity;
   for (const bucket of BUCKET_ORDER) {
     const max = bucketMax(row[bucket]);
+    // A malformed threshold (max_sqft: 'bad') yields NaN, and every NaN
+    // comparison is false — so without this check the row would pass here, get
+    // its legacy buckets rewritten, and then fail validatePestPricingConfig with
+    // db-bridge's legacy-seed guard no longer matching. syncConstantsFromDB
+    // would restore ALL pricing constants instead of loading DB-authoritative
+    // pricing. Absent is legal only as the terminal unbounded bucket.
     const value = max === undefined ? Infinity : max;
+    if (Number.isNaN(value)) return false;
+    if (value !== Infinity && !Number.isFinite(value)) return false;
     if (value <= previous) return false;
     previous = value;
   }
