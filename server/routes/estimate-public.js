@@ -15889,24 +15889,6 @@ function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
   return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
 }
 
-// The estimate's STORED termite pricing — what the frozen customer bundle
-// serves — for the builder's replay-vs-quote guard (codex P1 on #3001).
-// Read off the persisted mapped rows, same family as the persistence-side
-// row sweeps; null when the estimate has no persisted bait row.
-function persistedTermiteQuoteForComparison(estData) {
-  const rows = [estData?.result?.recurring?.services, estData?.recurring?.services]
-    .flatMap((list) => (Array.isArray(list) ? list : []));
-  const bait = rows.find((svc) => recurringServiceKey(svc) === 'termite_bait');
-  if (!bait) return null;
-  const rental = rows.find((svc) => String(svc?.service || '').toLowerCase() === 'termite_station_rental'
-    || /termite station rental/i.test(String(svc?.name || '')));
-  return {
-    ownership: rental ? 'rent' : 'own',
-    baitPerApp: Number(bait.perTreatment ?? bait.perApp) || null,
-    upliftPerApp: rental ? (Number(rental.perTreatment ?? rental.perApp) || null) : null,
-  };
-}
-
 // Engine inputs for the buy-vs-rent comparison replays. Admin-builder saves
 // store the replayable payload as engineRequest = { profile,
 // selectedServices, options } (estimate_data.inputs there is the FLATTENED
@@ -15963,7 +15945,8 @@ function termiteComparisonAvailableForEstimate(estData, services = [], estimate 
     // Same guards as the PDF route — selectedTier, quote-time discount, AND
     // the stored-quote reproduction check: a quote the replay can't
     // reproduce must hide the link, not 404 it.
-    const persistedQuote = persistedTermiteQuoteForComparison(estData);
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
     available = persistedQuote != null && buildTermiteComparisonData(comparisonEngineInputs(estData), {
       selectedTier: estimate?.waveguard_tier || null,
       expectedTierDiscount: estimate?.waveguard_tier
@@ -17812,7 +17795,8 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
     // instead of misprinting discounted figures.
     const storedBondSnapshot = termiteBondOptionsFromEstimateData(estData)
       || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
-    const persistedQuote = persistedTermiteQuoteForComparison(estData);
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
     if (!persistedQuote) return notFound();
     const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
       bondOptions: termiteBondOptionGateOn() ? storedBondSnapshot : null,

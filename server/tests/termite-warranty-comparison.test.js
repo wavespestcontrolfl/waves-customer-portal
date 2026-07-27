@@ -191,6 +191,51 @@ describe('replay must reproduce the stored quote', () => {
     expect(buildTermiteComparisonData(termiteInputs(), {
       persistedQuote: { ownership: 'own', baitPerApp: 99 },
     })).toBeNull();
+    // Own-mode install price is on the sheet — a termite_install config
+    // change after send fails closed too (codex P1 follow-up).
+    const ownMapped = mapV1ToLegacyShape(generateEstimate(termiteInputs()));
+    const installItem = ownMapped.oneTime.items.find((i) => i.service === 'termite_bait_installation');
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'own', baitPerApp: 105, installPrice: installItem.price },
+    })).toBeTruthy();
+    expect(buildTermiteComparisonData(termiteInputs(), {
+      persistedQuote: { ownership: 'own', baitPerApp: 105, installPrice: installItem.price - 40 },
+    })).toBeNull();
+  });
+
+  test('the guard is GROSS-vs-GROSS so discounted bundles still render (codex P1 follow-up)', () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    // Bundled estimate: WaveGuard percent applies, mapped rows stay
+    // pre-discount — the stored gross rate must match the replay's gross,
+    // not reject every discounted comparison.
+    const bundled = translateV2CallToV1Input(PROFILE, ['GENERAL_PEST', 'TERMITE_BAIT'], {
+      termiteBaitSystem: 'advance',
+      termiteOwnership: 'rent',
+    });
+    const mapped = mapV1ToLegacyShape(generateEstimate(JSON.parse(JSON.stringify(bundled))));
+    const persisted = persistedTermiteQuoteFromEstimateData({ result: mapped });
+    expect(persisted).toMatchObject({ ownership: 'rent' });
+    expect(buildTermiteComparisonData(bundled, { persistedQuote: persisted })).toBeTruthy();
+  });
+
+  test('persisted quote reads the raw { engineInputs, engineResult } shape too (codex P2)', () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const rentResult = generateEstimate(termiteInputs({ termiteOwnership: 'rent' }));
+    const raw = persistedTermiteQuoteFromEstimateData({ engineInputs: termiteInputs(), engineResult: rentResult });
+    const rawBait = rentResult.lineItems.find((li) => li.service === 'termite_bait');
+    const rawRental = rentResult.lineItems.find((li) => li.service === 'termite_station_rental');
+    expect(raw).toMatchObject({
+      ownership: 'rent',
+      baitPerApp: rawBait.perApp,
+      upliftPerApp: rawRental.perApp,
+    });
+    // The raw-shape quote round-trips through the guard.
+    expect(buildTermiteComparisonData(termiteInputs(), { persistedQuote: raw })).toBeTruthy();
+    // No termite anywhere → null.
+    expect(persistedTermiteQuoteFromEstimateData({ inputs: {} })).toBeNull();
   });
 });
 
