@@ -40,6 +40,8 @@ const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
+  annualPrepayEligibleForMosquitoTier,
+  mosquitoTierForAxisToken,
   buildPricingBundle,
   commercialAcceptDepositExempt,
   isCommercialAutoAcceptEstimate,
@@ -645,10 +647,18 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       const cadenceRequestsSeasonal = !!depositServiceCadences
         && Object.values(depositServiceCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
-      const prepayEligibleHere = !cadenceRequestsSeasonal
-        && (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean'
-          ? prepayFreq.annualPrepayEligible
-          : annualPrepayEligibleForEstimateData(estData));
+      // A monthly12 axis on a seasonal-default estimate is a VALID prepay —
+      // the stored-mix fallback would wrongly reject it (codex r16 P2).
+      // Mirrors accept's adjudication order exactly.
+      const depositAxisTier = depositServiceCadences
+        ? mosquitoTierForAxisToken(depositServiceCadences.mosquito)
+        : null;
+      let prepayEligibleHere;
+      if (cadenceRequestsSeasonal) prepayEligibleHere = false;
+      else if (depositAxisTier) prepayEligibleHere = annualPrepayEligibleForMosquitoTier(estData, depositAxisTier);
+      else if (prepayFreq && typeof prepayFreq.annualPrepayEligible === 'boolean') {
+        prepayEligibleHere = prepayFreq.annualPrepayEligible;
+      } else prepayEligibleHere = annualPrepayEligibleForEstimateData(estData);
       if (!prepayEligibleHere) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }

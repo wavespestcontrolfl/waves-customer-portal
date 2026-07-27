@@ -389,8 +389,16 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
   if (kind !== 'recurring' && price == null) return null;
 
-  const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
   const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // Never stamp the monthly catalog identity on a seasonal mosquito line
+  // (codex r16 P2): the seasonal row is normally in the index (queried
+  // explicitly despite is_active=false), but a fuzzy hit on mosquito_monthly
+  // would make catalog-first consumers classify the plan as 12-visit
+  // monthly. Fail to NO identity rather than the wrong one.
+  const matched = cadence === 'seasonal_feb_oct' && rawMatched?.service_key === 'mosquito_monthly'
+    ? null
+    : rawMatched;
   // The scheduler (and Schedule modal) have no native every_6_weeks cadence —
   // they represent it as a custom 42-day interval. Translate here so the
   // modal pre-fill books the series the quote actually sold; intervalDays is
@@ -1891,7 +1899,14 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
-        .where({ is_active: true })
+        // mosquito_seasonal is is_active=false until the owner activates the
+        // program, but a seasonal QUOTE still needs its catalog identity —
+        // without it the fuzzy match stamps mosquito_monthly's service_id on
+        // a seasonal booking and catalog-first consumers classify the plan
+        // as 12-visit monthly (codex r16 P2). Inactive here only widens the
+        // schedule-modal pre-fill's identity resolution; it does not make
+        // the service bookable anywhere else.
+        .where((q) => q.where({ is_active: true }).orWhere({ service_key: 'mosquito_seasonal' }))
         .select(
           'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
           'frequency', 'visits_per_year', 'default_duration_minutes',

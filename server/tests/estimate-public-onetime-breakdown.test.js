@@ -7448,6 +7448,23 @@ describe('public estimate one-time breakdown', () => {
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'mosquito', name: 'Mosquito' },
     ], [])).toBe(true);
+    // Bundle combo axes (codex r16 P2): the mosquito tier arrives as a
+    // serviceCadences token, and eligibility must follow the AXIS, not the
+    // stored row — monthly12 on a seasonal-default estimate is a valid
+    // prepay; seasonal9 on a monthly-default one is not.
+    const { mosquitoTierForAxisToken, annualPrepayEligibleForMosquitoTier } = require('../routes/estimate-public');
+    expect(mosquitoTierForAxisToken('monthly12')).toEqual(expect.objectContaining({ visitsPerYear: 12 }));
+    expect(mosquitoTierForAxisToken('seasonal9')).toEqual(expect.objectContaining({ visitsPerYear: 9 }));
+    expect(mosquitoTierForAxisToken('quarterly')).toBe(null);
+    const seasonalDefaultData = {
+      result: {
+        recurring: {
+          services: [{ service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 }],
+        },
+      },
+    };
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('monthly12'))).toBe(true);
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('seasonal9'))).toBe(false);
     // …EXCEPT seasonal mosquito (9x Feb–Oct, codex r8 P1): the converter fails
     // that prepay closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED) after a
     // deposit may already be collected, so the shared gate — SSR CTA, /data

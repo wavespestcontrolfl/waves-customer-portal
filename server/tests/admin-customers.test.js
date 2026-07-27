@@ -542,6 +542,37 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ name: 'Tick Treatment' }, legacyIndex)?.service_key).toBe('flea_tick');
   });
 
+  test('seasonal mosquito lines keep the seasonal catalog identity, never monthly (codex r16 P2)', () => {
+    const index = indexServicesForSchedule([
+      { id: 10, service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'monthly', visits_per_year: 12 },
+      { id: 11, service_key: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'seasonal_feb_oct', visits_per_year: 9 },
+    ]);
+    const estimate = {
+      id: 'estimate-mq-seasonal',
+      monthly_total: 82.5,
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9, mo: 82.5 }],
+          },
+        },
+      },
+    };
+    const [line] = scheduleLinesFromEstimate(estimate, index);
+    expect(line.cadence).toBe('seasonal_feb_oct');
+    expect(line.serviceKey).toBe('mosquito_seasonal');
+    expect(line.serviceId).toBe(11);
+    // Without the seasonal catalog row (env not yet migrated), fail to NO
+    // identity rather than stamping the monthly row on a seasonal series.
+    const monthlyOnlyIndex = indexServicesForSchedule([
+      { id: 10, service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'monthly', visits_per_year: 12 },
+    ]);
+    const [fallbackLine] = scheduleLinesFromEstimate(estimate, monthlyOnlyIndex);
+    expect(fallbackLine.cadence).toBe('seasonal_feb_oct');
+    expect(fallbackLine.serviceId).toBe(null);
+    expect(fallbackLine.serviceKey).not.toBe('mosquito_monthly');
+  });
+
   test('does not create fallback schedule lines from billing-only estimate rows', () => {
     const lines = scheduleLinesFromEstimate({
       id: 'estimate-1',

@@ -8201,22 +8201,28 @@ router.put('/:token/accept', async (req, res, next) => {
     // that flag decides for the SELECTED tier — the stored-mix rule remains
     // for everything else. Runs before any billing side effects.
     if (annualPrepaySelected) {
-      // A bundle combo axis can request the seasonal mosquito cadence via
-      // serviceCadences even when the top-level frequency is something else
-      // (codex r13 P0) — reject it here with the same 400 the deposit route
-      // uses, BEFORE the converter is reached.
+      // A bundle combo axis carries the mosquito tier via serviceCadences
+      // while the top-level frequency stays the pest cadence (codex r13 P0 +
+      // r16 P2): a seasonal9 axis is rejected here with the same 400 the
+      // deposit route uses, BEFORE the converter is reached — and a
+      // monthly12 axis on a seasonal-default estimate resolves ELIGIBLE
+      // (the stored-mix fallback would wrongly reject the valid selection).
       const rawCadences = req.body?.serviceCadences;
       const cadenceRequestsSeasonal = !!rawCadences && typeof rawCadences === 'object'
         && !Array.isArray(rawCadences)
         && Object.values(rawCadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
+      const axisTier = rawCadences && typeof rawCadences === 'object' && !Array.isArray(rawCadences)
+        ? mosquitoTierForAxisToken(rawCadences.mosquito)
+        : null;
       const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
         ? selectedFrequency.annualPrepayEligible
         : null;
-      const prepayMixEligible = !cadenceRequestsSeasonal
-        && (tierPrepayFlag != null
-          ? tierPrepayFlag
-          : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList));
+      let prepayMixEligible;
+      if (cadenceRequestsSeasonal) prepayMixEligible = false;
+      else if (axisTier) prepayMixEligible = annualPrepayEligibleForMosquitoTier(estData, axisTier);
+      else if (tierPrepayFlag != null) prepayMixEligible = tierPrepayFlag;
+      else prepayMixEligible = isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
       if (!prepayMixEligible) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
@@ -12138,6 +12144,21 @@ function frequencyIsSeasonalMosquitoTier(frequency = {}) {
   if (!frequencyIsMosquitoTier(frequency)) return false;
   return String(frequency.key || frequency.tierKey || '') === 'seasonal9'
     || Number(frequency.visitsPerYear) === 9;
+}
+
+// Bundle combo-axis token → mosquito tier stub for
+// annualPrepayEligibleForMosquitoTier; null when the token isn't a mosquito
+// ladder key. Lets accept and /deposit-intent honor a monthly12 axis on a
+// seasonal-default estimate (eligible) and refuse a seasonal9 axis on a
+// monthly-default one — the top-level frequency stays the pest cadence in a
+// bundle and carries no per-tier flag (codex r16 P2).
+function mosquitoTierForAxisToken(token) {
+  const t = String(token || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (t === 'seasonal9' || t === 'seasonal' || t === 'seasonal_feb_oct') {
+    return { serviceCategory: 'mosquito', key: 'seasonal9', visitsPerYear: 9 };
+  }
+  if (t === 'monthly12') return { serviceCategory: 'mosquito', key: 'monthly12', visitsPerYear: 12 };
+  return null;
 }
 
 // Prepay eligibility with the mix's mosquito row replaced by the given tier —
@@ -18403,6 +18424,8 @@ module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
+module.exports.annualPrepayEligibleForMosquitoTier = annualPrepayEligibleForMosquitoTier;
+module.exports.mosquitoTierForAxisToken = mosquitoTierForAxisToken;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;

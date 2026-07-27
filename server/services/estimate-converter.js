@@ -1464,6 +1464,29 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
   }) || null;
 }
 
+// Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
+// and weekends (bounded, fail-open — codex r8 P2). Shared by the
+// auto-schedule loop and the reserved-bundle mosquito promotion; in-season
+// bases pass through untouched.
+async function rolledSeasonalFirstDate(baseDateStr) {
+  let out = RecurringAppointmentSeeder.firstInSeasonDate(baseDateStr);
+  if (out === baseDateStr) return out;
+  try {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    const { parseETDateTime, etParts, addETDays } = require('../utils/datetime-et');
+    for (let nudge = 0; nudge < 14; nudge++) {
+      const at = parseETDateTime(`${out}T12:00`);
+      const { dayOfWeek } = etParts(at);
+      const closed = dayOfWeek === 0 || dayOfWeek === 6 || (await isBlackoutDate(out));
+      if (!closed) break;
+      out = etDateString(addETDays(at, 1));
+    }
+  } catch (nudgeErr) {
+    logger.warn(`[estimate-converter] rolled-date closed-day nudge failed (failing open): ${nudgeErr.message}`);
+  }
+  return out;
+}
+
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
   const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency);
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
@@ -2038,26 +2061,64 @@ const EstimateConverter = {
               catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits]) {
+        // Mosquito promotion (codex r16 P1): a recurring mosquito line beside
+        // a non-combining plan (pest + mosquito share no cadence route) sits
+        // in `remaining` and — per the adjudicated 2026-06-12 semantic — was
+        // never scheduled on the reservation path, even though the plan
+        // bills it monthly. Same remedy shape as the termite/bond
+        // promotions: a billed program must schedule. Monthly rides the
+        // reserved visit's slot (same trip); seasonal anchors its own first
+        // visit rolled into Feb–Oct — a reserved winter pest date must not
+        // seed a winter mosquito treatment.
+        const promotedMosquitoUnits = (remaining || [])
+          .filter((line) => {
+            if (RecurringAppointmentSeeder.serviceKeyFor(line) !== 'mosquito') return false;
+            const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+          })
+          .map((line) => {
+            const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
+            const seasonal = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey)
+              === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+            return {
+              service: line,
+              catalogServiceKey: seasonal ? 'mosquito_seasonal' : 'mosquito_monthly',
+              seasonalMosquito: seasonal,
+              noteKind: 'mosquito program',
+            };
+          });
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
           const unitKey = recurringServiceKey({ name: unit.service.name });
           const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey);
           if (alreadyReserved) continue;
           try {
-            // Copy the customer's picked slot onto the bait row (Codex r2):
+            // Copy the customer's picked slot onto the added row (Codex r2):
             // same trip, same window, same tech/zone — otherwise dispatch
-            // sees an un-slotted job floating on that day.
+            // sees an un-slotted job floating on that day. A SEASONAL
+            // mosquito unit whose first visit rolled into Feb–Oct is a
+            // different day, so it keeps only the zone and books unslotted
+            // (office assigns the window when February routing exists).
+            const unitDate = unit.seasonalMosquito
+              ? await rolledSeasonalFirstDate(scheduledDateOnly(reservedStart.scheduled_date))
+              : scheduledDateOnly(reservedStart.scheduled_date);
+            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date);
+            // Row notes are customer-visible — a seasonal line's raw
+            // every_6_weeks frequency must not leak into them.
+            const unitFrequencyLabel = unit.seasonalMosquito
+              ? 'seasonal (Feb–Oct)'
+              : (unit.service.frequency || 'recurring');
             const standaloneRow = {
               customer_id: customerId,
-              scheduled_date: reservedStart.scheduled_date,
-              ...(reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
-              ...(reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
-              ...(reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
+              scheduled_date: unitDate,
+              ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
+              ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
+              ...(sameTrip && reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
               ...(reservedStart.zone ? { zone: reservedStart.zone } : {}),
               service_type: unit.service.name,
               status: 'pending',
-              notes: `Auto-scheduled from estimate #${estimateId} (standalone bait program alongside reserved visit). Frequency: ${unit.service.frequency}.`,
+              notes: `Auto-scheduled from estimate #${estimateId} (${unit.noteKind || 'standalone bait program'} alongside reserved visit). Frequency: ${unitFrequencyLabel}.`,
               source_estimate_id: estimateId,
             };
             try {
@@ -2362,25 +2423,9 @@ const EstimateConverter = {
           // ORIGINAL date, so re-nudge the rolled date off closed days and
           // weekends — bounded and fail-open like the fallback nudge, and a
           // February date + 14 days can never leave the season.
-          let unitFirstDate = firstServiceDate;
-          if (seasonalUnit) {
-            unitFirstDate = RecurringAppointmentSeeder.firstInSeasonDate(firstServiceDate);
-            if (unitFirstDate !== firstServiceDate) {
-              try {
-                const { isBlackoutDate } = require('./scheduling/blackout-dates');
-                const { parseETDateTime, etParts, addETDays } = require('../utils/datetime-et');
-                for (let nudge = 0; nudge < 14; nudge++) {
-                  const at = parseETDateTime(`${unitFirstDate}T12:00`);
-                  const { dayOfWeek } = etParts(at);
-                  const closed = dayOfWeek === 0 || dayOfWeek === 6 || (await isBlackoutDate(unitFirstDate));
-                  if (!closed) break;
-                  unitFirstDate = etDateString(addETDays(at, 1));
-                }
-              } catch (nudgeErr) {
-                logger.warn(`[estimate-converter] rolled-date closed-day nudge failed (failing open): ${nudgeErr.message}`);
-              }
-            }
-          }
+          const unitFirstDate = seasonalUnit
+            ? await rolledSeasonalFirstDate(firstServiceDate)
+            : firstServiceDate;
           const row = {
             customer_id: customerId,
             scheduled_date: unitFirstDate,
