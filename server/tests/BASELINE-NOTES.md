@@ -569,3 +569,37 @@ jumps). See migration `20260728200000_mosquito_reprice_60_margin` for the
 the 2026-06 mosquito prices and should be recaptured against prod once the
 migration deploys — same post-deploy DB-parity recapture the 2026-06 reprice
 required.
+
+---
+
+## 2026-07-28 — Post-deploy DB-parity recapture (mosquito reprice + termite Trelona)
+
+DB-synced prod baselines (`*.baseline.json`) recaptured against live prod
+`pricing_config` after the #3026 mosquito reprice deployed — the step the
+2026-07-28 mosquito entry above called out. Both DB-mode suites verify green
+against prod afterward.
+
+Access note: this was an owner-authorized read-only recapture run in a local
+operator session with the connection injected ephemerally by `railway run`
+(read of `pricing_config` only; nothing written). No production credential is
+stored anywhere, and none exists in any Codex environment — the AGENTS.md
+"Codex local database policy" (which forbids pointing the *Codex sandbox* at
+production) is about Codex sessions and is not in play here. Codex sandboxes
+should continue to verify this suite via the authenticated HTTP mode
+(`PROD_URL` + `ADMIN_TOKEN`) or a dev/preview Postgres branch.
+
+Per-case attribution:
+- **Mosquito reprice #3026** (this lane): `mosquito_acre_waterfront_max_pressure`,
+  `platinum_bundle_4_qualifying_services_zone_a`,
+  `v1adapter_platinum_bundle_4_services_zone_a`,
+  `v1adapter_mosquito_waterfront_heavy_pressure`.
+- **Termite Trelona-only #3017** (merged + deployed 2026-07-28, DB baselines
+  were stale for it): `termite_basic_standard_perimeter`,
+  `v1adapter_termite_bait_three_systems` (Advance→Trelona install, new bait
+  rates).
+- **Additive T&S tier in prod config** (NOT from #3026):
+  `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub` AND
+  `v1adapter_platinum_bundle_4_services_zone_a` each gained an `Enhanced`
+  entry in `results.ts` — additive, no price changes to existing entries. The
+  platinum case therefore carries BOTH the mosquito reprice delta and this
+  config delta.
