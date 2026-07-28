@@ -22,16 +22,21 @@ async function loadLastServices(db, customerId, serviceType) {
   for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
     const rows = await db('service_records')
       .where({ customer_id: customerId, status: 'completed' })
-      // id tiebreaker keeps the page boundaries deterministic — same-date
-      // rows (routine for multi-service customers) may otherwise reorder
-      // between OFFSET queries and skip a same-line visit.
+      // created_at picks the LATEST same-day visit (a morning service plus
+      // an afternoon callback share service_date); the UUID id tiebreaker is
+      // purely for deterministic page boundaries, not recency.
       .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
       .offset(offset)
       .limit(PAGE_SIZE)
-      .select('service_type', 'service_date', 'technician_notes');
+      .select('service_type', 'service_line', 'service_date', 'technician_notes');
     if (offset === 0) lastService = rows[0] || null;
-    lastLineService = rows.find((r) => detectServiceLine(r.service_type) === visitLine) || null;
+    // The persisted service_line (typed reports) is canonical; the
+    // classifier is the fallback for legacy rows where the column is null.
+    lastLineService = rows.find(
+      (r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === visitLine,
+    ) || null;
     if (lastLineService || rows.length < PAGE_SIZE) break;
   }
   return { lastService, lastLineService, visitLine };

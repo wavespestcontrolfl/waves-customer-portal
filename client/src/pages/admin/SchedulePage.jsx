@@ -608,7 +608,19 @@ function detectServiceCategory(serviceType) {
   )
     return "lawn";
   if (s.includes("mosquito")) return "mosquito";
-  if (s.includes("termite")) return "termite";
+  // Termite-product aliases mirror the server normalizer: raw labels like
+  // "Bora-Care" / "Termidor" / "Advance Bait Station Check" are termite work
+  // even without the literal token ("advance" alone is too generic — only
+  // count it alongside bait/station).
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    (/\badvance\b/.test(s) && (s.includes("bait") || s.includes("station")))
+  )
+    return "termite";
   if (
     s.includes("rodent") ||
     /\brat(s)?\b/.test(s) ||
@@ -3448,9 +3460,17 @@ export function ProtocolPanel({ service, onClose }) {
 
       const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(
-          // Same raw-first type as the panel's classification — a normalized
-          // display name must not resolve photos/protocols for the wrong line.
-          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(panelServiceType)}&month=${month}`,
+          // The photos endpoint filters lawn by literal lawn/turf tokens; a
+          // raw lawn-classified label without them ("Aeration") would drop
+          // the filter entirely, so fall back to the normalized label (which
+          // carries the "Lawn" prefix) for that case only. Every other line
+          // passes the raw type so the lookup matches the panel's line.
+          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(
+            serviceCategory === "lawn" &&
+              !/(lawn|turf)/.test(panelServiceType.toLowerCase())
+              ? service.serviceType
+              : panelServiceType,
+          )}&month=${month}`,
         ),
         adminFetch(
           `/admin/protocols/seasonal-index?month=${month}&service_line=${line}`,
