@@ -2357,12 +2357,29 @@ export default function EstimateToolViewV2({
       }
     }
     if (form.svcMosquito && !commercialDetected) {
-      const programBase =
-        form.mosquitoProgram === "seasonal9" ? 73 : 66;
-      approx.mosquito = Math.max(
-        programBase,
-        Math.round(lotSqft * 0.005 + programBase),
-      );
+      // Rough preview; engine is authoritative. Mirrors the server's 500-sf
+      // step interpolation between per-visit bucket anchors (no pressure
+      // factors), then visits/yr -> levelized monthly.
+      const mqSeasonal = form.mosquitoProgram === "seasonal9";
+      const mqAnchors = mqSeasonal
+        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [43560, 97]]
+        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [43560, 86]];
+      const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
+      const mqStepped = Math.ceil(mqTreatable / 500) * 500;
+      let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];
+      if (mqStepped <= mqAnchors[0][0]) {
+        mqPerVisit = mqAnchors[0][1];
+      } else {
+        for (let i = 1; i < mqAnchors.length; i++) {
+          if (mqStepped <= mqAnchors[i][0]) {
+            const [aSq, aPr] = mqAnchors[i - 1];
+            const [bSq, bPr] = mqAnchors[i];
+            mqPerVisit = Math.round(aPr + ((mqStepped - aSq) / (bSq - aSq)) * (bPr - aPr));
+            break;
+          }
+        }
+      }
+      approx.mosquito = Math.round((mqPerVisit * (mqSeasonal ? 9 : 12)) / 12);
     }
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
     if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;

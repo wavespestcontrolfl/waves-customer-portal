@@ -7,7 +7,9 @@
  * in-code constants at startup. The constants.js reprice is therefore inert
  * in any env carrying these rows unless we also update the DB. This migration
  * brings both rows in line with the new constants (and the refreshed
- * admin-pricing-config seed defaults).
+ * admin-pricing-config seed defaults) via read-modify-write: only the bucket
+ * price keys are replaced, so admin edits to other keys in the same rows
+ * (add-on prices, over-acre increment) survive.
  *
  * New per-visit [seasonal9, monthly12]: SMALL 73/66, QUARTER 76/69,
  * THIRD 79/73, HALF 86/77, ACRE 97/86 (uniform +10% over the 2026-06 band —
@@ -22,52 +24,120 @@
  * per-step increment shrinks as lots grow instead of jumping at boundaries).
  * The pricing_config data shape is unchanged.
  */
+const MIGRATION_TAG = 'migration:20260728200000';
+
+const NEW_RECURRING = {
+  SMALL: { seasonal9: 73, monthly12: 66 },
+  QUARTER: { seasonal9: 76, monthly12: 69 },
+  THIRD: { seasonal9: 79, monthly12: 73 },
+  HALF: { seasonal9: 86, monthly12: 77 },
+  ACRE: { seasonal9: 97, monthly12: 86 },
+};
+const OLD_RECURRING = {
+  SMALL: { seasonal9: 66, monthly12: 60 },
+  QUARTER: { seasonal9: 69, monthly12: 63 },
+  THIRD: { seasonal9: 72, monthly12: 66 },
+  HALF: { seasonal9: 78, monthly12: 70 },
+  ACRE: { seasonal9: 88, monthly12: 78 },
+};
+const NEW_ONE_TIME = {
+  SMALL: 149,
+  STANDARD: 169,
+  LARGE: 189,
+  XL: 209,
+  ESTATE: 239,
+  ACRE_CLASS: 269,
+  OVER_ACRE: 269,
+};
+const OLD_ONE_TIME = {
+  SMALL: 99,
+  STANDARD: 129,
+  LARGE: 159,
+  XL: 199,
+  ESTATE: 239,
+  ACRE_CLASS: 269,
+  OVER_ACRE: 269,
+};
+// Non-price keys carried only when the row is inserted fresh (missing-row
+// envs); on existing rows they are preserved as-is.
+const ONE_TIME_INSERT_DEFAULTS = {
+  overAcreIncrementSqFt: 10000,
+  overAcreIncrementPrice: 40,
+  stationAddOn: 75,
+  dunkAddOn: 15,
+};
+
+const CHANGELOG_IDENTITY = {
+  version_from: 'v4.3',
+  version_to: 'v4.3',
+  changed_by: 'claude-2026-07-28',
+  category: 'rule',
+  summary: 'Reprice mosquito: recurring to 60% target margin (+10%), one-time to pest-aligned lot ladder.',
+};
+
+function parseData(row) {
+  if (!row) return null;
+  const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+  return data && typeof data === 'object' ? data : null;
+}
+
+async function upsertPriceKeys(knex, configKey, meta, priceKeys, insertDefaults, reason) {
+  const row = await knex('pricing_config').where({ config_key: configKey }).first();
+  const oldData = parseData(row);
+  const newData = oldData
+    ? { ...oldData, ...priceKeys }
+    : { ...insertDefaults, ...priceKeys };
+  if (row) {
+    await knex('pricing_config')
+      .where({ config_key: configKey })
+      .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
+  } else {
+    await knex('pricing_config').insert({
+      config_key: configKey,
+      ...meta,
+      data: JSON.stringify(newData),
+      updated_at: knex.fn.now(),
+    });
+  }
+  if (await knex.schema.hasTable('pricing_config_audit')) {
+    await knex('pricing_config_audit').insert({
+      config_key: configKey,
+      old_value: JSON.stringify(oldData || null),
+      new_value: JSON.stringify(newData),
+      changed_by: MIGRATION_TAG,
+      reason,
+    });
+  }
+}
+
+async function applyPrices(knex, recurring, oneTime, reason) {
+  await upsertPriceKeys(
+    knex,
+    'mosquito_base_prices',
+    { name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2 },
+    recurring,
+    {},
+    reason,
+  );
+  await upsertPriceKeys(
+    knex,
+    'onetime_mosquito',
+    { name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5 },
+    oneTime,
+    ONE_TIME_INSERT_DEFAULTS,
+    reason,
+  );
+}
+
 exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
-  const rows = [
-    {
-      config_key: 'mosquito_base_prices',
-      name: 'Mosquito Program Per-Visit Pricing',
-      category: 'mosquito',
-      sort_order: 2,
-      data: JSON.stringify({
-        SMALL: { seasonal9: 73, monthly12: 66 },
-        QUARTER: { seasonal9: 76, monthly12: 69 },
-        THIRD: { seasonal9: 79, monthly12: 73 },
-        HALF: { seasonal9: 86, monthly12: 77 },
-        ACRE: { seasonal9: 97, monthly12: 86 },
-      }),
-      updated_at: knex.fn.now(),
-    },
-    {
-      config_key: 'onetime_mosquito',
-      name: 'One-Time Mosquito Treatment',
-      category: 'one_time',
-      sort_order: 5,
-      data: JSON.stringify({
-        SMALL: 149,
-        STANDARD: 169,
-        LARGE: 189,
-        XL: 209,
-        ESTATE: 239,
-        ACRE_CLASS: 269,
-        OVER_ACRE: 269,
-        overAcreIncrementSqFt: 10000,
-        overAcreIncrementPrice: 40,
-        stationAddOn: 75,
-        dunkAddOn: 15,
-      }),
-      updated_at: knex.fn.now(),
-    },
-  ];
-
-  for (const row of rows) {
-    await knex('pricing_config')
-      .insert(row)
-      .onConflict('config_key')
-      .merge(['name', 'category', 'sort_order', 'data', 'updated_at']);
-  }
+  await applyPrices(
+    knex,
+    NEW_RECURRING,
+    NEW_ONE_TIME,
+    'Mosquito reprice: recurring +10% to 60% target margin; one-time aligned ~25% under one-time pest (owner decision 2026-07-28)',
+  );
 
   // Keep the service catalog (manual-appointment price defaults) aligned with
   // the new estimator pricing so manually added mosquito lines don't default
@@ -89,17 +159,10 @@ exports.up = async function (knex) {
 
   // Record the intentional pricing/baseline change.
   if (await knex.schema.hasTable('pricing_changelog')) {
-    const identity = {
-      version_from: 'v4.3',
-      version_to: 'v4.3',
-      changed_by: 'claude-2026-07-28',
-      category: 'rule',
-      summary: 'Reprice mosquito: recurring to 60% target margin (+10%), one-time to pest-aligned lot ladder.',
-    };
-    const existing = await knex('pricing_changelog').where(identity).first('id');
+    const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
     if (!existing) {
       await knex('pricing_changelog').insert({
-        ...identity,
+        ...CHANGELOG_IDENTITY,
         affected_services: JSON.stringify(['mosquito', 'one_time_mosquito']),
         before_value: JSON.stringify({
           mosquito_base_prices: { SMALL: [66, 60], QUARTER: [69, 63], THIRD: [72, 66], HALF: [78, 70], ACRE: [88, 78] },
@@ -117,62 +180,17 @@ exports.up = async function (knex) {
 
 exports.down = async function (knex) {
   if (await knex.schema.hasTable('pricing_changelog')) {
-    await knex('pricing_changelog')
-      .where({
-        version_from: 'v4.3',
-        version_to: 'v4.3',
-        changed_by: 'claude-2026-07-28',
-        category: 'rule',
-        summary: 'Reprice mosquito: recurring to 60% target margin (+10%), one-time to pest-aligned lot ladder.',
-      })
-      .del();
+    await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
   }
 
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
-  const rows = [
-    {
-      config_key: 'mosquito_base_prices',
-      name: 'Mosquito Program Per-Visit Pricing',
-      category: 'mosquito',
-      sort_order: 2,
-      data: JSON.stringify({
-        SMALL: { seasonal9: 66, monthly12: 60 },
-        QUARTER: { seasonal9: 69, monthly12: 63 },
-        THIRD: { seasonal9: 72, monthly12: 66 },
-        HALF: { seasonal9: 78, monthly12: 70 },
-        ACRE: { seasonal9: 88, monthly12: 78 },
-      }),
-      updated_at: knex.fn.now(),
-    },
-    {
-      config_key: 'onetime_mosquito',
-      name: 'One-Time Mosquito Treatment',
-      category: 'one_time',
-      sort_order: 5,
-      data: JSON.stringify({
-        SMALL: 99,
-        STANDARD: 129,
-        LARGE: 159,
-        XL: 199,
-        ESTATE: 239,
-        ACRE_CLASS: 269,
-        OVER_ACRE: 269,
-        overAcreIncrementSqFt: 10000,
-        overAcreIncrementPrice: 40,
-        stationAddOn: 75,
-        dunkAddOn: 15,
-      }),
-      updated_at: knex.fn.now(),
-    },
-  ];
-
-  for (const row of rows) {
-    await knex('pricing_config')
-      .insert(row)
-      .onConflict('config_key')
-      .merge(['name', 'category', 'sort_order', 'data', 'updated_at']);
-  }
+  await applyPrices(
+    knex,
+    OLD_RECURRING,
+    OLD_ONE_TIME,
+    'Rollback mosquito reprice 20260728200000 to the 2026-06 band',
+  );
 
   if (await knex.schema.hasTable('services')) {
     await knex('services').where({ service_key: 'mosquito_monthly' }).update({

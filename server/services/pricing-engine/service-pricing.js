@@ -4902,7 +4902,7 @@ function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
     }));
     return { areaBucket, basePrice: interpolateMosquitoPrice(anchors, sqft), requiresManualReview: false };
   }
-  const base = ONE_TIME.mosquito.ACRE_CLASS || ONE_TIME.mosquito.SMALL;
+  const base = ONE_TIME.mosquito.OVER_ACRE || ONE_TIME.mosquito.ACRE_CLASS || ONE_TIME.mosquito.SMALL;
   const overageSqFt = Math.max(0, sqft - 43560);
   const incrementCount = Math.ceil(overageSqFt / ONE_TIME.mosquito.overAcreIncrementSqFt);
   return {
