@@ -565,9 +565,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     : null;
 
   // Action OWNERSHIP: customerAction is a REAL homeowner task only — never a Waves
-  // next-visit task. wavesNext carries what Waves will do. No customer task → "no action".
+  // next-visit task. wavesNext carries what Waves WILL do — future tense only: falling
+  // back to the past-tense wavesAction ("Applied a fungicide…") under the client's
+  // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
   const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
-  const wavesNext = topIssue ? (topIssue.nextVisitPlan || topIssue.wavesAction || null) : null;
+  const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
@@ -615,6 +617,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     ]
     : null;
   const aftercare = buildAftercare(applications);
+  // Reconcile watering-in with the water story: when the weekly total is already
+  // above target the report tells the customer to EASE BACK on irrigation, and a
+  // bare "give the lawn a normal watering" instruction two cards later reads like a
+  // contradiction. Name the exception explicitly so both instructions survive.
+  if (aftercare.waterInRequired === true && (effectiveWaterStatus === 'surplus' || overwatering)) {
+    aftercare.watering += ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
+  }
 
   const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
   if (trendSeasonNote) trends.seasonalNote = trendSeasonNote;

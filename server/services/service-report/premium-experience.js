@@ -547,7 +547,7 @@ function buildWeatherCallContext({ record } = {}) {
   let body = 'Conditions were documented at application time for this service record.';
   if (Number.isFinite(rain) && rain > 0.25) {
     headline = 'Recent rainfall noted.';
-    body = 'Recent rainfall was considered during application decisions.';
+    body = 'Your technician factored the rain into today’s product choices and application timing.';
   } else if (Number.isFinite(wind) && wind > 15) {
     headline = 'Wind was elevated.';
     body = 'Treatment decisions were adjusted to match label and site conditions.';

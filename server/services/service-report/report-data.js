@@ -1853,10 +1853,29 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
 
   let beforeAfter = null;
   if (historyRows.length >= 2) {
-    const [beforePhoto, afterPhoto] = await Promise.all([
-      firstLawnAssessmentPhoto(knex, initialRow.id),
-      firstLawnAssessmentPhoto(knex, assessment.id),
-    ]);
+    // The before/after slider claims "the same lawn, then vs now" — pairing the
+    // best photo of each visit regardless of WHERE it was taken produced a bed
+    // photo next to a curb-strip photo (audit 2026-07-28). Anchor on the before
+    // photo's zone: prefer a current-visit photo from the SAME zone; when zones
+    // are recorded on both sides but never match, drop the photo pair (the
+    // score delta still reports) rather than show a false comparison.
+    const beforePhoto = await firstLawnAssessmentPhoto(knex, initialRow.id);
+    let afterPhoto = null;
+    if (beforePhoto?.zone) {
+      afterPhoto = await knex('lawn_assessment_photos')
+        .where({ assessment_id: assessment.id, customer_visible: true, zone: beforePhoto.zone })
+        .orderBy('is_best_photo', 'desc')
+        .orderBy('quality_score', 'desc')
+        .orderBy('photo_order', 'asc')
+        .first()
+        .catch(() => null);
+    }
+    if (!afterPhoto) {
+      const fallbackAfter = await firstLawnAssessmentPhoto(knex, assessment.id);
+      const zonesKnownAndDifferent = beforePhoto?.zone && fallbackAfter?.zone
+        && String(beforePhoto.zone) !== String(fallbackAfter.zone);
+      afterPhoto = zonesKnownAndDifferent ? null : fallbackAfter;
+    }
     beforeAfter = {
       before: {
         date: initialRow.service_date,
