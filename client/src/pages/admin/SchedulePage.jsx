@@ -5956,6 +5956,10 @@ function LawnAssessmentCompletionBlock({
   service,
   disabled,
   onConfirmed,
+  // Fires false while the existing-assessment lookup is in flight and true
+  // once it settles — the parent must not treat the pre-load null confirmed
+  // id as "retake pending".
+  onReady,
   // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
   // photos here, but stored on the shared turf-height state (CompletionPanel owns
   // it). Only rendered when the gauge-reading capture applies (turf-height flag).
@@ -6005,7 +6009,11 @@ function LawnAssessmentCompletionBlock({
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
-    if (!service?.id) return () => { cancelled = true; };
+    onReady?.(false);
+    if (!service?.id) {
+      onReady?.(true);
+      return () => { cancelled = true; };
+    }
 
     setLoading(true);
     adminFetch(`/admin/lawn-assessment/service/${service.id}`)
@@ -6032,7 +6040,10 @@ function LawnAssessmentCompletionBlock({
       })
       .catch(() => {})
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          onReady?.(true);
+        }
       });
 
     return () => {
@@ -8612,6 +8623,10 @@ export function CompletionPanel({
   const [tankCleanoutMethod, setTankCleanoutMethod] = useState("");
   const [tankCleanoutNote, setTankCleanoutNote] = useState("");
   const [lawnAssessmentId, setLawnAssessmentId] = useState(null);
+  // False while the assessment block is still looking up the visit's existing
+  // assessment — the AI-report payload omits lawnAssessmentId until then so a
+  // pre-load null is never misread as "retake pending".
+  const [lawnAssessmentReady, setLawnAssessmentReady] = useState(false);
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
@@ -10064,10 +10079,13 @@ export function CompletionPanel({
     }
     const payload = {
       scheduledServiceId: service.id || null,
-      // The CURRENTLY confirmed assessment (null while a retake is pending) —
-      // the server grounds lawn scores from exactly this row, never a stale
-      // confirmed row left behind by Retake.
-      lawnAssessmentId: lawnAssessmentId || null,
+      // The CURRENTLY confirmed assessment: an id grounds exactly that row,
+      // null means a retake is pending, and the field is OMITTED while the
+      // block's existing-assessment lookup is still in flight (the server
+      // then falls back to the visit-linked row) or for non-lawn visits.
+      ...(isLawn && lawnAssessmentReady
+        ? { lawnAssessmentId: lawnAssessmentId || null }
+        : {}),
       customerName: service.customerName,
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
@@ -11894,8 +11912,9 @@ export function CompletionPanel({
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
                   service={service}
-                  disabled={isIncompleteVisit || submitting}
+                  disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
+                  onReady={setLawnAssessmentReady}
                   showGaugePhoto={turfHeightFlag}
                   gaugePhoto={turfHeight.gaugePhoto}
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
@@ -13932,8 +13951,9 @@ export function CompletionPanel({
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
                 service={service}
-                disabled={isIncompleteVisit || submitting}
+                disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
+                onReady={setLawnAssessmentReady}
                 showGaugePhoto={turfHeightFlag}
                 gaugePhoto={turfHeight.gaugePhoto}
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}

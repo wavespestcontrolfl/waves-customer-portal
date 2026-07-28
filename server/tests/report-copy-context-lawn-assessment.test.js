@@ -42,6 +42,9 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
     return chain;
   };
   stub.calls = calls;
+  // knex.raw is used for the coalesced visit-date select; the stub resolves
+  // rows by table/flags, so the expression itself is inert here.
+  stub.raw = (expression) => expression;
   return stub;
 }
 

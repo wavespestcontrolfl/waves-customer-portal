@@ -142,9 +142,17 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
     // today's result). Only legacy callers (field absent) fall back to the
     // visit-linked lookup.
     let today = null;
-    if (lawnAssessmentId) {
+    if (lawnAssessmentId && scheduledServiceId) {
+      // The id must belong to THIS visit — scheduledServiceId is already
+      // authorized/canonical, so a stale or crafted id linked to a different
+      // visit is rejected rather than labeled as today's result.
       today = await knex('lawn_assessments')
-        .where({ id: lawnAssessmentId, customer_id: customerId, confirmed_by_tech: true })
+        .where({
+          id: lawnAssessmentId,
+          customer_id: customerId,
+          confirmed_by_tech: true,
+          service_id: scheduledServiceId,
+        })
         .first() || null;
     } else if (lawnAssessmentId === undefined && scheduledServiceId) {
       today = await loadLinkedLawnAssessment(
@@ -181,7 +189,12 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
       .orderBy('la.confirmed_at', 'desc')
       .orderBy('la.created_at', 'desc')
       .first(
-        'la.service_date', 'la.is_baseline',
+        // History is labeled by the VISIT date the row belongs to — the
+        // assessment run date can be a later backfill day ("vs Jul 28" for a
+        // June visit). Aliased as service_date so the label formatters keep
+        // one field.
+        knex.raw('COALESCE(ss.scheduled_date, la.service_date) as service_date'),
+        'la.is_baseline',
         'la.turf_density', 'la.weed_suppression', 'la.color_health',
         'la.fungus_control', 'la.thatch_level', 'la.stress_damage',
       ) || null;
