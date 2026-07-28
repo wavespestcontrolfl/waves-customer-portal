@@ -150,6 +150,11 @@ async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
   throw new Error('too many redirects');
 }
 
+// Hostname-only view of a sender-controlled URL for log lines.
+function safeHost(rawUrl) {
+  try { return new URL(rawUrl).hostname; } catch { return 'unparseable'; }
+}
+
 async function autoUnsubscribe(email) {
   const fromDomain = email.from_address?.split('@')[1] || '';
 
@@ -218,7 +223,9 @@ async function autoUnsubscribe(email) {
 
     if (urlMatch) {
       if (!isSafePublicUrl(urlMatch[1])) {
-        logger.warn(`[unsubscribe] Refused unsafe List-Unsubscribe URL: ${urlMatch[1]}`);
+        // Hostname only — unsubscribe URLs commonly embed the recipient
+        // address or mailbox-specific tokens (PII stays out of logs).
+        logger.warn(`[unsubscribe] Refused unsafe List-Unsubscribe URL host: ${safeHost(urlMatch[1])} (email ${email.id})`);
         return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
       }
       try {
@@ -271,7 +278,7 @@ async function autoUnsubscribe(email) {
   if (matches && matches.length > 0) {
     const unsubUrl = matches[0].replace(/["'>]+$/, ''); // Clean trailing chars
     if (!isSafePublicUrl(unsubUrl)) {
-      logger.warn(`[unsubscribe] Refused unsafe body unsubscribe URL: ${unsubUrl}`);
+      logger.warn(`[unsubscribe] Refused unsafe body unsubscribe URL host: ${safeHost(unsubUrl)} (email ${email.id})`);
       return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
     }
     try {

@@ -481,10 +481,17 @@ router.post('/message/:id/reclassify', async (req, res) => {
           .first();
         if (blocked) {
           const { unblockSender } = require('../services/email/spam-blocker');
-          await unblockSender(blocked.id);
+          const unblock = await unblockSender(blocked.id);
+          if (!unblock?.success) {
+            // Restoring the message while the sender filter still routes to
+            // Trash would look like a completed veto — surface a retryable
+            // error instead.
+            return res.status(502).json({ error: 'Sender is still trash-filtered (Gmail unblock failed) — retry reclassification' });
+          }
         }
       } catch (e) {
         logger.warn(`[email] restored-from-trash unblock failed (email ${email.id}): ${e.message}`);
+        return res.status(502).json({ error: 'Sender unblock failed — retry reclassification' });
       }
     }
     // quarantined_at survives a handler overwriting auto_action (it only
