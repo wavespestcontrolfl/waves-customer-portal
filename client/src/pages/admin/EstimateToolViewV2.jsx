@@ -2358,7 +2358,7 @@ export default function EstimateToolViewV2({
     }
     if (form.svcMosquito && !commercialDetected) {
       const programBase =
-        form.mosquitoProgram === "seasonal9" ? 105 : 90;
+        form.mosquitoProgram === "seasonal9" ? 73 : 66;
       approx.mosquito = Math.max(
         programBase,
         Math.round(lotSqft * 0.005 + programBase),

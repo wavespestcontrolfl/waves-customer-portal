@@ -333,18 +333,18 @@ describe('pricing engine DB bridge', () => {
   test('validates active mosquito recurring and one-time config defaults', () => {
     expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
     expect(constants.MOSQUITO.basePrices).toEqual(expect.objectContaining({
-      SMALL: [66, 60],
-      QUARTER: [69, 63],
-      THIRD: [72, 66],
-      HALF: [78, 70],
-      ACRE: [88, 78],
+      SMALL: [73, 66],
+      QUARTER: [76, 69],
+      THIRD: [79, 73],
+      HALF: [86, 77],
+      ACRE: [97, 86],
     }));
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
     expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
-      SMALL: 99,
-      STANDARD: 129,
-      LARGE: 159,
-      XL: 199,
+      SMALL: 149,
+      STANDARD: 169,
+      LARGE: 189,
+      XL: 209,
       ESTATE: 239,
       ACRE_CLASS: 269,
       OVER_ACRE: 269,

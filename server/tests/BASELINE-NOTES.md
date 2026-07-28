@@ -547,3 +547,25 @@ The DB-authoritative delta was isolated by running the pre-change `origin/main` 
 - The corresponding local fixtures changed for the same scenarios under in-memory constants.
 
 Migration `20260716140000_retire_pest_tree_driveway_modifiers` records the actual retired DB values in both `pricing_config_audit` and `pricing_changelog`; rollback restores those exact values rather than hardcoded defaults.
+
+---
+
+## 2026-07-28 — Mosquito reprice: 60% target margin + 500-sf step interpolation
+
+Owner reprice (Adam, 2026-07-28). Recurring per-visit [seasonal9, monthly12]
++10% across the board (SMALL 73/66 … ACRE 97/86) — lands the real cost basis
+(~11min on-site, 20min drive, $51/yr admin) at a ~60% contribution margin.
+One-time ladder aligned ~25% under the one-time pest band: 149/169/189/209/239/269
+(ESTATE/ACRE_CLASS held). Engine change in the same PR: bucket prices now act
+as interpolation anchors at each bucket's top edge with 500-sf price steps
+between them (declining marginal rate — big lots are not priced out by bucket
+jumps). See migration `20260728200000_mosquito_reprice_60_margin` for the
+`pricing_changelog` entry.
+
+- `pricing-engine.local-baseline.json`: `mosquito_acre_waterfront_max_pressure`, `edge_large_footprint_5500sf_platinum_bundle`, `platinum_bundle_4_qualifying_services_zone_a`
+- `pricing-engine-v1-adapter.local-baseline.json`: `v1adapter_mosquito_waterfront_heavy_pressure`, `v1adapter_platinum_bundle_4_services_zone_a`
+
+**Not done here:** the DB-synced prod baselines (`*.baseline.json`) still carry
+the 2026-06 mosquito prices and should be recaptured against prod once the
+migration deploys — same post-deploy DB-parity recapture the 2026-06 reprice
+required.

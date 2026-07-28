@@ -715,16 +715,22 @@ const MOSQUITO = {
   },
   basePrices: {
     //           seasonal9, monthly12
-    // Repriced 2026-06 to match SW-FL market ($45-58/mo recurring); prior
-    // pricing ran ~2x market and the service never sold. Bifen-only barrier
-    // @ ~11min on-site holds ~62-71% real margin at these rates.
-    SMALL:   [r(66), r(60)],
-    QUARTER: [r(69), r(63)],
-    THIRD:   [r(72), r(66)],
-    HALF:    [r(78), r(70)],
-    ACRE:    [r(88), r(78)],
+    // Repriced 2026-07 to a 60% target contribution margin on the real cost
+    // basis (Bifen-only barrier, ~11min on-site via mist blower, 20min drive,
+    // $51/yr admin) — a uniform +10% over the 2026-06 market floor. Still well
+    // under Terminix ($131.11/mo mosquito+tick) and TruGreen ($85.56/app).
+    SMALL:   [r(73), r(66)],
+    QUARTER: [r(76), r(69)],
+    THIRD:   [r(79), r(73)],
+    HALF:    [r(86), r(77)],
+    ACRE:    [r(97), r(86)],
   },
   tierVisits: { seasonal9: 9, monthly12: 12 },
+  // Prices climb between bucket anchors in 500-sf steps (see
+  // interpolateMosquitoPrice) instead of jumping flat-bucket to flat-bucket —
+  // drive + setup dominate visit cost, so the per-step increment shrinks as
+  // lots grow rather than pricing big jobs out.
+  priceStepSqFt: 500,
   productCosts: {
     bifenthrinOz: 41.08 / 128,      // Bifen I/T 1 gal @ $41.08; Talak equivalent @ $41.57.
     tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
@@ -1119,12 +1125,14 @@ const ONE_TIME = {
     oneTimeMultiplier: 1.50,
   },
   mosquito: {
-    // Repriced 2026-06 to the SW-FL single-visit band ($80-150 low end,
-    // scaling for big lots); prior pricing ran ~2x market.
-    SMALL:   r(99),
-    STANDARD: r(129),
-    LARGE:   r(159),
-    XL:      r(199),
+    // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly
+    // × 2.2, floor $199 → ~$199-290 for typical homes), scaled by lot bucket
+    // instead of footprint. ESTATE/ACRE_CLASS held at the 2026-06 values —
+    // they already sit inside that band and mosquito rates never get cut.
+    SMALL:   r(149),
+    STANDARD: r(169),
+    LARGE:   r(189),
+    XL:      r(209),
     ESTATE:  r(239),
     ACRE_CLASS: r(269),
     OVER_ACRE: r(269),
