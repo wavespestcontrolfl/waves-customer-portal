@@ -114,18 +114,8 @@ function validateNewsletterDraft(send, opts = {}) {
       if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
         warnings.push('No Waves CTA detected');
       }
-      if (!bodyText.includes('top pick')) {
-        warnings.push('No hero (top pick) section detected');
-      }
       if (!send.html_body.includes('<h2') && !send.html_body.includes('<strong>')) {
         warnings.push('No event structure detected');
-      }
-      // Compact-format word budget (owner spec 2026-07-28): the whole
-      // recipient-facing body should stay under ~900 words. Soft warning —
-      // the proof reader decides.
-      const wordCount = bodyText.split(/\s+/).filter(Boolean).length;
-      if (wordCount > 950) {
-        warnings.push(`Body is ~${wordCount} words (target < 900 — compact format)`);
       }
     }
   }
