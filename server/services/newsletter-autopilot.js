@@ -329,15 +329,27 @@ async function autoDraftFlagship() {
     const reason = preflightReport.hardFailures.join('; ');
     logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
     try {
-      await db('newsletter_calendar')
-        .insert({
-          week_of: weekOf,
-          status: 'skipped',
-          target_send_at: defaultTargetSendAt(weekOf),
-          event_ids: JSON.stringify([]),
-        })
-        .onConflict('week_of')
-        .merge({ status: 'skipped', updated_at: db.fn.now() });
+      // Guarded transition: only an unlinked planned/skipped row may flip
+      // to 'skipped'. This routine now also runs AFTER nondeterministic
+      // model generation, outside the advisory lock — an unconditional
+      // merge could overwrite the 'drafted' row a concurrent runner just
+      // created and linked, killing its proof retries.
+      const flipped = await db('newsletter_calendar')
+        .where({ week_of: weekOf })
+        .whereNull('send_id')
+        .whereIn('status', ['planned', 'skipped'])
+        .update({ status: 'skipped', updated_at: db.fn.now() });
+      if (!flipped) {
+        await db('newsletter_calendar')
+          .insert({
+            week_of: weekOf,
+            status: 'skipped',
+            target_send_at: defaultTargetSendAt(weekOf),
+            event_ids: JSON.stringify([]),
+          })
+          .onConflict('week_of')
+          .ignore();
+      }
     } catch (e) {
       logger.warn(`[newsletter-autopilot] failed to mark week skipped: ${e.message}`);
     }

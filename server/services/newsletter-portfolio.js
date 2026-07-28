@@ -199,13 +199,19 @@ function unmetConstraints(picked) {
 }
 
 /**
- * True when removing `event` from `picked` would break a currently-met
- * minimum — such an event is load-bearing and not swappable.
+ * True when removing `event` would REGRESS any constraint that is not in
+ * surplus: a fully-met minimum must stay met, and a partially-met count
+ * must not shrink (a later family/free repair must never trade away the
+ * only weekend candidate merely because weekend was already unmet).
+ * Surplus above a met minimum may be spent freely.
  */
 function isLoadBearing(event, picked) {
   const without = picked.filter((p) => p !== event);
-  const beforeUnmet = new Set(unmetConstraints(picked).map((c) => c.key));
-  return unmetConstraints(without).some((c) => !beforeUnmet.has(c.key));
+  return CONSTRAINTS.some((c) => {
+    const before = constraintCount(c, picked);
+    const after = constraintCount(c, without);
+    return after < Math.min(before, c.min);
+  });
 }
 
 /**
