@@ -39,6 +39,7 @@ const {
   isMembershipCustomerRow,
 } = require('../services/waveguard-existing-services');
 const {
+  ONE_TIME_BOOKING_SOURCE_VALUES,
   SELF_BOOKING_RECURRING_PLANS,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
@@ -374,6 +375,21 @@ async function noPlanCandidateCustomers(customerColumns, today) {
         .whereNotIn('s.status', TERMINAL_STATUSES)
         .where('s.scheduled_date', '>=', today);
       if (hasIsRecurring) this.where('s.is_recurring', true);
+      // Mirror the runtime reconcile's pre-screen (Codex #3011 r3): rows the
+      // authoritative predicate rejects anyway (callbacks, one-time booking
+      // sources) must not admit a candidate — with --limit N and created_at
+      // ordering, such false positives would occupy every batch forever and
+      // starve valid later customers.
+      if (columnPresent(scheduledColumns, 'is_callback')) {
+        this.where(function notCallback() {
+          this.whereNull('s.is_callback').orWhere('s.is_callback', false);
+        });
+      }
+      if (columnPresent(scheduledColumns, 'source')) {
+        this.where(function notOneTimeSource() {
+          this.whereNull('s.source').orWhereNotIn('s.source', ONE_TIME_BOOKING_SOURCE_VALUES);
+        });
+      }
     })
     .orderBy('c.created_at', 'asc');
 
