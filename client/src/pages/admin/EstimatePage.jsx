@@ -13,6 +13,7 @@ import {
   applyServerPestPricingConfig,
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
+  applyServerTermiteMonitoringPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1318,11 +1319,12 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
+        fetchConfigRow("termite_monitoring"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
@@ -1336,6 +1338,9 @@ function EstimateToolView() {
       // permanently unready and block every estimate, not just termite ones.
       // A missing row leaves the in-code default in place.
       if (rentalRow.ok) applyServerTermiteRentalPricingConfig(rentalRow.data);
+      // Station-check brackets: same live-rates posture as the rental horizon
+      // above, and same not-part-of-readiness reasoning (new row shape).
+      if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;

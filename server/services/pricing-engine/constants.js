@@ -757,13 +757,25 @@ const MOSQUITO = {
 // ============================================================
 const TERMITE = {
   perimeterMultiplier: { standard: 1.25, complex: 1.35 },
+  // Legacy fallback for callers without a system in hand; per-system
+  // spacing below wins wherever the system is known (owner 2026-07-28).
   stationSpacing: 10,  // feet between stations
   minStations: 8,
+  // Menu is Trelona-only (owner 2026-07-28): Advance stays fully priceable
+  // for replaying existing estimates, but new quotes default to Trelona and
+  // the estimator no longer offers the choice. Sentricon is NOT addable —
+  // Corteva dealer program, we're not enrolled.
+  defaultSystem: 'trelona',
   systems: {
     // Wholesale verified Apr 2026: Advance TBS RFID = $131.60 / 10-cs = $13.16/sta;
     // Trelona ATBS RFID (pre-baited annual) = $352.80 / 16-cs = $22.05/sta.
-    advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)' },
-    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)' },
+    // Spacing per LABEL: Advance/Sentricon-class ~10 ft; Trelona ATBS is the
+    // wide-spacing annual system (label 10-15 ft, 20 max) — 15 ft is what
+    // keeps a ~224 LF home at 15 stations / ~$610 install instead of
+    // 23 / ~$935 (owner 2026-07-28, competitive review vs $375 Sentricon
+    // installs).
+    advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)', spacingFt: 10 },
+    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)', spacingFt: 15 },
   },
   // 1.45x set Apr 2026 after competitive review (All U Need: 21 Sentricon stations
   // for $375). Prior 1.75x put doorstep ~3x market on Trelona default. Note:
@@ -771,11 +783,19 @@ const TERMITE = {
   // actual install labor in service-pricing.js is margin-only, not billed. Don't
   // remove the $6 buildup without restructuring the formula.
   installMultiplier: 1.45,
-  // TODO(v4.4): document monitoring subscription pricing policy
-  // (basic=$35, premier=$65 MRR — what each tier includes, why these values).
+  // Station-check pricing scales with STATION COUNT in 5-station brackets
+  // (owner 2026-07-28; anchor = a ~23-station/10-ft home at $34/mo gross,
+  // which a Gold member sees as the market-standard ~$29/mo):
+  //   monthly = baseMonthly + stepMonthly × max(0, ceil(stations/bracketStations) − 2)
+  //   ≤10 → $19 · 11-15 → $24 · 16-20 → $29 · 21-25 → $34 · 26-30 → $39 …
+  // Displayed AND billed per application (monthly × 12 ÷ 4 visits). The
+  // former flat Basic($35)/Premier($65) tiers are RETIRED — Premier was
+  // never defined or sold; the tier input is accepted for replay
+  // compatibility but no longer changes price.
   monitoring: {
-    basic:   { monthly: r(35), label: 'Basic' },
-    premier: { monthly: r(65), label: 'Premier' },
+    bracketStations: 5,
+    baseMonthly: r(19),
+    stepMonthly: r(5),
   },
   // Stations are checked quarterly (owner directive 2026-07-10) and the
   // program is displayed AND billed per application (owner 2026-07-20) —

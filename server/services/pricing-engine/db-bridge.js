@@ -304,10 +304,16 @@ function validatePestPricingConfig(snapshot = constants) {
       }
     }
   }
-  for (const tier of ['basic', 'premier']) {
-    if (!isPositiveNumber(TERMITE.monitoring?.[tier]?.monthly)) {
-      errors.push(`TERMITE.monitoring.${tier}.monthly must be positive`);
-    }
+  // Bracketed station-check pricing (owner 2026-07-28): base + step must be
+  // positive/non-negative or every termite quote prices NaN.
+  if (!isPositiveNumber(TERMITE.monitoring?.baseMonthly)) {
+    errors.push('TERMITE.monitoring.baseMonthly must be positive');
+  }
+  if (!isNonNegativeNumber(TERMITE.monitoring?.stepMonthly)) {
+    errors.push('TERMITE.monitoring.stepMonthly must be non-negative');
+  }
+  if (!isPositiveNumber(TERMITE.monitoring?.bracketStations)) {
+    errors.push('TERMITE.monitoring.bracketStations must be positive');
   }
 
   const trenching = SPECIALTY.trenching || {};
@@ -1005,7 +1011,12 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.termite_install) {
       const t = config.termite_install;
       setNumber(constants.TERMITE, 'installMultiplier', t.multiplier ?? t.install_multiplier, Number);
-      setNumber(constants.TERMITE, 'stationSpacing', t.station_spacing_ft ?? t.stationSpacing, Number);
+      // station_spacing_ft is RETIRED (owner 2026-07-28): spacing is
+      // per-system LABEL truth (Trelona 15 ft, Advance 10 — systems[].spacingFt
+      // in constants), so every normalized system bypasses the global
+      // fallback and syncing this key would change nothing while the admin
+      // UI reported success. The admin PUT strips the key on save
+      // (normalizeIncomingConfigData) for the same reason.
       setNumber(constants.TERMITE, 'minStations', t.min_stations ?? t.minStations, Number);
       setNumber(constants.TERMITE.systems.advance, 'stationCost', t.advance_bait ?? t.advance_station_cost, Number);
       setNumber(constants.TERMITE.systems.trelona, 'stationCost', t.trelona_bait ?? t.trelona_station_cost, Number);
@@ -1020,8 +1031,26 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (config.termite_monitoring) {
-      if (config.termite_monitoring.basic) constants.TERMITE.monitoring.basic.monthly = r(config.termite_monitoring.basic);
-      if (config.termite_monitoring.premier) constants.TERMITE.monitoring.premier.monthly = r(config.termite_monitoring.premier);
+      const tm = config.termite_monitoring;
+      // Bracketed shape (owner 2026-07-28): base_monthly + step_monthly per
+      // bracket_stations. The legacy flat keys (basic/premier) are IGNORED —
+      // they priced a retired model, and honoring `basic` as a bracket base
+      // would silently double the small-home rate ($35 vs $19). The
+      // migration rewrites the prod row to the new shape; an un-migrated
+      // row simply leaves the in-code bracket defaults in force.
+      // WHOLE dollars (matches the admin validator): the engine's annual is
+      // whole-dollar by design, so cents here would make monthly x 12 /
+      // monthly x 3 disagree across server, client fallback, and persisted
+      // payloads. A legacy/hand-edited cent row rounds rather than desyncs.
+      if (isPositiveNumber(Number(tm.base_monthly))) {
+        constants.TERMITE.monitoring.baseMonthly = Math.round(money(Number(tm.base_monthly)));
+      }
+      if (isNonNegativeNumber(Number(tm.step_monthly))) {
+        constants.TERMITE.monitoring.stepMonthly = Math.round(money(Number(tm.step_monthly)));
+      }
+      if (isPositiveNumber(Number(tm.bracket_stations))) {
+        constants.TERMITE.monitoring.bracketStations = Math.round(Number(tm.bracket_stations));
+      }
     }
     if (config.termite_bond) {
       const tb = config.termite_bond;

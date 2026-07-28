@@ -159,9 +159,9 @@
   },
   "termite_basic_standard_perimeter": {
     "summary": {
-      "recurringAnnualAfterDiscount": 420,
-      "recurringMonthlyAfterDiscount": 35,
-      "year1Total": 1355
+      "recurringAnnualAfterDiscount": 288,
+      "recurringMonthlyAfterDiscount": 24,
+      "year1Total": 898
     },
     "waveGuard": {
       "tier": "bronze",
@@ -170,8 +170,8 @@
     },
     "lineItems": {
       "termite_bait": {
-        "annual": 420,
-        "monthly": 35
+        "annual": 288,
+        "monthly": 24
       }
     }
   },

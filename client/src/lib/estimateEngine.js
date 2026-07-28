@@ -455,6 +455,36 @@ export function applyServerTermiteRentalPricingConfig(config) {
   return TERMITE_RENTAL_QUARTERS;
 }
 
+// Station-check brackets (owner 2026-07-28) — DB-tunable via
+// pricing_config.termite_monitoring, same live-rates posture as the bond and
+// rental appliers above. monthly = base + step × max(0, ceil(sta/bracket)−2):
+// ≤10 stations $19 · 11-15 $24 · 16-20 $29 · 21-25 $34 · … The flat
+// Basic/Premier tiers are retired (Premier was never defined or sold).
+const TERMITE_MONITORING_DEFAULTS = { baseMonthly: 19, stepMonthly: 5, bracketStations: 5 };
+let TERMITE_MONITORING = { ...TERMITE_MONITORING_DEFAULTS };
+
+export function applyServerTermiteMonitoringPricingConfig(config) {
+  const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  // Whole dollars, matching the server validator + bridge — cents cannot
+  // survive the engine's whole-dollar annualization.
+  TERMITE_MONITORING = {
+    baseMonthly: Math.round(pos(config?.base_monthly) ?? TERMITE_MONITORING_DEFAULTS.baseMonthly),
+    stepMonthly: Math.round(nonNeg(config?.step_monthly) ?? TERMITE_MONITORING_DEFAULTS.stepMonthly),
+    bracketStations: pos(config?.bracket_stations)
+      ? Math.round(Number(config.bracket_stations))
+      : TERMITE_MONITORING_DEFAULTS.bracketStations,
+  };
+  return { ...TERMITE_MONITORING };
+}
+
+// Mirrors server termiteMonitoringMonthlyForStations exactly.
+function termiteMonitoringMonthly(stations) {
+  const m = TERMITE_MONITORING;
+  const steps = Math.max(0, Math.ceil(Math.max(1, Number(stations) || 0) / m.bracketStations) - 2);
+  return Math.round((m.baseMonthly + steps * m.stepMonthly) * 100) / 100;
+}
+
 // Mirrors server priceTermiteStationRental: whole-dollar per-application
 // uplift, annual = x4. Returns null when there is nothing worth billing.
 function termiteStationRentalLine(installPrice) {
@@ -2177,16 +2207,28 @@ export function calculateEstimate(inputs) {
     const perim = termitePerimeterLF || (fpEff > 0 ? Math.round(4 * Math.sqrt(fpEff) * pm) : 0);
     if (perim > 0) {
       hasRec = true;
-      const sta = Math.max(8, Math.ceil(perim / 10));
-      const ai = Math.round((sta * (13.16 + 5.25 + 0.75)) * 1.45);
-      const ti = Math.round((sta * (22.05 + 5.25 + 0.75)) * 1.45);
-      const bmo = termiteMonitoringTier === 'premier' ? 35 : 35;
-      const pmo = 65;
+      // Label-driven spacing per system (owner 2026-07-28): Advance-class
+      // 10 ft, Trelona 15 ft — so each system's install prices off ITS OWN
+      // station count. Menu is Trelona-only; Advance stays computable for
+      // replaying old estimates.
+      const tmSystem = termiteBaitSystem || 'trelona';
+      const staAdv = Math.max(8, Math.ceil(perim / 10));
+      const staTre = Math.max(8, Math.ceil(perim / 15));
+      const sta = tmSystem === 'advance' ? staAdv : staTre;
+      const ai = Math.round((staAdv * (13.16 + 5.25 + 0.75)) * 1.45);
+      const ti = Math.round((staTre * (22.05 + 5.25 + 0.75)) * 1.45);
+      // Bracketed by the selected system's station count; the retired
+      // Basic/Premier tier input no longer changes price (bmo/pmo kept for
+      // legacy readers, both stamped with the bracket monthly).
+      const monMonthly = termiteMonitoringMonthly(sta);
+      const bmo = monMonthly;
+      const pmo = monMonthly;
       R.tmBait = {
-        selectedSystem: termiteBaitSystem,
-        system: termiteBaitSystem,
-        selectedMonitoringTier: termiteMonitoringTier,
-        monitoringTier: termiteMonitoringTier,
+        selectedSystem: tmSystem,
+        system: tmSystem,
+        selectedMonitoringTier: 'basic',
+        monitoringTier: 'basic',
+        monMonthly,
         ai,
         ti,
         bmo,
@@ -2199,13 +2241,17 @@ export function calculateEstimate(inputs) {
         },
       };
       wgServices.push({
-        name: termiteMonitoringTier === 'premier' ? 'Termite Bait (Premier)' : 'Termite Bait (Basic)',
+        // Tiers are retired (owner 2026-07-28) — no tier suffix, and the
+        // row bills the SAME bracket monthly the aggregates use (a flat
+        // 35/65 here would persist a row that disagrees with monthlyTotal,
+        // and acceptance/conversion bill from these rows).
+        name: 'Termite Bait',
         service: 'termite_bait',
-        mo: termiteMonitoringTier === 'premier' ? 65 : 35,
+        mo: monMonthly,
         // Quarterly station checks, billed per application (owner
         // 2026-07-20) — mirrors server priceTermiteBait visitsPerYear/perApp
-        // (perApp = monthly x 3, exact: $105 basic / $195 premier).
-        perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
+        // (perApp = monthly × 3, exact by construction).
+        perTreatment: Math.round(monMonthly * 3 * 100) / 100,
         visitsPerYear: 4,
       });
       // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
@@ -2243,7 +2289,7 @@ export function calculateEstimate(inputs) {
       R.tmBait.ownership = rentsStations ? 'rent' : 'own';
       R.tmBait.stationsOwnedBy = rentsStations ? 'waves' : 'customer';
       if (rentsStations) {
-        const rental = termiteStationRentalLine(termiteBaitSystem === 'trelona' ? ti : ai);
+        const rental = termiteStationRentalLine(tmSystem === 'advance' ? ai : ti);
         if (rental) {
           R.tmBait.rented = true;
           R.tmBait.stationRental = rental;
@@ -2986,7 +3032,9 @@ export function calculateEstimate(inputs) {
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', service: 'mosquito', ann: R.mq[ri].ann, discountable: true }); }
   }
   if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
-    const termiteMonthly = termiteMonitoringTier === 'premier' ? 65 : 35;
+    // Bracketed station-check monthly off the priced system's station count
+    // (owner 2026-07-28) — the flat tier literals are retired.
+    const termiteMonthly = R.tmBait.monMonthly ?? termiteMonitoringMonthly(R.tmBait.sta);
     ac++;
     ra += termiteMonthly * 12;
     lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
@@ -3199,7 +3247,7 @@ export function calculateEstimate(inputs) {
   // recurring termite_station_rental line instead (mirrors the server, where
   // installation.price is zeroed while retailValue keeps the hardware value).
   let tmInstall = R.tmBait && !R.tmBait.rented
-    ? ((termiteBaitSystem === 'trelona' ? R.tmBait.ti : R.tmBait.ai) || 0)
+    ? (((R.tmBait.system || 'trelona') === 'advance' ? R.tmBait.ai : R.tmBait.ti) || 0)
     : 0;
   ot = Math.round(ot * 100) / 100;
 

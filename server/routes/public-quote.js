@@ -664,8 +664,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.termite) {
       engineInput.services.termite = {
-        system: services.termite.system || 'advance',
-        monitoringTier: services.termite.monitoringTier || 'basic',
+        // FORCED, not defaulted (codex P1): this route mints NEW quotes
+        // from an unauthenticated body, so a caller-supplied 'advance' /
+        // 'sentricon' must not buy an off-menu program — Trelona-only
+        // (owner 2026-07-28). Replay compatibility lives in the stored-
+        // estimate paths, never here.
+        system: 'trelona',
+        monitoringTier: 'basic',
       };
     }
     if (services.rodentBait) {

@@ -947,7 +947,7 @@ function generateEstimate(input) {
       const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
-        system: termiteOptions.system || 'advance',
+        system: termiteOptions.system || 'trelona',
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',
         modifiers,

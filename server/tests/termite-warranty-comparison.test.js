@@ -102,21 +102,21 @@ describe('the numbers are the engine’s', () => {
     // round(install / seeded 20 quarters), rent per-app = monitoring + uplift.
     const install = data.own.installToday;
     expect(install).toBeGreaterThan(0);
-    expect(data.own.perApp).toBe(105);
+    expect(data.own.perApp).toBe(102);
     const expectedUplift = Math.round(install / 20);
     expect(data.rent).toMatchObject({
       installToday: 0,
       hardwareValue: install,
-      basePerApp: 105,
+      basePerApp: 102,
       upliftPerApp: expectedUplift,
-      perApp: 105 + expectedUplift,
+      perApp: 102 + expectedUplift,
       recoveryQuarters: 20,
     });
     expect(data.visitsPerYear).toBe(4);
 
     // First year: buying carries the install, renting carries the uplift.
-    expect(data.own.firstYear).toBe(install + 105 * 4);
-    expect(data.rent.firstYear).toBe((105 + expectedUplift) * 4);
+    expect(data.own.firstYear).toBe(install + 102 * 4);
+    expect(data.rent.firstYear).toBe((102 + expectedUplift) * 4);
 
     // Parity at five years (20 quarters) is the honest framing on the sheet —
     // exact up to the whole-dollar uplift rounding (at most half the horizon,
@@ -186,7 +186,7 @@ describe('replay must reproduce the stored quote', () => {
     })).toBeNull();
     // Own-mode: stored bait rate must match too.
     expect(buildTermiteComparisonData(termiteInputs(), {
-      persistedQuote: { ownership: 'own', baitPerApp: 105 },
+      persistedQuote: { ownership: 'own', baitPerApp: 102 },
     })).toBeTruthy();
     expect(buildTermiteComparisonData(termiteInputs(), {
       persistedQuote: { ownership: 'own', baitPerApp: 99 },
@@ -196,10 +196,10 @@ describe('replay must reproduce the stored quote', () => {
     const ownMapped = mapV1ToLegacyShape(generateEstimate(termiteInputs()));
     const installItem = ownMapped.oneTime.items.find((i) => i.service === 'termite_bait_installation');
     expect(buildTermiteComparisonData(termiteInputs(), {
-      persistedQuote: { ownership: 'own', baitPerApp: 105, installPrice: installItem.price },
+      persistedQuote: { ownership: 'own', baitPerApp: 102, installPrice: installItem.price },
     })).toBeTruthy();
     expect(buildTermiteComparisonData(termiteInputs(), {
-      persistedQuote: { ownership: 'own', baitPerApp: 105, installPrice: installItem.price - 40 },
+      persistedQuote: { ownership: 'own', baitPerApp: 102, installPrice: installItem.price - 40 },
     })).toBeNull();
   });
 

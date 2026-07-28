@@ -422,9 +422,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 420,
-      "annualAfterDiscount": 420,
-      "monthlyTotal": 35,
+      "annualBeforeDiscount": 348,
+      "annualAfterDiscount": 348,
+      "monthlyTotal": 29,
       "savings": 0,
       "serviceCount": 1
     },
@@ -434,26 +434,26 @@
       "ts": [],
       "mq": [],
       "tmBait": {
-        "ai": 695,
-        "ti": null,
-        "bmo": 35,
-        "pmo": 65
+        "ai": null,
+        "ti": 691,
+        "bmo": 29,
+        "pmo": 29
       }
     },
     "oneTime": {
-      "total": 695,
-      "tmInstall": 695,
+      "total": 691,
+      "tmInstall": 691,
       "items": [
         {
-          "name": "Advance Installation",
-          "price": 695
+          "name": "Trelona Installation",
+          "price": 691
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 1115,
-      "year2": 420
+      "year1": 1039,
+      "year2": 348
     }
   },
   "v1adapter_rodent_bait_large_footprint": {

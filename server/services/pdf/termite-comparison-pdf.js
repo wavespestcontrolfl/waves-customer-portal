@@ -229,11 +229,18 @@ function renderTermiteComparisonPdf(content) {
     headerBar(doc, 'Termite Protection — Your Options');
 
     const { own, rent, bondOptions = [], visitsPerYear = 4 } = content;
+    // Name the installed system (owner 2026-07-28): the menu is
+    // Trelona-only, and the service-details guide already brands the
+    // program Trelona® ATBS — the sheet should match. Legacy Advance
+    // estimates keep a generic label rather than misnaming their hardware.
+    const systemName = String(content.system || '').toLowerCase() === 'trelona'
+      ? 'Trelona® ATBS annual bait stations'
+      : 'in-ground bait stations';
     const intro = [
       content.address ? `Priced for ${content.address}.` : 'Priced for your home.',
       content.stations
-        ? `Your program: ${content.stations} in-ground bait stations, checked ${visitsPerYear} times a year on a quarterly station check, billed per application.`
-        : `Your program: in-ground bait stations, checked ${visitsPerYear} times a year on a quarterly station check, billed per application.`,
+        ? `Your program: ${content.stations} ${systemName}, checked ${visitsPerYear} times a year on a quarterly station check, billed per application.`
+        : `Your program: ${systemName}, checked ${visitsPerYear} times a year on a quarterly station check, billed per application.`,
       'Same stations, same bait, same quarterly checks either way — the difference is who owns the hardware and how you pay.',
     ].join(' ');
     doc.font('Helvetica').fontSize(10).fillColor(BODY).text(intro, L, doc.y, { width: W, lineGap: 1.5 });
@@ -243,8 +250,6 @@ function renderTermiteComparisonPdf(content) {
     comparisonTable(doc, [
       ['Due at installation', money(own.installToday), `$0 — ${money(rent.hardwareValue)} of hardware installed at no charge`],
       ['Per application (quarterly)', money(own.perApp), `${money(rent.perApp)} (${money(rent.basePerApp)} station check + ${money(rent.upliftPerApp)} station rental)`],
-      ['First-year total', money(own.firstYear), money(rent.firstYear)],
-      ['Five-year total', money(own.fiveYear), money(rent.fiveYear)],
       ['Who owns the hardware', 'You do — bought once, yours permanently.', 'Waves — we retain ownership.'],
       ['If you end the program', 'The stations stay in your yard.', 'We remove the stations; your inspection history stays in your app.'],
     ]);

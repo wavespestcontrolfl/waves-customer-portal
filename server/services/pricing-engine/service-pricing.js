@@ -200,7 +200,12 @@ function normalizeTermiteComplexity(property = {}, options = {}) {
 
 function normalizeTermiteSystem(value) {
   const requestedSystem = value;
-  const raw = normalizeToken(value || 'advance');
+  // Menu is Trelona-only (owner 2026-07-28): an ABSENT system now defaults
+  // to Trelona. Explicit legacy values (old estimates' replayable inputs
+  // always stored their system) keep pricing as Advance — the system stays
+  // fully priceable off-menu, so replays never silently reprice.
+  const fallback = TERMITE.defaultSystem || 'trelona';
+  const raw = normalizeToken(value || fallback);
   const aliases = {
     advance: 'advance',
     advanced: 'advance',
@@ -209,9 +214,22 @@ function normalizeTermiteSystem(value) {
     sentricon_recruit_hd: 'advance',
     trelona: 'trelona',
   };
-  const selectedSystem = aliases[raw] || 'advance';
-  const warnings = raw && !aliases[raw] ? ['invalid_termite_system_defaulted_to_advance'] : [];
+  const selectedSystem = aliases[raw] || fallback;
+  const warnings = raw && !aliases[raw] ? [`invalid_termite_system_defaulted_to_${fallback}`] : [];
   return { requestedSystem, selectedSystem, warnings };
+}
+
+// Station-check monthly by 5-station bracket (owner 2026-07-28): ≤10
+// stations → baseMonthly; each further bracket of `bracketStations` adds
+// stepMonthly. Anchored so a ~23-station home lands $34/mo gross — the
+// market-standard ~$29/mo a WaveGuard Gold member sees. Replaces the flat
+// Basic/Premier tiers (Premier was never defined or sold).
+function termiteMonitoringMonthlyForStations(stations) {
+  const m = TERMITE.monitoring || {};
+  const bracketSize = Number(m.bracketStations) > 0 ? Number(m.bracketStations) : 5;
+  const count = Math.max(1, Number(stations) || 0);
+  const steps = Math.max(0, Math.ceil(count / bracketSize) - 2);
+  return Math.round((Number(m.baseMonthly) + steps * Number(m.stepMonthly)) * 100) / 100;
 }
 
 function normalizeTermiteMonitoringTier(value) {
@@ -3915,9 +3933,11 @@ function priceTermiteStationRental(installPrice) {
 
 function priceTermiteBait(property, options = {}) {
   const {
-    // Default switched to Advance Apr 2026 (was 'trelona') for competitive
-    // doorstep pricing. Trelona remains available as the premium upgrade.
-    system = 'advance',
+    // No destructure default (codex P2): an absent system must reach
+    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
+    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
+    // it and quote 10-ft Advance for direct callers.
+    system,
     monitoringTier = 'basic',
     // 'own' (customer buys the stations, one-time install charge) or 'rent'
     // (Waves retains ownership, $0 install, recovery rides the quarterly).
@@ -3975,8 +3995,6 @@ function priceTermiteBait(property, options = {}) {
       ? ['stories_estimated']
       : []),
   ]);
-  const mon = TERMITE.monitoring[selectedMonitoringTier] || TERMITE.monitoring.basic;
-
   if (perimeterResolution.value === null) {
     return {
       service: 'termite_bait',
@@ -4021,8 +4039,10 @@ function priceTermiteBait(property, options = {}) {
       monitoring: {
         monthly: 0,
         annual: 0,
-        quotedMonthly: mon.monthly,
-        quotedAnnual: mon.monthly * 12,
+        // No perimeter → no station count; quote the smallest program's
+        // rate as the "from" figure (min-station bracket).
+        quotedMonthly: termiteMonitoringMonthlyForStations(TERMITE.minStations),
+        quotedAnnual: termiteMonitoringMonthlyForStations(TERMITE.minStations) * 12,
       },
       annual: 0,
       monthly: 0,
@@ -4030,9 +4050,15 @@ function priceTermiteBait(property, options = {}) {
   }
 
   const perimeter = perimeterResolution.value;
-  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / TERMITE.stationSpacing));
+  const sys = TERMITE.systems[selectedSystem]
+    || TERMITE.systems[TERMITE.defaultSystem]
+    || TERMITE.systems.advance;
+  // Label-driven spacing per system (Trelona 15 ft, Advance 10 ft — owner
+  // 2026-07-28) wins over the legacy global; the DB termite_install row can
+  // still tune the FALLBACK spacing but never a system's label spacing.
+  const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : TERMITE.stationSpacing;
+  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / spacingFt));
 
-  const sys = TERMITE.systems[selectedSystem] || TERMITE.systems.advance;
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
   const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
@@ -4053,7 +4079,9 @@ function priceTermiteBait(property, options = {}) {
   const isRentedStations = ownership === 'rent';
   const billedInstallPrice = isRentedStations ? 0 : installPrice;
 
-  const monitoringMonthly = mon.monthly;
+  // Bracketed by the station count this property actually needs (owner
+  // 2026-07-28) — the flat Basic/Premier tiers are retired.
+  const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
   const monitoringAnnual = monitoringMonthly * 12;
 
   return {
@@ -7826,6 +7854,7 @@ module.exports = {
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
   priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  termiteMonitoringMonthlyForStations,
   priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
