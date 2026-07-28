@@ -622,6 +622,33 @@ function buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerCo
   return { updates, detectedFamilyKeys, inferredTier };
 }
 
+// Downward tier alignment for LABEL-ONLY customers (owner follow-up
+// 2026-07-28: falling out of recurring coverage means falling out of the
+// tier, symmetric with enrollment). Applies ONLY to customers whose tier is
+// derived state — no positive monthly_rate and no explicit monthly_membership
+// billing lane. A PAYING member's tier is billing state owned by the
+// cancellation/offboarding flow (customer-offboarding.js already clears
+// waveguard_tier + monthly_rate on cancel); a transient schedule gap must
+// never silently strip a paying member's membership. Lowers the tier to what
+// the upcoming families still support, or clears it to NULL (No Plan) when
+// none remain. Never raises — upgrades belong to the alignment/enrollment
+// paths.
+function buildTierDemotionUpdates(customer, detectedPlanKeys, customerColumns = {}) {
+  const updates = {};
+  const detectedFamilyKeys = uniqueServiceFamilies(detectedPlanKeys);
+  const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
+  const currentTier = normalizeTierName(customer?.waveguard_tier);
+  if (!currentTier) return { updates, detectedFamilyKeys, inferredTier };
+  if (Number(customer?.monthly_rate || 0) > 0) return { updates, detectedFamilyKeys, inferredTier };
+  if (customer?.billing_mode === 'monthly_membership') return { updates, detectedFamilyKeys, inferredTier };
+  if (!customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
+  const currentRank = activeTierRank(currentTier);
+  const inferredRank = inferredTier ? activeTierRank(inferredTier) : -1;
+  if (inferredRank >= currentRank) return { updates, detectedFamilyKeys, inferredTier };
+  updates.waveguard_tier = inferredTier;
+  return { updates, detectedFamilyKeys, inferredTier };
+}
+
 function serviceRowCountsTowardWaveGuard(row = {}) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (TERMINAL_STATUSES.includes(String(row.status || '').toLowerCase())) return false;
@@ -828,11 +855,10 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
 // scripts/align-waveguard-portal-records.js. The direct customers UPDATE
 // fires zero customer communications: the membership.started email lives only
 // in the admin PATCH route and the customers table has no DB triggers.
-async function enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today }) {
-  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
-    return { synced: false, reason: 'commercial_customer' };
-  }
-
+// Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
+// recurring qualifying rows — the basis for both enrollment and demotion, so
+// the two directions can never disagree about what counts as coverage.
+async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
   const detectedPlanKeys = [];
   for (const row of rows) {
@@ -843,7 +869,15 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
   }
+  return detectedPlanKeys;
+}
 
+async function enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today }) {
+  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
+    return { synced: false, reason: 'commercial_customer' };
+  }
+
+  const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(database, customerId, today);
   const enrollment = buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerColumns);
   if (!enrollment.inferredTier || !Object.keys(enrollment.updates).length) {
     return { synced: false, reason: 'no_upcoming_recurring_evidence', detectedPlanKeys };
@@ -875,13 +909,54 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
   };
 }
 
-// Nightly backstop for the auto-tier directive: heals any No-Plan customer
-// holding upcoming recurring rows that arrived by a path outside the seeding
-// hook (direct row edits, imports, legacy flows). No-op while
-// GATE_AUTO_WAVEGUARD_TIER is off. Bounded per run; each candidate goes
-// through the same gated sync as the booking-time hook, so the write rules
-// (tier only, no comms) live in exactly one place.
-async function reconcileNoPlanRecurringTiers(options = {}) {
+// Demotion executor: recompute a label-only customer's tier downward from
+// their remaining upcoming coverage. Same no-comms guarantee as enrollment —
+// a direct customers UPDATE; the membership.canceled email lives only in the
+// admin PATCH route and offboarding flow.
+async function demoteLapsedTierCustomer({ database, log, customer, customerId, customerColumns, today }) {
+  const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(database, customerId, today);
+  const demotion = buildTierDemotionUpdates(customer, detectedPlanKeys, customerColumns);
+  if (!Object.keys(demotion.updates).length) {
+    return { demoted: false, detectedPlanKeys };
+  }
+
+  await database('customers').where({ id: customerId }).update(demotion.updates);
+
+  void db('activity_log').insert({
+    customer_id: customerId,
+    action: 'waveguard_tier_auto_lapsed',
+    description: demotion.inferredTier
+      ? `Lowered WaveGuard tier to ${demotion.inferredTier} — upcoming recurring coverage shrank`
+      : 'Cleared WaveGuard tier — no upcoming recurring services remain',
+    metadata: {
+      previous_tier: customer?.waveguard_tier || null,
+      detected_plan_keys: detectedPlanKeys,
+      detected_family_keys: demotion.detectedFamilyKeys,
+      updates: demotion.updates,
+    },
+  }).catch((err) => log.warn(`[self-booking-plan-sync] tier auto-lapse activity_log insert failed: ${err.message}`));
+
+  return {
+    demoted: true,
+    detectedPlanKeys,
+    detectedFamilyKeys: demotion.detectedFamilyKeys,
+    inferredTier: demotion.inferredTier,
+    updates: demotion.updates,
+  };
+}
+
+// Nightly reconcile for the auto-tier directive, BOTH directions:
+//   1. Enrollment — No-Plan customers holding upcoming recurring rows that
+//      arrived by a path outside the seeding hook (direct row edits, imports,
+//      legacy flows) get their tier stamped.
+//   2. Demotion — label-only tiered customers whose upcoming coverage shrank
+//      get lowered, or cleared to No Plan when nothing upcoming remains
+//      (cancelled/lapsed series). Paying members are excluded in SQL and
+//      re-checked in buildTierDemotionUpdates.
+// No-op while GATE_AUTO_WAVEGUARD_TIER is off. Bounded per pass; each
+// enrollment candidate goes through the same gated sync as the booking-time
+// hook, so the write rules (tier only, no comms) live in exactly one place.
+async function reconcileRecurringTiers(options = {}) {
   const {
     database = db,
     log = logger,
@@ -896,7 +971,15 @@ async function reconcileNoPlanRecurringTiers(options = {}) {
   const scheduledColumns = await columnInfo(database, 'scheduled_services');
   const hasIsRecurring = !!scheduledColumns.is_recurring;
 
-  let query = database('customers as c')
+  const applyCommonFilters = (query) => {
+    let filtered = query;
+    if (customerColumns.active) filtered = filtered.where('c.active', true);
+    if (customerColumns.deleted_at) filtered = filtered.whereNull('c.deleted_at');
+    return filtered;
+  };
+
+  // Pass 1 — enrollment: not enrolled + at least one upcoming recurring row.
+  let enrollQuery = database('customers as c')
     .where(function notEnrolled() {
       this.where(function noRecognizedTier() {
         this.whereNull('c.waveguard_tier').orWhereRaw(
@@ -918,13 +1001,12 @@ async function reconcileNoPlanRecurringTiers(options = {}) {
     .orderBy('c.created_at', 'asc')
     .limit(Math.max(1, limit))
     .select('c.id');
-  if (customerColumns.active) query = query.where('c.active', true);
-  if (customerColumns.deleted_at) query = query.whereNull('c.deleted_at');
+  enrollQuery = applyCommonFilters(enrollQuery);
 
-  const candidates = await query;
+  const enrollCandidates = await enrollQuery;
   let enrolled = 0;
   let failed = 0;
-  for (const candidate of candidates) {
+  for (const candidate of enrollCandidates) {
     try {
       const result = await syncCustomerWaveGuardPlanFromScheduledServices({
         database,
@@ -935,11 +1017,65 @@ async function reconcileNoPlanRecurringTiers(options = {}) {
       if (result?.enrolled) enrolled += 1;
     } catch (err) {
       failed += 1;
-      log.warn(`[self-booking-plan-sync] nightly tier reconcile failed for ${candidate.id}: ${err.message}`);
+      log.warn(`[self-booking-plan-sync] nightly tier enroll failed for ${candidate.id}: ${err.message}`);
     }
   }
 
-  return { ok: true, checked: candidates.length, enrolled, failed, limit };
+  // Pass 2 — demotion: label-only tiered customers (no positive rate, not an
+  // explicit monthly_membership lane). Partial demotions (Silver -> Bronze)
+  // need per-customer family analysis, so SQL only narrows to the label-only
+  // tiered set and the recompute happens per candidate.
+  let demoteQuery = database('customers as c')
+    .whereRaw(
+      `LOWER(c.waveguard_tier) IN (${tiersLower.map(() => '?').join(', ')})`,
+      tiersLower,
+    )
+    .where(function noRate() {
+      this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
+    })
+    .orderBy('c.created_at', 'asc')
+    .limit(Math.max(1, limit))
+    .select(
+      'c.id',
+      'c.waveguard_tier',
+      'c.monthly_rate',
+      ...(customerColumns.billing_mode ? ['c.billing_mode'] : []),
+    );
+  if (customerColumns.billing_mode) {
+    demoteQuery = demoteQuery.where(function notMonthlyLane() {
+      this.whereNull('c.billing_mode').orWhere('c.billing_mode', '!=', 'monthly_membership');
+    });
+  }
+  demoteQuery = applyCommonFilters(demoteQuery);
+
+  const demoteCandidates = await demoteQuery;
+  let demoted = 0;
+  for (const candidate of demoteCandidates) {
+    try {
+      const result = await demoteLapsedTierCustomer({
+        database,
+        log,
+        customer: candidate,
+        customerId: candidate.id,
+        customerColumns,
+        today,
+      });
+      if (result?.demoted) demoted += 1;
+    } catch (err) {
+      failed += 1;
+      log.warn(`[self-booking-plan-sync] nightly tier demotion failed for ${candidate.id}: ${err.message}`);
+    }
+  }
+
+  return {
+    ok: true,
+    enrollChecked: enrollCandidates.length,
+    enrolled,
+    demoteChecked: demoteCandidates.length,
+    demoted,
+    failed,
+    limit,
+  };
 }
 
 module.exports = {
@@ -952,12 +1088,13 @@ module.exports = {
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
+  buildTierDemotionUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
   normalizeTierName,
-  reconcileNoPlanRecurringTiers,
+  reconcileRecurringTiers,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,

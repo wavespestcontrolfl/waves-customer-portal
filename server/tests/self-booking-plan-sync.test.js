@@ -7,6 +7,7 @@ const {
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
+  buildTierDemotionUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -310,6 +311,48 @@ describe('self-booking plan sync helpers', () => {
     expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
       .toEqual({});
     expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, ['pest_control_quarterly'], { monthly_rate: {} }).updates)
+      .toEqual({});
+  });
+
+  test('demotes a label-only customer when upcoming recurring coverage shrinks or lapses', () => {
+    const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
+    const labelOnly = { monthly_rate: null, billing_mode: null };
+
+    // Silver with only one remaining family -> Bronze.
+    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Silver' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze' });
+    // Platinum down to two families -> Silver.
+    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Platinum' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver' });
+    // No upcoming recurring coverage at all -> tier cleared to No Plan.
+    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, [], customerColumns).updates)
+      .toEqual({ waveguard_tier: null });
+
+    // Coverage equal to (or above) the current tier -> untouched; demotion
+    // never raises a tier.
+    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({});
+  });
+
+  test('never auto-demotes paying members or unrecognized tiers', () => {
+    const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
+
+    // Positive monthly_rate = paying member — the cancellation/offboarding
+    // flow owns their tier, a schedule gap must not strip it.
+    expect(buildTierDemotionUpdates({ waveguard_tier: 'Silver', monthly_rate: 129 }, [], customerColumns).updates)
+      .toEqual({});
+    // Explicit monthly_membership lane is preserved even at rate 0.
+    expect(buildTierDemotionUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: 'monthly_membership' }, [], customerColumns).updates)
+      .toEqual({});
+    // No recognized tier (No Plan / sentinels) -> nothing to demote.
+    expect(buildTierDemotionUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    expect(buildTierDemotionUpdates({ waveguard_tier: 'none', monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    // Missing waveguard_tier column (older environment) -> no mutation.
+    expect(buildTierDemotionUpdates({ waveguard_tier: 'Silver', monthly_rate: 0 }, [], { monthly_rate: {} }).updates)
       .toEqual({});
   });
 
