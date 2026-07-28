@@ -154,7 +154,9 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('We checked five traps today.', facts)).toContain('uncorroborated_count:5 traps');
   expect(ungroundedClaims('We inspected all seven traps today.', facts)).toEqual([]);
   // partitive phrasing claims no count and harmless word-numbers stay clean
-  expect(ungroundedClaims('One of the traps was relocated to the attic entry.', facts)).toEqual([]);
+  // (no location named — an action-at-location claim would need a paired
+  // completed-work fact)
+  expect(ungroundedClaims('One of the traps was relocated during the visit.', facts)).toEqual([]);
 
   // counts validate per NOUN, not against a shared pool (codex round-3 P1):
   // with 7 checked and captures at 2 traps, the model can't swap the facts

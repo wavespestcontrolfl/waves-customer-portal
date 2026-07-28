@@ -3020,9 +3020,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // Typed-report narrative for EVERY OTHER typed specialty report (owner
-  // ask 2026-07-27, second lane): cockroach, bed bug, termite bait, WDO…
-  // keep the frozen recap/template as their summary — the gate reweaves the
+  // Typed-report narrative for EVERY OTHER typed specialty report on the
+  // V1 surface (owner ask 2026-07-27, second lane): cockroach, bed bug,
+  // termite bait, … keep the frozen recap/template as their summary — the
+  // gate reweaves the typed data. NOTE: WDO inspections are OUT OF SCOPE
+  // here — completion profiles exclude wdo_inspection from V1 and public
+  // WDOs render on the project-report surface (codex P2 #3007 r7); a WDO
+  // narrative would be its own lane on that surface.
+  // The gate reweaves the
   // typed findings, activity reading, station counts, products, photo
   // evidence, and next same-line visit into the grounded narrative (same
   // engine + guard stack as the rodent refresh). Precedence unchanged: the

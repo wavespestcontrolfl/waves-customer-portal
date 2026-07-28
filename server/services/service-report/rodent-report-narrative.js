@@ -42,7 +42,8 @@ const {
 } = require('./visit-summary-narrative');
 
 // v2: the narrative covers EVERY typed specialty report (cockroach, bed
-// bug, termite bait, WDO, rodent…) — the prompt generalized from rodent-
+// bug, termite bait, rodent… on the V1 report surface; WDO renders on the
+// project-report surface and is out of scope) — the prompt generalized from rodent-
 // only wording (owner ask 2026-07-27, second lane). File name kept (no
 // renames); rodent remains a thin alias over the same engine.
 const PROMPT_VERSION = 'typed_report_narrative_v2';
@@ -746,7 +747,7 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bcoyotes?\b/i, corpus: /\bcoyote/ },
   // treatment actions
   { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
-  { kind: 'action', out: /\bbait(?:s|ed)?\b/i, corpus: /\bbait/ },
+  { kind: 'action', out: /\bbait(?:s|ed|ing)?\b/i, corpus: /\bbait/ },
   { kind: 'action', out: /\bgrowth\s+regulator/i, corpus: /\bgrowth\s+regulator/ },
   { kind: 'action', out: /\bcracks?\s*(?:and|&)\s*crevices?/i, corpus: /\bcrack\w*\s+(?:and\s+)?crevice/ },
   { kind: 'action', out: /\bflush[-\s]?out\b/i, corpus: /\bflush\s*out/ },
@@ -838,9 +839,16 @@ const OBSERVATION_RE = /\b(observed|noted|seen|found|documented|present|active)\
 function contradictedZeroStates(text, facts) {
   const problems = [];
   const pestTerms = DOMAIN_TERMS.filter((term) => term.kind === 'pest' || term.kind === 'species');
+  // Negative-valued FINDINGS carry zero states too (codex P1 #3007 r7):
+  // "Live roaches observed: No" negates the sighting even when no
+  // headline/body sentence spells it out.
+  const negativeFindings = (facts.findings || [])
+    .filter((finding) => NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()))
+    .map((finding) => `${finding.label} ${finding.value}`);
   const ratified = [facts.todaysResult?.headline, facts.todaysResult?.body, facts.recap]
     .flatMap((block) => String(block || '').split(/(?<=[.!?])\s+/))
-    .filter((sentence) => NEGATED_SENTENCE_RE.test(sentence));
+    .filter((sentence) => NEGATED_SENTENCE_RE.test(sentence))
+    .concat(negativeFindings);
   if (!ratified.length) return problems;
   const zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
   if (!zeroStatePests.length) return problems;
@@ -945,6 +953,48 @@ function typedCountProblems(text, facts) {
   return problems;
 }
 
+// Action–location PAIRING (codex P1 #3007 r7): "we sprayed the kitchen"
+// must not pass just because a perimeter spray grounds "spray" and a
+// kitchen ACTIVITY finding grounds "kitchen" — a sentence that claims an
+// action at a location requires some single completed-work fact recording
+// them together. Work facts = affirmative ratified sentences, positive
+// findings (label+value), and device entries.
+function completedWorkStrings(facts) {
+  const strings = [];
+  const norm = (value) => ` ${String(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  [facts.recap, facts.todaysResult?.headline, facts.todaysResult?.body, facts.todaysResult?.nextStep]
+    .forEach((block) => String(block || '').split(/(?<=[.!?])\s+/).forEach((sentence) => {
+      if (sentence.trim() && !NEGATED_SENTENCE_RE.test(sentence)) strings.push(norm(sentence));
+    }));
+  (facts.findings || []).forEach((finding) => {
+    if (!NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())) {
+      strings.push(norm(`${finding.label} ${finding.value}`));
+    }
+  });
+  (facts.devices || []).forEach((device) => {
+    strings.push(norm(`${device.name || ''} ${device.category || ''} ${device.summary || ''}`));
+  });
+  return strings;
+}
+
+function unpairedActionLocations(text, facts) {
+  const problems = [];
+  const actionTerms = DOMAIN_TERMS.filter((term) => term.kind === 'action');
+  const locationTerms = DOMAIN_TERMS.filter((term) => term.kind === 'location');
+  const work = completedWorkStrings(facts);
+  for (const sentence of String(text).split(/(?<=[.!?])\s+/)) {
+    const actions = actionTerms.filter((term) => term.out.test(sentence));
+    if (!actions.length) continue;
+    const locations = locationTerms.filter((term) => term.out.test(sentence));
+    if (!locations.length) continue;
+    const everyLocationPaired = locations.every((location) => actions.some(
+      (action) => work.some((fact) => action.corpus.test(fact) && location.corpus.test(fact)),
+    ));
+    if (!everyLocationPaired) problems.push('unpaired_action_location');
+  }
+  return problems;
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -976,6 +1026,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...ungroundedDomainTerms(text, facts));
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...contradictedZeroStates(text, facts));
+  problems.push(...unpairedActionLocations(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month
@@ -1041,7 +1092,8 @@ function mandatoryCareCopy(todaysResult) {
 
 /**
  * Returns the detailed Visit Summary string for a typed specialty report
- * (rodent, cockroach, bed bug, termite bait, WDO…), or the deterministic
+ * (rodent, cockroach, bed bug, termite bait, … — V1 surface only; WDO is
+ * project-report territory), or the deterministic
  * fallback. Never throws; never returns unguarded model copy.
  */
 async function applyTypedReportNarrative(input = {}, deps = {}) {

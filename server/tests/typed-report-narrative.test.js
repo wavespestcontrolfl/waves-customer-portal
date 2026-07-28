@@ -89,7 +89,11 @@ test('follow-up windows from the ratified copy ground their own numerals', () =>
 test('cross-domain claims reject: pests, actions, and locations must exist in the facts', () => {
   const facts = groundingFacts(roachInput());
   // grounded control — everything below appears in the typed facts
-  expect(ungroundedClaims('We treated cracks and crevices in the kitchen and completed a flush-out treatment.', facts)).toEqual([]);
+  expect(ungroundedClaims('We treated cracks and crevices and completed a flush-out treatment.', facts)).toEqual([]);
+  // action + location in ONE sentence must be recorded TOGETHER in a
+  // completed-work fact (codex P1 r7): crack & crevice work is recorded,
+  // kitchen is recorded as an ACTIVITY area, but no fact pairs them
+  expect(ungroundedClaims('We treated cracks and crevices in the kitchen.', facts)).toContain('unpaired_action_location');
   // invented action + invented location reject
   expect(ungroundedClaims('We applied gel bait in the kitchen.', facts)).toContain('ungrounded_action:gel bait');
   expect(ungroundedClaims('Activity was documented in the attic.', facts)).toContain('ungrounded_location:attic');
@@ -165,6 +169,24 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   // ratified window is 10–14 days — "one day" contradicts it
   expect(ungroundedClaims('We recommend a follow-up in one day.', facts)).toContain('ungrounded_number:1');
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
+});
+
+test('negative FINDINGS derive zero states too (codex r7)', () => {
+  const facts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'German Roach Knockdown',
+      todaysResult: { headline: 'Knockdown service completed today.', body: 'We completed the scheduled knockdown service today.', nextStep: null },
+      findings: [
+        { fieldKey: 'activity_level', customerLabel: 'Activity level', customerValueLabel: 'Moderate', value: 'Moderate' },
+        { fieldKey: 'live_roaches_observed', customerLabel: 'Live roaches observed', customerValueLabel: 'No', value: 'No' },
+      ],
+    },
+    activity: null,
+  }));
+  // no negated SENTENCE exists — the negative finding alone carries the
+  // zero state, and a reversed sighting rejects
+  expect(ungroundedClaims('Live German roaches were observed today.', facts))
+    .toContain('contradicted_zero_state');
 });
 
 test('zero-state contradiction is evaluated per clause', () => {
