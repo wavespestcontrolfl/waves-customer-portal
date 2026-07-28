@@ -59,6 +59,11 @@ describe('stripSchedulerAuditText', () => {
     expect(stripSchedulerAuditText(note)).toBe('Gate code 4412');
   });
 
+  test('keeps prose that merely contains the no-SMS phrase mid-sentence', () => {
+    const note = 'Gate code 4412. Customer has no mobile, so no SMS sent; call on arrival.';
+    expect(stripSchedulerAuditText(note)).toBe(note);
+  });
+
   test('does not false-positive on prose containing underscores or years', () => {
     const note = 'Customer prefers service_area notes in 2026 format. Treat lanai edges.';
     expect(stripSchedulerAuditText(note)).toBe(note);

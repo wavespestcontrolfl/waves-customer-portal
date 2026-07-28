@@ -33,22 +33,28 @@ function previewText(text, max = PREVIEW_MAX) {
 // an explicit "No SMS sent" marker are dropped; everything else passes through
 // untouched. Returns the cleaned string, or null when nothing legible remains.
 const AUDIT_TAG_RE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)*_\d{4}_\d{2}\s*:/;
-const NO_SMS_RE = /\bno sms sent\b/i;
+// Only a STANDALONE "No SMS sent." sentence is an audit marker. Genuine
+// prose that merely contains the phrase ("Customer has no mobile, so no
+// SMS sent; call on arrival.") must pass through untouched.
+const NO_SMS_STANDALONE_RE = /^no sms sent[.!]?$/i;
 
 function stripSchedulerAuditText(text) {
   const value = String(text || '').trim();
   if (!value) return null;
-  if (!AUDIT_TAG_RE.test(value) && !NO_SMS_RE.test(value)) return value;
   // Sentence-ish segments: split on newlines and on periods followed by
   // whitespace. Keeps decimals ("+13.45") and times inside one segment.
   const segments = value.split(/(?<=\.)\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+  const hasAuditContent = segments.some(
+    (s) => AUDIT_TAG_RE.test(s) || NO_SMS_STANDALONE_RE.test(s),
+  );
+  if (!hasAuditContent) return value;
   const kept = [];
   // An audit entry reads "<what moved / what changed>. No SMS sent." — the
   // marker sentence retroactively consumes its untagged predecessor too
   // (tagged predecessors were already handled on their own).
   let prevWasAudit = false;
   for (const segment of segments) {
-    if (NO_SMS_RE.test(segment)) {
+    if (NO_SMS_STANDALONE_RE.test(segment)) {
       if (!prevWasAudit && kept.length) kept.pop();
       prevWasAudit = true;
       continue;

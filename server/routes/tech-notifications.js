@@ -28,7 +28,13 @@ router.get('/', async (req, res, next) => {
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       });
     if (unreadOnly) q = q.where({ read: false });
-    const rows = await q.orderBy('created_at', 'desc').limit(20);
+    // Non-storm rows outrank storm alerts inside the 20-row window: a burst
+    // of storm nudges must never crowd an actionable geofence/timer prompt
+    // out of the poll result while the tech works through the capped cards.
+    const rows = await q
+      .orderByRaw("CASE WHEN type = 'storm_watch_alert' THEN 1 ELSE 0 END")
+      .orderBy('created_at', 'desc')
+      .limit(20);
     res.json({ notifications: rows.map(parseRow) });
   } catch (err) { next(err); }
 });
