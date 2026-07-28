@@ -166,6 +166,23 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
   });
 
+  test('a citation URL containing a brand token is NOT a prose mention — anchor text still is (Codex r2 P1)', () => {
+    // Required citation link whose DESTINATION contains "trugreen": with a
+    // table present, must not produce COMPETITOR_IN_PROSE or poison the
+    // unsourced-known set; with no table, must not produce IN_PROSE either.
+    const citation = 'Per [the company\'s published plan page](https://www.trugreen.com/why-choose-trugreen/professional-lawn-care), plans are annual.';
+    const withTable = { body: `# Guide\n\n${citation}\n\n${CATEGORY_TABLE}\n\nClosing prose.` };
+    const r1 = gate.evaluate(withTable, { namedCompetitorEnabled: true });
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
+    const r2 = gate.evaluate({ body: `# Guide\n\n${citation}\n\nNo table here.` }, { namedCompetitorEnabled: true });
+    expect(r2.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    // Anchor TEXT naming the competitor is still a prose mention.
+    const named = 'See [TruGreen\'s plan page](https://www.trugreen.com/plans) for details.';
+    const r3 = gate.evaluate({ body: `# Guide\n\n${named}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(r3.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
     for (const body of [
       'Why Ants Bug Out After Rain. Palmetto bugs scatter when the barrier is fresh. No table.',

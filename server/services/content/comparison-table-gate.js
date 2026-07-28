@@ -1323,7 +1323,14 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  const nameScanText = stripQuotesForNames(scanText);
+  // Link DESTINATIONS are not prose: a required citation like
+  // [company's plan page](https://www.trugreen.com/…) must not count as
+  // naming the competitor (the URL host is separately validated by the
+  // external-link guardrail). Anchor TEXT stays scanned. Length-preserving
+  // (URL chars become spaces) so indices still align with scanText.
+  // Deliberately NOT applied to operatorBriefText below — a URL there is a
+  // legitimate operator authorization signal.
+  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
   // Authorized names come from running the SAME mention detector over the
   // operator's brief text — both sides canonicalize identically, so a brief
   // that says "Massey" authorizes a draft that writes the canonical "Massey
@@ -1567,6 +1574,17 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   return { pass, findings, requiresHumanReview };
 }
 
+// Blank every http(s) URL substring with an equal run of spaces — covers
+// markdown link destinations, bare autolinks, and image srcs. Used ONLY for
+// competitor-NAME detection inputs: a link destination is not prose (its
+// host is validated by the external-link guardrail), but a brand token
+// inside it ("www.trugreen.com") would otherwise read as naming the
+// competitor and block operator-required citations. Length-preserving so
+// name-scan indices keep aligning with the original text.
+function stripLinkDestinationsForNames(s) {
+  return String(s).replace(/https?:\/\/[^\s)"'<>\]]+/gi, (u) => ' '.repeat(u.length));
+}
+
 // Escape a detected business name for use inside a regex, tolerating the
 // collapsed whitespace stripQuotesForNames leaves behind.
 function escapeForNameRe(name) {
@@ -1606,7 +1624,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // nameScanText share character indices) but can leave multiple spaces between
   // words — name lookups must stay whitespace-tolerant.
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  const nameScanText = stripQuotesForNames(scanText);
+  // Also blank link DESTINATIONS (length-preserving) — a required citation
+  // URL containing a brand token ("trugreen.com") is not a prose mention;
+  // the URL host is validated by the external-link guardrail instead.
+  // Anchor text stays scanned. Disparagement/ranking scans keep scanText.
+  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
 
   const known = new Set();
   const unknown = new Set();
@@ -1642,7 +1664,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   let proseText = body;
   for (const b of blocks) proseText = proseText.split(b).join(' ');
   if (metaText) proseText = `${proseText}\n${metaText}`;
-  const proseNameText = stripQuotesForNames(proseText); // length-preserving; indices align
+  // Length-preserving; indices align. Link destinations blanked for the same
+  // reason as nameScanText above — a citation URL is not a prose mention.
+  const proseNameText = stripQuotesForNames(stripLinkDestinationsForNames(proseText));
 
   // A detected business name within PROVIDER_NEGATIVE_PROXIMITY of a prose
   // match — same window idiom as the competitor scans below.
