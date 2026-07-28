@@ -81,6 +81,23 @@ function parseData(row) {
   return data && typeof data === 'object' ? data : null;
 }
 
+// Canonical serialization for equality checks: JSONB round-trips may reorder
+// object keys, so a plain JSON.stringify comparison would misread unchanged
+// values as operator edits.
+function stableStringify(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort()
+      .map((k) => JSON.stringify(k) + ':' + stableStringify(value[k]))
+      .join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+function sameValue(a, b) {
+  return stableStringify(a) === stableStringify(b);
+}
+
 async function upsertPriceKeys(knex, configKey, meta, priceKeys, insertDefaults, reason) {
   const row = await knex('pricing_config').where({ config_key: configKey }).first();
   const oldData = parseData(row);
@@ -196,7 +213,7 @@ async function rollbackPriceKeys(knex, configKey, fallbackPrices, reason) {
   // fallback prices into a row that never existed. Only deleted while it still
   // holds exactly what up() applied; an operator-edited row is left alone.
   if (capturedNew && capturedOld === null) {
-    if (JSON.stringify(current) === JSON.stringify(capturedNew)) {
+    if (sameValue(current, capturedNew)) {
       await knex('pricing_config').where({ config_key: configKey }).del();
       await knex('pricing_config_audit').insert({
         config_key: configKey,
@@ -213,7 +230,7 @@ async function rollbackPriceKeys(knex, configKey, fallbackPrices, reason) {
   for (const key of Object.keys(fallbackPrices)) {
     if (capturedNew) {
       // Skip keys an operator changed after up() ran.
-      if (JSON.stringify(current[key]) !== JSON.stringify(capturedNew[key])) continue;
+      if (!sameValue(current[key], capturedNew[key])) continue;
       const prior = capturedOld ? capturedOld[key] : undefined;
       newData[key] = prior !== undefined ? prior : fallbackPrices[key];
     } else {
