@@ -1,13 +1,13 @@
 /**
- * GET /admin/communications/reschedule-link — the SMS composer's
+ * POST /admin/communications/reschedule-link — the SMS composer's
  * "Reschedule Link" helper. The reschedule token is a bearer credential, so
- * these tests pin the fail-closed resolution rules (full 10-digit phone,
- * exact last-10 match, customerId↔phone cross-check, account-scoped
- * multi-property expansion, cross-account rejection), the candidate gates
- * (status set, ET day frame, dispatch-owned pending exclusion, elapsed
- * same-day placeholder skip, stable ordering), and the response shape. Link
- * building itself is covered by reschedule-public.test.js —
- * buildRescheduleLink is mocked here.
+ * these tests pin the fail-closed resolution rules (admin-only, POST body,
+ * full 10-digit phone, exact last-10 match, customerId↔phone cross-check,
+ * account-scoped expansion on BOTH paths, cross-account rejection), the
+ * candidate gates (status set, ET day frame, dispatch-owned pending
+ * exclusion, elapsed same-day placeholder skip with paging, stable
+ * ordering), and the response shape. Link building itself is covered by
+ * reschedule-public.test.js — buildRescheduleLink is mocked here.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -26,13 +26,20 @@ jest.mock('../services/logger', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (token !== 'admin') return res.status(401).json({ error: 'Admin authentication required' });
-    req.technician = { id: 'admin-1', role: 'admin' };
-    req.technicianId = 'admin-1';
-    req.techRole = 'admin';
+    const role = token === 'admin' ? 'admin' : token === 'tech' ? 'technician' : null;
+    if (!role) return res.status(401).json({ error: 'Admin authentication required' });
+    req.technician = { id: `${role}-1`, role };
+    req.technicianId = `${role}-1`;
+    req.techRole = role;
     return next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  // Mirrors the real middleware: 403 for any non-admin staff role.
+  requireAdmin: (req, res, next) => (
+    req.techRole !== 'admin'
+      ? res.status(403).json({ error: 'Admin access required' })
+      : next()
+  ),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
@@ -80,8 +87,9 @@ const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-book
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
-// The phone path issues up to two customers queries (exact-match rows, then
-// the account expansion) — selectResults is consumed in call order.
+// Customers: first() serves the customerId lookup; select() calls consume
+// selectResults in order (phone-match rows, then account-expansion rows —
+// the customerId path only issues the expansion select).
 function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
   const queue = [...selectResults];
   const inner = {
@@ -101,14 +109,17 @@ function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
   return b;
 }
 
-function makeServicesBuilder(rows = []) {
+// Services: select() calls consume pages in order so the offset-paging loop
+// can be exercised; offset args are recorded.
+function makeServicesBuilder(pages = [[]]) {
+  const queue = [...pages];
   const inner = {
     whereNull: jest.fn(() => inner),
     orWhereNotIn: jest.fn(() => inner),
     orWhereNot: jest.fn(() => inner),
     orWhere: jest.fn(() => inner),
   };
-  const b = { inner, calls: { where: [], whereIn: [], orderBy: [] } };
+  const b = { inner, calls: { where: [], whereIn: [], orderBy: [], offset: [] } };
   b.whereIn = jest.fn((...a) => { b.calls.whereIn.push(a); return b; });
   b.where = jest.fn((...a) => {
     if (typeof a[0] === 'function') a[0](inner);
@@ -117,7 +128,8 @@ function makeServicesBuilder(rows = []) {
   });
   b.orderBy = jest.fn((...a) => { b.calls.orderBy.push(a); return b; });
   b.limit = jest.fn(() => b);
-  b.select = jest.fn(() => Promise.resolve(rows));
+  b.offset = jest.fn((v) => { b.calls.offset.push(v); return b; });
+  b.select = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : []));
   return b;
 }
 
@@ -146,9 +158,14 @@ async function withServer(fn) {
   }
 }
 
-function get(baseUrl, qs) {
-  return fetch(`${baseUrl}/admin/communications/reschedule-link${qs}`, {
-    headers: { Authorization: 'Bearer admin' },
+function post(baseUrl, body, token = 'admin') {
+  return fetch(`${baseUrl}/admin/communications/reschedule-link`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
   });
 }
 
@@ -157,15 +174,16 @@ const GOOD_LINK = {
   line: 'Need a different time? Reschedule online: https://wvs.example/r/abc123\n\n',
 };
 
-// A single-account, single-profile customer: exact-match row + account
-// expansion resolving back to the same id (self-adopted account_id = id).
+// A single-account, single-profile customer resolved via phone: exact-match
+// row + account expansion resolving back to the same id (self-adopted
+// account_id = id).
 function soloCustomer(id = CUSTOMER_UUID) {
   return makeCustomersBuilder({
     selectResults: [[{ id, account_id: id }], [{ id }]],
   });
 }
 
-describe('GET /admin/communications/reschedule-link', () => {
+describe('POST /admin/communications/reschedule-link', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockReset();
@@ -173,8 +191,8 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('400 when phone is missing or partial (no LIKE over-match on fragments)', async () => {
     await withServer(async (baseUrl) => {
-      for (const qs of ['', '?phone=7', '?phone=555123', `?customerId=${CUSTOMER_UUID}`]) {
-        const res = await get(baseUrl, qs);
+      for (const body of [{}, { phone: '7' }, { phone: '555123' }, { customerId: CUSTOMER_UUID }]) {
+        const res = await post(baseUrl, body);
         expect(res.status).toBe(400);
         expect((await res.json()).error).toMatch(/full 10-digit/);
       }
@@ -184,9 +202,9 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('404 when no live customer matches the exact last-10 digits', async () => {
     const customers = makeCustomersBuilder({ selectResults: [[]] });
-    wireDb({ customers, services: makeServicesBuilder([]) });
+    wireDb({ customers, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=%2B15551234567');
+      const res = await post(baseUrl, { phone: '+15551234567' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No customer/);
       // Exact last-10 match on non-deleted rows — same idiom as /rewrite-sms,
@@ -202,9 +220,9 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('11-digit numbers with a leading 1 normalize to the last 10', async () => {
     const customers = makeCustomersBuilder({ selectResults: [[]] });
-    wireDb({ customers, services: makeServicesBuilder([]) });
+    wireDb({ customers, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      await get(baseUrl, '?phone=19415551234');
+      await post(baseUrl, { phone: '19415551234' });
       expect(customers.whereRaw).toHaveBeenCalledWith(
         expect.stringContaining('right(regexp_replace'),
         ['9415551234'],
@@ -212,26 +230,33 @@ describe('GET /admin/communications/reschedule-link', () => {
     });
   });
 
-  test('a valid customerId wins over phone lookup but must cross-match the phone', async () => {
-    const customers = makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+1 (941) 555-1234' } });
-    const services = makeServicesBuilder([]);
+  test('customerId wins over phone lookup, cross-matches the phone, and expands to the whole account', async () => {
+    const customers = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '+1 (941) 555-1234', account_id: 'acct-9' },
+      // Thread rows supply whichever property profile last messaged — the
+      // sibling profile may own the next visit, so the lookup must span the
+      // account.
+      selectResults: [[{ id: CUSTOMER_UUID }, { id: 'cust-sibling' }]],
+    });
+    const services = makeServicesBuilder();
     wireDb({ customers, services });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, `?phone=9415551234&customerId=${CUSTOMER_UUID}`);
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(404); // no visit — resolution path is what's under test
       expect(customers.calls.where).toContainEqual([{ id: CUSTOMER_UUID }]);
       expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
       expect(customers.whereRaw).not.toHaveBeenCalled();
-      expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID]]);
+      expect(customers.inner.where).toHaveBeenCalledWith({ account_id: 'acct-9' });
+      expect(customers.inner.orWhere).toHaveBeenCalledWith({ id: 'acct-9' });
+      expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID, 'cust-sibling']]);
     });
   });
 
   test('400 when customerId and phone disagree (stale selection fails closed)', async () => {
-    const customers = makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+19410000000' } });
-    const services = makeServicesBuilder([]);
-    wireDb({ customers, services });
+    const customers = makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+19410000000', account_id: CUSTOMER_UUID } });
+    wireDb({ customers, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, `?phone=9415551234&customerId=${CUSTOMER_UUID}`);
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(400);
       expect((await res.json()).error).toMatch(/must match/);
       expect(db).not.toHaveBeenCalledWith('scheduled_services');
@@ -240,10 +265,9 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('a malformed customerId falls back to the exact phone match instead of reaching the uuid column', async () => {
     const customers = soloCustomer();
-    const services = makeServicesBuilder([]);
-    wireDb({ customers, services });
+    wireDb({ customers, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      await get(baseUrl, '?phone=9415551234&customerId=not-a-uuid');
+      await post(baseUrl, { phone: '9415551234', customerId: 'not-a-uuid' });
       expect(customers.calls.where).not.toContainEqual([{ id: 'not-a-uuid' }]);
       expect(customers.whereRaw).toHaveBeenCalled();
     });
@@ -256,7 +280,7 @@ describe('GET /admin/communications/reschedule-link', () => {
         [{ id: 'cust-a' }, { id: 'cust-b' }, { id: 'cust-c' }],
       ],
     });
-    const services = makeServicesBuilder([{
+    const services = makeServicesBuilder([[{
       id: 'svc-c1',
       customer_id: 'cust-c',
       scheduled_date: '2099-01-05',
@@ -264,14 +288,12 @@ describe('GET /admin/communications/reschedule-link', () => {
       window_end: '10:00:00',
       service_type: 'pest control',
       status: 'confirmed',
-    }]);
+    }]]);
     wireDb({ customers, services });
     buildRescheduleLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(200);
-      // Expansion is by account membership, not just the phone-matched rows —
-      // a property profile with a different contact number still counts.
       expect(customers.inner.where).toHaveBeenCalledWith({ account_id: 'acct-1' });
       expect(customers.inner.orWhere).toHaveBeenCalledWith({ id: 'acct-1' });
       expect(services.calls.whereIn).toContainEqual(['customer_id', ['cust-a', 'cust-b', 'cust-c']]);
@@ -286,10 +308,9 @@ describe('GET /admin/communications/reschedule-link', () => {
         [{ id: 'cust-a', account_id: 'acct-1' }, { id: 'cust-x', account_id: 'acct-2' }],
       ],
     });
-    const services = makeServicesBuilder([]);
-    wireDb({ customers, services });
+    wireDb({ customers, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/more than one customer account/);
       expect(db).not.toHaveBeenCalledWith('scheduled_services');
@@ -302,9 +323,9 @@ describe('GET /admin/communications/reschedule-link', () => {
     const ambiguous = makeCustomersBuilder({
       selectResults: [[{ id: 'cust-a', account_id: null }, { id: 'cust-b', account_id: null }]],
     });
-    wireDb({ customers: ambiguous, services: makeServicesBuilder([]) });
+    wireDb({ customers: ambiguous, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(409);
     });
 
@@ -312,9 +333,9 @@ describe('GET /admin/communications/reschedule-link', () => {
     const solo = makeCustomersBuilder({
       selectResults: [[{ id: 'cust-a', account_id: null }], [{ id: 'cust-a' }]],
     });
-    wireDb({ customers: solo, services: makeServicesBuilder([]) });
+    wireDb({ customers: solo, services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404); // proceeds to the (empty) visit lookup
       expect(solo.inner.where).toHaveBeenCalledWith({ account_id: 'cust-a' });
       expect(solo.inner.orWhere).toHaveBeenCalledWith({ id: 'cust-a' });
@@ -323,10 +344,10 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('candidate query applies the status gate, ET day frame, dispatch-owned exclusion, and stable ordering', async () => {
     const customers = soloCustomer();
-    const services = makeServicesBuilder([]);
+    const services = makeServicesBuilder();
     wireDb({ customers, services });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No upcoming appointment/);
       expect(services.calls.whereIn).toContainEqual(['status', ['pending', 'confirmed', 'rescheduled']]);
@@ -347,13 +368,14 @@ describe('GET /admin/communications/reschedule-link', () => {
         { column: 'window_start', order: 'asc' },
         { column: 'id', order: 'asc' },
       ]]);
+      expect(services.calls.offset).toEqual([0]);
       expect(buildRescheduleLink).not.toHaveBeenCalled();
     });
   });
 
   test('200 returns the link, the SMS clause, and the visit the link points to', async () => {
     const customers = soloCustomer();
-    const services = makeServicesBuilder([{
+    const services = makeServicesBuilder([[{
       id: 'svc-1',
       customer_id: CUSTOMER_UUID,
       // pg can hand DATE columns back as a JS Date — the route must
@@ -363,11 +385,11 @@ describe('GET /admin/communications/reschedule-link', () => {
       window_end: '10:00:00',
       service_type: 'lawn care',
       status: 'confirmed',
-    }]);
+    }]]);
     wireDb({ customers, services });
     buildRescheduleLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         url: GOOD_LINK.url,
@@ -390,7 +412,7 @@ describe('GET /admin/communications/reschedule-link', () => {
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
     try {
       const customers = soloCustomer();
-      const services = makeServicesBuilder([
+      const services = makeServicesBuilder([[
         {
           id: 'svc-placeholder',
           customer_id: CUSTOMER_UUID,
@@ -409,11 +431,11 @@ describe('GET /admin/communications/reschedule-link', () => {
           service_type: 'pest control',
           status: 'confirmed',
         },
-      ]);
+      ]]);
       wireDb({ customers, services });
       buildRescheduleLink.mockResolvedValue(GOOD_LINK);
       await withServer(async (baseUrl) => {
-        const res = await get(baseUrl, '?phone=9415551234');
+        const res = await post(baseUrl, { phone: '9415551234' });
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body.appointment.id).toBe('svc-next');
@@ -424,9 +446,49 @@ describe('GET /admin/communications/reschedule-link', () => {
     }
   });
 
+  test('pages past a full batch of unusable placeholders instead of reporting no appointment', async () => {
+    jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
+    try {
+      const customers = soloCustomer();
+      // Page 1: 25 elapsed same-day placeholders (a full page, all
+      // discarded in JS). Page 2: the genuinely usable visit.
+      const placeholderPage = Array.from({ length: 25 }, (_, i) => ({
+        id: `svc-ph-${i}`,
+        customer_id: CUSTOMER_UUID,
+        scheduled_date: '2026-07-28',
+        window_start: '08:00:00',
+        window_end: '10:00:00',
+        service_type: 'pest control',
+        status: 'rescheduled',
+      }));
+      const services = makeServicesBuilder([
+        placeholderPage,
+        [{
+          id: 'svc-real',
+          customer_id: CUSTOMER_UUID,
+          scheduled_date: '2026-08-02',
+          window_start: '09:00:00',
+          window_end: '11:00:00',
+          service_type: 'lawn care',
+          status: 'confirmed',
+        }],
+      ]);
+      wireDb({ customers, services });
+      buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { phone: '9415551234' });
+        expect(res.status).toBe(200);
+        expect((await res.json()).appointment.id).toBe('svc-real');
+        expect(services.calls.offset).toEqual([0, 25]);
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('404 when the visit has no usable link (legacy tokenless row)', async () => {
     const customers = soloCustomer();
-    const services = makeServicesBuilder([{
+    const services = makeServicesBuilder([[{
       id: 'svc-legacy',
       customer_id: CUSTOMER_UUID,
       scheduled_date: '2099-08-04',
@@ -434,20 +496,25 @@ describe('GET /admin/communications/reschedule-link', () => {
       window_end: null,
       service_type: 'pest control',
       status: 'pending',
-    }]);
+    }]]);
     wireDb({ customers, services });
     buildRescheduleLink.mockResolvedValue({ url: null, line: '' });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=9415551234');
+      const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/no reschedule link/);
     });
   });
 
-  test('401 without an admin token', async () => {
+  test('401 without a token, 403 for a technician (admin-only mint)', async () => {
+    wireDb({ customers: soloCustomer(), services: makeServicesBuilder() });
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/communications/reschedule-link?phone=9415551234`);
-      expect(res.status).toBe(401);
+      const anon = await post(baseUrl, { phone: '9415551234' }, null);
+      expect(anon.status).toBe(401);
+      const tech = await post(baseUrl, { phone: '9415551234' }, 'tech');
+      expect(tech.status).toBe(403);
+      expect((await tech.json()).error).toMatch(/Admin access required/);
+      expect(db).not.toHaveBeenCalled();
     });
   });
 });

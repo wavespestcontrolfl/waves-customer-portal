@@ -1215,11 +1215,16 @@ function SmsTab() {
     setInsertingResched(true);
     setSendResult(null);
     try {
-      const params = new URLSearchParams({ phone: requestRecipient });
-      if (requestCustomerId) params.set("customerId", requestCustomerId);
-      const d = await adminFetch(
-        `/admin/communications/reschedule-link?${params.toString()}`,
-      );
+      // POST body, never a query string — the request logger's redacted-url
+      // does not treat `phone` as sensitive, so a GET would write the
+      // customer's number to the request logs on every click.
+      const d = await adminFetch("/admin/communications/reschedule-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+        }),
+      });
       if (rescheduleContextChanged()) return;
       const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
       // Replace-don't-stack: every lookup mints a FRESH short code, and the

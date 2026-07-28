@@ -4,7 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -1135,42 +1135,63 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
   return Math.max(...bounds) <= nowEt.hour * 60 + nowEt.minute;
 }
 
-// GET /api/admin/communications/reschedule-link?phone=...&customerId=...
+// All live customer rows under one account. Self-adoption sets
+// account_id = id, and rows created by webhook/call paths can carry NULL
+// until the lazy login-time adoption (backfill 20260721000000) — callers
+// pass the effective key (account_id || id).
+async function customerIdsForAccount(accountKey) {
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .where((qb) => qb.where({ account_id: accountKey }).orWhere({ id: accountKey }))
+    .select('id');
+  return rows.map((r) => r.id);
+}
+
+// POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
 // the SMS body. Read-only apart from the short-url row buildRescheduleLink
 // mints. The reschedule token is a BEARER credential (AGENTS.md public-token
-// section), so recipient resolution fails closed:
+// section), so this fails closed on every axis:
+//   - admin-only (requireAdmin): the comms composer is an admin surface, and
+//     the tech portal must not be able to mint arbitrary customers' links;
+//   - POST body, not query string — the request logger's :redacted-url does
+//     not classify `phone` as sensitive, so a GET would write customer
+//     phone numbers to the request logs;
 //   - phone is always required and must normalize to a full 10 digits
 //     (fullPhoneLast10) — no partial LIKE matching;
 //   - customerId, when the composer knows it, must belong to a live customer
-//     whose phone matches the request (same cross-check as /rewrite-sms);
+//     whose phone matches the request (same cross-check as /rewrite-sms).
+//     It then expands to the row's whole account: thread rows supply
+//     whichever property profile last messaged, so scoping to that one row
+//     would falsely 404 when a sibling property owns the next visit;
 //   - phone-only resolution matches on the EXACT last-10 digits across all
-//     non-deleted customer rows, and a number shared by multiple property
-//     rows resolves deterministically to the soonest eligible visit across
-//     the whole matched account.
+//     non-deleted customer rows; rows under ONE shared account expand to the
+//     account, while digits spanning DIFFERENT accounts (number reuse,
+//     duplicate CRM entry) 409 — the operator disambiguates via the
+//     dropdown, which takes the customerId path.
 // Final eligibility stays owned by the public /reschedule/:token page (e.g.
 // a missed same-day visit still rebooks there) — this endpoint only picks
 // WHICH visit the link points to.
-router.get('/reschedule-link', async (req, res) => {
+router.post('/reschedule-link', requireAdmin, async (req, res) => {
   try {
-    const last10 = fullPhoneLast10(req.query.phone);
+    const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
 
-    const customerId = req.query.customerId;
+    const customerId = req.body?.customerId;
     let customerIds = [];
     if (customerId && UUID_RE.test(String(customerId))) {
       const customer = await db('customers')
         .where({ id: customerId })
         .whereNull('deleted_at')
-        .first('id', 'phone');
+        .first('id', 'phone', 'account_id');
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
       if (fullPhoneLast10(customer.phone) !== last10) {
         return res.status(400).json({ error: 'phone must match the selected customer' });
       }
-      customerIds = [customer.id];
+      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
     } else {
       const matches = await db('customers')
         .whereNull('deleted_at')
@@ -1179,27 +1200,13 @@ router.get('/reschedule-link', async (req, res) => {
       if (!matches.length) {
         return res.status(404).json({ error: 'No customer found for that number' });
       }
-      // Genuine multi-property customers share one customer_accounts row;
-      // the same digits on rows under DIFFERENT accounts (number reuse,
-      // duplicate CRM entry) is ambiguous and fails closed — the operator
-      // picks the person from the dropdown, which takes the customerId path
-      // above. Effective account key is account_id || id: self-adoption sets
-      // account_id = id, but rows created by webhook/call paths can carry
-      // NULL until the lazy login-time adoption (backfill 20260721000000),
-      // and two account-less rows can't be assumed to be the same person.
       const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
       if (accountKeys.length > 1) {
         return res.status(409).json({
           error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
         });
       }
-      // Expand to the whole account so the soonest visit is chosen across
-      // every property profile, including ones whose contact number differs.
-      const accountRows = await db('customers')
-        .whereNull('deleted_at')
-        .where((qb) => qb.where({ account_id: accountKeys[0] }).orWhere({ id: accountKeys[0] }))
-        .select('id');
-      customerIds = accountRows.map((r) => r.id);
+      customerIds = await customerIdsForAccount(accountKeys[0]);
     }
     if (!customerIds.length) {
       return res.status(404).json({ error: 'No customer found for that number' });
@@ -1213,27 +1220,40 @@ router.get('/reschedule-link', async (req, res) => {
     // excluded with the same null-safe predicate /api/schedule uses: their
     // tentative times are hidden from the customer until the office
     // confirms, so this button must not hand out a bearer link to one.
-    const candidates = await db('scheduled_services')
-      .whereIn('customer_id', customerIds)
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
-      .where('scheduled_date', '>=', etDateString())
-      .where((qb) => qb
-        .whereNull('source_action')
-        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhereNot('status', 'pending')
-        .orWhere('customer_confirmed', true))
-      .orderBy([
-        { column: 'scheduled_date', order: 'asc' },
-        { column: 'window_start', order: 'asc' },
-        // Stable tie-breaker: two properties' visits can share a date and
-        // window, and without a unique key the "soonest" pick would be
-        // whichever row Postgres returns first that day.
-        { column: 'id', order: 'asc' },
-      ])
-      .limit(25)
-      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
-
-    const svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c));
+    //
+    // The elapsed-placeholder skip happens in JS (the time math doesn't
+    // survive SQL TIME wrap-arounds cleanly), so page until a usable
+    // candidate turns up or the candidate set is exhausted — a page full of
+    // today's elapsed 'rescheduled' placeholders must not read as "no
+    // upcoming appointment" when a later visit exists. Ordering is fully
+    // deterministic (id tie-breaker), so offset pages can't skip or repeat
+    // rows within a request.
+    const PAGE = 25;
+    let svc = null;
+    for (let offset = 0; ; offset += PAGE) {
+      const candidates = await db('scheduled_services')
+        .whereIn('customer_id', customerIds)
+        .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+        .where('scheduled_date', '>=', etDateString())
+        .where((qb) => qb
+          .whereNull('source_action')
+          .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+          .orWhereNot('status', 'pending')
+          .orWhere('customer_confirmed', true))
+        .orderBy([
+          { column: 'scheduled_date', order: 'asc' },
+          { column: 'window_start', order: 'asc' },
+          // Stable tie-breaker: two properties' visits can share a date and
+          // window, and without a unique key the "soonest" pick would be
+          // whichever row Postgres returns first that day.
+          { column: 'id', order: 'asc' },
+        ])
+        .limit(PAGE)
+        .offset(offset)
+        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
+      svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c)) || null;
+      if (svc || candidates.length < PAGE) break;
+    }
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
     const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
