@@ -840,7 +840,7 @@ function stripCommentaryUrls(value) {
 
 function sanitizeCommentaryFields(ev) {
   const out = { ...ev };
-  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption', 'scoopLabel', 'linkText']) {
+  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption', 'scoopLabel', 'linkText', 'hook', 'heroWhy']) {
     if (typeof out[k] === 'string') out[k] = stripCommentaryUrls(out[k]);
   }
   if (Array.isArray(out.highlights)) {
@@ -1514,6 +1514,11 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     ];
     delete draft.hero;
   }
+  // Community Notes have NO factual-lock pipeline yet — no notice records
+  // are fetched or supplied to the model, so anything it wrote here is
+  // invented. Force the section empty until a real sourcing pipeline
+  // exists (operator-curated notice records, locked by id like events).
+  if (!isPestInsider) draft.communityNotes = null;
 
   if (!isPestInsider && Array.isArray(draft.events) && draft.events.length > 0) {
     if (approvedEvents.length === 0) {
@@ -1535,6 +1540,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
       throw new Error(
         `Factual locking dropped every event — model returned ${draft.events.length} event(s) ` +
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
+      );
+    }
+    // Flagship drafts must carry a SUCCESSFULLY LOCKED hero with its hero
+    // fields — a dropped/invalid hero would otherwise silently promote a
+    // standard card (short hook, no why-line) into the top-pick box.
+    if (typeConfig?.flagship && !locked.some((ev) => ev.isHero && ev.hook && ev.heroWhy)) {
+      throw new Error(
+        'Flagship draft has no locked hero (missing, invalid eventId, or dropped by the factual lock) — refusing to render.'
       );
     }
     draft.events = locked;

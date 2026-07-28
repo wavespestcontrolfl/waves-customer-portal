@@ -97,8 +97,11 @@ function applyListwiseNudges(scored, ranking) {
 async function applyListwiseRerank(scored) {
   if (!listwiseRerankEnabled()) return scored;
   const floor = featureScoreFloor();
+  // Top-N by EDITORIAL score — `scored` arrives in freshness order, and
+  // slicing that would re-rank the wrong 18 events.
   const pool = scored
     .filter((ev) => Number.isFinite(Number(ev.editorial_score)) && Number(ev.editorial_score) >= floor)
+    .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score))
     .slice(0, LISTWISE_POOL);
   if (pool.length < 4) return scored;
   try {
