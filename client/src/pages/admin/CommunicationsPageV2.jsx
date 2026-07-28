@@ -1185,15 +1185,38 @@ function SmsTab() {
   // resolves WHICH visit; feedback lands in the sendResult line under the
   // buttons so the operator can see what the link points to before sending.
   const handleInsertRescheduleLink = async () => {
-    if (!toNumber.trim() || insertingResched) return;
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingResched) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    // Stale-response guard (mirrors handleRewriteSms): the operator may
+    // switch threads or edit the recipient while the request is in flight —
+    // applying the response then would drop THIS customer's bearer link (or
+    // its error) into a message addressed to someone else. Discard silently.
+    const rescheduleContextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient
+        ? smsThreadKey(latestRecipient)
+        : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
     setInsertingResched(true);
     setSendResult(null);
     try {
-      const params = new URLSearchParams({ phone: toNumber.trim() });
-      if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+      const params = new URLSearchParams({ phone: requestRecipient });
+      if (requestCustomerId) params.set("customerId", requestCustomerId);
       const d = await adminFetch(
         `/admin/communications/reschedule-link?${params.toString()}`,
       );
+      if (rescheduleContextChanged()) return;
       const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
       setMsgBody((b) =>
         b.trim() ? `${b.replace(/\s+$/, "")}\n\n${clause}` : clause,
@@ -1214,7 +1237,9 @@ function SmsTab() {
         } visit.`,
       });
     } catch (e) {
-      setSendResult({ ok: false, text: e.message });
+      if (!rescheduleContextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
     } finally {
       setInsertingResched(false);
     }

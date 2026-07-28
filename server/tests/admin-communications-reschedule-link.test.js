@@ -1,9 +1,12 @@
 /**
  * GET /admin/communications/reschedule-link — the SMS composer's
- * "Reschedule Link" helper. Covers customer resolution (customerId wins,
- * phone fallback), the upcoming-visit picker (status gate + ET day frame),
- * and the link/appointment response shape. Link building itself is covered
- * by reschedule-public.test.js — buildRescheduleLink is mocked here.
+ * "Reschedule Link" helper. The reschedule token is a bearer credential, so
+ * these tests pin the fail-closed resolution rules (full 10-digit phone,
+ * exact last-10 match, customerId↔phone cross-check, multi-property
+ * determinism), the candidate gates (status set, ET day frame,
+ * dispatch-owned pending exclusion, elapsed same-day placeholder skip), and
+ * the response shape. Link building itself is covered by
+ * reschedule-public.test.js — buildRescheduleLink is mocked here.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -72,16 +75,43 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { buildRescheduleLink } = require('../services/reschedule-link');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { etDateString } = require('../utils/datetime-et');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
-function makeFirstBuilder(row = null) {
-  const b = {};
-  b.where = jest.fn(() => b);
-  b.whereIn = jest.fn(() => b);
-  b.orderBy = jest.fn(() => b);
-  b.first = jest.fn(() => Promise.resolve(row));
+function makeCustomersBuilder({ firstRow = null, rows = [] } = {}) {
+  const b = { calls: { where: [], whereRaw: [], whereNull: [] } };
+  b.where = jest.fn((...a) => { b.calls.where.push(a); return b; });
+  b.whereNull = jest.fn((...a) => { b.calls.whereNull.push(a); return b; });
+  b.whereRaw = jest.fn((...a) => { b.calls.whereRaw.push(a); return b; });
+  b.first = jest.fn(() => Promise.resolve(firstRow));
+  b.select = jest.fn(() => Promise.resolve(rows));
   return b;
+}
+
+function makeServicesBuilder(rows = []) {
+  const inner = {
+    whereNull: jest.fn(() => inner),
+    orWhereNotIn: jest.fn(() => inner),
+    orWhereNot: jest.fn(() => inner),
+    orWhere: jest.fn(() => inner),
+  };
+  const b = { inner, calls: { where: [], whereIn: [] } };
+  b.whereIn = jest.fn((...a) => { b.calls.whereIn.push(a); return b; });
+  b.where = jest.fn((...a) => {
+    if (typeof a[0] === 'function') a[0](inner);
+    else b.calls.where.push(a);
+    return b;
+  });
+  b.orderBy = jest.fn(() => b);
+  b.limit = jest.fn(() => b);
+  b.select = jest.fn(() => Promise.resolve(rows));
+  return b;
+}
+
+function wireDb({ customers, services }) {
+  db.mockImplementation((table) => (table === 'customers' ? customers : services));
 }
 
 function appServer() {
@@ -111,102 +141,165 @@ function get(baseUrl, qs) {
   });
 }
 
+const GOOD_LINK = {
+  url: 'https://wvs.example/r/abc123',
+  line: 'Need a different time? Reschedule online: https://wvs.example/r/abc123\n\n',
+};
+
 describe('GET /admin/communications/reschedule-link', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockReset();
   });
 
-  test('400 when neither phone nor customerId is provided', async () => {
+  test('400 when phone is missing or partial (no LIKE over-match on fragments)', async () => {
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '');
-      expect(res.status).toBe(400);
-      expect((await res.json()).error).toMatch(/phone or customerId/);
-      expect(db).not.toHaveBeenCalledWith('scheduled_services');
+      for (const qs of ['', '?phone=7', '?phone=555123', `?customerId=${CUSTOMER_UUID}`]) {
+        const res = await get(baseUrl, qs);
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/full 10-digit/);
+      }
+      expect(db).not.toHaveBeenCalled();
     });
   });
 
-  test('404 when no customer matches the phone', async () => {
-    const customers = makeFirstBuilder(null);
-    db.mockImplementation((table) => (table === 'customers' ? customers : makeFirstBuilder(null)));
+  test('404 when no live customer matches the exact last-10 digits', async () => {
+    const customers = makeCustomersBuilder({ rows: [] });
+    wireDb({ customers, services: makeServicesBuilder([]) });
     await withServer(async (baseUrl) => {
       const res = await get(baseUrl, '?phone=%2B15551234567');
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No customer/);
-      // Last-10-digit LIKE match — the same resolution /ai-draft uses.
-      expect(customers.where).toHaveBeenCalledWith('phone', 'like', '%5551234567');
+      // Exact last-10 match on non-deleted rows — same idiom as /rewrite-sms,
+      // never a bare LIKE '%...'.
+      expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(customers.whereRaw).toHaveBeenCalledWith(
+        "right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+        ['5551234567'],
+      );
+      expect(db).not.toHaveBeenCalledWith('scheduled_services');
     });
   });
 
-  test('404 when the customer has no upcoming reschedulable visit; picker uses the status gate + ET day frame', async () => {
-    const customers = makeFirstBuilder({ id: CUSTOMER_UUID });
-    const services = makeFirstBuilder(null);
-    db.mockImplementation((table) => (table === 'customers' ? customers : services));
+  test('11-digit numbers with a leading 1 normalize to the last 10', async () => {
+    const customers = makeCustomersBuilder({ rows: [] });
+    wireDb({ customers, services: makeServicesBuilder([]) });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=5551234567');
+      await get(baseUrl, '?phone=19415551234');
+      expect(customers.whereRaw).toHaveBeenCalledWith(
+        expect.stringContaining('right(regexp_replace'),
+        ['9415551234'],
+      );
+    });
+  });
+
+  test('a valid customerId wins over phone lookup but must cross-match the phone', async () => {
+    const customers = makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+1 (941) 555-1234' } });
+    const services = makeServicesBuilder([]);
+    wireDb({ customers, services });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, `?phone=9415551234&customerId=${CUSTOMER_UUID}`);
+      expect(res.status).toBe(404); // no visit — resolution path is what's under test
+      expect(customers.where).toHaveBeenCalledWith({ id: CUSTOMER_UUID });
+      expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(customers.whereRaw).not.toHaveBeenCalled();
+      expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID]]);
+    });
+  });
+
+  test('400 when customerId and phone disagree (stale selection fails closed)', async () => {
+    const customers = makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+19410000000' } });
+    const services = makeServicesBuilder([]);
+    wireDb({ customers, services });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, `?phone=9415551234&customerId=${CUSTOMER_UUID}`);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/must match/);
+      expect(db).not.toHaveBeenCalledWith('scheduled_services');
+    });
+  });
+
+  test('a malformed customerId falls back to the exact phone match instead of reaching the uuid column', async () => {
+    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const services = makeServicesBuilder([]);
+    wireDb({ customers, services });
+    await withServer(async (baseUrl) => {
+      await get(baseUrl, '?phone=9415551234&customerId=not-a-uuid');
+      expect(customers.where).not.toHaveBeenCalledWith({ id: 'not-a-uuid' });
+      expect(customers.whereRaw).toHaveBeenCalled();
+    });
+  });
+
+  test('a phone shared by multiple property rows resolves across the whole matched account', async () => {
+    const customers = makeCustomersBuilder({ rows: [{ id: 'cust-a' }, { id: 'cust-b' }] });
+    const services = makeServicesBuilder([{
+      id: 'svc-b1',
+      customer_id: 'cust-b',
+      scheduled_date: '2099-01-05',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+      service_type: 'pest control',
+      status: 'confirmed',
+    }]);
+    wireDb({ customers, services });
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, '?phone=9415551234');
+      expect(res.status).toBe(200);
+      expect(services.calls.whereIn).toContainEqual(['customer_id', ['cust-a', 'cust-b']]);
+      // The link is minted for the row that owns the picked visit.
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-b1', { customerId: 'cust-b' });
+    });
+  });
+
+  test('candidate query applies the status gate, ET day frame, and the dispatch-owned pending exclusion', async () => {
+    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const services = makeServicesBuilder([]);
+    wireDb({ customers, services });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, '?phone=9415551234');
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No upcoming appointment/);
-      expect(services.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed', 'rescheduled']);
-      // DATE column compared against the ET 'YYYY-MM-DD' day string — never a
-      // hand-built timestamp (the timestamptz window trap doesn't apply, but
-      // the frame must still be ET, not UTC).
-      const dateWhere = services.where.mock.calls.find((c) => c[0] === 'scheduled_date');
+      expect(services.calls.whereIn).toContainEqual(['status', ['pending', 'confirmed', 'rescheduled']]);
+      // DATE column compared against the ET 'YYYY-MM-DD' day string.
+      const dateWhere = services.calls.where.find((c) => c[0] === 'scheduled_date');
       expect(dateWhere).toBeDefined();
       expect(dateWhere[1]).toBe('>=');
       expect(dateWhere[2]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // Null-safe dispatch-owned predicate — same shape as /api/schedule:
+      // a tentative call-pipeline pending row must not get a bearer link.
+      expect(services.inner.whereNull).toHaveBeenCalledWith('source_action');
+      expect(services.inner.orWhereNotIn).toHaveBeenCalledWith('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+      expect(services.inner.orWhereNot).toHaveBeenCalledWith('status', 'pending');
+      expect(services.inner.orWhere).toHaveBeenCalledWith('customer_confirmed', true);
       expect(buildRescheduleLink).not.toHaveBeenCalled();
     });
   });
 
-  test('a valid customerId wins over the phone fallback', async () => {
-    const customers = makeFirstBuilder({ id: CUSTOMER_UUID });
-    const services = makeFirstBuilder(null);
-    db.mockImplementation((table) => (table === 'customers' ? customers : services));
-    await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, `?phone=5551234567&customerId=${CUSTOMER_UUID}`);
-      expect(res.status).toBe(404); // no visit — but resolution path is what's under test
-      expect(customers.where).toHaveBeenCalledWith({ id: CUSTOMER_UUID });
-      expect(customers.where).not.toHaveBeenCalledWith('phone', 'like', '%5551234567');
-    });
-  });
-
-  test('a malformed customerId falls back to phone instead of reaching the uuid column', async () => {
-    const customers = makeFirstBuilder({ id: CUSTOMER_UUID });
-    const services = makeFirstBuilder(null);
-    db.mockImplementation((table) => (table === 'customers' ? customers : services));
-    await withServer(async (baseUrl) => {
-      await get(baseUrl, '?phone=5551234567&customerId=not-a-uuid');
-      expect(customers.where).not.toHaveBeenCalledWith({ id: 'not-a-uuid' });
-      expect(customers.where).toHaveBeenCalledWith('phone', 'like', '%5551234567');
-    });
-  });
-
   test('200 returns the link, the SMS clause, and the visit the link points to', async () => {
-    const customers = makeFirstBuilder({ id: CUSTOMER_UUID });
-    const services = makeFirstBuilder({
+    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const services = makeServicesBuilder([{
       id: 'svc-1',
+      customer_id: CUSTOMER_UUID,
       // pg can hand DATE columns back as a JS Date — the route must
       // normalize to 'YYYY-MM-DD'.
-      scheduled_date: new Date('2026-08-04T00:00:00Z'),
+      scheduled_date: new Date('2099-08-04T00:00:00Z'),
       window_start: '08:00:00',
+      window_end: '10:00:00',
       service_type: 'lawn care',
       status: 'confirmed',
-    });
-    db.mockImplementation((table) => (table === 'customers' ? customers : services));
-    buildRescheduleLink.mockResolvedValue({
-      url: 'https://wvs.example/r/abc123',
-      line: 'Need a different time? Reschedule online: https://wvs.example/r/abc123\n\n',
-    });
+    }]);
+    wireDb({ customers, services });
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=5551234567');
+      const res = await get(baseUrl, '?phone=9415551234');
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body).toEqual({
-        url: 'https://wvs.example/r/abc123',
-        line: 'Need a different time? Reschedule online: https://wvs.example/r/abc123\n\n',
+      expect(await res.json()).toEqual({
+        url: GOOD_LINK.url,
+        line: GOOD_LINK.line,
         appointment: {
           id: 'svc-1',
-          scheduledDate: '2026-08-04',
+          scheduledDate: '2099-08-04',
           windowStart: '08:00',
           serviceType: 'lawn care',
           status: 'confirmed',
@@ -216,19 +309,61 @@ describe('GET /admin/communications/reschedule-link', () => {
     });
   });
 
+  test('an elapsed same-day rescheduled placeholder is skipped in favor of the next usable visit', async () => {
+    // Fake only Date: 2026-07-28 16:00 ET (20:00 UTC, EDT). Timers, sockets,
+    // and fetch stay real.
+    jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
+    try {
+      const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+      const services = makeServicesBuilder([
+        {
+          id: 'svc-placeholder',
+          customer_id: CUSTOMER_UUID,
+          scheduled_date: '2026-07-28', // today, 8–10 AM quoted window long past by 4 PM
+          window_start: '08:00:00',
+          window_end: '10:00:00',
+          service_type: 'pest control',
+          status: 'rescheduled',
+        },
+        {
+          id: 'svc-next',
+          customer_id: CUSTOMER_UUID,
+          scheduled_date: '2026-07-30',
+          window_start: '09:00:00',
+          window_end: '11:00:00',
+          service_type: 'pest control',
+          status: 'confirmed',
+        },
+      ]);
+      wireDb({ customers, services });
+      buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+      await withServer(async (baseUrl) => {
+        const res = await get(baseUrl, '?phone=9415551234');
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.appointment.id).toBe('svc-next');
+        expect(buildRescheduleLink).toHaveBeenCalledWith('svc-next', { customerId: CUSTOMER_UUID });
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('404 when the visit has no usable link (legacy tokenless row)', async () => {
-    const customers = makeFirstBuilder({ id: CUSTOMER_UUID });
-    const services = makeFirstBuilder({
+    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const services = makeServicesBuilder([{
       id: 'svc-legacy',
-      scheduled_date: '2026-08-04',
+      customer_id: CUSTOMER_UUID,
+      scheduled_date: '2099-08-04',
       window_start: null,
+      window_end: null,
       service_type: 'pest control',
       status: 'pending',
-    });
-    db.mockImplementation((table) => (table === 'customers' ? customers : services));
+    }]);
+    wireDb({ customers, services });
     buildRescheduleLink.mockResolvedValue({ url: null, line: '' });
     await withServer(async (baseUrl) => {
-      const res = await get(baseUrl, '?phone=5551234567');
+      const res = await get(baseUrl, '?phone=9415551234');
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/no reschedule link/);
     });
@@ -236,8 +371,64 @@ describe('GET /admin/communications/reschedule-link', () => {
 
   test('401 without an admin token', async () => {
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/communications/reschedule-link?phone=5551234567`);
+      const res = await fetch(`${baseUrl}/admin/communications/reschedule-link?phone=9415551234`);
       expect(res.status).toBe(401);
     });
+  });
+});
+
+describe('isElapsedSameDayReschedulePlaceholder', () => {
+  const { isElapsedSameDayReschedulePlaceholder } = communicationsRouter._internals;
+  // Fixed "now": 2026-07-28 16:00 ET (20:00 UTC, EDT).
+  const NOW = new Date('2026-07-28T20:00:00.000Z');
+
+  test('true for a same-day rescheduled row whose quoted window elapsed', () => {
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-28',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+    }, NOW)).toBe(true);
+  });
+
+  test('false while the quoted arrival window (start + 120m) is still open, even past window_end', () => {
+    // 15:00 start, job block to 15:30 — at 16:00 the quoted 15:00–17:00
+    // arrival window is still open, so the placeholder is still actionable.
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-28',
+      window_start: '15:00:00',
+      window_end: '15:30:00',
+    }, NOW)).toBe(false);
+  });
+
+  test('false for pending/confirmed rows (missed visits stay rebookable) and future rescheduled rows', () => {
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'confirmed',
+      scheduled_date: '2026-07-28',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+    }, NOW)).toBe(false);
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'pending',
+      scheduled_date: '2026-07-28',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+    }, NOW)).toBe(false);
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-29',
+      window_start: '08:00:00',
+      window_end: '10:00:00',
+    }, NOW)).toBe(false);
+  });
+
+  test('false when the row has no window to judge by', () => {
+    expect(isElapsedSameDayReschedulePlaceholder({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-28',
+      window_start: null,
+      window_end: null,
+    }, NOW)).toBe(false);
   });
 });

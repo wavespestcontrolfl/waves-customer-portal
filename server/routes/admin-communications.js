@@ -12,8 +12,10 @@ const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
 const { isEnabled } = require('../config/feature-gates');
@@ -1097,60 +1099,127 @@ Write ONLY the SMS reply text. Keep it under 160 characters. No quotes or labels
   }
 });
 
+// pg returns DATE columns as a JS Date or a 'YYYY-MM-DD' string depending on
+// parser config — normalize (same idiom as reschedule-public's apptDateStr).
+function scheduledDateStr(value) {
+  if (!value) return null;
+  return value instanceof Date
+    ? value.toISOString().slice(0, 10)
+    : String(value).slice(0, 10);
+}
+
+// Mirrors the same-day 'rescheduled' leg of reschedule-public's eligibility:
+// a 'rescheduled' row is a pending-rebook PLACEHOLDER, and once its quoted
+// arrival window — max(window_end, window_start + ARRIVAL_WINDOW_MINUTES) —
+// has elapsed, the public page rejects it as 'past'. Picking it here would
+// insert a link that dead-ends even when a later usable visit exists, so the
+// candidate walk skips it. Same-day pending/confirmed rows whose window
+// elapsed stay pickable on purpose: those are MISSED visits and the public
+// page offers the "we missed each other" rebook for them.
+function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
+  if (String(svc.status || '').toLowerCase() !== 'rescheduled') return false;
+  if (scheduledDateStr(svc.scheduled_date) !== etDateString(now)) return false;
+  const toMin = (t) => {
+    const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  };
+  const bounds = [];
+  const end = toMin(svc.window_end);
+  const start = toMin(svc.window_start);
+  if (end != null) bounds.push(end);
+  if (start != null) bounds.push(start + ARRIVAL_WINDOW_MINUTES);
+  // No window on the row → can't prove the quoted window elapsed; the public
+  // page treats it as still reschedulable, so keep it pickable here too.
+  if (!bounds.length) return false;
+  const nowEt = etParts(now);
+  return Math.max(...bounds) <= nowEt.hour * 60 + nowEt.minute;
+}
+
 // GET /api/admin/communications/reschedule-link?phone=...&customerId=...
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
-// the SMS body. customerId (when the composer knows it) wins; otherwise the
-// customer resolves by phone exactly like /ai-draft. Read-only apart from
-// the short-url row buildRescheduleLink mints. Final eligibility stays owned
-// by the public /reschedule/:token page (e.g. a missed same-day visit still
-// rebooks there) — this endpoint only picks WHICH visit the link points to.
+// the SMS body. Read-only apart from the short-url row buildRescheduleLink
+// mints. The reschedule token is a BEARER credential (AGENTS.md public-token
+// section), so recipient resolution fails closed:
+//   - phone is always required and must normalize to a full 10 digits
+//     (fullPhoneLast10) — no partial LIKE matching;
+//   - customerId, when the composer knows it, must belong to a live customer
+//     whose phone matches the request (same cross-check as /rewrite-sms);
+//   - phone-only resolution matches on the EXACT last-10 digits across all
+//     non-deleted customer rows, and a number shared by multiple property
+//     rows resolves deterministically to the soonest eligible visit across
+//     the whole matched account.
+// Final eligibility stays owned by the public /reschedule/:token page (e.g.
+// a missed same-day visit still rebooks there) — this endpoint only picks
+// WHICH visit the link points to.
 router.get('/reschedule-link', async (req, res) => {
   try {
-    const { phone, customerId } = req.query;
-    let customer = null;
-    if (customerId && UUID_RE.test(String(customerId))) {
-      customer = await db('customers').where({ id: customerId }).first('id');
+    const last10 = fullPhoneLast10(req.query.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
-    if (!customer) {
-      const cleanPhone = String(phone || '').replace(/\D/g, '').slice(-10);
-      if (!cleanPhone) return res.status(400).json({ error: 'phone or customerId required' });
-      customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first('id');
-    }
-    if (!customer) return res.status(404).json({ error: 'No customer found for that number' });
 
-    // Soonest not-yet-terminal visit today-or-later. ET day frame:
-    // scheduled_date is a DATE column, so comparing against the ET
-    // 'YYYY-MM-DD' string is exact (same comparison reschedule-public makes).
-    // The status gate mirrors RESCHEDULABLE_STATUSES there — live
-    // (en_route/on_site) and terminal rows never match.
-    const svc = await db('scheduled_services')
-      .where({ customer_id: customer.id })
+    const customerId = req.query.customerId;
+    let customerIds = [];
+    if (customerId && UUID_RE.test(String(customerId))) {
+      const customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+      customerIds = [customer.id];
+    } else {
+      const rows = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id');
+      customerIds = rows.map((r) => r.id);
+    }
+    if (!customerIds.length) {
+      return res.status(404).json({ error: 'No customer found for that number' });
+    }
+
+    // Candidate visits, soonest first. ET day frame: scheduled_date is a
+    // DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
+    // (same comparison reschedule-public makes). The status gate mirrors
+    // RESCHEDULABLE_STATUSES there — live (en_route/on_site) and terminal
+    // rows never match. Dispatch-owned pending call-pipeline bookings are
+    // excluded with the same null-safe predicate /api/schedule uses: their
+    // tentative times are hidden from the customer until the office
+    // confirms, so this button must not hand out a bearer link to one.
+    const candidates = await db('scheduled_services')
+      .whereIn('customer_id', customerIds)
       .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
       .where('scheduled_date', '>=', etDateString())
+      .where((qb) => qb
+        .whereNull('source_action')
+        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('status', 'pending')
+        .orWhere('customer_confirmed', true))
       .orderBy([
         { column: 'scheduled_date', order: 'asc' },
         { column: 'window_start', order: 'asc' },
       ])
-      .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
+      .limit(25)
+      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
+
+    const svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c));
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line } = await buildRescheduleLink(svc.id, { customerId: customer.id });
+    const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
     // Null url = legacy pre-backfill row without a token (or shortener +
     // portal-url both unavailable) — nothing usable to insert.
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
-    // pg returns DATE columns as a JS Date or a string depending on parser
-    // config — normalize to 'YYYY-MM-DD' (same idiom as reschedule-sms).
-    const scheduledDate = svc.scheduled_date instanceof Date
-      ? svc.scheduled_date.toISOString().slice(0, 10)
-      : String(svc.scheduled_date).slice(0, 10);
     res.json({
       url,
       line,
       appointment: {
         id: svc.id,
-        scheduledDate,
+        scheduledDate: scheduledDateStr(svc.scheduled_date),
         windowStart: svc.window_start ? String(svc.window_start).slice(0, 5) : null,
         serviceType: svc.service_type || null,
         status: svc.status,
@@ -1851,6 +1920,7 @@ router._internals = {
   cleanSmsRewriteOutput,
   csvEscape,
   fullPhoneLast10,
+  isElapsedSameDayReschedulePlaceholder,
   normalizeRewriteRecentMessages,
   rowsToCsv,
 };
