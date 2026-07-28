@@ -245,6 +245,11 @@ function matchesTerm(normalized, term) {
   return hasToken(normalized, normalizedTerm);
 }
 
+// NOTE: deliberately rodent-only. A pest + TERMITE bait combination keeps the
+// termite-bait PROTOCOL (the tech needs the station steps — codified in
+// protocol-matcher.test.js "keeps pest and termite bait station combinations
+// on termite bait protocol") even though the service LINE classifies pest for
+// reporting. Protocol follows the work; line follows the report.
 function isPestPrimaryCompanion(normalized) {
   return /\bpest\b.*\brodent\b/.test(normalized) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(normalized);
 }
@@ -290,6 +295,10 @@ function programKeyForService(serviceType) {
     normalized.includes('bora') ||
     normalized.includes('borate') ||
     normalized.includes('termidor') ||
+    // Termite-bait product aliases the normalizer maps to termite labels —
+    // the matcher must agree ("Trelona Installation", "Advance Monitoring").
+    normalized.includes('trelona') ||
+    hasToken(normalized, 'advance') ||
     normalized.includes('pre slab') ||
     normalized.includes('preslab') ||
     normalized.includes('foam drill') ||
@@ -297,7 +306,7 @@ function programKeyForService(serviceType) {
     normalized.includes('liquid perimeter') ||
     normalized.includes('trench')
   ) return 'termite';
-  if (normalized.includes('tree') || normalized.includes('shrub') || normalized.includes('palm') || normalized.includes('ornamental')) return 'tree_shrub';
+  if (normalized.includes('tree') || normalized.includes('shrub') || normalized.includes('palm') || normalized.includes('ornamental') || normalized.includes('arborjet')) return 'tree_shrub';
   return 'pest';
 }
 

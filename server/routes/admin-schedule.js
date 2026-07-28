@@ -8,6 +8,8 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { loadLastServices } = require('../utils/last-line-service');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -1669,9 +1671,14 @@ router.get('/', async (req, res, next) => {
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
-      const lastService = await db('service_records')
-        .where({ customer_id: s.customer_id, status: 'completed' })
-        .orderBy('service_date', 'desc').first();
+      // Any-line latest keeps the "Last:" card + new-customer detection
+      // semantics; the line-scoped record feeds the service dashboard so a
+      // pest visit never shows the customer's lawn notes (multi-service
+      // customers were leaking cross-line notes into the Protocol panel).
+      // Paged same-line search — a fixed window silently lost history for
+      // high-cadence customers (two weekly lines ≈ 104 rows between annual
+      // termite visits).
+      const { lastService, lastLineService } = await loadLastServices(db, s.customer_id, s.service_type);
 
       const genuinelyNew = await isNewCustomer(db, s.customer_id);
 
@@ -1720,8 +1727,11 @@ router.get('/', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push({ type: 'access', text: `Side gate: ${prefs.side_gate_access}` });
       if (prefs?.parking_notes) alerts.push({ type: 'access', text: `Parking: ${prefs.parking_notes}` });
       if (prefs?.special_instructions) alerts.push({ type: 'special', text: prefs.special_instructions });
-      // Only add notes if there's meaningful content after cleaning
-      if (cleanedNotes) alerts.push({ type: 'note', text: cleanedNotes });
+      // Only add notes if there's meaningful content after cleaning. Ops
+      // sessions write scheduling-audit trails into notes; those are internal
+      // and never belong on the tech-facing alerts block.
+      const displayNotes = stripSchedulerAuditText(cleanedNotes);
+      if (displayNotes) alerts.push({ type: 'note', text: displayNotes });
       // Show "New customer" badge ONLY if genuinely new (no completed service records)
       if (genuinelyNew) alerts.push({ type: 'new_customer', text: 'New customer — first visit' });
       // Service-preference opt-outs — the customer toggled one of these off
@@ -1883,7 +1893,16 @@ router.get('/', async (req, res, next) => {
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
-        lastServiceNotes: lastService?.technician_notes?.slice(0, 200),
+        // Technician-authored notes get the word-boundary preview only — the
+        // scheduler-audit filter is for scheduled_services.notes (where ops
+        // sessions write audit trails), and would false-positive on genuine
+        // tech prose like "No SMS sent because the phone is disconnected".
+        lastServiceNotes: previewText(lastService?.technician_notes),
+        // Line-scoped last visit for the service dashboards (Protocol panel):
+        // null when the customer has no completed history on THIS line.
+        lastLineServiceDate: safeDate(lastLineService?.service_date),
+        lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
+        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
         checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,

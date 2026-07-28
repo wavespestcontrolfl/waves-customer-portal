@@ -582,24 +582,77 @@ function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
 
+// Token per category that /admin/protocols/photos/relevant classifies to the
+// same line the panel renders (its filter matches literal tokens only).
+const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
+  lawn: "lawn",
+  tree_shrub: "tree shrub",
+  pest: "pest",
+  mosquito: "mosquito",
+  termite: "termite",
+};
+
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
+  // "Palmetto" is a roach, not a palm — the word-bounded exception must run
+  // before the palm check or "Palmetto Roach Knockdown" classifies as
+  // tree_shrub (mirrors the server classifier).
+  if (/\bpalmetto\b/.test(s)) return "pest";
+  // Pest-primary combined names ("Quarterly Pest + Termite Bait Station")
+  // stay pest — the companion token names a section, not the line (mirrors
+  // the server classifier's rule exactly).
   if (
+    /\bpest\b.*\b(rodent|termite)\b/.test(s) &&
+    !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(s)
+  )
+    return "pest";
+  // Precedence mirrors the server's detectServiceLine: explicit lawn-SURFACE
+  // tokens win (the combined "Lawn + Tree & Shrub" service stays lawn), while
+  // tree/shrub outranks only lawn's ambiguous treatment tokens — "Tree &
+  // Shrub Fertilization" is a tree & shrub service, not lawn.
+  const hasLawnSurface =
     s.includes("lawn") ||
     s.includes("turf") ||
     s.includes("grass") ||
+    s.includes("sod");
+  if (
+    !hasLawnSurface &&
+    // Mosquito/termite/WDO tokens outrank tree tokens ("Tree Line Mosquito
+    // Treatment" is mosquito work) — mirrors the server normalizer's
+    // tree/shrub exclusions exactly. Ornamental/Arborjet are the server's
+    // tree/shrub aliases (service-line-configs.js).
+    !s.includes("mosquito") &&
+    !s.includes("termite") &&
+    !s.includes("wdo") &&
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
+  )
+    return "tree_shrub";
+  if (
+    hasLawnSurface ||
     s.includes("fertil") ||
     s.includes("weed") ||
     s.includes("dethatch") ||
     s.includes("top dress") ||
-    s.includes("aerat") ||
-    s.includes("sod")
+    s.includes("aerat")
   )
     return "lawn";
-  if (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
-    return "tree_shrub";
   if (s.includes("mosquito")) return "mosquito";
-  if (s.includes("termite")) return "termite";
+  // Termite-product aliases mirror the server normalizer, which maps EVERY
+  // /advance/ label to a termite type. Word-bounded \badvance\b never
+  // matches "Advanced Pest Control" (trailing d), so the bare alias is safe.
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    /\badvance\b/.test(s)
+  )
+    return "termite";
   if (
     s.includes("rodent") ||
     /\brat(s)?\b/.test(s) ||
@@ -3377,7 +3430,12 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  // Classify from the RAW service type when the payload carries it: the
+  // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
+  // becomes "Tree & Shrub Care") while the server's line-scoped fields are
+  // classified from the raw value — the panel must agree with them.
+  const panelServiceType = service.serviceTypeRaw || service.serviceType;
+  const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
   const [activeSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
@@ -3434,7 +3492,20 @@ export function ProtocolPanel({ service, onClose }) {
 
       const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(
-          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`,
+          // The photos endpoint derives its line from literal tokens
+          // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
+          // panel's CLASSIFIED category as that token so the lookup always
+          // matches the panel's line, even for raw aliases ("Bora-Care",
+          // "Aeration") carrying none of the tokens. "pest" is also the
+          // classifier's rodent/unknown fallback though, so that token is
+          // only sent when the label genuinely says pest — rodent and
+          // unknown labels keep their token-less (unfiltered) lookup.
+          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(
+            (serviceCategory !== "pest" ||
+            /\bpest\b/.test(panelServiceType.toLowerCase())
+              ? PHOTO_LOOKUP_TYPE_BY_CATEGORY[serviceCategory]
+              : null) || service.serviceType,
+          )}&month=${month}`,
         ),
         adminFetch(
           `/admin/protocols/seasonal-index?month=${month}&service_line=${line}`,
@@ -3451,7 +3522,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(service.serviceType)}`,
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
             )
           : Promise.resolve(null),
       ]);
@@ -4445,9 +4516,12 @@ export function ProtocolPanel({ service, onClose }) {
                     ))}
                   </div>
                 )}
-                {/* Last service notes */}
-                {service.lastServiceNotes &&
-                  stripLegacyBoilerplate(service.lastServiceNotes) && (
+                {/* Last service notes — line-scoped (lastLineServiceNotes) so a
+                    pest dashboard never shows the customer's lawn visit notes.
+                    No fallback to the any-line field: cross-line notes here
+                    were the bug, not a degraded mode. */}
+                {service.lastLineServiceNotes &&
+                  stripLegacyBoilerplate(service.lastLineServiceNotes) && (
                     <div
                       style={{
                         background: D.bg,
@@ -4472,7 +4546,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}
                       >
-                        {stripLegacyBoilerplate(service.lastServiceNotes)}
+                        {stripLegacyBoilerplate(service.lastLineServiceNotes)}
                       </div>{" "}
                     </div>
                   )}
