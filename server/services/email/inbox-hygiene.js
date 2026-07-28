@@ -91,11 +91,12 @@ async function quarantineMessage(email) {
     await gmailClient.modifyLabels(email.gmail_id, [labelId], ['INBOX']);
   } catch (e) {
     e.quarantineStage = 'gmail'; // AMBIGUOUS — swap may have applied
-    // De-stamp so the sweep never trashes a row whose Gmail state is
-    // unknown; is_archived resets too or a message still in the Gmail inbox
-    // would vanish from the portal's default email view indefinitely.
+    // Park an AMBIGUOUS marker (never trashable) — the daily sweep
+    // reconciles it against live Gmail labels: swap applied → adopt as
+    // quarantined (24h window starts then); swap not applied → failed,
+    // is_archived reset so the message stays visible in the portal.
     await db('emails').where({ id: email.id, auto_action: 'spam_quarantined' })
-      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() })
+      .update({ auto_action: 'spam_quarantine_ambiguous', quarantined_at: null, updated_at: new Date() })
       .catch(() => {});
     throw e;
   }
@@ -154,6 +155,25 @@ async function sweepQuarantine(now = new Date()) {
     .select('id', 'gmail_id', 'from_address');
   for (const row of blockPending) {
     await settleDeferredBlock(row);
+  }
+
+  // Reconcile AMBIGUOUS quarantine attempts (label swap timed out — did it
+  // apply?) against live Gmail labels: applied → adopt as quarantined with a
+  // fresh 24h window; not applied → failed + visible again in the portal.
+  const ambiguous = await db('emails')
+    .where('auto_action', 'spam_quarantine_ambiguous')
+    .select('id', 'gmail_id');
+  for (const row of ambiguous) {
+    try {
+      const labels = await gmailClient.getMessageLabels(row.gmail_id);
+      const applied = labels.includes(quarantineLabelId) && !labels.includes('INBOX');
+      await db('emails').where({ id: row.id, auto_action: 'spam_quarantine_ambiguous' })
+        .update(applied
+          ? { auto_action: 'spam_quarantined', quarantined_at: new Date(), is_archived: true, updated_at: new Date() }
+          : { auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() });
+    } catch (e) {
+      logger.warn(`[inbox-hygiene] ambiguous-quarantine reconcile failed (email ${row.id}): ${e.message}`);
+    }
   }
 
   const rows = await db('emails')
@@ -334,12 +354,15 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
        WHERE classification = ANY(?)
          AND is_archived = false
          AND received_at >= ?
+         AND NOT (label_ids \\? 'SENT')
+         AND NOT (label_ids \\? 'DRAFT')
+         AND LOWER(from_address) <> ?
        ORDER BY gmail_thread_id, received_at DESC
      ) latest_per_thread
      WHERE received_at <= ?
      ORDER BY received_at ASC
      LIMIT 40`,
-    [NUDGE_CATEGORIES, oldest, newest]
+    [NUDGE_CATEGORIES, oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), newest]
   );
   const deduped = res?.rows || [];
 
@@ -372,8 +395,8 @@ async function reconcilePendingDrafts(now = new Date()) {
   const rows = await db('emails')
     .where('draft_gmail_id', 'pending')
     .where('draft_claimed_at', '<', staleCutoff)
-    .select('id', 'gmail_thread_id');
-  const counts = { settled: 0, released: 0 };
+    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id');
+  const counts = { settled: 0, released: 0, redrafted: 0 };
   for (const row of rows) {
     try {
       const thread = await gmailClient.getThread(row.gmail_thread_id);
@@ -389,6 +412,21 @@ async function reconcilePendingDrafts(now = new Date()) {
         .where('draft_claimed_at', '<', staleCutoff)
         .update({ ...patch, updated_at: new Date() });
       if (n) counts[hasDraft ? 'settled' : 'released'] += 1;
+      // A release is only useful if something retries — classification and
+      // auto-actions ran once at insert, so re-draft eligible rows here
+      // (draftReplyForEmail re-claims atomically and no-ops when the gate is
+      // off or the row is non-inbound). Lazy require: email-actions requires
+      // this module.
+      if (n && !hasDraft && ['customer_request', 'scheduling', 'complaint'].includes(row.classification)) {
+        try {
+          const { draftReplyForEmail } = require('./email-actions');
+          const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();
+          await draftReplyForEmail(row, { customer, tone: row.classification === 'complaint' ? 'complaint' : 'service' });
+          counts.redrafted += 1;
+        } catch (e) {
+          logger.warn(`[inbox-hygiene] released-claim redraft failed (email ${row.id}): ${e.message}`);
+        }
+      }
     } catch (e) {
       logger.warn(`[inbox-hygiene] pending-draft reconcile failed (email ${row.id}): ${e.message}`);
     }

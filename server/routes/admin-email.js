@@ -484,7 +484,12 @@ router.get('/daily-digest', async (req, res) => {
     });
 
     digest.leads_created = digest.by_category.lead_inquiry || 0;
-    digest.spam_blocked = digest.by_category.spam || 0;
+    // Quarantine-lane outcomes only — a known-sender skip or failed
+    // quarantine left the message available and is not "handled spam".
+    digest.spam_quarantined = todayEmails
+      .filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
+    // Kept for API back-compat; now mirrors the accurate count.
+    digest.spam_blocked = digest.spam_quarantined;
     digest.invoices_processed = digest.by_category.vendor_invoice || 0;
 
     // Blocked count today
