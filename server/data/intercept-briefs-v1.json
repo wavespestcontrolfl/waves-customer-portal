@@ -280,7 +280,8 @@
    "sources": [
     "https://legalclarity.org/how-to-cancel-trugreen-phone-mail-or-online/",
     "https://www.nj.gov/oag/newsreleases06/pr20060808a.html",
-    "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints"
+    "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints",
+    "https://www.trugreen.com/why-choose-trugreen/professional-lawn-care"
    ],
    "internal_links": [
     "/lawn-care/why-national-lawn-programs-fail-st-augustine-swfl/",
@@ -293,7 +294,7 @@
    ],
    "verify_notes": [
     "VERIFY: locate primary NY AG release/filing — prefer primary over AOL coverage; if unfound, attribute to contemporaneous press coverage explicitly.",
-    "GATE RULE (this brief previously died on P0 HARDCODED_PRICE): TruGreen dollar amounts may appear ONLY inside the comparison table as curated competitor-facts rows, or in body copy with explicit range/varies/estimate framing in the same sentence — never as a bare asserted price. Waves prices never appear at all.",
+    "GATE RULE (this brief previously died on P0 HARDCODED_PRICE): NO TruGreen dollar amounts anywhere in the post — body OR comparison-table cells (the price gate scans table cells too, and no sourced TruGreen pricing fact is curated, so a priced cell would also fail the unsupported-fact check). Discuss cost positioning qualitatively only ('national-brand annual plans', 'pricing varies by lawn size'). Waves prices never appear at all.",
     "GATE RULE (this brief previously died on P0 DISALLOWED_EXTERNAL_LINK): link ONLY the sources listed on this brief and TruGreen's own published pages (trugreen.com) — no other external hosts; every external link carries explicit attribution."
    ]
   },
@@ -570,7 +571,8 @@
    ],
    "sources": [
     "https://www.nj.gov/oag/newsreleases06/pr20060808a.html",
-    "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints"
+    "https://www.bbb.org/us/tn/germantown/profile/lawn-maintenance/trugreen-0543-1000545/complaints",
+    "https://www.trugreen.com/why-choose-trugreen/professional-lawn-care"
    ],
    "source_notes": [
     "UF/IFAS for agronomic claims",
@@ -587,7 +589,7 @@
    ],
    "verify_notes": [
     "Agronomic mechanism claims cited to IFAS; 'worse after TruGreen' framed as mechanism explanation, never as a claim about any specific customer's lawn.",
-    "GATE RULE (this brief previously died on P0 HARDCODED_PRICE): TruGreen dollar amounts may appear ONLY inside the comparison table as curated competitor-facts rows, or in body copy with explicit range/varies/estimate framing in the same sentence — never as a bare asserted price. Waves prices never appear at all.",
+    "GATE RULE (this brief previously died on P0 HARDCODED_PRICE): NO TruGreen dollar amounts anywhere in the post — body OR comparison-table cells (the price gate scans table cells too, and no sourced TruGreen pricing fact is curated, so a priced cell would also fail the unsupported-fact check). Discuss cost positioning qualitatively only ('national-brand annual plans', 'pricing varies by lawn size'). Waves prices never appear at all.",
     "GATE RULE (this brief previously died on P0 DISALLOWED_EXTERNAL_LINK): link ONLY the sources listed on this brief and TruGreen's own published pages (trugreen.com) — no other external hosts; every external link carries explicit attribution."
    ]
   },

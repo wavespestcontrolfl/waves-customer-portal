@@ -203,7 +203,9 @@ const COMPETITORS = [
     name: 'TruGreen',
     aliases: ['trugreen lawn care', 'tru green'],
     attributes: {
-      reach: { value: "National (US) — self-described \"America's #1 lawn care company based on U.S. market share of professional lawn care companies\"", source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
+      // Deliberately neutral — no market-share/"#1" language: the comparison
+      // gate rejects ranking tokens even when they quote a curated value.
+      reach: { value: 'National (US)', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
       residential_recurring: { value: 'Yes — annual residential lawn plans (TruPro / TruCore / TruBasic tiers)', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
       guarantee: { value: 'Healthy Lawn Guarantee — "we\'ll gladly visit your property as often as needed between scheduled visits to make any necessary adjustments and to ensure your satisfaction"; site footnote: "Guarantee applies to full program customers only"', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
     },
