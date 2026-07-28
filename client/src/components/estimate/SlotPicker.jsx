@@ -259,13 +259,24 @@ export default function SlotPicker({
           .includes(String(v || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))));
     let horizonDays = 90;
     if (seasonalSelected) {
-      const now = new Date();
-      const m = now.getMonth(); // 0-indexed: Feb=1 … Oct=9
-      if (m === 0 || m > 9) {
-        const seasonStart = new Date(m === 0 ? now.getFullYear() : now.getFullYear() + 1, 1, 1, 12);
-        const gapDays = Math.round((seasonStart - now) / 86400000);
-        horizonDays = Math.max(90, gapDays + 14);
+      // Walk to the date that gives a full 90-day complement of IN-SEASON
+      // days (Feb–Oct), crossing the Nov–Jan gap — mirror of the server's
+      // seasonalMaxHorizonDays, so the picker bound matches what the API's
+      // browse clamp and the reservation gate accept (an Oct 31 customer
+      // must reach February; a wide window may extend into spring).
+      const inSeasonMonth = (d) => { const m = d.getMonth(); return m >= 1 && m <= 9; };
+      const at = new Date(); at.setHours(12, 0, 0, 0);
+      let counted = 0;
+      let steps = 0;
+      while (steps < 320) {
+        if (inSeasonMonth(at)) {
+          counted += 1;
+          if (counted >= 91) break;
+        }
+        at.setDate(at.getDate() + 1);
+        steps += 1;
       }
+      horizonDays = Math.max(90, steps);
     }
     const d = new Date();
     d.setDate(d.getDate() + horizonDays);
