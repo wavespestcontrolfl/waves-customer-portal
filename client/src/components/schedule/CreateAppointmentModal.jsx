@@ -777,12 +777,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   // Auto (lot-based) one-time mosquito charge the server will stamp when the
   // field is left blank — resolved here so staff see the amount before
-  // scheduling; the server re-derives it authoritatively on submit.
+  // scheduling; the server re-derives it authoritatively on submit. Mirrors
+  // the server fallback order: lot ladder, then the catalog base price when
+  // the customer has no usable lot size.
   const mosquitoAutoAmount = (svc) => {
     if (svc?.service_key !== 'mosquito_one_time' || lineHasEnteredPrice(svc)) return null;
     const lotSqft = Number(selectedCustomer?.lotSqft);
-    if (!Number.isFinite(lotSqft) || lotSqft <= 0) return null;
-    return oneTimeMosquitoLadderPrice(lotSqft);
+    if (Number.isFinite(lotSqft) && lotSqft > 0) return oneTimeMosquitoLadderPrice(lotSqft);
+    const catalogBase = Number(svc.base_price ?? svc.priceMin);
+    return Number.isFinite(catalogBase) && catalogBase > 0 ? catalogBase : null;
   };
   const lineEffectiveBaseAmount = (svc) => (
     lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
@@ -895,6 +898,35 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // and "No matches" states — without them, a slow network or zero-hit
   // query looks identical to a broken search (no UI ever appears) and
   // operators report it as "the search vanished".
+  // Preselected-customer flows (modal opened from a customer page) pass a
+  // customer object without lotSqft. Hydrate it from the detail endpoint when
+  // a one-time mosquito line needs the auto price, so the operator-visible
+  // amount matches what the server will bill.
+  const hasAutoMosquitoLine = services.some((s) => s.service_key === 'mosquito_one_time' && !lineHasEnteredPrice(s));
+  useEffect(() => {
+    const id = selectedCustomer?.id;
+    if (!id || !hasAutoMosquitoLine || selectedCustomer.lotSqft !== undefined) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await adminFetch(`/admin/customers/${id}`);
+        const lotSqft = r?.customer?.property?.lotSqft;
+        if (!cancelled) {
+          setSelectedCustomer((prev) => (prev && prev.id === id
+            ? { ...prev, lotSqft: lotSqft != null ? Number(lotSqft) : null }
+            : prev));
+        }
+      } catch {
+        if (!cancelled) {
+          setSelectedCustomer((prev) => (prev && prev.id === id && prev.lotSqft === undefined
+            ? { ...prev, lotSqft: null }
+            : prev));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCustomer?.id, selectedCustomer?.lotSqft, hasAutoMosquitoLine]);
+
   const doSearch = async (val) => {
     setCustomerSearch(val);
     if (val.length >= 2) {
