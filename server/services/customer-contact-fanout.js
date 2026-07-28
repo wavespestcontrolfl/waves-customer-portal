@@ -221,9 +221,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
   // settled back to sent/send_failed before this query — still key-match the
   // old name and heal here. Diff-gating means a stranded row could never heal
   // later, so this pass must not depend on the status observed at select
-  // time. Residual: a raced row's preparedFor copy keeps the old spelling
-  // (its estimate_data was owned by the concurrent send); the next proposal
-  // re-author refreshes it.
+  // time.
   counts.estimates += await conn('estimates')
     .where({ customer_id: customerId })
     .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
@@ -231,6 +229,42 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .whereRaw(`${NAME_KEY_SQL('customer_name')} = ?`, [oldFullKey])
     .whereRaw('customer_name IS DISTINCT FROM ?', [newFull.slice(0, 100)])
     .update({ customer_name: newFull.slice(0, 100), updated_at: now });
+
+  // Guarded preparedFor repair — keyed on the PROPOSAL'S OWN copy, not the
+  // column, so it reaches rows the per-row pass could not touch: a send that
+  // settled back to an open state after racing past both passes above, or a
+  // copy left half-synced by an earlier race. Proposal rendering PREFERS
+  // preparedFor over the column, so leaving it would keep the old name on
+  // the public estimate indefinitely. Same concurrency guard as the per-row
+  // pass; rows still inside a 'sending' claim stay untouched (their
+  // estimate_data is owned by the send) — that residual is a row in flight
+  // for this whole fan-out, and its send already rendered the old name.
+  const repairRows = await conn('estimates')
+    .where({ customer_id: customerId })
+    .whereIn('status', OPEN_ESTIMATE_STATUSES)
+    .whereNull('archived_at')
+    .whereRaw(`${NAME_KEY_SQL("(estimate_data #>> '{proposal,preparedFor}')")} = ?`, [oldFullKey])
+    .select('id', 'estimate_data');
+  for (const row of repairRows) {
+    const data = typeof row.estimate_data === 'string'
+      ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
+      : row.estimate_data;
+    const preparedFor = data?.proposal?.preparedFor;
+    const targetName = newFull.slice(0, 100);
+    if (!preparedFor || nameKey(preparedFor) !== oldFullKey || preparedFor === targetName) continue;
+    counts.estimates += await conn('estimates')
+      .where({ id: row.id, customer_id: customerId })
+      .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
+      .whereRaw("estimate_data #>> '{proposal,preparedFor}' IS NOT DISTINCT FROM ?", [preparedFor])
+      .update({
+        estimate_data: conn.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'",
+          [targetName]
+        ),
+        updated_at: now,
+      });
+  }
 
   // Active enrollments greet every remaining step from their denormalized
   // name; terminal enrollments are history.

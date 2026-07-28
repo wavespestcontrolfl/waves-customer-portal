@@ -17,7 +17,9 @@ const {
 
 /**
  * Minimal knex-shaped stub (mirrors customer-email-fanout.test.js). Per-table
- * config: rows (awaited select), firstQueue (successive first() results),
+ * config: rows (every awaited select) or rowsQueue (successive awaited
+ * selects — the estimates table is selected twice: per-row pass, then the
+ * preparedFor repair pass), firstQueue (successive first() results),
  * updateCount (what update() resolves, default 1). Builders are thenable so
  * they work both awaited and embedded. Mutations recorded in conn.__calls.
  */
@@ -37,7 +39,9 @@ function makeConn(cfg = {}) {
       select: () => qb,
       first: () => Promise.resolve((t.firstQueue || []).shift() ?? null),
       update: (patch) => { calls.push({ table, op: 'update', arg: patch }); return Promise.resolve(t.updateCount ?? 1); },
-      then: (resolve, reject) => Promise.resolve(t.rows || []).then(resolve, reject),
+      then: (resolve, reject) => Promise.resolve(
+        t.rowsQueue ? ((t.rowsQueue.shift()) ?? []) : (t.rows || [])
+      ).then(resolve, reject),
     };
     return qb;
   };
@@ -55,11 +59,11 @@ describe('propagateCustomerNameChange', () => {
   test('syncs every open snapshot copy, the proposal preparedFor, and queued payload greetings', async () => {
     const conn = makeConn({
       estimates: {
-        rows: [{
+        rowsQueue: [[{
           id: 'est-1',
           customer_name: 'Kathy Nunez',
           estimate_data: { proposal: { preparedFor: 'Kathy Nunez' }, proposalDelivery: { sentAt: 'x' } },
-        }],
+        }], []],
       },
       email_template_automation_runs: {
         rows: [{ id: 'run-1', payload: { first_name: 'Kathy', customer_name: 'Kathy Nunez', service: 'pest' } }],
@@ -167,6 +171,27 @@ describe('propagateCustomerNameChange', () => {
     // The only estimates write allowed is the column-only 'sending' sync —
     // nothing may carry an estimate_data patch.
     expect(conn.__updates('estimates').every((u) => u.arg.estimate_data === undefined)).toBe(true);
+  });
+
+  test('the repair pass heals a stale preparedFor even when the column already synced', async () => {
+    // A row that raced through 'sending' during an earlier fan-out has its
+    // column corrected but the proposal still addressed to the old name —
+    // the repair pass keys on the proposal's own copy and fixes it.
+    const conn = makeConn({
+      estimates: {
+        rowsQueue: [[], [{
+          id: 'est-2',
+          estimate_data: { proposal: { preparedFor: 'Kathy Nunez' }, proposalDelivery: { sentAt: 'x' } },
+        }]],
+      },
+    });
+    const counts = await propagateCustomerNameChange({ before: NAME_BEFORE, after: NAME_AFTER }, conn);
+    expect(counts.estimates).toBe(2); // catch-up + repair
+    const repairSync = conn.__updates('estimates')[1].arg;
+    expect(repairSync.customer_name).toBeUndefined();
+    expect(repairSync.estimate_data.__raw).toContain('{proposal,preparedFor}');
+    expect(repairSync.estimate_data.__raw).toContain("- 'proposalDelivery'");
+    expect(repairSync.estimate_data.__bindings).toEqual(['Cathy Nunes Furao']);
   });
 
   test('no-ops when the name did not actually change', async () => {
