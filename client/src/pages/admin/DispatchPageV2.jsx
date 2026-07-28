@@ -47,6 +47,7 @@ import {
   RescheduleModal,
   EditServiceModal,
   ProtocolPanel,
+  completionResumeOwed,
 } from "./SchedulePage";
 import ProtocolReferenceTabV2 from "./ProtocolReferenceTabV2";
 import {
@@ -108,7 +109,11 @@ function shouldOpenMobileCompletion(service) {
   const status = String(service?.status || "").toLowerCase();
   return (
     ACTIVE_MOBILE_COMPLETION_STATUSES.has(status) ||
-    PRE_SERVICE_STATUSES.has(status)
+    PRE_SERVICE_STATUSES.has(status) ||
+    // A completed visit still owing its invoice-mint resume (503
+    // backfill_invoice_mint_failed marked it) reopens completion so the
+    // re-submit can replay through the server's resume claim.
+    (status === "completed" && completionResumeOwed(service?.id))
   );
 }
 
@@ -1284,14 +1289,6 @@ export default function DispatchPageV2({
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
-  const [completionDetourPhotos, setCompletionDetourPhotos] = useState(null);
-  const handleCompletionDetourPhotosChange = useCallback((serviceId, photos) => {
-    setCompletionDetourPhotos((current) =>
-      String(current?.serviceId) === String(serviceId)
-        ? { ...current, photos: Array.isArray(photos) ? photos : [] }
-        : current,
-    );
-  }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1543,10 +1540,15 @@ export default function DispatchPageV2({
     const svc = (data.services || []).find((s) => String(s.id) === String(id));
     if (!svc) {
       alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
-    } else if (["completed", "cancelled", "skipped", "no_show"].includes(String(svc.status || ""))) {
+    } else if (
+      ["completed", "cancelled", "skipped", "no_show"].includes(String(svc.status || "")) &&
+      !(String(svc.status || "") === "completed" && completionResumeOwed(svc.id))
+    ) {
       // Defense in depth for the /tech deep-link (Codex P1): a stale or
       // re-tapped URL must never reopen completion on a terminal visit —
-      // the endpoint would accept a duplicate submission.
+      // the endpoint would accept a duplicate submission. A completed visit
+      // owing its invoice-mint resume is the one exception: the server's
+      // idempotency machinery replays it instead of double-submitting.
       alert(`That visit is already ${svc.status} — nothing to complete.`);
     } else {
       handleComplete(svc);
@@ -2483,36 +2485,14 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          billingDetourPhotos={
-            String(completionDetourPhotos?.serviceId) === String(completingService.id)
-              ? completionDetourPhotos.photos
-              : []
-          }
-          onDiscardBillingDetour={() => setCompletionDetourPhotos(null)}
-          onBillingDetourPhotosChange={handleCompletionDetourPhotosChange}
-          onClose={(completed) => {
+          onClose={() => {
             setCompletingService(null);
-            if (completed) setCompletionDetourPhotos(null);
             if (pendingPaymentAfterCompletionRef.current) {
               setPaymentData(pendingPaymentAfterCompletionRef.current);
               pendingPaymentAfterCompletionRef.current = null;
             }
           }}
           onSubmit={handleCompleteSubmit}
-          onBillingRequired={(svc, detourState) => {
-            // Typed one-time completion hit the billing 409 — close the
-            // panel (its draft autosave preserves the findings) and open
-            // the existing checkout flow; the post-payment paths re-open
-            // completion automatically.
-            setCompletionDetourPhotos({
-              serviceId: svc.id,
-              photos: Array.isArray(detourState?.servicePhotos)
-                ? detourState.servicePhotos
-                : [],
-            });
-            setCompletingService(null);
-            setCheckoutService(svc);
-          }}
           onScheduleFollowup={async (suggestion) => {
             // Books the suggested follow-up as a PENDING appointment (the
             // normal pending → confirmed dispatch flow is the confirmation

@@ -540,8 +540,8 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       // Surface the server's error body — completion handlers branch on
-      // err.code (completion_billing_required and friends), so a bare
-      // "HTTP 409" string breaks the billing-detour routing.
+      // err.code (lawn_assessment_stale and friends), so a bare
+      // "HTTP 409" string breaks that routing.
       let body = null;
       try { body = await r.json(); } catch { /* non-JSON error */ }
       const err = new Error(body?.error || `HTTP ${r.status}`);
@@ -699,10 +699,6 @@ export function completionPreferencesNeedDraft({
     || String(backfillTimeOnSite || "").trim() !== "";
 }
 
-export function normalizeCompletionDetourPhotos(photos) {
-  return Array.isArray(photos) ? photos : [];
-}
-
 // timeOnSite fragment of the completion POST body. The panel's running
 // `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
 // row that's days or weeks — and the server books any submitted timeOnSite
@@ -773,6 +769,27 @@ export function completionWillReview({
 
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
+}
+
+// A completed visit whose REQUIRED completion-invoice mint failed (503
+// backfill_invoice_mint_failed) still owes its resume: the server released
+// the completion attempt to the immediately-resumable state and the visit
+// row is already 'completed', so without a marker no dispatch surface would
+// reopen completion after a reload/dismiss and the mint could strand until
+// Billing Recovery sweeps it. CompletionPanel sets the marker when the 503
+// lands and clears it on success; DispatchPageV2's completion-open gates
+// honor it for completed visits. Exported for DispatchPageV2 — one key
+// derivation, no drift.
+export function completionResumeOwedKey(serviceId) {
+  return `waves_completion_resume_owed_${serviceId}`;
+}
+
+export function completionResumeOwed(serviceId) {
+  try {
+    return localStorage.getItem(completionResumeOwedKey(serviceId)) === "1";
+  } catch {
+    return false;
+  }
 }
 
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
@@ -7958,14 +7975,9 @@ export function CompletionPanel({
   onClose,
   onSubmit,
   onViewDetails,
-  // Typed specialty completion (PR 3): parent-owned routes for the
-  // billing-required 409 (opens the checkout flow) and the success-screen
-  // follow-up CTA (wired by PR 4 — the button only renders when provided).
-  onBillingRequired,
+  // Typed specialty completion (PR 4): parent-owned success-screen
+  // follow-up CTA (the button only renders when provided).
   onScheduleFollowup,
-  billingDetourPhotos = [],
-  onDiscardBillingDetour,
-  onBillingDetourPhotosChange,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -8166,11 +8178,8 @@ export function CompletionPanel({
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
-  // of base64 images can exceed its quota). Dispatch keeps them in memory
-  // across the billing checkout detour and passes them back on remount.
-  const [servicePhotos, setServicePhotos] = useState(() =>
-    normalizeCompletionDetourPhotos(billingDetourPhotos),
-  );
+  // of base64 images can exceed its quota).
+  const [servicePhotos, setServicePhotos] = useState([]);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -8500,9 +8509,6 @@ export function CompletionPanel({
   useEffect(() => {
     servicePhotosRef.current = servicePhotos;
   }, [servicePhotos]);
-  useEffect(() => {
-    onBillingDetourPhotosChange?.(service.id, servicePhotos);
-  }, [onBillingDetourPhotosChange, service.id, servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -8795,10 +8801,27 @@ export function CompletionPanel({
     invoiceAlreadyPaid ||
     autopayCoversVisit ||
     !!service.completionInvoiceAlreadySent;
+  // Typed one-time completions bill by PROFILE: since the billing pre-gate
+  // removal (2026-07-27) the server mints the completion invoice at the row
+  // price for a billingType 'one_time' profile even without the scheduler
+  // flag or a tier. Mirror that conjunction here (row-priced, performed,
+  // non-callback, not an included follow-up) so the SMS preview, pay-link
+  // toggle, and review controls show the completion the server actually
+  // performs.
+  const typedOneTimeBilling =
+    String(service.completionProfile?.billingType || "").toLowerCase() ===
+      "one_time" &&
+    service.followupIncluded !== true &&
+    hasVisitPrice &&
+    !isCallback &&
+    visitOutcome !== "inspection_only" &&
+    visitOutcome !== "customer_declined";
   const willInvoice =
     !oneTimeRecapOnly &&
     !reportOnlyCompletion &&
-    (!!service.createInvoiceOnComplete || !!service.waveguardTier) &&
+    (!!service.createInvoiceOnComplete ||
+      !!service.waveguardTier ||
+      typedOneTimeBilling) &&
     invoiceAmount > 0;
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
@@ -9733,11 +9756,10 @@ export function CompletionPanel({
 
   function discardDraft() {
     localStorage.removeItem(completionDraftKey(service.id));
-    // Photos survive checkout in parent memory rather than localStorage. A
-    // deliberate Discard must clear both stores or old evidence remains
-    // attached to the otherwise-reset completion.
+    // Photos live in memory rather than localStorage. A deliberate Discard
+    // must clear them too or old evidence remains attached to the
+    // otherwise-reset completion.
     setServicePhotos([]);
-    onDiscardBillingDetour?.();
     setSavedDraft(null);
     setShowDraftPrompt(false);
   }
@@ -10980,6 +11002,9 @@ export function CompletionPanel({
         );
       }
       localStorage.removeItem(completionDraftKey(service.id));
+      try {
+        localStorage.removeItem(completionResumeOwedKey(service.id));
+      } catch { /* storage unavailable — marker never existed either */ }
       setCompletionResult(result || null);
       setSuccess(true);
       const smsNeedsAttention = ["blocked", "failed"].includes(
@@ -11000,33 +11025,30 @@ export function CompletionPanel({
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
-      const billingRequired =
-        e?.status === 409 &&
-        (e?.code === "completion_billing_required" ||
-          /invoice or payment is required/i.test(e?.message || ""));
-      if (billingRequired) {
-        // Typed one-time billing gate — route to the existing checkout
-        // flow. Flush the draft synchronously first: the panel unmounts on
-        // detour, which cancels the debounced write and would lose edits
-        // made in the last 700ms.
-        if (draftSnapshotRef.current) {
-          try {
-            localStorage.setItem(
-              completionDraftKey(service.id),
-              JSON.stringify(draftSnapshotRef.current),
-            );
-          } catch { /* storage full — draft prompt simply won't restore */ }
-        }
+      if (e?.code === "backfill_invoice_mint_failed") {
+        // The closeout committed but its REQUIRED invoice didn't mint. Mark
+        // the visit as owing a resume so the dispatch page can reopen this
+        // panel for the (now completed) visit even after a reload — the
+        // re-submitted completion replays through the server's resume claim
+        // and retries the mint.
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage full — the mounted panel's retry still works */ }
+      } else if (e?.code === "completion_resume_payload_mismatch") {
+        // A marker-resume rebuilt from the draft can differ from the
+        // committed body (photos live only in memory). The closeout itself
+        // is saved; the office bills the visit from Billing Recovery — stop
+        // re-offering a resume that can never match.
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
         alert(
-          "An invoice or payment is required before completing this one-time service." +
-            (onBillingRequired ? " Opening checkout." : ""),
+          "This closeout is already saved — the retry didn't match the original submission (photos don't survive a reload). The office can bill the visit from Billing Recovery.",
         );
-        if (onBillingRequired) {
-          onBillingRequired(service, { servicePhotos });
-        }
-      } else {
-        alert("Failed to complete service: " + e.message);
+        setSubmitting(false);
+        return;
       }
+      alert("Failed to complete service: " + e.message);
     }
     setSubmitting(false);
   }
