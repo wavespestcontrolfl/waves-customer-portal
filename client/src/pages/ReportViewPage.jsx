@@ -3852,6 +3852,7 @@ function ServiceCoverageCard({
   mapAttribution,
   live = true,
   tracedMap = null,
+  tracedVariant = 'spray',
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
@@ -3932,7 +3933,7 @@ function ServiceCoverageCard({
         <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
           {showMap ? (
             showTraced ? (
-              <TracedTreatmentZoneMap traced={tracedMap} live={live} />
+              <TracedTreatmentZoneMap traced={tracedMap} live={live} variant={tracedVariant} />
             ) : (
               <ServiceCoverageMap
                 coverage={coverage}
@@ -8248,6 +8249,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8378,6 +8380,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
               live={mode === 'live'}
               applications={data.applications || []}
             />
