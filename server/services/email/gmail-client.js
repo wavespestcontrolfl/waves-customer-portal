@@ -375,7 +375,7 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
  * Paginated message listing — walks nextPageToken up to `cap` ids so a
  * burst of junk can't hide older matches behind a single-page limit.
  */
-async function listAllMessages(query = '', cap = 500) {
+async function listAllMessages(query = '', cap = 500, { includeSpamTrash = false } = {}) {
   const gmail = await getGmail();
   const ids = [];
   let pageToken;
@@ -385,6 +385,9 @@ async function listAllMessages(query = '', cap = 500) {
       q: query,
       maxResults: Math.min(100, cap - ids.length),
       pageToken,
+      // messages.list EXCLUDES Spam/Trash by default even when the query
+      // says in:spam — the caller must opt in.
+      includeSpamTrash,
     });
     ids.push(...(res.data.messages || []));
     pageToken = res.data.nextPageToken;

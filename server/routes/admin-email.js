@@ -428,14 +428,23 @@ router.post('/message/:id/reclassify', async (req, res) => {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
 
+    // A quarantined/claimed row being reclassified is the operator saying
+    // "not spam" — undo the quarantine (Gmail labels + sweep stamp) BEFORE
+    // the new classification acts, or the sweep would trash it anyway.
+    if (/^spam_(quarantined|quarantine_ambiguous|trashing)/.test(email.auto_action || '')) {
+      const { cancelQuarantine } = require('../services/email/inbox-hygiene');
+      await cancelQuarantine(email);
+      email.auto_action = 'quarantine_cancelled_reclassified';
+    }
+
     const classification = await classifyEmail(email);
     await db('emails').where('id', email.id).update({
       classification: classification.category,
       extracted_data: JSON.stringify(classification),
     });
-
-    // Run auto-action for the new classification
-    await executeAutoAction(email, classification);
+    // NOTE: classifyEmail already executed the auto-action for the new
+    // category — running executeAutoAction again here was the double-action
+    // path (duplicate drafts/unsubscribes flagged in review).
 
     logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);
     res.json({ classification });

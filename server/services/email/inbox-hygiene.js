@@ -103,6 +103,26 @@ async function quarantineMessage(email) {
 }
 
 /**
+ * Cancel a quarantine (operator reclassified away from spam within the undo
+ * window): restore the message to INBOX, drop the Quarantine label, clear
+ * the sweep stamp so nothing can trash it later.
+ */
+async function cancelQuarantine(email) {
+  const labelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
+  try {
+    await gmailClient.modifyLabels(email.gmail_id, ['INBOX'], [labelId]);
+  } catch (e) {
+    logger.warn(`[inbox-hygiene] cancelQuarantine label restore failed (email ${email.id}): ${e.message}`);
+  }
+  await db('emails').where({ id: email.id }).update({
+    quarantined_at: null,
+    is_archived: false,
+    auto_action: 'quarantine_cancelled_reclassified',
+    updated_at: new Date(),
+  });
+}
+
+/**
  * Trash quarantined mail older than the undo window. The undo contract is
  * label-based: an operator who drags the message back to the inbox (or off
  * the Quarantine label) has vetoed the classification, so the sweep
@@ -275,7 +295,7 @@ async function rescueSpamFolder() {
   // Paginated: a junk burst must not push a buried customer email past a
   // single-page cap. 500 ids over a 2-day window is far above observed spam
   // volume; if it ever truncates, say so (no silent caps).
-  const { messages, truncated } = await gmailClient.listAllMessages('in:spam newer_than:2d', 500);
+  const { messages, truncated } = await gmailClient.listAllMessages('in:spam newer_than:2d', 500, { includeSpamTrash: true });
   if (truncated) logger.warn('[inbox-hygiene] spam rescue hit the 500-message cap — oldest spam not scanned this pass');
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   for (const m of messages || []) {
@@ -450,6 +470,7 @@ module.exports = {
   isKnownSender,
   hasAlignedAuth,
   quarantineMessage,
+  cancelQuarantine,
   sweepQuarantine,
   rescueSpamFolder,
   collectUnansweredNudges,

@@ -2442,13 +2442,17 @@ function initScheduledJobs() {
         let swept = { trashed: 0, restored: 0 };
         let rescued = { rescued: 0, scanned: 0, customers: 0, unauthenticated: 0 };
         let drafts = { settled: 0, released: 0, redrafted: 0 };
+        const failures = [];
         try { swept = await hygiene.sweepQuarantine(); }
-        catch (e) { logger.error(`[inbox-hygiene] quarantine sweep failed: ${e.message}`); }
+        catch (e) { failures.push(`sweep: ${e.message}`); logger.error(`[inbox-hygiene] quarantine sweep failed: ${e.message}`); }
         try { rescued = await hygiene.rescueSpamFolder(); }
-        catch (e) { logger.error(`[inbox-hygiene] spam rescue failed: ${e.message}`); }
+        catch (e) { failures.push(`rescue: ${e.message}`); logger.error(`[inbox-hygiene] spam rescue failed: ${e.message}`); }
         try { drafts = await hygiene.reconcilePendingDrafts(); }
-        catch (e) { logger.error(`[inbox-hygiene] draft reconcile failed: ${e.message}`); }
+        catch (e) { failures.push(`reconcile: ${e.message}`); logger.error(`[inbox-hygiene] draft reconcile failed: ${e.message}`); }
         logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed (${swept.restored} restored), ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer, ${rescued.unauthenticated} unverified), draft claims: ${drafts.settled} settled/${drafts.released} released/${drafts.redrafted} redrafted`);
+        // Isolation must not mask failure from job_health — all three ran,
+        // but a failed step still marks this tick failed for ops visibility.
+        if (failures.length) throw new Error(`inbox-hygiene partial failure: ${failures.join('; ')}`);
       });
     } catch (err) {
       logger.error(`[inbox-hygiene] Cron failed: ${err.message}`);
