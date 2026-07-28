@@ -1038,6 +1038,24 @@ function mosquitoOneTimeLadderPrice(customer) {
   }
 }
 
+// GET /mosquito-onetime-quote?customerId= — live lot-ladder default for the
+// create-appointment modal, computed by the same helper the booking path uses
+// (post-syncConstantsFromDB, so admin pricing-config edits are reflected
+// immediately). price is null when the customer has no usable lot size; the
+// client falls back to the catalog base price, same as booking.
+router.get('/mosquito-onetime-quote', async (req, res, next) => {
+  try {
+    const customerId = String(req.query.customerId || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
+      throw httpError(400, 'customerId must be a valid customer id');
+    }
+    const customer = await db('customers').where({ id: customerId }).first('id', 'lot_sqft');
+    if (!customer) throw httpError(404, 'Customer not found');
+    const price = mosquitoOneTimeLadderPrice(customer);
+    res.json({ price, source: price != null ? 'lot_ladder' : null });
+  } catch (err) { next(err); }
+});
+
 async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');

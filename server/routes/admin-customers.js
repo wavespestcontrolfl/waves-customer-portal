@@ -651,7 +651,6 @@ function mapCustomerListRow(c) {
     accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
     email: c.email, phone: c.phone, city: c.city,
-    lotSqft: c.lot_sqft != null ? Number(c.lot_sqft) : null,
     serviceContactName: c.service_contact_name,
     serviceContactPhone: c.service_contact_phone,
     serviceContactEmail: c.service_contact_email,
