@@ -981,10 +981,14 @@ function selectProtocolVisit(profile, serviceDate) {
   return { trackKey, track, month, visit };
 }
 
-async function getApplicableOrdinances(knex, profile) {
+async function getApplicableOrdinances(knex, profile, fallbackCity = null) {
   if (!profile) return [];
   const county = String(profile.county || '').trim();
-  const city = String(profile.municipality || '').trim();
+  // Same city resolution the completion path uses (actualProductBlackoutBlocks):
+  // a turf profile with blank municipality still matches its city ordinance via
+  // the customer's/service's city, so the closeout advisory and the recorded
+  // completion condition agree.
+  const city = String(profile.municipality || fallbackCity || '').trim();
   if (!county && !city) return [];
 
   let query = knex('municipality_ordinances').where({ active: true });
@@ -1292,7 +1296,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
-  const ordinances = await getApplicableOrdinances(knex, profile);
+  const ordinances = await getApplicableOrdinances(knex, profile, service.city);
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,

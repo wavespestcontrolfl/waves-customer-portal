@@ -3936,7 +3936,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
         waveguardTankCleanout = {
           ...(cleanoutBlocks.length
-            ? { advisory: true, missing: cleanoutBlocks.map((block) => block.message) }
+            ? {
+              advisory: true,
+              // No attestation collected (the closeout has no equipment
+              // step) is distinct from "tech answered no" — the audit view
+              // renders this as "Not recorded", never "Not completed".
+              notRecorded: !normalizedTankCleanout,
+              missing: cleanoutBlocks.map((block) => block.message),
+            }
             : {}),
           ...normalizedTankCleanout,
           equipmentSystemId: waveguardEquipmentSystemId || null,

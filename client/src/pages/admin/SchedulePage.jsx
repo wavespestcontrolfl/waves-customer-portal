@@ -8967,7 +8967,7 @@ export function CompletionPanel({
     })),
     ...conditionalProtocolSelectedProducts.map((product) => ({
       code: "conditional_protocol_product_review",
-      message: `${product.name || "Selected product"} is conditional on the WaveGuard protocol card and was not in the generated mix; manager review is required before applying it.`,
+      message: `${product.name || "Selected product"} is conditional on the WaveGuard protocol card and was not in the generated mix — double-check the fit before applying.`,
     })),
     ...highRateSelectedProducts.map((product) => ({
       code: "high_rate_application",
@@ -8975,7 +8975,7 @@ export function CompletionPanel({
     })),
     ...labelUnitReviewProducts.map((product) => ({
       code: "label_rate_unit_review",
-      message: `${product.name || "Selected product"} rate unit ${product.rateUnit || "unknown"} does not match label unit ${product.catalogRateUnit || "unknown"}; manager review is required before applying it.`,
+      message: `${product.name || "Selected product"} rate unit ${product.rateUnit || "unknown"} does not match label unit ${product.catalogRateUnit || "unknown"} — double-check the rate math before applying.`,
     })),
   ];
   const managerApprovalRequired =
@@ -8993,12 +8993,28 @@ export function CompletionPanel({
   // real municipality ordinances for this service date (no client month
   // math, no timezone handling). Advisory only; the server still records
   // the authoritative condition on the completion.
+  // Per-nutrient suppression, not all-or-nothing: a plan already blocked for
+  // nitrogen must still warn about an off-plan PHOSPHORUS product the tech
+  // swapped in (the plan block only speaks for the nutrient it names).
+  const planBlackoutNutrients = new Set(
+    blackoutBlocks
+      .map((block) =>
+        block?.code === "nitrogen_blackout"
+          ? "n"
+          : block?.code === "phosphorus_blackout"
+            ? "p"
+            : null,
+      )
+      .filter(Boolean),
+  );
   const offPlanNpAdvisories =
-    calibrationRequired && !isIncompleteVisit && blackoutBlocks.length === 0
+    calibrationRequired && !isIncompleteVisit
       ? treatmentPlanOrdinanceWindows.flatMap((window) => {
           const restricted = [];
-          if (window?.restrictedNitrogen) restricted.push("n");
-          if (window?.restrictedPhosphorus) restricted.push("p");
+          if (window?.restrictedNitrogen && !planBlackoutNutrients.has("n"))
+            restricted.push("n");
+          if (window?.restrictedPhosphorus && !planBlackoutNutrients.has("p"))
+            restricted.push("p");
           if (!restricted.length) return [];
           const names = [
             ...new Set(
