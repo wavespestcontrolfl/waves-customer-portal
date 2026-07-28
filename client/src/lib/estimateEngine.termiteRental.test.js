@@ -104,9 +104,47 @@ describe("termite station rental — client fallback engine", () => {
     const rent = calculateEstimate(
       termiteInput({ termiteBaitSystem: "trelona", termiteOwnership: "rent" }),
     );
-    // ti, not ai — renting the premium system recovers the premium price.
+    // ti, not ai — renting recovers the Trelona install.
     expect(rentalRow(rent).perTreatment).toBe(Math.round(own.results.tmBait.ti / 20));
-    expect(own.results.tmBait.ti).toBeGreaterThan(own.results.tmBait.ai);
+    // Per-system spacing (owner 2026-07-28): Trelona installs FEWER stations
+    // (label 15-ft vs Advance 10-ft), so despite the pricier per-station
+    // hardware ($22.05 vs $13.16) its install can undercut Advance. Pin the
+    // structure — each system priced off its OWN station count — instead of
+    // the retired "Trelona always costs more" ordering.
+    const perim = own.results.tmBait.perim;
+    const staTre = Math.max(8, Math.ceil(perim / 15));
+    const staAdv = Math.max(8, Math.ceil(perim / 10));
+    expect(own.results.tmBait.sta).toBe(staTre);
+    expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.05 + 5.25 + 0.75) * 1.45));
+    expect(own.results.tmBait.ai).toBe(Math.round(staAdv * (13.16 + 5.25 + 0.75) * 1.45));
+  });
+
+  it("station-check monthly follows the 5-station brackets and the server config applier", async () => {
+    const { applyServerTermiteMonitoringPricingConfig } = await import("./estimateEngine");
+    // Bracket formula: $19 base (≤10 stations) + $5 per further 5-station
+    // bracket — mirrors the server exactly. Station counts follow each
+    // system's label spacing (Trelona 15 ft, Advance 10 ft).
+    const bracketMonthly = (sta, base = 19, step = 5) =>
+      Math.round((base + Math.max(0, Math.ceil(sta / 5) - 2) * step) * 100) / 100;
+    const tre = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
+    const perim = tre.results.tmBait.perim;
+    expect(tre.results.tmBait.sta).toBe(Math.max(8, Math.ceil(perim / 15)));
+    expect(tre.results.tmBait.monMonthly).toBe(bracketMonthly(tre.results.tmBait.sta));
+    const adv = calculateEstimate(termiteInput({ termiteBaitSystem: "advance" }));
+    expect(adv.results.tmBait.sta).toBe(Math.max(8, Math.ceil(perim / 10)));
+    expect(adv.results.tmBait.monMonthly).toBe(bracketMonthly(adv.results.tmBait.sta));
+    // More stations, same-or-higher bracket price — never cheaper.
+    expect(adv.results.tmBait.monMonthly).toBeGreaterThanOrEqual(tre.results.tmBait.monMonthly);
+    // An ABSENT system resolves Trelona (menu is Trelona-only).
+    expect(calculateEstimate(termiteInput({ termiteBaitSystem: undefined })).results.tmBait.sta)
+      .toBe(tre.results.tmBait.sta);
+    // Server-tuned brackets apply and reset (kill-value pattern).
+    applyServerTermiteMonitoringPricingConfig({ base_monthly: 25, step_monthly: 10, bracket_stations: 5 });
+    expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.monMonthly)
+      .toBe(bracketMonthly(tre.results.tmBait.sta, 25, 10));
+    applyServerTermiteMonitoringPricingConfig(null);
+    expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.monMonthly)
+      .toBe(bracketMonthly(tre.results.tmBait.sta));
   });
 
   it("honors a server-supplied horizon and resets to the default when absent", () => {

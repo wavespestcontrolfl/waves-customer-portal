@@ -2106,7 +2106,9 @@ export default function EstimateToolViewV2({
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
     termiteBaitComplexity: "",
-    termiteBaitSystem: "advance",
+    // Trelona-only menu (owner 2026-07-28); tier is a retired concept the
+    // API still accepts.
+    termiteBaitSystem: "trelona",
     termiteMonitoringTier: "basic",
     termiteBondTerm: "none",
     termiteOwnership: "own",
@@ -3531,7 +3533,7 @@ export default function EstimateToolViewV2({
         thatchProbe3Inches: form.thatchProbe3Inches,
         thatchDepthInches: form.thatchDepthInches,
         thatchMeasurementSource: form.thatchMeasurementSource || "manual",
-        termiteBaitSystem: form.termiteBaitSystem || "advance",
+        termiteBaitSystem: form.termiteBaitSystem || "trelona",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBondTerm: form.termiteBondTerm || "none",
         // Hard floor to purchase when the server has not advertised the
@@ -4237,7 +4239,7 @@ export default function EstimateToolViewV2({
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
-      termiteBaitSystem: "advance",
+      termiteBaitSystem: "trelona",
       termiteMonitoringTier: "basic",
       termiteBondTerm: "none",
       termiteOwnership: "own",
@@ -6038,24 +6040,13 @@ export default function EstimateToolViewV2({
                             ]}
                           />
                         </FieldV2>
-                        <FieldV2 label="System">
-                          <SelectV2
-                            k="termiteBaitSystem"
-                            options={[
-                              { value: "advance", label: "Advance" },
-                              { value: "trelona", label: "Trelona" },
-                            ]}
-                          />
-                        </FieldV2>
-                        <FieldV2 label="Monitoring">
-                          <SelectV2
-                            k="termiteMonitoringTier"
-                            options={[
-                              { value: "basic", label: "Basic" },
-                              { value: "premier", label: "Premier" },
-                            ]}
-                          />
-                        </FieldV2>
+                        {/* System + Monitoring selects removed (owner
+                            2026-07-28): the menu is Trelona-only at its
+                            label 15-ft spacing, and the station check is
+                            bracket-priced by station count — no tiers.
+                            Advance stays priceable in the engine for
+                            replaying old estimates; the form always sends
+                            trelona/basic for new quotes. */}
                         {/* Residential bond rider (owner 2026-07-20): fixed
                             quarterly warranty rate per term, priced by the
                             engine — labels stay term-only so a DB rate change

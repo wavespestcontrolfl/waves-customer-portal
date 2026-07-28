@@ -243,8 +243,6 @@ function renderTermiteComparisonPdf(content) {
     comparisonTable(doc, [
       ['Due at installation', money(own.installToday), `$0 — ${money(rent.hardwareValue)} of hardware installed at no charge`],
       ['Per application (quarterly)', money(own.perApp), `${money(rent.perApp)} (${money(rent.basePerApp)} station check + ${money(rent.upliftPerApp)} station rental)`],
-      ['First-year total', money(own.firstYear), money(rent.firstYear)],
-      ['Five-year total', money(own.fiveYear), money(rent.fiveYear)],
       ['Who owns the hardware', 'You do — bought once, yours permanently.', 'Waves — we retain ownership.'],
       ['If you end the program', 'The stations stay in your yard.', 'We remove the stations; your inspection history stays in your app.'],
     ]);

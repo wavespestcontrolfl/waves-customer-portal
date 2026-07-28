@@ -304,10 +304,16 @@ function validatePestPricingConfig(snapshot = constants) {
       }
     }
   }
-  for (const tier of ['basic', 'premier']) {
-    if (!isPositiveNumber(TERMITE.monitoring?.[tier]?.monthly)) {
-      errors.push(`TERMITE.monitoring.${tier}.monthly must be positive`);
-    }
+  // Bracketed station-check pricing (owner 2026-07-28): base + step must be
+  // positive/non-negative or every termite quote prices NaN.
+  if (!isPositiveNumber(TERMITE.monitoring?.baseMonthly)) {
+    errors.push('TERMITE.monitoring.baseMonthly must be positive');
+  }
+  if (!isNonNegativeNumber(TERMITE.monitoring?.stepMonthly)) {
+    errors.push('TERMITE.monitoring.stepMonthly must be non-negative');
+  }
+  if (!isPositiveNumber(TERMITE.monitoring?.bracketStations)) {
+    errors.push('TERMITE.monitoring.bracketStations must be positive');
   }
 
   const trenching = SPECIALTY.trenching || {};
@@ -1020,8 +1026,22 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (config.termite_monitoring) {
-      if (config.termite_monitoring.basic) constants.TERMITE.monitoring.basic.monthly = r(config.termite_monitoring.basic);
-      if (config.termite_monitoring.premier) constants.TERMITE.monitoring.premier.monthly = r(config.termite_monitoring.premier);
+      const tm = config.termite_monitoring;
+      // Bracketed shape (owner 2026-07-28): base_monthly + step_monthly per
+      // bracket_stations. The legacy flat keys (basic/premier) are IGNORED —
+      // they priced a retired model, and honoring `basic` as a bracket base
+      // would silently double the small-home rate ($35 vs $19). The
+      // migration rewrites the prod row to the new shape; an un-migrated
+      // row simply leaves the in-code bracket defaults in force.
+      if (isPositiveNumber(Number(tm.base_monthly))) {
+        constants.TERMITE.monitoring.baseMonthly = r(Number(tm.base_monthly));
+      }
+      if (isNonNegativeNumber(Number(tm.step_monthly))) {
+        constants.TERMITE.monitoring.stepMonthly = r(Number(tm.step_monthly));
+      }
+      if (isPositiveNumber(Number(tm.bracket_stations))) {
+        constants.TERMITE.monitoring.bracketStations = Math.round(Number(tm.bracket_stations));
+      }
     }
     if (config.termite_bond) {
       const tb = config.termite_bond;

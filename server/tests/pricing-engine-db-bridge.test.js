@@ -876,7 +876,7 @@ describe('pricing engine DB bridge', () => {
 
     snapshot.TERMITE.stationSpacing = 0;
     snapshot.TERMITE.systems.advance.stationCost = -1;
-    snapshot.TERMITE.monitoring.basic.monthly = 0;
+    snapshot.TERMITE.monitoring.baseMonthly = 0;
     snapshot.SPECIALTY.trenching.concretePctCap = 1.2;
     snapshot.SPECIALTY.trenching.products.termidor_sc.containerCost = 0;
     snapshot.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate = 0.4;
@@ -903,7 +903,7 @@ describe('pricing engine DB bridge', () => {
     expect(result.errors).toEqual(expect.arrayContaining([
       'TERMITE.stationSpacing must be positive',
       'TERMITE.systems.advance.stationCost must be non-negative',
-      'TERMITE.monitoring.basic.monthly must be positive',
+      'TERMITE.monitoring.baseMonthly must be positive',
       'SPECIALTY.trenching.concretePctCap must be between 0 and 1',
       'SPECIALTY.trenching.productPremiumMultiplier must be at least 1',
       'SPECIALTY.trenching.products.termidor_sc.containerCost must be positive',

@@ -22,8 +22,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(result.perimeter).toBe(224);
     expect(result.stations).toBe(23);
     expect(result.installation.price).toBe(639);
-    expect(result.monitoring.monthly).toBe(35);
-    expect(result.monitoring.annual).toBe(420);
+    // 23 stations -> 21-25 bracket $34/mo (owner 2026-07-28 station brackets).
+    expect(result.monitoring.monthly).toBe(34);
+    expect(result.monitoring.annual).toBe(408);
     expect(result.measurements.footprintSqFt.source).toBe('property_footprint');
     expect(result.measurements.perimeterLF.source).toBe('computed_from_footprint');
   });
@@ -81,8 +82,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(missing.requiresMeasurement).toBe(true);
     expect(missing.manualReviewReasons).toContain('missing_termite_footprint');
     expect(Number.isNaN(missing.perimeter)).toBe(false);
-    expect(missing.selectedSystem).toBe('advance');
-    expect(missing.measurementWarnings).toContain('invalid_termite_system_defaulted_to_advance');
+    // Unknown systems fall back to the Trelona-only menu default (owner 2026-07-28).
+    expect(missing.selectedSystem).toBe('trelona');
+    expect(missing.measurementWarnings).toContain('invalid_termite_system_defaulted_to_trelona');
   });
 
   test('trenching keeps existing valid example and supports manual concrete LF', () => {
@@ -799,15 +801,16 @@ describe('termite bait per-application cadence (owner 2026-07-20)', () => {
       { system: 'advance', monitoringTier: 'basic' }
     );
     expect(basic.visitsPerYear).toBe(4);
-    // 35 x 12 / 4 — agrees to the cent with intervalPriceFromAnnual(420).
-    expect(basic.perApp).toBe(105);
+    // 34 x 12 / 4 — agrees to the cent with intervalPriceFromAnnual(408).
+    expect(basic.perApp).toBe(102);
 
     const premier = priceTermiteBait(
       { footprint: 2000, features: { complexity: 'standard' } },
       { system: 'advance', monitoringTier: 'premier' }
     );
     expect(premier.visitsPerYear).toBe(4);
-    expect(premier.perApp).toBe(195);
+    // Premier is retired: the tier input no longer changes price.
+    expect(premier.perApp).toBe(102);
   });
 
   test('mapper forwards perApp/visitsPerYear onto the persisted recurring row', () => {
@@ -819,8 +822,8 @@ describe('termite bait per-application cadence (owner 2026-07-20)', () => {
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
     const row = mapped.recurring.services.find((svc) => svc.service === 'termite_bait');
     expect(row).toBeTruthy();
-    expect(row.perTreatment).toBe(105);
+    expect(row.perTreatment).toBe(102);
     expect(row.visitsPerYear).toBe(4);
-    expect(row.mo).toBe(35);
+    expect(row.mo).toBe(34);
   });
 });

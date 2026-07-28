@@ -604,8 +604,10 @@ function mapV1ToLegacyShape(v1Result) {
       monitoringTier: tbLI.monitoringTier || tbLI.selectedMonitoringTier || null,
       ai: selectedSystem === 'advance' ? installPrice : null,
       ti: selectedSystem === 'trelona' ? installPrice : null,
-      bmo: tbLI.monitoringTier === 'basic' ? monMonthly : 35,
-      pmo: tbLI.monitoringTier === 'premier' ? monMonthly : 65,
+      // Bracketed station-check monthly (owner 2026-07-28): tiers are
+      // retired, so both legacy fields carry the line's priced monthly.
+      bmo: monMonthly,
+      pmo: monMonthly,
       perim: tbLI.perimeter || 0,
       sta: tbLI.stations || 0,
       measurements: tbLI.measurements || null,

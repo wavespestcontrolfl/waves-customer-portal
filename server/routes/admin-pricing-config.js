@@ -229,6 +229,20 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     for (const term of ['term_1yr', 'term_5yr', 'term_10yr']) {
       if (!isPositive(data?.[term])) return fail(`termite_bond.${term} must be a positive $/quarter amount`);
     }
+  } else if (configKey === 'termite_monitoring') {
+    // Station-check brackets (owner 2026-07-28): monthly = base + step ×
+    // bracket-index. The legacy flat shape ({ basic, premier }) priced a
+    // retired model and the runtime sync ignores it — reject it here so an
+    // admin edit can't silently save keys that change nothing.
+    if (data?.pricing_model !== 'station_brackets') {
+      return fail("termite_monitoring.pricing_model must be 'station_brackets' (the flat basic/premier tiers are retired)");
+    }
+    if (!isPositive(data?.base_monthly)) return fail('termite_monitoring.base_monthly must be a positive $/mo amount');
+    if (!isNonNegative(data?.step_monthly)) return fail('termite_monitoring.step_monthly must be a non-negative $/mo amount');
+    const bracket = num(data?.bracket_stations);
+    if (!Number.isInteger(bracket) || bracket < 1 || bracket > 50) {
+      return fail('termite_monitoring.bracket_stations must be a whole number of stations between 1 and 50');
+    }
   } else if (configKey === 'termite_rental') {
     // Station rental amortization horizon (owner 2026-07-26). The uplift is
     // install price / recovery_quarters, so a zero here divides by nothing
@@ -396,7 +410,7 @@ async function ensureTable() {
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
-      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
+      { config_key: 'termite_monitoring', name: 'Termite Station-Check Brackets', category: 'termite', sort_order: 2, data: JSON.stringify({ pricing_model: 'station_brackets', base_monthly: 19, step_monthly: 5, bracket_stations: 5 }) },
 
       // Rodent — bait stations (recurring monthly)
       { config_key: 'rodent_monthly', name: 'Rodent Bait Monthly Tiers (quarterly visits, billed monthly)', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 49, medium: 59, large: 69, visits_per_year: 4 }) },

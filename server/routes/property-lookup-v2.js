@@ -2927,7 +2927,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   if (sel.has('TERMITE_BAIT')) {
     services.termite = {
-      system: o.termiteBaitSystem || 'advance',
+      // Trelona-only menu default (owner 2026-07-28); explicit legacy
+      // values still replay as sent.
+      system: o.termiteBaitSystem || 'trelona',
       monitoringTier: o.termiteMonitoringTier || 'basic',
       ...(o.termiteBaitComplexity ? { complexity: o.termiteBaitComplexity } : {}),
       // Residential bond rider (owner 2026-07-20): 1yr/5yr/10yr adds the
