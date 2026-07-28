@@ -7912,6 +7912,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
+        // Only pass the visit linkage when the caller was authorized for
+        // service grounding (groundingCustomerId is set on that same path).
+        scheduledServiceId: groundingCustomerId ? scheduledServiceId : null,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,

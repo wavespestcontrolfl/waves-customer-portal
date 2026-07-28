@@ -17,6 +17,7 @@ const { detectServiceLine } = require('./service-line-configs');
 const { etDateString } = require('../../utils/datetime-et');
 const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
+const { lawnScoreValue, resolveStressDamage, loadLinkedLawnAssessment } = require('./report-data');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -127,30 +128,29 @@ async function loadCustomer(customerId, knex) {
 
 // Photo-scored lawn assessment (the closeout's "Analyze lawn" flow). Only
 // tech-confirmed rows count — the raw model pass without a tech's confirm is
-// not a fact yet. Returns the assessment taken ON the service date (if any)
-// plus the most recent prior one so the copy can speak to change over time.
-const LAWN_ASSESSMENT_METRICS = [
-  ['turf_density', 'turf density'],
-  ['weed_suppression', 'weed suppression'],
-  ['color_health', 'color health'],
-  ['fungus_control', 'fungus control'],
-  ['thatch_level', 'thatch level'],
-];
-
-async function loadLawnAssessments({ customerId, serviceYmd, knex }) {
+// not a fact yet. "Today" resolves strictly through the visit linkage
+// (loadLinkedLawnAssessment's no-customer-fallback rule): a customer/date
+// query could grab an unrelated same-day row and mislabel it as this visit's
+// result. The prior row (strictly before the service date) is customer-scoped
+// history for trend framing.
+async function loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd, knex }) {
   if (!customerId || !serviceYmd) return { today: null, prior: null };
   try {
-    const rows = await knex('lawn_assessments')
+    const today = scheduledServiceId
+      ? await loadLinkedLawnAssessment(
+        { customer_id: customerId, service_id: scheduledServiceId },
+        knex,
+      )
+      : null;
+    const prior = await knex('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
-      .where('service_date', '<=', serviceYmd)
+      .where('service_date', '<', serviceYmd)
       .orderBy('service_date', 'desc')
-      .limit(2)
-      .select(
-        'service_date', 'is_baseline', 'observations',
-        'turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level',
-      );
-    const today = rows[0] && toYmd(rows[0].service_date) === serviceYmd ? rows[0] : null;
-    const prior = today ? rows[1] || null : rows[0] || null;
+      .first(
+        'service_date', 'is_baseline',
+        'turf_density', 'weed_suppression', 'color_health',
+        'fungus_control', 'thatch_level', 'stress_damage',
+      ) || null;
     return { today, prior };
   } catch (err) {
     logger.warn(`[report-copy-context] lawn assessment load failed: ${err.message}`);
@@ -158,13 +158,27 @@ async function loadLawnAssessments({ customerId, serviceYmd, knex }) {
   }
 }
 
+// The four consolidated categories the tech actually reviews and confirms —
+// stress/damage via resolveStressDamage (fungus/thatch are its underlying
+// AI sub-reads, not tech-confirmed facts on their own). lawnScoreValue keeps
+// unscored (null/'') categories out entirely instead of coercing them to 0.
+function lawnAssessmentEntries(row) {
+  return [
+    ['turf density', lawnScoreValue(row?.turf_density)],
+    ['weed suppression', lawnScoreValue(row?.weed_suppression)],
+    ['color health', lawnScoreValue(row?.color_health)],
+    ['stress/damage control', resolveStressDamage(row || {})],
+  ];
+}
+
 function lawnAssessmentLine(row, prior) {
+  const priorEntries = prior ? Object.fromEntries(lawnAssessmentEntries(prior)) : {};
   const parts = [];
-  for (const [key, label] of LAWN_ASSESSMENT_METRICS) {
-    const value = Number(row?.[key]);
-    if (!Number.isFinite(value)) continue;
-    const prev = Number(prior?.[key]);
-    const delta = Number.isFinite(prev) && prev !== value
+  for (const [label, value] of lawnAssessmentEntries(row)) {
+    if (value == null) continue;
+    const prev = priorEntries[label];
+    // A delta is meaningful only when BOTH visits scored the category.
+    const delta = prev != null && prev !== value
       ? ` (${value > prev ? '+' : ''}${value - prev} vs ${formatShortDate(prior.service_date)})`
       : '';
     parts.push(`${label} ${value}/100${delta}`);
@@ -322,6 +336,7 @@ function conditionsLine(conditions) {
 //  - signals: compact object for response caching + diagnostics
 async function buildReportCopyContext({
   customerId,
+  scheduledServiceId = null,
   serviceType,
   serviceLine,
   suppressPressureTrend = false,
@@ -368,7 +383,7 @@ async function buildReportCopyContext({
       : Promise.resolve(null),
     loadActiveConfig(knex).catch(() => null),
     line === 'lawn'
-      ? loadLawnAssessments({ customerId, serviceYmd, knex })
+      ? loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd, knex })
       : Promise.resolve({ today: null, prior: null }),
   ]);
 
@@ -412,20 +427,24 @@ async function buildReportCopyContext({
     sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
   }
 
-  // Photo-scored lawn assessment (tech-confirmed). Today's scores are facts
+  // Photo-scored lawn assessment (tech-confirmed scores only — the free-text
+  // vision observations are deliberately NOT grounded: the confirm UI never
+  // shows them to the tech, so an unreviewed photo diagnosis must not become
+  // a technician-observed finding in customer copy). Today's scores are facts
   // about THIS visit; deltas vs the prior assessment let the copy speak to
-  // measurable change. When only a prior assessment exists, present it as
-  // history — never as today's reading.
+  // measurable change. A baseline visit suppresses deltas — an admin baseline
+  // reset intentionally supersedes the earlier trend line. When only a prior
+  // assessment exists, present it as history — never as today's reading.
   if (lawnAssessments?.today) {
-    const scoreLine = lawnAssessmentLine(lawnAssessments.today, lawnAssessments.prior);
+    const isBaseline = !!lawnAssessments.today.is_baseline;
+    const scoreLine = lawnAssessmentLine(
+      lawnAssessments.today,
+      isBaseline ? null : lawnAssessments.prior,
+    );
     if (scoreLine) {
       sections.push(
-        `LAWN ASSESSMENT (photo-scored TODAY, tech-confirmed; 0–100, higher is better${lawnAssessments.today.is_baseline ? '; baseline visit' : ''}): ${scoreLine}`,
+        `LAWN ASSESSMENT (photo-scored TODAY, tech-confirmed; 0–100, higher is better${isBaseline ? '; baseline visit — no comparison to earlier visits' : ''}): ${scoreLine}`,
       );
-    }
-    const obs = cleanText(lawnAssessments.today.observations);
-    if (obs) {
-      sections.push(`LAWN ASSESSMENT OBSERVATIONS (from today's photo scoring): ${obs.length > 300 ? `${obs.slice(0, obs.lastIndexOf(' ', 300))}…` : obs}`);
     }
   } else if (lawnAssessments?.prior) {
     const scoreLine = lawnAssessmentLine(lawnAssessments.prior, null);
