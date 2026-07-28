@@ -285,6 +285,10 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
       'id', 'title', 'description', 'admin_status', 'start_at', 'end_at',
       'event_url', 'event_type', 'recurrence_type', 'freshness_status',
       'times_featured', 'last_featured_at', 'pulled_at', 'merged_into',
+      // Series context for isSameSeriesSibling — without these the final
+      // gate compares a context-free locked row against the context-rich
+      // pool and rejects a lineup planning accepted.
+      'venue_name', 'city',
     )
     .whereIn('id', [...new Set(ids)]);
   const featuredHistory = await loadFeaturedIdentityHistory(knex);

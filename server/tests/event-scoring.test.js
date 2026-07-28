@@ -9,6 +9,8 @@ const {
   DERIVED_PENALTY_VALUES,
   REJECTION_CODES,
   isMalformedAssessment,
+  malformedAssessmentReason,
+  resolveScoreThresholds,
   normalizeAssessment,
   derivedPenalties,
   computeEditorialScore,
@@ -52,13 +54,27 @@ describe('factor clamping', () => {
     expect(Object.values(FACTOR_MAXES).reduce((a, b) => a + b, 0)).toBe(100);
   });
 
-  test('drops unknown penalty flags and rejection codes — a hallucinated code cannot invent policy', () => {
+  test('normalize drops unknown values, but the malformed gate refuses them FIRST — a typo cannot become approval', () => {
+    // normalizeAssessment (post-gate) still allowlists, so a hallucinated
+    // code can't invent policy…
     const normalized = normalizeAssessment({
       penalty_flags: ['generic_class', 'made_up_flag'],
       rejection_codes: ['webinar_virtual', 'not_a_real_code'],
     });
     expect(normalized.penaltyFlags).toEqual(['generic_class']);
     expect(normalized.rejectionCodes).toEqual(['webinar_virtual']);
+    // …and the structural gate refuses the assessment outright before it
+    // ever reaches normalize: silently dropping "government_civics" would
+    // turn a policy rejection into a policy-clean approval.
+    expect(malformedAssessmentReason({
+      scores: PERFECT_SCORES, penalty_flags: [], rejection_codes: ['government_civics'],
+    })).toContain('government_civics');
+    expect(malformedAssessmentReason({
+      scores: PERFECT_SCORES, penalty_flags: ['retail_promotion_event'], rejection_codes: [],
+    })).toContain('retail_promotion_event');
+    expect(malformedAssessmentReason({
+      scores: PERFECT_SCORES, penalty_flags: ['generic_class'], rejection_codes: ['webinar_virtual'],
+    })).toBeNull();
   });
 
   test('spec penalty values hold: class -15, retail -25, screening -10', () => {
@@ -139,6 +155,19 @@ describe('thresholds', () => {
     process.env.NEWSLETTER_MIN_HERO_SCORE = '   ';
     expect(featureScoreFloor()).toBe(75);
     expect(heroScoreFloor()).toBe(88);
+  });
+
+  test('an incoherent threshold set falls back to the defaults wholesale', () => {
+    // feature above hero would tier an 85-point event "hero" while
+    // refusing to approve it — the set is only valid ordered.
+    process.env.NEWSLETTER_MIN_FEATURE_SCORE = '90';
+    process.env.NEWSLETTER_MIN_HERO_SCORE = '80';
+    expect(resolveScoreThresholds()).toEqual({ shortlist: 65, feature: 75, hero: 88 });
+    // A coherent override set is honored.
+    process.env.NEWSLETTER_MIN_FEATURE_SCORE = '70';
+    process.env.NEWSLETTER_MIN_HERO_SCORE = '85';
+    process.env.NEWSLETTER_SHORTLIST_SCORE = '60';
+    expect(resolveScoreThresholds()).toEqual({ shortlist: 60, feature: 70, hero: 85 });
   });
 });
 

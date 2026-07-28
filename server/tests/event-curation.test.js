@@ -98,6 +98,14 @@ describe('event-curation buildCurationPrompt', () => {
     expect(prompt).toContain('family-friendly: unknown');
   });
 
+  test('renders dates as Eastern wall-clock with the weekday — never raw UTC ISO', () => {
+    // 2026-06-15T23:30:00Z = Monday, June 15, 7:30 PM EDT. A raw
+    // toISOString() would show it as 23:30 UTC and push evening events
+    // onto the wrong weekday, moving Friday–Sunday planning points.
+    expect(prompt).toContain('Monday, June 15, 7:30 PM ET');
+    expect(prompt).not.toContain('2026-06-15T23:30:00.000Z');
+  });
+
   test('flattens whitespace and truncates long descriptions', () => {
     const long = buildCurationPrompt([
       { ...EVENTS[0], description: `line1\nline2\t${'x'.repeat(500)}` },

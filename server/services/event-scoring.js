@@ -97,14 +97,30 @@ function clampFactor(name, value) {
  * assessments through the same pending fallback as a missing one.
  */
 function isMalformedAssessment(raw) {
-  if (!raw || typeof raw !== 'object') return true;
-  if (!Array.isArray(raw.rejection_codes)) return true;
+  return malformedAssessmentReason(raw) !== null;
+}
+
+/**
+ * Null for a well-formed assessment, else a short human-readable reason
+ * (surfaced in curation_note for diagnostics). Beyond structure, any
+ * NON-ALLOWLISTED rejection code or penalty flag is malformed — silently
+ * dropping a typo like "government_civics" would turn a policy rejection
+ * into a policy-clean approval (fail-open). The unknown value is named
+ * in the reason so the drift is visible instead of swallowed.
+ */
+function malformedAssessmentReason(raw) {
+  if (!raw || typeof raw !== 'object') return 'assessment is not an object';
+  if (!Array.isArray(raw.rejection_codes)) return 'rejection_codes is not an array';
   // penalty_flags gets the same treatment: an omitted field would
   // normalize to [] and skip the fixed 10–25 point penalties, letting a
   // high-scoring retail promo or generic class cross the floor.
-  if (!Array.isArray(raw.penalty_flags)) return true;
-  if (!raw.scores || typeof raw.scores !== 'object' || Array.isArray(raw.scores)) return true;
-  return false;
+  if (!Array.isArray(raw.penalty_flags)) return 'penalty_flags is not an array';
+  if (!raw.scores || typeof raw.scores !== 'object' || Array.isArray(raw.scores)) return 'scores is not an object';
+  const unknownCode = raw.rejection_codes.find((c) => !REJECTION_CODES.includes(String(c)));
+  if (unknownCode !== undefined) return `unknown rejection code "${String(unknownCode).slice(0, 40)}"`;
+  const unknownFlag = raw.penalty_flags.find((f) => !(String(f) in PENALTY_VALUES));
+  if (unknownFlag !== undefined) return `unknown penalty flag "${String(unknownFlag).slice(0, 40)}"`;
+  return null;
 }
 
 /**
@@ -174,9 +190,25 @@ function envThreshold(name, fallback) {
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : fallback;
 }
 
-function featureScoreFloor() { return envThreshold('NEWSLETTER_MIN_FEATURE_SCORE', 75); }
-function heroScoreFloor() { return envThreshold('NEWSLETTER_MIN_HERO_SCORE', 88); }
-function shortlistScoreFloor() { return envThreshold('NEWSLETTER_SHORTLIST_SCORE', 65); }
+const DEFAULT_THRESHOLDS = Object.freeze({ shortlist: 65, feature: 75, hero: 88 });
+
+/**
+ * The three thresholds are only meaningful as an ordered set
+ * (shortlist ≤ feature ≤ hero) — independently-validated overrides like
+ * feature=90/hero=80 would tier an 85-point event 'hero' while refusing
+ * to approve it. An incoherent set falls back to the defaults wholesale.
+ */
+function resolveScoreThresholds() {
+  const shortlist = envThreshold('NEWSLETTER_SHORTLIST_SCORE', DEFAULT_THRESHOLDS.shortlist);
+  const feature = envThreshold('NEWSLETTER_MIN_FEATURE_SCORE', DEFAULT_THRESHOLDS.feature);
+  const hero = envThreshold('NEWSLETTER_MIN_HERO_SCORE', DEFAULT_THRESHOLDS.hero);
+  if (!(shortlist <= feature && feature <= hero)) return { ...DEFAULT_THRESHOLDS };
+  return { shortlist, feature, hero };
+}
+
+function featureScoreFloor() { return resolveScoreThresholds().feature; }
+function heroScoreFloor() { return resolveScoreThresholds().hero; }
+function shortlistScoreFloor() { return resolveScoreThresholds().shortlist; }
 
 /**
  * The full curation decision for one event, given the model's raw
@@ -226,6 +258,8 @@ module.exports = {
   REJECTION_CODES,
   NOVELTY_TYPES,
   isMalformedAssessment,
+  malformedAssessmentReason,
+  resolveScoreThresholds,
   normalizeAssessment,
   derivedPenalties,
   computeEditorialScore,

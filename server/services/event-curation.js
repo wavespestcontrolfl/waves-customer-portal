@@ -37,7 +37,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const {
+  etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime,
+} = require('../utils/datetime-et');
 const {
   excludeRoutineRecurringFromQuery,
   isEligibleForFreshDigest,
@@ -51,7 +53,7 @@ const {
   REJECTION_CODES,
   assessEvent,
   featureScoreFloor,
-  isMalformedAssessment,
+  malformedAssessmentReason,
 } = require('./event-scoring');
 
 let Anthropic;
@@ -128,24 +130,29 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   // leaving them pending forever.
   const candidates = historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
 
-  // Rows the policy filters dropped must still be marked examined — the
-  // candidate query is start_at-ASC LIMIT-ed, so un-stamped drops (e.g. a
-  // debut series' later siblings) would hold the same earliest slots on
-  // every run and eventually starve later events out of classification
-  // entirely (Codex P2). They stay pending — the note says why, and the
-  // operator can still approve manually.
-  const surviving = new Set(candidates.map((row) => String(row.id)));
+  // Rows dropped by the PERMANENT identity filters must be marked
+  // examined — the candidate query is start_at-ASC LIMIT-ed, so
+  // un-stamped drops (e.g. a debut series' later siblings) would hold the
+  // same earliest slots on every run and eventually starve later events
+  // out of classification. They stay pending — the note says why, and
+  // the operator can still approve manually.
+  //
+  // Eligibility drops are deliberately NOT stamped: isEligibleForFreshDigest
+  // is time-dependent — a limited_run is only admissible in its opening or
+  // closing week, an annual can clear its 300-day cooldown — so a row
+  // dropped today can be genuinely scoreable next week. Those rows stay
+  // curated_at NULL and retry as the reference advances; they are bounded
+  // (real limited-run/annual listings, not fan-out spam, which the identity
+  // filters above catch and stamp).
   const nonRepeatedIds = new Set(nonRepeatedRows.map((row) => String(row.id)));
   const historicallyNewIds = new Set(historicallyNewRows.map((row) => String(row.id)));
   const policyDrops = rows
-    .filter((row) => !surviving.has(String(row.id)))
+    .filter((row) => !historicallyNewIds.has(String(row.id)))
     .map((row) => ({
       id: String(row.id),
       note: !nonRepeatedIds.has(String(row.id))
         ? 'Excluded by policy: repeated-date identity (routine series occurrence)'
-        : (!historicallyNewIds.has(String(row.id))
-          ? 'Excluded by policy: identity already featured in a prior issue'
-          : 'Excluded by policy: ineligible for the fresh digest'),
+        : 'Excluded by policy: identity already featured in a prior issue',
     }));
 
   return { candidates, policyDrops };
@@ -153,7 +160,14 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
 
 function buildCurationPrompt(events, todayIso) {
   const lines = events.map((e) => {
-    const date = e.start_at ? new Date(e.start_at).toISOString() : 'unknown';
+    // Eastern wall-clock with the weekday spelled out — the rubric awards
+    // planning points for Friday–Sunday timing, and a raw UTC ISO string
+    // shifts every EDT evening event onto the wrong weekday (Thu 8 PM ET
+    // renders as Friday midnight UTC).
+    const startDate = e.start_at ? new Date(e.start_at) : null;
+    const date = startDate && !Number.isNaN(startDate.getTime())
+      ? `${formatETDay(startDate)}, ${formatETDate(startDate)}, ${formatETTime(startDate)} ET`
+      : 'unknown';
     const desc = (e.description || '').replace(/\s+/g, ' ').slice(0, 300);
     const free = e.is_free === true ? 'yes' : (e.is_free === false ? 'no' : 'unknown');
     const family = e.family_friendly === true ? 'yes' : (e.family_friendly === false ? 'no' : 'unknown');
@@ -266,7 +280,8 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
   // structured assessment columns cleared, so a revived occurrence can
   // never keep a prior occurrence's score/codes/evidence attached to a
   // fresh examination (Codex P1/P2 on this PR).
-  if (rawAssessment.__missing || isMalformedAssessment(rawAssessment)) {
+  const malformedReason = rawAssessment.__missing ? null : malformedAssessmentReason(rawAssessment);
+  if (rawAssessment.__missing || malformedReason) {
     await db('events_raw')
       .where({ id: event.id })
       .whereNull('curated_at')
@@ -280,7 +295,7 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
         curated_at: db.fn.now(),
         curation_note: rawAssessment.__missing
           ? 'No assessment returned by model'
-          : 'Malformed assessment returned by model',
+          : `Malformed assessment: ${malformedReason}`.slice(0, NOTE_MAX),
         updated_at: db.fn.now(),
       });
     return 'left_pending';
