@@ -126,7 +126,29 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   // accept. A plain isRoutineRecurringEvent check here silently discarded
   // fresh_series_launch debuts (the single-use series-debut carve-out),
   // leaving them pending forever.
-  return historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
+  const candidates = historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
+
+  // Rows the policy filters dropped must still be marked examined — the
+  // candidate query is start_at-ASC LIMIT-ed, so un-stamped drops (e.g. a
+  // debut series' later siblings) would hold the same earliest slots on
+  // every run and eventually starve later events out of classification
+  // entirely (Codex P2). They stay pending — the note says why, and the
+  // operator can still approve manually.
+  const surviving = new Set(candidates.map((row) => String(row.id)));
+  const nonRepeatedIds = new Set(nonRepeatedRows.map((row) => String(row.id)));
+  const historicallyNewIds = new Set(historicallyNewRows.map((row) => String(row.id)));
+  const policyDrops = rows
+    .filter((row) => !surviving.has(String(row.id)))
+    .map((row) => ({
+      id: String(row.id),
+      note: !nonRepeatedIds.has(String(row.id))
+        ? 'Excluded by policy: repeated-date identity (routine series occurrence)'
+        : (!historicallyNewIds.has(String(row.id))
+          ? 'Excluded by policy: identity already featured in a prior issue'
+          : 'Excluded by policy: ineligible for the fresh digest'),
+    }));
+
+  return { candidates, policyDrops };
 }
 
 function buildCurationPrompt(events, todayIso) {
@@ -309,9 +331,30 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
     return { disabled: true, examined: 0, approved: 0 };
   }
 
-  const candidates = await fetchCurationCandidates(limit);
+  const { candidates, policyDrops } = await fetchCurationCandidates(limit);
+
+  // Stamp policy-dropped rows first so they leave the candidate window
+  // even when the model batches below fail. Same guarded write as the
+  // missing-assessment fallback: examined, pending, assessment cleared.
+  for (const drop of policyDrops) {
+    await db('events_raw')
+      .where({ id: drop.id })
+      .whereNull('curated_at')
+      .update({
+        editorial_score: null,
+        score_breakdown: null,
+        rejection_codes: null,
+        audience_tags: null,
+        novelty_type: null,
+        editorial_evidence: null,
+        curated_at: db.fn.now(),
+        curation_note: drop.note,
+        updated_at: db.fn.now(),
+      });
+  }
+
   if (!candidates.length) {
-    return { examined: 0, approved: 0 };
+    return { examined: 0, approved: 0, policyDropped: policyDrops.length };
   }
 
   const byId = new Map(candidates.map((e) => [String(e.id), e]));
@@ -340,8 +383,8 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
     }
   }
 
-  logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved} (feature floor ${featureScoreFloor()})`);
-  return { examined, approved, candidates: candidates.length };
+  logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved}, policy-dropped ${policyDrops.length} (feature floor ${featureScoreFloor()})`);
+  return { examined, approved, candidates: candidates.length, policyDropped: policyDrops.length };
 }
 
 module.exports = {

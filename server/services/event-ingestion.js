@@ -273,8 +273,9 @@ async function pullRssSource(source) {
   //     to do" columns, municipal announcements). item.pubDate is the
   //     publication date, NOT an event date — writing it to start_at
   //     dates every event "yesterday at pull time", so nothing ever
-  //     lands in the forward digest window and tier-1 auto-approval
-  //     seeds junk (council agendas) into the approved pool. Articles
+  //     lands in the forward digest window (and, historically, tier-1
+  //     auto-approval — retired by the 2026-07-28 rubric — seeded junk
+  //     council agendas straight into the approved pool). Articles
   //     are bundled and run through the same Claude extraction as
   //     scrape sources to pull real event dates out of the text;
   //     articles with no dated event yield nothing.
@@ -318,7 +319,10 @@ async function pullRssSource(source) {
     // Best-effort city from title + description; falls back to source
     // coverage_geo[0] so the tile always has *something*.
     const city = extractCity(title) || extractCity(description) || (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1;
+    // No tier-based auto-approval: since the 2026-07-28 editorial rubric,
+    // EVERY automatic approval must carry a score above the absolute floor,
+    // and only auto-curation computes scores. Tier-1 rows insert pending
+    // like everything else and are examined at the next 6:15 curation run.
 
     await db('events_raw')
       .insert({
@@ -333,7 +337,6 @@ async function pullRssSource(source) {
         event_url: eventUrl,
         image_url: imageUrl,
         categories,
-        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
@@ -544,7 +547,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
 /**
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
- * { row, autoApprove } where row holds the events_raw columns.
+ * { row } where row holds the events_raw columns.
  *
  * opts.requireStart — drop events without a parseable start date.
  * News-mode RSS sets this: the articles contract says "no stated event
@@ -593,14 +596,13 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
     ? ev.city.trim().toLowerCase().slice(0, 128)
     : (source.coverage_geo?.[0] || null);
 
-  // Tier-1 auto-approve additionally requires a real extracted start
-  // date. An undated event can never enter the digest (eligibility
-  // requires start_at), so pre-approving it only seeds unreviewed
-  // rows into the approved pool.
-  const autoApprove = source.priority_tier === 1 && Boolean(start);
-
+  // No tier-based auto-approval (2026-07-28 rubric): every automatic
+  // approval must carry an editorial score above the absolute floor, and
+  // only auto-curation computes scores — a tier-1 row that skipped the
+  // rubric would ship with editorial_score/rejection_codes NULL and no
+  // floor applied. All rows insert pending; curation examines them at
+  // the next 6:15 run.
   return {
-    autoApprove,
     row: {
       source_id: source.id,
       external_id: externalId,
@@ -623,13 +625,10 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   for (const ev of claudeEvents) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row, autoApprove } = normalized;
+    const { row } = normalized;
 
     await db('events_raw')
-      .insert({
-        ...row,
-        ...(autoApprove && { admin_status: 'approved' }),
-      })
+      .insert(row)
       .onConflict(['source_id', 'external_id'])
       .merge({
         title: row.title,
@@ -785,7 +784,7 @@ async function pullIcalSource(source) {
       || extractCity(description)
       || extractCity(venueName)
       || (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1 && !recurrence?.routine;
+    // No tier-based auto-approval — see the rubric note in the RSS handler.
 
     await db('events_raw')
       .insert({
@@ -807,7 +806,6 @@ async function pullIcalSource(source) {
           freshness_status: recurrence.freshness_status,
           freshness_score: recurrence.freshness_score,
         }),
-        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({

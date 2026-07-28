@@ -91,9 +91,18 @@ function repeatedDateTitleKeys(events) {
 async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
   const issueTuesday = getActiveNewsletterTuesday(reference);
   const issueStart = parseETDateTime(`${issueTuesday}T00:00:00`);
-  const horizonStart = parseETDateTime(
+  // Both bounds are anchored to whichever of (issue Tuesday, reference)
+  // reaches further — on a Monday run the issue Tuesday is TOMORROW, so an
+  // issue-only lower bound would start a day late and hide an earlier
+  // sibling in the Monday-to-Tuesday slice (Codex P2, mirror of the
+  // upper-bound fix below).
+  const issueLower = parseETDateTime(
     `${etDateString(addETDays(issueStart, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
   );
+  const referenceLower = parseETDateTime(
+    `${etDateString(addETDays(reference, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
+  );
+  const horizonStart = referenceLower < issueLower ? referenceLower : issueLower;
   // The pool must reach at least as far as curation's own candidate
   // horizon (reference + 90 days). Anchored only to the issue Tuesday it
   // ends 1–5 days short on Wed–Sun runs, and a daily/custom debut series
@@ -107,10 +116,31 @@ async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
   );
   const horizonEnd = referenceEnd > issueEnd ? referenceEnd : issueEnd;
   return knex('events_raw')
-    .select('id', 'title', 'start_at')
+    .select('id', 'title', 'start_at', 'venue_name', 'city')
     .whereNull('merged_into')
     .where('start_at', '>=', horizonStart)
     .where('start_at', '<=', horizonEnd);
+}
+
+const normalizeSeriesContext = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Same normalized title does not always mean same series — two venues can
+ * both run a "Trivia Night" launch. When BOTH rows carry a venue (or,
+ * failing that, both carry a city) and those disagree, they are distinct
+ * series and neither constrains the other's debut. When the context is
+ * missing on either side we assume same series — fail closed, the
+ * conservative reading for a debut claim.
+ */
+function isSameSeriesSibling(event, sibling) {
+  if (normalizeDigestTitle(sibling?.title) !== normalizeDigestTitle(event?.title)) return false;
+  const eventVenue = normalizeSeriesContext(event?.venue_name);
+  const siblingVenue = normalizeSeriesContext(sibling?.venue_name);
+  if (eventVenue && siblingVenue) return eventVenue === siblingVenue;
+  const eventCity = normalizeSeriesContext(event?.city);
+  const siblingCity = normalizeSeriesContext(sibling?.city);
+  if (eventCity && siblingCity) return eventCity === siblingCity;
+  return true;
 }
 
 /**
@@ -130,7 +160,7 @@ function isFirstOccurrenceInPool(event, pool) {
   if (Number.isNaN(start)) return false;
   return !(Array.isArray(pool) ? pool : []).some((sibling) => {
     if (String(sibling?.id) === String(event?.id)) return false;
-    if (normalizeDigestTitle(sibling?.title) !== title) return false;
+    if (!isSameSeriesSibling(event, sibling)) return false;
     const siblingStart = sibling?.start_at ? new Date(sibling.start_at).getTime() : NaN;
     return !Number.isNaN(siblingStart) && siblingStart < start;
   });

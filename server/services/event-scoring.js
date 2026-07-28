@@ -99,6 +99,10 @@ function clampFactor(name, value) {
 function isMalformedAssessment(raw) {
   if (!raw || typeof raw !== 'object') return true;
   if (!Array.isArray(raw.rejection_codes)) return true;
+  // penalty_flags gets the same treatment: an omitted field would
+  // normalize to [] and skip the fixed 10–25 point penalties, letting a
+  // high-scoring retail promo or generic class cross the floor.
+  if (!Array.isArray(raw.penalty_flags)) return true;
   if (!raw.scores || typeof raw.scores !== 'object' || Array.isArray(raw.scores)) return true;
   return false;
 }

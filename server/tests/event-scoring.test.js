@@ -149,15 +149,20 @@ describe('isMalformedAssessment (fail-closed structure gate)', () => {
     expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: null })).toBe(true);
   });
 
+  test('missing or scalar penalty_flags is malformed — the fixed penalties cannot be skipped', () => {
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: [] })).toBe(true);
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: [], penalty_flags: 'none' })).toBe(true);
+  });
+
   test('missing or non-object scores is malformed', () => {
-    expect(isMalformedAssessment({ rejection_codes: [] })).toBe(true);
-    expect(isMalformedAssessment({ rejection_codes: [], scores: [1, 2] })).toBe(true);
+    expect(isMalformedAssessment({ rejection_codes: [], penalty_flags: [] })).toBe(true);
+    expect(isMalformedAssessment({ rejection_codes: [], penalty_flags: [], scores: [1, 2] })).toBe(true);
     expect(isMalformedAssessment(null)).toBe(true);
   });
 
   test('a well-formed assessment passes', () => {
-    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: [] })).toBe(false);
-    expect(isMalformedAssessment({ scores: {}, rejection_codes: ['webinar_virtual'] })).toBe(false);
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: [], penalty_flags: [] })).toBe(false);
+    expect(isMalformedAssessment({ scores: {}, rejection_codes: ['webinar_virtual'], penalty_flags: ['retail_promo'] })).toBe(false);
   });
 });
 

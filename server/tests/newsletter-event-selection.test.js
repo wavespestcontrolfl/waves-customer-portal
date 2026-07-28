@@ -294,6 +294,59 @@ describe('series-debut first-occurrence rule (owner spec 2026-07-28)', () => {
     expect(result.valid).toBe(true);
   });
 
+  test('an unrelated same-title series at a DIFFERENT venue does not deny debut status', async () => {
+    const first = { ...debutOccurrence(ID_1, '2026-07-25T22:00:00Z'), venue_name: 'Harbor Pavilion', city: 'venice' };
+    const otherVenueEarlier = {
+      ...debutOccurrence(ID_2, '2026-07-18T22:00:00Z'),
+      venue_name: 'Riverwalk Stage',
+      city: 'bradenton',
+    };
+    const result = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, otherVenueEarlier],
+    );
+    expect(result.valid).toBe(true);
+
+    // Same venue = same series: the later occurrence is still denied.
+    const sameVenueEarlier = { ...otherVenueEarlier, venue_name: 'Harbor Pavilion' };
+    const denied = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, sameVenueEarlier],
+    );
+    expect(denied.valid).toBe(false);
+  });
+
+  test('identity pool spans max(issue, reference) in BOTH directions (Monday lower-bound gap)', async () => {
+    // Monday run: the active issue Tuesday is TOMORROW, so an issue-anchored
+    // lower bound would start a day after reference − 90d.
+    const mondayReference = new Date('2026-07-27T12:00:00Z');
+    const bounds = { lower: [], upper: [] };
+    const query = {
+      select: jest.fn(),
+      whereNull: jest.fn(),
+      where: jest.fn(),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    query.select.mockReturnValue(query);
+    query.whereNull.mockReturnValue(query);
+    query.where.mockImplementation((col, op, value) => {
+      if (col === 'start_at' && op === '>=') bounds.lower.push(value);
+      if (col === 'start_at' && op === '<=') bounds.upper.push(value);
+      return query;
+    });
+    const knex = jest.fn(() => query);
+
+    await loadRoutineIdentityPool(knex, mondayReference);
+    const maxLower = new Date(mondayReference.getTime() - 90 * 24 * 3600 * 1000);
+    expect(bounds.lower[0].getTime()).toBeLessThanOrEqual(maxLower.getTime());
+  });
+
   test('identity pool reaches curation\'s own horizon on late-week runs (reference + 90d)', async () => {
     // Sunday run: the active issue Tuesday is 5 days back. Anchored only to
     // the Tuesday, the pool would stop 5 days short of curation's

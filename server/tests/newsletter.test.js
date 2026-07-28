@@ -658,7 +658,7 @@ describe('event ingestion buildExtractionSystemPrompt — shared extraction prom
   });
 });
 
-describe('event ingestion normalizeExtractedEvent — validation + auto-approve gate', () => {
+describe('event ingestion normalizeExtractedEvent — validation (no auto-approval since the 2026-07-28 rubric)', () => {
   const { normalizeExtractedEvent, recurrenceMetadataFromIcalEvent } = require('../services/event-ingestion');
   const NOW = Date.parse('2026-06-11T12:00:00Z');
   const tier1 = { id: 'src-1', priority_tier: 1, coverage_geo: ['tampa'] };
@@ -679,14 +679,16 @@ describe('event ingestion normalizeExtractedEvent — validation + auto-approve 
     expect(normalizeExtractedEvent(tier2, undated, NOW)).not.toBeNull();
   });
 
-  test('tier-1 auto-approves ONLY when a real start date was extracted', () => {
+  test('NO source tier auto-approves — every automatic approval must come from the scored curation path', () => {
+    // Owner rubric 2026-07-28: an approval without an editorial score above
+    // the absolute floor must be impossible. Tier-1 rows insert pending and
+    // are examined by the 6:15 curation run like everything else.
     const dated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(dated.autoApprove).toBe(true);
-    const undated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: null }, NOW);
-    expect(undated).not.toBeNull();
-    expect(undated.autoApprove).toBe(false);
+    expect(dated.autoApprove).toBeUndefined();
+    expect(dated.row.admin_status).toBeUndefined();
     const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(tier2Dated.autoApprove).toBe(false);
+    expect(tier2Dated.autoApprove).toBeUndefined();
+    expect(Object.keys(dated).sort()).toEqual(['row']);
   });
 
   test('canonicalizes the dedup key and validates URLs', () => {
