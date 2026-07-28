@@ -2851,7 +2851,33 @@ function providerTimeoutSignal(kind) {
 // a short call. The floor is deliberately loose (≈40% of the observed rate)
 // so a codec/bitrate change degrades to a no-op rather than false rejects.
 const MIN_AUDIO_BYTES_PER_SEC = Number(process.env.CALL_PROC_MIN_AUDIO_BYTES_PER_SEC) || 3000;
+// A truncated download is only "not ready" while Twilio's CDN can still be
+// propagating. Past this window (measured from the call row's creation) the
+// recording is as complete as it will ever get, so verification stands down
+// and behavior reverts to the pre-verification path.
+const NOT_READY_MAX_AGE_MS = Number(process.env.CALL_PROC_NOT_READY_MAX_AGE_MS) || 60 * 60 * 1000;
 const RECORDING_NOT_READY = 'RECORDING_NOT_READY';
+
+// Estimate playable duration from the MP3 frame header (Twilio recordings are
+// CBR, so bytes*8/bitrate is accurate). Returns null when no parseable Layer
+// III header is found — callers then fall back to the loose byte floor.
+function estimateMp3DurationSeconds(buffer) {
+  if (!buffer || buffer.length < 4) return null;
+  const MPEG1_L3_KBPS = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+  const MPEG2_L3_KBPS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+  const scanLimit = Math.min(buffer.length - 4, 65536);
+  for (let i = 0; i <= scanLimit; i++) {
+    if (buffer[i] !== 0xff || (buffer[i + 1] & 0xe0) !== 0xe0) continue;
+    const versionBits = (buffer[i + 1] >> 3) & 0x03; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5, 1=reserved
+    const layerBits = (buffer[i + 1] >> 1) & 0x03;   // 1=Layer III
+    const bitrateIdx = (buffer[i + 2] >> 4) & 0x0f;
+    if (versionBits === 1 || layerBits !== 1 || bitrateIdx === 0 || bitrateIdx === 15) continue;
+    const kbps = versionBits === 3 ? MPEG1_L3_KBPS[bitrateIdx] : MPEG2_L3_KBPS[bitrateIdx];
+    if (!kbps) continue;
+    return (buffer.length * 8) / (kbps * 1000);
+  }
+  return null;
+}
 
 function verifyRecordingBuffer(buffer, expectedSeconds, contentLength) {
   const bytes = buffer ? buffer.length : 0;
@@ -2860,9 +2886,23 @@ function verifyRecordingBuffer(buffer, expectedSeconds, contentLength) {
     return { ok: false, reason: 'short_read', bytes, declared };
   }
   const seconds = Number(expectedSeconds);
-  // Sub-3s recordings are legitimately tiny; the floor only means anything
-  // when the duration is known and non-trivial.
-  if (Number.isFinite(seconds) && seconds >= 3 && bytes < seconds * MIN_AUDIO_BYTES_PER_SEC) {
+  // Sub-3s recordings are legitimately tiny; duration checks only mean
+  // anything when the duration is known and non-trivial.
+  if (!Number.isFinite(seconds) || seconds < 3) return { ok: true, bytes };
+  // Primary check: decoded audio duration must cover ≥90% of the recording's
+  // known length. Catches truncated 200s whose Content-Length matches the
+  // truncated body — a byte floor alone passes any prefix over the floor
+  // rate, silently losing the tail (Codex #3037 P1).
+  const estimated = estimateMp3DurationSeconds(buffer);
+  if (estimated !== null) {
+    if (estimated < seconds * 0.9) {
+      return { ok: false, reason: 'duration_shortfall', bytes, estimated_seconds: Math.round(estimated), expected_seconds: seconds };
+    }
+    return { ok: true, bytes };
+  }
+  // No parseable MP3 header (unexpected codec): loose byte floor, tuned so a
+  // codec/bitrate change degrades to a no-op rather than false rejects.
+  if (bytes < seconds * MIN_AUDIO_BYTES_PER_SEC) {
     return { ok: false, reason: 'below_duration_floor', bytes, expected_min: seconds * MIN_AUDIO_BYTES_PER_SEC };
   }
   return { ok: true, bytes };
@@ -3294,10 +3334,20 @@ async function transcribeRecording(mp3Url, opts = {}) {
 async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
   try {
     logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
+    // Verification (and the retryable not-ready classification) only applies
+    // inside the CDN propagation window. An old row's recording is as complete
+    // as it will ever get — verifying it would either reject it forever
+    // (starving the sweep on dead URLs, Codex #3037 P2) or block a partial
+    // recording that is still better transcribed than dropped.
+    const callCreatedMs = opts.call?.created_at ? new Date(opts.call.created_at).getTime() : null;
+    const withinPropagationWindow = Number.isFinite(callCreatedMs)
+      && (Date.now() - callCreatedMs) < NOT_READY_MAX_AGE_MS;
     let audioBuffer;
     try {
       audioBuffer = await downloadRecording(mp3Url, {
-        expectedSeconds: recordingDurationSeconds(opts.call || {}) || null,
+        expectedSeconds: withinPropagationWindow
+          ? (recordingDurationSeconds(opts.call || {}) || null)
+          : null,
       });
     } catch (err) {
       if (err.code === RECORDING_NOT_READY) {
@@ -4463,18 +4513,25 @@ const CallRecordingProcessor = {
     }
 
     // Recording not ready (CDN propagation): release the claim with the row
-    // left in its pre-claim shape — no no_transcription stamp, no attempt
-    // counters — so the 10-minute fallback timer / 5-minute cron retries
-    // against complete audio. Skips the Twilio-builtin fallback on purpose:
+    // restored to its PRE-CLAIM status — no no_transcription stamp, no
+    // attempt counters — so the 10-minute fallback timer / 5-minute cron
+    // retries against complete audio. Restoring (not nulling) matters for a
+    // force-reprocess of an already-processed row: nulling would resurrect it
+    // as pending and bypass the processed-row dedup guard, repeating
+    // downstream side effects (Codex #3037 P1). `call.processing_status` was
+    // read before the claim; 'processing' (stale-reclaim takeover) maps to
+    // NULL since restoring a phantom in-flight marker would block the row for
+    // another stale window. Skips the Twilio-builtin fallback on purpose:
     // real audio a few minutes from now beats Twilio's rough transcript.
     if (!transcription && recordingNotReady) {
+      const preClaimStatus = call.processing_status === 'processing' ? null : (call.processing_status || null);
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
-        processing_status: null,
+        processing_status: preClaimStatus,
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
       });
-      logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet`);
+      logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
       return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
 
@@ -9140,6 +9197,7 @@ CallRecordingProcessor._test = {
   PROVIDER_FETCH_TIMEOUTS_MS,
   downloadRecording,
   verifyRecordingBuffer,
+  estimateMp3DurationSeconds,
   modelSupportsKeywordHints,
   transcriptionKeywords,
   isNonLeadCallContent,

@@ -1,16 +1,53 @@
 const CallRecordingProcessor = require('../services/call-recording-processor');
 
+// Buffer with a valid MPEG1 Layer III frame header at the given bitrate.
+// 0xFF 0xFB = sync + MPEG1 + Layer III + no CRC; upper nibble of byte 2 is
+// the bitrate index.
+const MPEG1_L3_KBPS = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+function mp3BufferOf(bytes, kbps = 64) {
+  const buf = Buffer.alloc(bytes);
+  const idx = MPEG1_L3_KBPS.indexOf(kbps);
+  if (idx <= 0) throw new Error(`not a valid MPEG1 L3 bitrate: ${kbps}`);
+  buf[0] = 0xff;
+  buf[1] = 0xfb;
+  buf[2] = (idx << 4) | 0x04;
+  return buf;
+}
+
+describe('mp3 duration estimation', () => {
+  const { estimateMp3DurationSeconds } = CallRecordingProcessor._test;
+
+  test('estimates duration from bitrate for a CBR buffer', () => {
+    // 64kbps → 8000 B/s → 254s needs 2,032,000 bytes
+    const est = estimateMp3DurationSeconds(mp3BufferOf(254 * 8000, 64));
+    expect(est).toBeCloseTo(254, 0);
+  });
+
+  test('returns null when no parseable frame header exists', () => {
+    expect(estimateMp3DurationSeconds(Buffer.alloc(50_000))).toBeNull();
+    expect(estimateMp3DurationSeconds(null)).toBeNull();
+  });
+});
+
 describe('recording download verification', () => {
   const { verifyRecordingBuffer } = CallRecordingProcessor._test;
 
   // Prod Twilio recordings run ~7.8KB/s (64kbps mp3); the floor is 3000 B/s.
   const bufferOf = (bytes) => Buffer.alloc(bytes);
 
-  test('accepts a full-size buffer for the known duration', () => {
-    expect(verifyRecordingBuffer(bufferOf(254 * 7800), 254, String(254 * 7800)).ok).toBe(true);
+  test('accepts a full-size mp3 for the known duration', () => {
+    expect(verifyRecordingBuffer(mp3BufferOf(254 * 8000, 64), 254, String(254 * 8000)).ok).toBe(true);
   });
 
-  test('rejects a buffer far below the duration floor as a partial read', () => {
+  test('rejects a half-length mp3 even though it clears the byte floor (Codex P1)', () => {
+    // 5 min of a 10-min call at 64kbps = 2.4MB — well above 3000 B/s × 600s
+    // (1.8MB), so the old floor passed it; duration estimation catches it.
+    const verdict = verifyRecordingBuffer(mp3BufferOf(300 * 8000, 64), 600, null);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe('duration_shortfall');
+  });
+
+  test('headerless buffer falls back to the byte floor: rejects far-short reads', () => {
     const verdict = verifyRecordingBuffer(bufferOf(20 * 1024), 254, null);
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toBe('below_duration_floor');
