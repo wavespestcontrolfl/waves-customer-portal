@@ -88,6 +88,23 @@ function buildReentryContextFromRecord(record, now = new Date()) {
   };
 }
 
+// Shared trace-evidence resolver (read paths + SMS delivery): a
+// technician-traced treatment zone is explicit exterior scope. Only the
+// expected missing-table error means "no trace" — a transient failure
+// preserves the exterior timer rather than suppressing customer safety
+// guidance (codex P1 #3007 r9).
+async function resolveTracedExteriorZone(record, knex = db) {
+  if (!record?.scheduled_service_id) return false;
+  try {
+    return !!(await knex('treatment_zone_maps')
+      .where({ scheduled_service_id: record.scheduled_service_id })
+      .first());
+  } catch (traceErr) {
+    return !(traceErr?.code === '42P01'
+      || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+  }
+}
+
 async function buildReentryContext({ record, now = new Date(), knex = db } = {}) {
   if (!record?.id) return undefined;
   let applications = Array.isArray(record.applications) ? record.applications : null;
@@ -97,21 +114,9 @@ async function buildReentryContext({ record, now = new Date(), knex = db } = {})
       .select('id', 'applied_at', 'created_at', 'application_area', 'application_method', 'targets')
       .catch(() => []);
   }
-  let tracedExteriorZone = record.tracedExteriorZone;
-  if (tracedExteriorZone === undefined && record.scheduled_service_id) {
-    try {
-      tracedExteriorZone = !!(await knex('treatment_zone_maps')
-        .where({ scheduled_service_id: record.scheduled_service_id })
-        .first());
-    } catch (traceErr) {
-      // Mirror of the completion path (codex P1 #3007 r9): only the
-      // expected missing-table error means "no trace" — a transient
-      // failure preserves the exterior timer rather than suppressing
-      // customer safety guidance for this view.
-      tracedExteriorZone = !(traceErr?.code === '42P01'
-        || /no such table|does not exist/i.test(String(traceErr?.message || '')));
-    }
-  }
+  const tracedExteriorZone = record.tracedExteriorZone !== undefined
+    ? record.tracedExteriorZone
+    : await resolveTracedExteriorZone(record, knex);
   return buildReentryContextFromRecord({ ...record, applications, tracedExteriorZone }, now);
 }
 
@@ -119,4 +124,5 @@ module.exports = {
   buildReentryContext,
   buildReentryContextFromRecord,
   buildReentrySummary,
+  resolveTracedExteriorZone,
 };

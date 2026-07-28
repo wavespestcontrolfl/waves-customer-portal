@@ -853,13 +853,27 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Cockroach-family typed reports retired the V2 perimeter story — an
+// approved recap video telling it must not serve from ANY public endpoint,
+// including permanent-token URLs hit by old clients (codex P2 #3007 r12).
+function cockroachRecapRetired(service) {
+  try {
+    const data = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    const { isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
+    return isCockroachTypedReportType(data?.typedReportSnapshot?.type);
+  } catch { return false; }
+}
+
 // GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
 // recap the tech has APPROVED (ready-but-unapproved stays private).
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
     if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
+    if (cockroachRecapRetired(service)) return res.json({ ready: false, durationMs: null });
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
@@ -871,8 +885,9 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
     if (!service || !service.scheduled_service_id) return res.status(404).end();
+    if (cockroachRecapRetired(service)) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();

@@ -174,6 +174,23 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('one-time treatment pests ground dynamically (codex r12: flies on a moth report)', () => {
+  const mothFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'One-Time Pest Treatment',
+    reportTypeLabel: 'One-Time Pest Treatment',
+    typedReport: {
+      reportTypeLabel: 'One-Time Pest Treatment',
+      todaysResult: { headline: 'Moth treatment completed today.', body: 'We treated the moth activity in the pantry today.', nextStep: null },
+      findings: [{ fieldKey: 'target_pest', customerLabel: 'Target pest', customerValueLabel: 'Moths', value: 'moths' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Moths were treated today.', mothFacts)).toEqual([]);
+  expect(ungroundedClaims('Flies were treated today.', mothFacts)).toContain('ungrounded_pest:flies');
+});
+
 test('recommendations never ground completed work; generic verbs validated (codex r11)', () => {
   const inspectionFacts = groundingFacts(roachInput({
     recap: 'Today we completed an inspection for your pest service. We checked the accessible areas and noted the current conditions.',

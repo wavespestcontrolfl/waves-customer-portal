@@ -2661,6 +2661,10 @@ describe('service report v1', () => {
         report_template_version: 'service_report_v1',
         status: 'completed',
         service_line: 'pest',
+        // Explicit interior + exterior scope: the SMS applies the same
+        // read-time normalization as the report, so an unclassified visit
+        // would (correctly) drop the exterior clause here.
+        areas_serviced: JSON.stringify(['Exterior perimeter', 'Interior baseboards']),
         advisory: JSON.stringify({
           exterior_reentry_min: 45,
           interior_reentry_min: 90,

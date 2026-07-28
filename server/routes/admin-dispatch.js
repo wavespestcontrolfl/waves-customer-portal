@@ -7117,7 +7117,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
-            record,
+            // Trace evidence resolved here (async) so the sync SMS builder
+            // can apply the same read-time exterior normalization the
+            // report does (codex P2 #3007 r12).
+            record: {
+              ...record,
+              scheduled_service_id: record.scheduled_service_id || svc.id,
+              tracedExteriorZone: await require('../services/service-report/reentry')
+                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
+            },
             service: svc,
             reportUrl,
             smsReportUrl: reportSmsUrl,
