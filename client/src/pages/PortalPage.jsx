@@ -2220,7 +2220,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       />
       <HomeContentRow
         compact={compact}
-        title="The Waves Newsletter"
+        title="Waves Newsletter"
         ctaLabel="Read Issue"
         iconTile={<WavesLogoTile compact={compact} />}
         posts={newsletterPosts.map((p) => ({

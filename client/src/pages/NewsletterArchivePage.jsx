@@ -182,7 +182,7 @@ export default function NewsletterArchivePage() {
               color: '#fff',
               textDecoration: 'none',
             }}
-          >← The Waves Newsletter</a>
+          >← Waves Newsletter</a>
           {dateLabel && (
             <span style={{ fontFamily: FONTS.body, fontSize: 12, color: 'rgba(255,255,255,0.78)' }}>
               {dateLabel}

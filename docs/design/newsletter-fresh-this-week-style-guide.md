@@ -1,7 +1,8 @@
-# The Waves Newsletter Style Guide — the Beehiiv-Era Formula
+# Waves Newsletter Style Guide — the Beehiiv-Era Formula
 
 > **Identity update (owner directive 2026-07-28):** the public-facing
-> masthead is now **"The Waves Newsletter"** — no subtitle. The
+> masthead is now **"Waves Newsletter"** — no "The", no subtitle,
+> rendered small (20px). The
 > "Fresh This Week / A local weekend guide from the Waves crew" identity
 > (2026-07-17) is retired and must not resurrect. Internal keys
 > (`local-weekly-fresh-events`, `fresh_this_week`, this filename) are
