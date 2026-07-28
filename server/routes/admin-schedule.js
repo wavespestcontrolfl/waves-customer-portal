@@ -1023,13 +1023,17 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
 // Lot-ladder price for a hand-scheduled one-time mosquito line (owner
 // decision 2026-07-28): compute from the customer's lot size via the pricing
 // engine; null when the customer has no usable lot size (callers fall back to
-// the catalog base_price).
+// the catalog base_price). Recurring-plan customers get the engine's canonical
+// 15% one-time perk, same as the estimate path — membership derived via the
+// file's one predicate (hasMembership) so tier sentinels stay in one place.
 function mosquitoOneTimeLadderPrice(customer) {
   const lotSqFt = Number(customer?.lot_sqft);
   if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
   try {
     const { priceOneTimeMosquito } = require('../services/pricing-engine');
-    const quote = priceOneTimeMosquito({ lotSqFt });
+    const quote = priceOneTimeMosquito({ lotSqFt }, {
+      isRecurringCustomer: hasMembership(customer || {}),
+    });
     const price = Number(quote?.price);
     return Number.isFinite(price) && price > 0 ? price : null;
   } catch (e) {
@@ -1043,13 +1047,18 @@ function mosquitoOneTimeLadderPrice(customer) {
 // (post-syncConstantsFromDB, so admin pricing-config edits are reflected
 // immediately). price is null when the customer has no usable lot size; the
 // client falls back to the catalog base price, same as booking.
-router.get('/mosquito-onetime-quote', async (req, res, next) => {
+// requireAdmin: the create-appointment modal is an office surface (POST '/'
+// is requireAdmin too), and tech tokens must not be able to probe arbitrary
+// customer ids for lot-size/price data outside their assignment scope.
+router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
   try {
     const customerId = String(req.query.customerId || '').trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
       throw httpError(400, 'customerId must be a valid customer id');
     }
-    const customer = await db('customers').where({ id: customerId }).first('id', 'lot_sqft');
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'lot_sqft', 'waveguard_tier', 'monthly_rate');
     if (!customer) throw httpError(404, 'Customer not found');
     const price = mosquitoOneTimeLadderPrice(customer);
     res.json({ price, source: price != null ? 'lot_ladder' : null });

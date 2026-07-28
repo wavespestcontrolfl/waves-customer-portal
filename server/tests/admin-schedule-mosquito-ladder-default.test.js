@@ -119,6 +119,21 @@ describe('hand-scheduled one-time mosquito lot-ladder default', () => {
     expect(pricing.finalPrice).toBe(expected + 150);
   });
 
+  test('recurring-plan customers get the canonical 15% one-time perk on the ladder default', async () => {
+    const lotSqFt = 12000;
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: mosquitoService,
+      estimatedPrice: null,
+      primaryLinePrice: null,
+      serviceAddons: [],
+      customer: { id: 'customer-1', lot_sqft: lotSqFt, waveguard_tier: 'Gold' },
+    });
+
+    const expected = priceOneTimeMosquito({ lotSqFt }, { isRecurringCustomer: true }).price;
+    expect(expected).toBeLessThan(priceOneTimeMosquito({ lotSqFt }).price);
+    expect(pricing.finalPrice).toBe(expected);
+  });
+
   test('non-mosquito services keep the catalog base fallback untouched', async () => {
     const pricing = await buildAppointmentPricing({
       serviceRecord: { service_key: 'general_pest', category: 'pest_control', base_price: 150 },

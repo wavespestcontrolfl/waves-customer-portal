@@ -359,7 +359,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // effect) rather than booking against a null id.
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer?.id ? defaultCustomer : null);
   // Live server quote for a blank-priced one-time mosquito line:
-  // { customerId, price } — price null when the customer has no usable lot size.
+  // { customerId, status: 'loading' | 'ready' | 'error', price } — price is
+  // null only on an authoritative 'ready' response for a customer with no
+  // usable lot size (catalog fallback applies); 'loading'/'error' must never
+  // show a substitute amount or allow submission of an auto line.
   const [mosquitoQuote, setMosquitoQuote] = useState(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
@@ -788,12 +791,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // catalog base price when the customer has no usable lot size.
   const mosquitoAutoAmount = (svc) => {
     if (svc?.service_key !== 'mosquito_one_time' || lineHasEnteredPrice(svc)) return null;
-    if (mosquitoQuote?.customerId === selectedCustomer?.id && Number(mosquitoQuote?.price) > 0) {
-      return Number(mosquitoQuote.price);
+    if (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready') {
+      // Pending or failed quote: never substitute a possibly-wrong amount —
+      // the hint shows the state and handleSubmit blocks until resolved.
+      return null;
     }
+    if (Number(mosquitoQuote.price) > 0) return Number(mosquitoQuote.price);
+    // Authoritative "no usable lot size": catalog base, same as booking.
     const catalogBase = Number(svc.base_price ?? svc.priceMin);
     return Number.isFinite(catalogBase) && catalogBase > 0 ? catalogBase : null;
   };
+  const mosquitoQuotePending = (svc) => (
+    svc?.service_key === 'mosquito_one_time'
+    && !lineHasEnteredPrice(svc)
+    && (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready')
+  );
   const lineEffectiveBaseAmount = (svc) => (
     lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
   );
@@ -914,12 +926,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const id = selectedCustomer?.id;
     if (!id || !hasAutoMosquitoLine || mosquitoQuote?.customerId === id) return;
     let cancelled = false;
+    setMosquitoQuote({ customerId: id, status: 'loading', price: null });
     (async () => {
       try {
         const r = await adminFetch(`/admin/schedule/mosquito-onetime-quote?customerId=${encodeURIComponent(id)}`);
-        if (!cancelled) setMosquitoQuote({ customerId: id, price: r?.price != null ? Number(r.price) : null });
+        if (!cancelled) setMosquitoQuote({ customerId: id, status: 'ready', price: r?.price != null ? Number(r.price) : null });
       } catch {
-        if (!cancelled) setMosquitoQuote({ customerId: id, price: null });
+        if (!cancelled) setMosquitoQuote({ customerId: id, status: 'error', price: null });
       }
     })();
     return () => { cancelled = true; };
@@ -1209,6 +1222,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Submit
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0) return;
+    // An auto-priced mosquito line must not be booked until the live server
+    // quote resolved — otherwise the operator confirms a total that omits (or
+    // misstates) what the server will stamp. On a failed quote, clear the
+    // state so the fetch effect retries.
+    if (services.some((s) => mosquitoQuotePending(s))) {
+      if (mosquitoQuote?.status === 'error') {
+        setMosquitoQuote(null);
+        setToast('Mosquito price quote failed — retrying; submit again in a moment or enter a price');
+      } else {
+        setToast('Fetching the lot-based mosquito price — try again in a moment or enter a price');
+      }
+      setTimeout(() => setToast(''), 2800);
+      return;
+    }
     setSaving(true);
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
@@ -1991,6 +2018,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   {mosquitoAutoAmount(svc) != null && (
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                       Auto: ${mosquitoAutoAmount(svc).toFixed(2)} (lot-based)
+                    </div>
+                  )}
+                  {mosquitoQuotePending(svc) && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      {mosquitoQuote?.status === 'error'
+                        ? 'Auto quote failed — enter a price or resubmit to retry'
+                        : 'Auto: fetching lot-based price…'}
                     </div>
                   )}
                 </div>
