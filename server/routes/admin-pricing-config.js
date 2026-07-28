@@ -173,6 +173,16 @@ function normalizeIncomingConfigData(configKey, data) {
     RETIRED_PEST_FEATURE_KEYS.forEach((key) => delete normalized[key]);
     return normalized;
   }
+  if (configKey === 'termite_install' && data && typeof data === 'object' && !Array.isArray(data)) {
+    // station_spacing_ft is retired (owner 2026-07-28): spacing is
+    // per-system label truth (Trelona 15 ft, Advance 10) and the bridge no
+    // longer reads this key — stripping it on save keeps the row from
+    // advertising a dial that changes nothing.
+    const normalized = { ...data };
+    delete normalized.station_spacing_ft;
+    delete normalized.stationSpacing;
+    return normalized;
+  }
   return data;
 }
 
@@ -237,8 +247,17 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (data?.pricing_model !== 'station_brackets') {
       return fail("termite_monitoring.pricing_model must be 'station_brackets' (the flat basic/premier tiers are retired)");
     }
-    if (!isPositive(data?.base_monthly)) return fail('termite_monitoring.base_monthly must be a positive $/mo amount');
-    if (!isNonNegative(data?.step_monthly)) return fail('termite_monitoring.step_monthly must be a non-negative $/mo amount');
+    // WHOLE dollars only (codex P2 on #3017): the engine's annual is
+    // whole-dollar by design (Math.round at the line level), so a cent
+    // value like 19.55 would price $234.60 -> $235 and derive a per-app
+    // that disagrees with monthly x 3 across server/client/persisted
+    // payloads. Integers keep monthly x 12 and monthly x 3 exact end to end.
+    if (!isPositive(data?.base_monthly) || !Number.isInteger(num(data?.base_monthly))) {
+      return fail('termite_monitoring.base_monthly must be a positive WHOLE-dollar $/mo amount (cents cannot survive the whole-dollar annualization)');
+    }
+    if (!isNonNegative(data?.step_monthly) || !Number.isInteger(num(data?.step_monthly))) {
+      return fail('termite_monitoring.step_monthly must be a non-negative WHOLE-dollar $/mo amount');
+    }
     const bracket = num(data?.bracket_stations);
     if (!Number.isInteger(bracket) || bracket < 1 || bracket > 50) {
       return fail('termite_monitoring.bracket_stations must be a whole number of stations between 1 and 50');

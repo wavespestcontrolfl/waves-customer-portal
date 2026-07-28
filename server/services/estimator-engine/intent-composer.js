@@ -39,7 +39,7 @@ SERVICE VOCABULARY (the only keys allowed in "services"):
 - treeShrub: recurring ornamental tree & shrub care (fertilization, insect, disease). Options: treeCount (integer 1-200 — ONLY when the caller states how many trees/palms they have; never guess a count).
 - mosquito: recurring mosquito program. Options: tier (seasonal9|monthly12).
 - oneTimeMosquito: single mosquito treatment (event, one-off).
-- termite: termite BAIT/MONITORING program only. Options: system=advance, monitoringTier=basic. Active termite TREATMENT (tenting, liquid treatment) is out of scope — skip with reason.
+- termite: termite BAIT/MONITORING program only. Options: system=trelona, monitoringTier=basic. Active termite TREATMENT (tenting, liquid treatment) is out of scope — skip with reason.
 - flea: flea/tick treatment program.
 - bedBug: CHEMICAL bed bug treatment. ALL options REQUIRED — method (CHEMICAL), rooms (1-12), severity (light|moderate|severe), prepStatus (ready|partial|poor|refused — how prepared the home is for treatment), occupancyType (singleFamily|apartment|hotel|studentHousing — singleFamily for a house). If the call did not establish the affected room count or severity, skip with reason instead of guessing. HEAT treatment requires an in-house-vs-subcontract equipment decision the call can't establish — a caller specifically wanting heat treatment is out of scope, skip with reason.
 - rodentBait: exterior rodent bait-station program. Rodent TRAPPING/exclusion/remediation is out of scope — skip with reason.

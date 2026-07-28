@@ -186,7 +186,9 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
     // Engine defaults (system/monitoring) match estimate-engine's own
     // fallbacks; footprint/perimeter come from the saved property inputs,
     // and missing measurements surface as quoteRequired on the draft.
-    updatedInputs.services.termite_bait = { system: 'advance', monitoringTier: 'basic' };
+    // Trelona-only menu (owner 2026-07-28): new quotes sell Trelona at its
+    // label 15-ft spacing; 'advance' is replay-only.
+    updatedInputs.services.termite_bait = { system: 'trelona', monitoringTier: 'basic' };
     return { added: true, updatedInputs };
   }
 

@@ -920,30 +920,35 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
-  test('termite monitoring brackets sync CENT-precise and ignore the retired flat keys', async () => {
+  test('termite monitoring brackets sync whole-dollar and ignore the retired flat keys', async () => {
     const db = pricingConfigDb([{
       config_key: 'termite_monitoring',
-      // Decimal admin values must survive to the cent (codex pre-push P1:
-      // r() rounded to whole dollars, pricing $19.50 differently on server
-      // vs the client fallback applier). Legacy basic/premier keys are
-      // ignored — honoring `basic` as a bracket base would double the
-      // small-home rate.
+      // Whole dollars end-to-end (codex P2 rounds 0+1 on #3017): the
+      // engine's annual is whole-dollar by design, so cents cannot stay
+      // coherent across monthly x 12 / monthly x 3 — the admin validator
+      // rejects cents, and a legacy/hand-edited cent row ROUNDS here
+      // rather than desyncing server vs client fallback. Legacy
+      // basic/premier keys are ignored — honoring `basic` as a bracket
+      // base would double the small-home rate.
       data: { pricing_model: 'station_brackets', base_monthly: 19.5, step_monthly: 4.25, bracket_stations: 5, basic: 35, premier: 65 },
     }]);
     await expect(syncConstantsFromDB(db)).resolves.toBe(true);
-    expect(constants.TERMITE.monitoring.baseMonthly).toBe(19.5);
-    expect(constants.TERMITE.monitoring.stepMonthly).toBe(4.25);
+    expect(constants.TERMITE.monitoring.baseMonthly).toBe(20);
+    expect(constants.TERMITE.monitoring.stepMonthly).toBe(4);
     expect(constants.TERMITE.monitoring.bracketStations).toBe(5);
   });
 
   test('rejects invalid termite DB overlay and restores previous constants', async () => {
+    // station_spacing_ft is retired and no longer synced (owner
+    // 2026-07-28), so the invalid trigger is a negative station cost —
+    // still a synced field.
     const db = pricingConfigDb([{
       config_key: 'termite_install',
-      data: { station_spacing_ft: 0, multiplier: 1.45 },
+      data: { advance_bait: -1, multiplier: 1.45 },
     }]);
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(false);
-    expect(constants.TERMITE.stationSpacing).toBe(originalTermite.stationSpacing);
+    expect(constants.TERMITE.systems.advance.stationCost).toBe(originalTermite.systems.advance.stationCost);
     expect(constants.TERMITE.installMultiplier).toBe(originalTermite.installMultiplier);
   });
 });

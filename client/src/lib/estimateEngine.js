@@ -466,9 +466,11 @@ let TERMITE_MONITORING = { ...TERMITE_MONITORING_DEFAULTS };
 export function applyServerTermiteMonitoringPricingConfig(config) {
   const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  // Whole dollars, matching the server validator + bridge — cents cannot
+  // survive the engine's whole-dollar annualization.
   TERMITE_MONITORING = {
-    baseMonthly: pos(config?.base_monthly) ?? TERMITE_MONITORING_DEFAULTS.baseMonthly,
-    stepMonthly: nonNeg(config?.step_monthly) ?? TERMITE_MONITORING_DEFAULTS.stepMonthly,
+    baseMonthly: Math.round(pos(config?.base_monthly) ?? TERMITE_MONITORING_DEFAULTS.baseMonthly),
+    stepMonthly: Math.round(nonNeg(config?.step_monthly) ?? TERMITE_MONITORING_DEFAULTS.stepMonthly),
     bracketStations: pos(config?.bracket_stations)
       ? Math.round(Number(config.bracket_stations))
       : TERMITE_MONITORING_DEFAULTS.bracketStations,

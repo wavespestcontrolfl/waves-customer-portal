@@ -7857,22 +7857,17 @@ export default function EstimateToolViewV2({
                               <>
                                 <TierGridV2>
                                   {" "}
-                                  {R.tmBait.ai != null && (
-                                    <TierRowV2
-                                      name="Advance"
-                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "advance"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                    />
-                                  )}{" "}
+                                  {/* Trelona-only menu + station-count
+                                      bracket pricing (owner 2026-07-28) —
+                                      the retired flat Basic/Premier figures
+                                      must never render beside a bracketed
+                                      quote total. */}
                                   {R.tmBait.ti != null && (
                                     <TierRowV2
                                       name="Trelona"
-                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "trelona"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                      detail={`${fmtInt(R.tmBait.ti)} install | ${R.tmBait.sta} stations | $${R.tmBait.monMonthly}/mo station check`}
+                                      price={`$${Math.round((R.tmBait.monMonthly ?? 0) * 3)}/app`}
+                                      recommended
                                     />
                                   )}{" "}
                                 </TierGridV2>{" "}

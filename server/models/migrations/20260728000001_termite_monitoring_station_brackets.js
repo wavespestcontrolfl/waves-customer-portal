@@ -51,6 +51,19 @@ exports.up = async function up(knex) {
       sort_order: 2,
       data: JSON.stringify(NEW_DATA),
     });
+    // Record ownership of the INSERT too (codex P2): a null old_value is
+    // how down() knows this migration created the row and may delete it —
+    // without the audit row, rollback stranded a bracket row the old
+    // bridge ignores.
+    if (await knex.schema.hasTable('pricing_config_audit')) {
+      await knex('pricing_config_audit').insert({
+        config_key: 'termite_monitoring',
+        old_value: null,
+        new_value: JSON.stringify(NEW_DATA),
+        changed_by: MIGRATION_TAG,
+        reason: UP_REASON,
+      });
+    }
     return;
   }
   const oldData = typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {});
@@ -92,17 +105,24 @@ exports.down = async function down(knex) {
     .where({ config_key: 'termite_monitoring', changed_by: MIGRATION_TAG })
     .orderBy('id', 'desc')
     .first();
-  if (!audit) return; // up() inserted fresh or skipped — nothing to restore
+  if (!audit) return; // up() skipped (pre-migrated/admin-authored row) — nothing to undo
   const row = await knex('pricing_config').where({ config_key: 'termite_monitoring' }).first();
   if (!row) return;
   const current = typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {});
-  // Restore ONLY if the row still holds exactly what up() wrote — an
+  // Undo ONLY if the row still holds exactly what up() wrote — an
   // admin-tuned bracket is not ours to roll back. Key-by-key comparison:
   // jsonb round-trips reorder keys, so a JSON.stringify equality check
   // false-negatives and silently skips the restore.
   const untouched = Object.keys(NEW_DATA).length === Object.keys(current).length
     && Object.entries(NEW_DATA).every(([k, v]) => String(current[k]) === String(v));
   if (!untouched) return;
+  if (audit.old_value == null) {
+    // up() CREATED the row (fresh env) — rollback removes it entirely so
+    // the old code's admin UI doesn't show bracket settings the old bridge
+    // ignores.
+    await knex('pricing_config').where({ config_key: 'termite_monitoring' }).del();
+    return;
+  }
   await knex('pricing_config')
     .where({ config_key: 'termite_monitoring' })
     .update({

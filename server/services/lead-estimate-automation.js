@@ -170,7 +170,8 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 
   if (wants(/\btermite\b/)) {
     if (/\bmonitoring\b|\bprotection\b|\bbait\b/.test(text) || recurring) {
-      services.termite = { system: 'advance', monitoringTier: 'basic' };
+      // Trelona-only menu (owner 2026-07-28); 'advance' is replay-only.
+      services.termite = { system: 'trelona', monitoringTier: 'basic' };
     } else {
       return {
         services,

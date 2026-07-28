@@ -1011,7 +1011,12 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.termite_install) {
       const t = config.termite_install;
       setNumber(constants.TERMITE, 'installMultiplier', t.multiplier ?? t.install_multiplier, Number);
-      setNumber(constants.TERMITE, 'stationSpacing', t.station_spacing_ft ?? t.stationSpacing, Number);
+      // station_spacing_ft is RETIRED (owner 2026-07-28): spacing is
+      // per-system LABEL truth (Trelona 15 ft, Advance 10 — systems[].spacingFt
+      // in constants), so every normalized system bypasses the global
+      // fallback and syncing this key would change nothing while the admin
+      // UI reported success. The admin PUT strips the key on save
+      // (normalizeIncomingConfigData) for the same reason.
       setNumber(constants.TERMITE, 'minStations', t.min_stations ?? t.minStations, Number);
       setNumber(constants.TERMITE.systems.advance, 'stationCost', t.advance_bait ?? t.advance_station_cost, Number);
       setNumber(constants.TERMITE.systems.trelona, 'stationCost', t.trelona_bait ?? t.trelona_station_cost, Number);
@@ -1033,14 +1038,15 @@ async function syncConstantsFromDB(dbInstance) {
       // would silently double the small-home rate ($35 vs $19). The
       // migration rewrites the prod row to the new shape; an un-migrated
       // row simply leaves the in-code bracket defaults in force.
-      // money(), not r(): the admin validator accepts cent values and the
-      // client applier preserves them — whole-dollar rounding here would
-      // price a $19.50 base differently on server vs fallback.
+      // WHOLE dollars (matches the admin validator): the engine's annual is
+      // whole-dollar by design, so cents here would make monthly x 12 /
+      // monthly x 3 disagree across server, client fallback, and persisted
+      // payloads. A legacy/hand-edited cent row rounds rather than desyncs.
       if (isPositiveNumber(Number(tm.base_monthly))) {
-        constants.TERMITE.monitoring.baseMonthly = money(Number(tm.base_monthly));
+        constants.TERMITE.monitoring.baseMonthly = Math.round(money(Number(tm.base_monthly)));
       }
       if (isNonNegativeNumber(Number(tm.step_monthly))) {
-        constants.TERMITE.monitoring.stepMonthly = money(Number(tm.step_monthly));
+        constants.TERMITE.monitoring.stepMonthly = Math.round(money(Number(tm.step_monthly)));
       }
       if (isPositiveNumber(Number(tm.bracket_stations))) {
         constants.TERMITE.monitoring.bracketStations = Math.round(Number(tm.bracket_stations));

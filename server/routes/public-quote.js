@@ -664,7 +664,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.termite) {
       engineInput.services.termite = {
-        system: services.termite.system || 'advance',
+        // Trelona-only menu default (owner 2026-07-28).
+        system: services.termite.system || 'trelona',
         monitoringTier: services.termite.monitoringTier || 'basic',
       };
     }
