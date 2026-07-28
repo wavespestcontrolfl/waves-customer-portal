@@ -58,39 +58,48 @@ function reverifyEnabled() {
 
 // ── SSRF guard ───────────────────────────────────────────────────────
 
-function isPrivateIPv4(ip) {
+// ALLOWLIST posture: an address is acceptable only when it is provably
+// globally-routable unicast. Everything else — including ranges we have
+// never heard of — is refused (fail closed for the fetch).
+
+function ipv4ToInt(ip) {
   const o = ip.split('.').map(Number);
-  return o[0] === 0 || o[0] === 10 || o[0] === 127
-    || (o[0] === 100 && o[1] >= 64 && o[1] <= 127) // CGNAT
-    || (o[0] === 169 && o[1] === 254) // link-local / cloud metadata
-    || (o[0] === 172 && o[1] >= 16 && o[1] <= 31)
-    || (o[0] === 192 && o[1] === 168)
-    || (o[0] === 192 && o[1] === 0 && o[2] === 2)
-    || o[0] >= 224; // multicast + reserved
+  if (o.length !== 4 || o.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+  return (((o[0] << 24) >>> 0) + (o[1] << 16) + (o[2] << 8) + o[3]) >>> 0;
 }
 
-function isPrivateIPv6(ip) {
-  const lower = ip.toLowerCase();
-  if (lower === '::' || lower === '::1') return true;
-  if (lower.startsWith('fe8') || lower.startsWith('fe9')
-    || lower.startsWith('fea') || lower.startsWith('feb')) return true; // link-local
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // ULA
-  if (lower.startsWith('::ffff:')) {
-    // v4-mapped — URL parsing may normalize the dotted form to hex
-    // groups ('::ffff:10.0.0.1' → '::ffff:a00:1'), so handle both.
-    const rest = lower.slice(7);
-    if (rest.includes('.')) return isPrivateIPv4(rest);
-    const groups = rest.split(':');
-    const hi = parseInt(groups[0] || '0', 16);
-    const lo = parseInt(groups[1] || '0', 16);
-    if (Number.isNaN(hi) || Number.isNaN(lo)) return true; // unparseable = refuse
-    return isPrivateIPv4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
-  }
-  return false;
+// IANA IPv4 special-purpose registry (+ multicast/reserved). Any hit = refused.
+const V4_BLOCKED_CIDRS = [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+  ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+].map(([base, bits]) => {
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return { base: (ipv4ToInt(base) & mask) >>> 0, mask };
+});
+
+function isGlobalIPv4(ip) {
+  const n = ipv4ToInt(ip);
+  if (n === null) return false;
+  return !V4_BLOCKED_CIDRS.some(({ base, mask }) => ((n & mask) >>> 0) === base);
+}
+
+function isGlobalIPv6(ip) {
+  // Only current global unicast (2000::/3) is acceptable. This refuses
+  // loopback, unspecified, link-local, ULA, deprecated site-local
+  // (fec0::/10), multicast (ff00::/8), v4-mapped/compat, and every
+  // reserved block wholesale — a legitimate venue AAAA lives in 2000::/3.
+  const lower = String(ip).toLowerCase().replace(/^\[|\]$/g, '');
+  const head = lower.split(':')[0];
+  if (head === '' || head.length > 4) return false; // '::…' forms are never 2000::/3
+  const hextet = parseInt(head, 16);
+  if (Number.isNaN(hextet)) return false;
+  return (hextet & 0xe000) === 0x2000;
 }
 
 function isPrivateIp(ip) {
-  return net.isIPv4(ip) ? isPrivateIPv4(ip) : isPrivateIPv6(ip);
+  return net.isIPv4(ip) ? !isGlobalIPv4(ip) : !isGlobalIPv6(ip);
 }
 
 /**
@@ -140,6 +149,11 @@ async function assertPublicHttpUrl(rawUrl, { lookup = dns.lookup.bind(dns) } = {
 function pinnedGet(urlObj, address, family, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_BODY_BYTES } = {}) {
   const mod = urlObj.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
+    // Wall-clock deadline: Node's `timeout` option is an INACTIVITY
+    // timer — an untrusted server trickling one byte per interval could
+    // hold the send path hostage until the byte cap. Hard-stop the
+    // request after FETCH_TIMEOUT_MS regardless of activity.
+    let deadline;
     const req = mod.request(urlObj, {
       method: 'GET',
       // Pin: whatever the URL hostname is, connect only to the vetted IP.
@@ -170,13 +184,17 @@ function pinnedGet(urlObj, address, family, { timeoutMs = FETCH_TIMEOUT_MS, maxB
         location: res.headers.location || null,
         text: Buffer.concat(chunks).slice(0, maxBytes).toString('utf8'),
       });
-      res.on('end', finish);
-      res.on('close', finish);
+      const finishOnce = () => { clearTimeout(deadline); finish(); };
+      res.on('end', finishOnce);
+      res.on('close', finishOnce);
     });
-    req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { name: 'AbortError' })));
+    const abort = () => req.destroy(Object.assign(new Error('timeout'), { name: 'AbortError' }));
+    deadline = setTimeout(abort, timeoutMs);
+    req.on('timeout', abort);
     req.on('error', (err) => {
       // A capped-body destroy surfaces as ECONNRESET after we already
       // resolved via 'close'; real pre-response errors reject.
+      clearTimeout(deadline);
       reject(err);
     });
     req.end();

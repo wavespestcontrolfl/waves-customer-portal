@@ -60,6 +60,12 @@ describe('SSRF guard (assertPublicHttpUrl)', () => {
       'http://192.168.1.1/', 'http://169.254.169.254/latest/meta-data',
       'http://100.64.0.1/', 'http://0.0.0.0/', 'http://[::1]/',
       'http://[fd00::1]/', 'http://[fe80::1]/', 'http://[::ffff:10.0.0.1]/',
+      // Global-unicast allowlist posture: benchmark, IETF-protocol,
+      // reserved, broadcast, v6 multicast, deprecated site-local — and
+      // v4-mapped even to public space (a real venue AAAA is 2000::/3).
+      'http://198.18.0.9/', 'http://192.0.0.8/', 'http://240.0.0.1/',
+      'http://255.255.255.255/', 'http://[ff05::1]/', 'http://[fec0::1]/',
+      'http://[::ffff:8.8.8.8]/',
     ]) {
       const verdict = await assertPublicHttpUrl(target);
       expect(verdict.ok).toBe(false);

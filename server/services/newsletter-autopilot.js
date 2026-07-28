@@ -375,16 +375,34 @@ async function autoDraftFlagship() {
   let safeEventIds = eventIds.filter(id => typeof id === 'string' && uuidRe.test(id));
 
   // Verify selected events still exist — supplement if stale IDs reduced the count
-  const resolvedCount = await db('events_raw').whereIn('id', safeEventIds).count('* as c').first();
-  const actualCount = Number(resolvedCount?.c || 0);
-  if (actualCount < 5 && portfolio.selected.length > 0) {
-    // Supplement ONLY from the floor-passing portfolio selection — never
-    // pad a thin lineup with sub-floor events.
-    const supplementIds = portfolio.selected
-      .map((ev) => ev.id)
-      .filter((id) => !safeEventIds.includes(id));
-    safeEventIds = [...safeEventIds, ...supplementIds].slice(0, MAX_PORTFOLIO);
-    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, filled to ${safeEventIds.length} from the portfolio`);
+  // Drop locked ids whose rows disappeared between planning and now —
+  // a stale UUID left in place would pass here and then fail the final
+  // proof/delivery validation. Refill (only when thin) from the ranked
+  // alternates, the floor-passing pool built for exactly this. Operator
+  // slates larger than the portfolio cap are kept intact — only refill
+  // additions respect the cap.
+  const existingIds = new Set(
+    (await db('events_raw').whereIn('id', safeEventIds).pluck('id')).map(String),
+  );
+  const staleCount = safeEventIds.length - existingIds.size;
+  safeEventIds = safeEventIds.filter((id) => existingIds.has(String(id)));
+  if (staleCount > 0) {
+    logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
+  }
+  if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
+    const refillCandidates = lineupAlternates
+      .map((ev) => String(ev.id))
+      .filter((id) => uuidRe.test(id) && !safeEventIds.includes(id));
+    if (refillCandidates.length) {
+      const refillExisting = new Set(
+        (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
+      );
+      for (const id of refillCandidates) {
+        if (safeEventIds.length >= MAX_PORTFOLIO) break;
+        if (refillExisting.has(id)) safeEventIds.push(id);
+      }
+      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
+    }
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
