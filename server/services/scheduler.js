@@ -1045,6 +1045,20 @@ function initScheduledJobs() {
   // for newly-live optimizations, then fills the 14d/21d diff-in-diff windows
   // and records control-adjusted verdicts. Read-only against gsc_pages; writes
   // only content_optimization_impact. Same gate as the engine.
+  // EVERY 10 MIN — Owner email-approval poller (2026-07-28). Reads the
+  // contact@ inbox (IMAP, read-only) for "approved"/"not approved" replies
+  // to parked-run approval emails and executes the decision through the
+  // same entrypoints as the operator script. Skips the connection entirely
+  // when nothing is awaiting. Kill switch: unset GATE_CONTENT_EMAIL_APPROVALS.
+  cron.schedule('*/10 * * * *', async () => {
+    if (!isEnabled('contentEmailApprovals')) return;
+    try {
+      const emailApprovals = require('./content/email-approvals');
+      const result = await emailApprovals.pollReplies();
+      if (result?.decided) logger.info(`Email approvals: ${result.decided} decision(s) executed`);
+    } catch (err) { logger.error(`Email-approval poll failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 8 * * *', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     logger.info('Running: content-optimization impact tracker');

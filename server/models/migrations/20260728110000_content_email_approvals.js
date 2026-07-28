@@ -1,0 +1,42 @@
+/**
+ * content_email_approvals — email-reply approval loop for parked autonomous
+ * content runs (owner directive 2026-07-28: "I don't have time to approve
+ * these things … send to my email and I can say approved or not approved").
+ *
+ * One row per parked run we emailed the owner about. The IMAP poller matches
+ * reply subjects on `token`, verifies the sender allowlist, and executes the
+ * decision through the SAME entrypoints the operator script uses
+ * (approveAndPublishNamedCompetitor / trust-build stamp) — this table is the
+ * audit trail and idempotency guard, never a second source of truth for run
+ * state.
+ */
+
+exports.up = async function up(knex) {
+  const has = await knex.schema.hasTable('content_email_approvals');
+  if (has) return;
+  await knex.schema.createTable('content_email_approvals', (t) => {
+    t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+    // Short reply-matching token carried in the email subject ("EA-1a2b3c4d").
+    t.string('token', 20).notNullable().unique();
+    // One active approval request per run.
+    t.uuid('run_id').notNullable().unique()
+      .references('id').inTable('autonomous_runs').onDelete('CASCADE');
+    t.uuid('opportunity_id')
+      .references('id').inTable('opportunity_queue').onDelete('SET NULL');
+    // The run's skip_reason at send time (named_competitor_review /
+    // trust_build_<n>_of_<m>) — decides which approve path executes.
+    t.string('kind', 60).notNullable();
+    // awaiting_reply → approved | rejected | failed
+    t.string('status', 20).notNullable().defaultTo('awaiting_reply');
+    t.timestamp('email_sent_at');
+    t.text('decided_by'); // "email:<sender>" — audit, never trusted alone
+    t.timestamp('decided_at');
+    t.text('last_error');
+    t.timestamps(true, true);
+    t.index('status');
+  });
+};
+
+exports.down = async function down(knex) {
+  await knex.schema.dropTableIfExists('content_email_approvals');
+};

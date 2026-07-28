@@ -986,6 +986,14 @@ class AutonomousRunner {
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+      // Owner email-approval loop (2026-07-28): approvable kinds notify the
+      // owner's inbox; the emailed reply executes the decision. Fire-and-
+      // forget — a notification failure never affects the run outcome (the
+      // poller retries unsent emails each cycle).
+      setImmediate(() => {
+        require('./email-approvals').notifyParkedRun(run.id)
+          .catch((err) => logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`));
+      });
       return finalized;
     }
 
