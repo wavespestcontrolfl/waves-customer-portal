@@ -81,7 +81,7 @@ function formatEventBlock(events) {
  * styled metadata blocks, and per-event sections server-side.
  */
 function buildFlagshipSystemPrompt(voice, month) {
-  return `You write The Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
+  return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
 This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide written like a friend texting "yo, here's what's actually worth doing."
 
@@ -124,29 +124,30 @@ NEVER WRITE: ${voice.bannedCorporatePhrases.map(p => `"${p}"`).join(', ')}
 GIF CAPTIONS (gifCaption + introGifCaption) are their own genre: ${voice.gifCaptionRules?.maxWords || 12} words MAX, never a description of the image or the event — always a punchline. Proven shapes:
 ${(voice.gifCaptionRules?.shapes || []).map((s) => `- ${s}`).join('\n')}
 
-FORMAT (owner spec 2026-07-28 — compact, restrained, under 900 words total):
-- ONE hero (the first event provided is the hero unless a different one is clearly the week's anchor) + compact standard picks. No table of contents, no GIFs, no "Mood:" captions, no pro tips, no scoop labels, no checklists, no P.S. jokes.
-- The OFFICIAL event name leads every card (the renderer prints it from the database) — your hook follows it. Never invent a replacement headline.
-- Better events need less hype: state what is genuinely special, plainly, with at most a light touch of the voice above. If the copy is working hard to manufacture excitement, the pick was wrong.
-
 EVENT RULES:
 - Use ONLY the approved event records provided. Do NOT invent events.
-- For every event you include, copy its [eventId: ...] UUID into the "eventId" field exactly. The renderer re-pulls the official name, date, time, venue, address, labels, and ticket URL straight from the database — anything you write for those fields is IGNORED.
-- Do NOT mention specific dollar amounts, "free admission", "no cost", "complimentary", or any ticket-price phrasing. We never render model pricing; verified price/free labels come from the database.
-- Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved").
-- heroHook: 60-90 words on the ONE event most worth planning around — why it's rare, who it's for, what you'd tell a friend. No logistics (date/venue/price render from the DB).
-- heroWhy: ONE plain sentence: why this event made the cut (its specialness evidence — inaugural, touring, opening weekend, one-night-only).
-- hook (standard picks): 30-45 words. What it is and why it's worth the drive/plan. No logistics, no restated names — the official name renders directly above your hook.
+- For every event you include, copy its [eventId: ...] UUID into the "eventId" field exactly. The renderer uses this to re-pull date, time, venue, address, and ticket URL straight from the database — anything you write for those fields will be IGNORED.
+- Do NOT mention specific dollar amounts, "free admission", "no cost", "complimentary", or any ticket-price phrasing in your commentary. We never store admission in the DB, so any pricing claim you make is unverifiable and will hard-block the send.
+- Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved") — this is an events newsletter, not a service pitch.
+- title: a CURIOSITY-GAP headline that never uses the raw event name (it renders elsewhere). Proven formulas: question + affirmation ("...? Yes, Please" / "...? Say Less" / "...? Count Us In"), PSA framing ("PSA: You Might Meet Your New Best Friend This Weekend"), direct address ("This One's for You"), equation ("High Hair + Hot Dice = Ultimate Weekend").
+- Each event gets a unique thematic emoji (no repeats between events).
+- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo. Every gifSearchTerm in the issue (including introGifTerm) must be clearly DISTINCT from the others — different verbs, moods, and meme genres, never near-synonyms of another section's term — so no two sections pull similar GIFs.
+- description: 2-4 sentences, conversational, says WHY someone would actually go. Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
+- scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
+- highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
+- proTip: insider tip (optional — only if genuinely useful, e.g. parking, arrive-early, what to bring). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing or ticket logistics.
+- closingLine: punchy one-line kicker to wrap the event — bold the punch ("This is **Bradenton's Fourth of July mic drop.**").
+- linkText: short anchor text for the ticket link, rotated across events: "More info here", "Get tickets", "Grab your spot", "Full lineup", "Save your seat", "All the details".
 
-INTRO: 2-3 sentences, ~60 words max. State what is unusually good THIS week — specific, no generic hype, no "calendar chose chaos" filler unless the week genuinely earns it. NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically.
+INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically. introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
 
-COMMUNITY NOTES: If (and only if) community-notice records are provided, write ONE line each (max 2) — plain, informative, no jokes: what, when, where, the one thing to know. These are services to readers, not entertainment features.
+HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). Max ~90 words. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
 
-HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). 75-100 words. Genuinely useful, not salesy — the brand sell is ZERO. **Bold the facts**, _italicize the jokes_, urgency biological/seasonal, never commercial.
-
-CLOSING: ONE short paragraph (2-3 sentences) wrapping the week — may reference this issue's actual events. No checklist, no P.S.
+CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake"). Do NOT include the ✔️ itself in the items — the renderer adds it.
 
 SIGN-OFF: "${voice.signoff}"
+
+P.S. JOKE: "If you loved this, forward it to a friend who [hyper-specific persona — e.g. 'owns both a tutu *and* a folding lawn chair']. If you didn't... [reverse-blame punchline — e.g. 'blame the clown']." End with thematic emoji. Reference this issue's actual events. Do NOT write the "P.S." label itself — the renderer adds it.
 
 Return STRICT JSON (no HTML, no prose outside the JSON):
 {
@@ -154,22 +155,32 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "selectedSubject": "string",
   "previewText": "string, 40-110 chars (punchline, not summary)",
   "greeting": "string (e.g. 'Hey there!')",
-  "introText": "string (2-3 sentences, ~60 words)",
-  "hero": {
-    "eventId": "string (REQUIRED — the [eventId: ...] UUID of the hero event)",
-    "heroHook": "string (60-90 words)",
-    "heroWhy": "string (one sentence: why it made the cut)"
-  },
+  "introText": "string (2-4 sentences setting the week's vibe, use **bold** and _italic_ densely)",
+  "introGifTerm": "string (Giphy search for mood-setting intro GIF)",
+  "introGifCaption": "string (cold-open punchline, caption genre)",
+  "transitionLine": "string (bold rallying one-liner before events, e.g. 'Let's get into it 👇')",
   "events": [
     {
-      "eventId": "string (REQUIRED — copy the [eventId: ...] UUID verbatim; do NOT repeat the hero)",
-      "hook": "string (30-45 words)"
+      "eventId": "string (REQUIRED — copy the [eventId: ...] UUID from the approved event verbatim)",
+      "emoji": "string (single thematic emoji)",
+      "title": "string (curiosity-gap headline, never the raw event name)",
+      "gifSearchTerm": "string (2-4 word Giphy search, pop-culture reaction meme)",
+      "gifCaption": "string (caption-genre punchline, max 12 words)",
+      "description": "string (2-4 sentences, includes the event's official name once verbatim — vibe only, no logistics)",
+      "scoopLabel": "string (rotating lead-in for highlights)",
+      "highlights": ["string (plain text, no emoji, no bullet marker)"] or null,
+      "proTip": "string or null (no 'Pro tip' prefix)",
+      "linkText": "string (rotating ticket-link anchor text)",
+      "closingLine": "string (bold punchy kicker)"
     }
   ],
-  "communityNotes": ["string (one line each, max 2)"] or null,
-  "homeownerMinute": "string (75-100 words, plain — no HTML)",
-  "closingText": "string (one short paragraph)",
-  "signoff": "string"
+  "homeownerMinute": "string (the tip text, plain — no HTML)",
+  "closingEmoji": "string",
+  "closingHeading": "string (recap title, e.g. 'That's the scoop, crew')",
+  "closingText": "string (callback triad wrapping the week)",
+  "closingChecklist": ["string (3-4 short reminders, practical + absurd)"] or null,
+  "signoff": "string",
+  "ps": "string or null (no 'P.S.' prefix — the renderer adds the label)"
 }`;
 }
 
@@ -1046,6 +1057,26 @@ function locationCoversAddress(location, address) {
 // model split the name across emphasis tags, we simply don't link (the
 // metadata block still carries a labeled link). `url` must already be
 // safeUrl-validated by the caller.
+// GIF-shaped urls: path suffix, format-style query params, or a known
+// GIF-CDN host. Heuristic by design — image urls are rendered by the
+// recipient's mail client, never fetched server-side, and a content-type
+// probe of feed-controlled urls would reopen the SSRF surface the
+// live-reverify hardening closed (event-reverify.js). Fail toward
+// rendering: an unparseable url falls back to the plain suffix test.
+function isLikelyGifUrl(url) {
+  try {
+    const u = new URL(url);
+    if (/\.gif$/i.test(u.pathname)) return true;
+    if (/(^|\.)(giphy\.com|tenor\.com|gfycat\.com)$/i.test(u.hostname)) return true;
+    for (const v of u.searchParams.values()) {
+      if (/\.gif$/i.test(v) || /^gif$/i.test(v)) return true;
+    }
+    return false;
+  } catch {
+    return /\.gif($|[?#])/i.test(String(url));
+  }
+}
+
 function linkifyFirst(html, text, url) {
   const needle = escapeHtml(String(text).trim());
   if (!needle) return html;
@@ -1265,30 +1296,44 @@ async function assembleBeehiivNewsletter(draft) {
     parts.push(`<h2 id="${anchorId}" style="${sectionHeadingStyle(i, 8)}">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     // Reaction GIF first — in the shipped Beehiiv formula the GIF + caption
-    // IS the joke; the event photo is only a fallback when Giphy yields
-    // nothing (or no API key, e.g. in tests). Prefetched above.
+    // IS the joke. The real event photo renders separately after the
+    // description (owner, 2026-07-28: thumbnail AND comedic devices).
     const eventGif = eventGifs[i];
     if (eventGif) {
       parts.push(gifBlock(eventGif, ev.gifCaption));
-    } else {
-      const thumbUrl = safeUrl(ev.imageUrl);
-      if (thumbUrl) {
-        parts.push(`<div style="text-align:center;margin:8px 0 12px 0;">
-<img src="${thumbUrl}" alt="${escapeHtml(ev.title || '')}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
-</div>`);
-      }
     }
 
     // Description — the event's official (DB-locked) name becomes the
     // inline ticket link, per the Beehiiv convention; the metadata block
     // keeps a labeled link as well for skimmers.
     const ticketUrl = safeUrl(ev.eventUrl);
+    // Ticket links render as {{evclick:<eventId>}} tokens: the live sender
+    // substitutes a per-recipient tracking redirect; proof, preview, and
+    // archive resolve them back to the DIRECT event URL
+    // (newsletter-event-clicks.js) — tracking applies to real sends only.
+    const ticketHref = (ticketUrl && ev.eventId)
+      ? `{{evclick:${String(ev.eventId).toLowerCase()}}}`
+      : ticketUrl;
     if (ev.description) {
       let descHtml = markdownToHtml(ev.description);
-      if (ticketUrl && ev.sourceTitle) {
-        descHtml = linkifyFirst(descHtml, ev.sourceTitle, ticketUrl);
+      if (ticketHref && ev.sourceTitle) {
+        descHtml = linkifyFirst(descHtml, ev.sourceTitle, ticketHref);
       }
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${descHtml}</p>`);
+    }
+
+    // Real event thumbnail — in addition to the GIF, never instead of it.
+    // GIF-shaped urls reject (the contract is still event art; safeUrl
+    // validates scheme only). Two-axis cap without upscaling for standards
+    // clients; Outlook's Word engine ignores max-* so the MSO branch gets
+    // a fixed width (height scales proportionally).
+    const thumbUrl = safeUrl(ev.imageUrl);
+    if (thumbUrl && !isLikelyGifUrl(thumbUrl)) {
+      const thumbAlt = escapeHtml(ev.title || '');
+      parts.push(`<div style="text-align:center;margin:0 0 14px 0;">
+<!--[if !mso]><!--><img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:220px;width:auto;height:auto;border-radius:10px;display:block;margin:0 auto;" /><!--<![endif]-->
+<!--[if mso]><img src="${thumbUrl}" alt="${thumbAlt}" width="280" /><![endif]-->
+</div>`);
     }
 
     // Metadata block. date/location/address are DB-locked but originate from
@@ -1312,7 +1357,7 @@ async function assembleBeehiivNewsletter(draft) {
       const anchorText = (typeof ev.linkText === 'string' && ev.linkText.trim())
         ? ev.linkText.trim().slice(0, 40)
         : 'Tickets & Info';
-      meta.push(`🔗 <a href="${ticketUrl}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(anchorText)}</a>`);
+      meta.push(`🔗 <a href="${ticketHref}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(anchorText)}</a>`);
     }
     if (meta.length) {
       parts.push(`<div style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`);
@@ -1588,14 +1633,6 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
-    // Flagship drafts must carry a SUCCESSFULLY LOCKED hero with its hero
-    // fields — a dropped/invalid hero would otherwise silently promote a
-    // standard card (short hook, no why-line) into the top-pick box.
-    if (typeConfig?.flagship && !locked.some((ev) => ev.isHero && ev.hook && ev.heroWhy)) {
-      throw new Error(
-        'Flagship draft has no locked hero (missing, invalid eventId, or dropped by the factual lock) — refusing to render.'
-      );
-    }
     draft.events = locked;
   }
 
@@ -1608,7 +1645,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // 4b. Generate hero image (non-flagship lanes only — the compact
   //     flagship format uses the hero EVENT's own image, not a generated
   //     collage, per the 2026-07-28 spec; this also ends that image spend).
-  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl && !typeConfig?.flagship) {
+  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Waves Newsletter');
   }
 
@@ -1618,9 +1655,10 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   if (isPestInsider) {
     sanitizePestInsiderDraft(draft);
     draft.htmlBody = await assemblePestInsiderNewsletter(draft);
-  } else if (draft.events?.length && typeConfig?.flagship) {
-    draft.htmlBody = await assembleWavesNewsletter(draft);
   } else if (draft.events?.length) {
+    // Owner reversal 2026-07-28 (late evening): the flagship keeps the
+    // Beehiiv-formula renderer + comedic devices. assembleWavesNewsletter
+    // (the compact format) is retained, unused by the pipeline.
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
   } else if (typeConfig?.flagship) {
     // Flagship drafts must come through the locked structured-events path.

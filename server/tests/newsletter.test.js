@@ -1573,8 +1573,11 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     // rotating anchor text, not "Tickets & Info"
     expect(html).toContain('>Grab your spot</a>');
     expect(html).not.toContain('Tickets &amp; Info');
-    // event name inline-linked in the description
-    expect(html).toContain('<a href="https://example.com/fin"');
+    // event name inline-linked in the description — via the evclick
+    // tracking token (the live sender substitutes a per-recipient
+    // redirect; proof/preview/archive resolve it back to the direct url)
+    expect(html).toContain('<a href="{{evclick:a0000000-0000-4000-8000-000000000002}}"');
+    expect(html).not.toContain('<a href="https://example.com/fin"');
     // rotating scoop label; plain "•" bullets with model emojis stripped
     // (baseEvent highlights deliberately carry leading emojis to prove the
     // strip — and old persisted drafts still have them)
@@ -1593,6 +1596,33 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     });
     expect(html).toContain('https://cdn.example.com/fin.jpg');
     expect(html).not.toContain('🎟️ <strong>FREE</strong>');
+  });
+
+  test('no eventId → ticket links fall back to the direct url (no tracking token)', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent, eventId: null }],
+    });
+    expect(html).toContain('<a href="https://example.com/fin"');
+    expect(html).not.toContain('{{evclick:');
+  });
+
+  test('thumbnail hardening: GIF-shaped urls reject (suffix/param/host); still images get the two-axis cap + MSO branch', async () => {
+    for (const bad of [
+      'https://cdn.example.com/loop.gif',
+      'https://cdn.example.com/image?file=promo.gif',
+      'https://cdn.example.com/image?format=gif&id=9',
+      'https://media2.giphy.com/media/abc/200.webp',
+    ]) {
+      const html = await assembleBeehiivNewsletter({
+        selectedSubject: 'Test',
+        events: [{ ...baseEvent, imageUrl: bad }],
+      });
+      expect(html).not.toContain(bad.slice(24));
+    }
+    const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent }] });
+    expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:220px/);
+    expect(jpg).toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*width="280"/);
   });
 
   test('closing checklist renders ✔️ items and the sign-off defaults to the Team form', async () => {

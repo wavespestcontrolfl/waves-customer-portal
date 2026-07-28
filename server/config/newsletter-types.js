@@ -36,15 +36,17 @@ const NEWSLETTER_TYPES = {
         'tampa',
       ],
     },
-    // Compact format (owner spec 2026-07-28): one hero + compact event
-    // roundup; audience/road-trip coverage is enforced as portfolio
-    // constraints (newsletter-portfolio.js), not conceptual boxes the
-    // generator has to fill. community_notes is optional.
+    // Beehiiv comedic format (owner reversal 2026-07-28, late evening —
+    // supersedes the same-day compact spec): conceptual coverage boxes the
+    // generator fills; audience/road-trip coverage is ALSO enforced upstream
+    // as portfolio constraints (newsletter-portfolio.js), which is retained.
     requiredSections: [
       'local_intro',
-      'top_pick',
-      'event_roundup',
-      'community_notes',
+      'fresh_this_week',
+      'just_starting',
+      'weekend_picks',
+      'family_or_low_key_pick',
+      'road_trip_pick',
       'homeowner_minute',
       'waves_cta',
     ],
