@@ -174,6 +174,23 @@ async function sweepQuarantine(now = new Date()) {
     }
   }
 
+  // Reclassification claims stranded by a crashed route call: revert to
+  // quarantined after the grace period so the undo window resumes (a live
+  // route call finishes in seconds).
+  try {
+    const staleReclass = await db('emails')
+      .where('auto_action', 'spam_reclassifying')
+      .where('updated_at', '<', claimGraceCutoff)
+      .select('id');
+    for (const row of staleReclass) {
+      await db('emails').where({ id: row.id, auto_action: 'spam_reclassifying' })
+        .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+    }
+    if (staleReclass.length) logger.info(`[inbox-hygiene] reverted ${staleReclass.length} stale reclassification claim(s)`);
+  } catch (e) {
+    logger.warn(`[inbox-hygiene] stale reclassify-claim revert failed: ${e.message}`);
+  }
+
   // Retry sender blocks that failed after a successful trash on a prior
   // sweep — 'spam_trashed_block_pending' is the retryable state.
   const blockPending = await db('emails')
