@@ -97,12 +97,20 @@ function applyListwiseNudges(scored, ranking) {
 async function applyListwiseRerank(scored) {
   if (!listwiseRerankEnabled()) return scored;
   const floor = featureScoreFloor();
-  // Top-N by EDITORIAL score — `scored` arrives in freshness order, and
-  // slicing that would re-rank the wrong 18 events.
-  const pool = scored
+  // Boundary-banded pool: the score being CORRECTED must not solely
+  // control admission to the corrective pass — an understated event just
+  // past a pure top-18 line could never earn a positive nudge. Take the
+  // top 12 by score, then sample every other candidate from the DOUBLE-
+  // WIDTH boundary band (positions 12–23), so events as deep as ~23rd
+  // still reach the comparison. Deterministic — no RNG in the cron path.
+  const byScoreDesc = scored
     .filter((ev) => Number.isFinite(Number(ev.editorial_score)) && Number(ev.editorial_score) >= floor)
-    .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score))
-    .slice(0, LISTWISE_POOL);
+    .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score));
+  const head = byScoreDesc.slice(0, LISTWISE_POOL - 6);
+  const boundary = byScoreDesc.slice(LISTWISE_POOL - 6, LISTWISE_POOL + 6)
+    .filter((_, i) => i % 2 === 0)
+    .slice(0, 6);
+  const pool = [...head, ...boundary];
   if (pool.length < 4) return scored;
   try {
     // Cross-provider per repo policy: generated structured output goes

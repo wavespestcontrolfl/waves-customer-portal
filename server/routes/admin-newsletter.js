@@ -1193,9 +1193,15 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // flagship draft stays DB-locked instead of inviting the model to
         // invent events.
         const plan = await buildDigestPlan({ reference: editorialReference || new Date() });
-        const { scored } = plan;
         editorialReference = editorialReference || plan.startDate;
-        resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
+        // Portfolio-select the auto-sourced pool (floor, caps, coverage,
+        // hero-first ordering) — the raw plan is freshness-ordered, and the
+        // compact prompt treats the FIRST id as the hero, so passing it
+        // unranked would promote an arbitrary fresh event.
+        const { selectPortfolio } = require('../services/newsletter-portfolio');
+        const portfolio = selectPortfolio(plan.scored);
+        resolvedEventIds = (portfolio.selected.length ? portfolio.selected : plan.scored.slice(0, 12))
+          .map((ev) => ev.id);
       }
 
       if (resolvedEventIds.length === 0) {

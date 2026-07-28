@@ -964,12 +964,16 @@ function deriveEventLabels(row) {
   if (tagSet.has('parents_night') || breakdown?.family_status === 'adults_lean') {
     labels.push("Parents' night");
   }
-  // ONE definition of "free-ish" across the platform — the portfolio
-  // selector's classifier (is_free, the word "free" or $0 forms in
-  // price_text, the curated tag). An event that satisfied the issue's
-  // free-pick constraint must display the promised label.
-  const { isFreeish } = require('./newsletter-portfolio');
-  if (isFreeish(row)) labels.push('Free');
+  // The customer-facing Free chip is STRICTER than the portfolio's
+  // free-ish coverage classifier: an unqualified "Free" claim renders
+  // only when the row is unambiguously all-free — the is_free flag, the
+  // curated tag, or price text that says free / $0 WITHOUT any nonzero
+  // dollar tier ("Kids $0, adults $25" gets no chip).
+  const priceText = String(row.price_text || '');
+  const hasPaidTier = /\$\s*\d*[1-9]/.test(priceText);
+  const unambiguouslyFree = !hasPaidTier
+    && (/\bfree\b/i.test(priceText) || /^\s*\$?\s*0+(?:\.0+)?\s*$/.test(priceText));
+  if (row.is_free === true || tagSet.has('free') || unambiguouslyFree) labels.push('Free');
   if (tagSet.has('worth_the_drive')) labels.push('Worth the drive');
   return labels;
 }
@@ -1084,7 +1088,12 @@ async function assembleWavesNewsletter(draft) {
     if (ev.dateStr) {
       bits.push(`📅 <strong>${escapeHtml(ev.dateStr)}${ev.timeStr ? `, ${escapeHtml(ev.timeStr)}` : ''}</strong>`);
     }
-    if (ev.location) bits.push(`📍 ${escapeHtml(ev.location)}`);
+    if (ev.location) {
+      // Include the separately-locked street address when the venue line
+      // doesn't already carry it — readers get directions without the link.
+      const loc = ev.address ? `${ev.location} (${ev.address})` : ev.location;
+      bits.push(`📍 ${escapeHtml(loc)}`);
+    }
     const labels = Array.isArray(ev.labels) ? ev.labels : [];
     if (labels.length) bits.push(`<strong>${labels.map(escapeHtml).join(' · ')}</strong>`);
     // Ordinary spaces around the separator — the derived plain-text body

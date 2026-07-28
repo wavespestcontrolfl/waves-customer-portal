@@ -152,6 +152,7 @@ describe('free-label parity with the portfolio classifier', () => {
   test('price_text free/$0 forms earn the Free label like the selector', () => {
     expect(deriveEventLabels({ price_text: 'Free with registration' })).toContain('Free');
     expect(deriveEventLabels({ price_text: '$0.00' })).toContain('Free');
+    expect(deriveEventLabels({ price_text: 'Kids $0, adults $25' })).not.toContain('Free');
     expect(deriveEventLabels({ price_text: '$25' })).not.toContain('Free');
   });
 });
