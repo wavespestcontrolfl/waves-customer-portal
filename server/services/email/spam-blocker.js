@@ -246,9 +246,14 @@ async function unblockSender(id) {
 }
 
 /**
- * Remove a stale spam_auto block (row + Gmail filter) for a sender who has
- * since become an identity we protect. Best-effort: unblockSender keeps the
- * row when the Gmail filter can't be deleted, so the next message retries.
+ * Remove a stale spam_auto block (Gmail filter + row) for a sender who has
+ * since become an identity we protect, recovering any mail the filter
+ * already buried. Ordered stages — the row is deleted LAST, only after both
+ * the filter removal and the Trash recovery succeed, so any failure keeps
+ * the row as the retry token: the sender's next message (via isBlocked) or
+ * the daily reconcile re-runs the FULL recovery. Recovery searches Trash
+ * for everything from this sender (not just the triggering message) —
+ * earlier mail the filter buried before sync ever saw it comes back too.
  */
 async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null } = {}) {
   try {
@@ -256,28 +261,86 @@ async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null }
       .whereRaw('LOWER(email_address) = ?', [normalizedAddress])
       .where({ reason: 'spam_auto' })
       .first();
-    if (!row) return;
-    const result = await unblockSender(row.id);
-    if (result?.success) {
-      logger.info(`[spam-blocker] removed stale auto-block for now-protected sender ${redactEmail(normalizedAddress)}`);
-      // The stale filter may have routed the TRIGGERING message to Trash
-      // before sync ever saw it — pull it back out.
-      if (untrashGmailId) {
-        try {
-          const gmailClient = require('./gmail-client');
-          const labels = await gmailClient.getMessageLabels(untrashGmailId);
-          if (labels.includes('TRASH')) {
-            await gmailClient.modifyLabels(untrashGmailId, ['INBOX'], ['TRASH']);
-            logger.info(`[spam-blocker] untrashed message filtered by the removed stale block`);
-          }
-        } catch (e) {
-          logger.warn(`[spam-blocker] untrash after stale-block removal failed: ${e.message}`);
+    if (!row) return { success: true };
+    const gmailClient = require('./gmail-client');
+    // 1. Delete the Gmail filter — stops future burials. 404 = already gone
+    //    (a prior attempt got this far), which makes retries idempotent.
+    if (row.gmail_filter_id) {
+      const auth = await gmailClient.getAuthClient();
+      if (!auth) {
+        logger.warn(`[spam-blocker] stale auto-block removal deferred — Gmail not connected (${redactEmail(normalizedAddress)})`);
+        return { success: false };
+      }
+      try {
+        const gmail = google.gmail({ version: 'v1', auth });
+        await gmail.users.settings.filters.delete({ userId: 'me', id: row.gmail_filter_id });
+        logger.info(`[spam-blocker] stale-block Gmail filter removed: ${row.gmail_filter_id}`);
+      } catch (err) {
+        const gone = err.code === 404 || err.response?.status === 404;
+        if (!gone) {
+          logger.warn(`[spam-blocker] stale-filter removal failed — block row retained for retry: ${err.message}`);
+          return { success: false };
         }
       }
     }
+    // 2. Recover everything the filter buried. A failure here keeps the row
+    //    even though the filter is gone (step 1 tolerates the resulting 404).
+    const { messages: buried } = await gmailClient.listAllMessages(
+      `in:trash from:${normalizedAddress} newer_than:30d`, 100, { includeSpamTrash: true }
+    );
+    const ids = new Set((buried || []).map((m) => m.id));
+    if (untrashGmailId) ids.add(untrashGmailId);
+    let recovered = 0;
+    for (const id of ids) {
+      const labels = await gmailClient.getMessageLabels(id);
+      if (labels.includes('TRASH')) {
+        await gmailClient.modifyLabels(id, ['INBOX'], ['TRASH']);
+        recovered += 1;
+      }
+    }
+    if (recovered) logger.info(`[spam-blocker] recovered ${recovered} message(s) buried by the stale block`);
+    // 3. Fully unwound — only now does the retry token go away.
+    await db('blocked_email_senders').where({ id: row.id }).del();
+    logger.info(`[spam-blocker] removed stale auto-block for now-protected sender ${redactEmail(normalizedAddress)}`);
+    return { success: true };
   } catch (e) {
-    logger.warn(`[spam-blocker] stale auto-block removal failed for ${redactEmail(normalizedAddress)}: ${e.message}`);
+    logger.warn(`[spam-blocker] stale auto-block removal failed for ${redactEmail(normalizedAddress)} — row retained for retry: ${e.message}`);
+    return { success: false };
   }
+}
+
+/**
+ * Daily belt for stale auto-blocks: a blocked sender who has SINCE become a
+ * customer/open lead (or whose domain joined the operational set) gets the
+ * block unwound even if they never email again — without this, recovery of
+ * already-buried mail waits on their next inbound message to trip isBlocked.
+ */
+async function reconcileStaleAutoBlocks() {
+  const counts = { reconciled: 0, failed: 0 };
+  const rows = await db('blocked_email_senders')
+    .where({ reason: 'spam_auto' })
+    .select('id', 'email_address');
+  for (const row of rows) {
+    const normalized = normalizeAddress(row.email_address || '');
+    if (!normalized) continue;
+    try {
+      const domain = domainFromAddress(normalized);
+      const identity = (domain && isOperationalDomain(domain))
+        || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first())
+        || !!(await db('leads')
+          .whereRaw('LOWER(email) = ?', [normalized])
+          .whereNull('deleted_at')
+          .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+          .first());
+      if (!identity) continue;
+      const result = await removeStaleAutoBlock(normalized);
+      counts[result?.success ? 'reconciled' : 'failed'] += 1;
+    } catch (e) {
+      counts.failed += 1;
+      logger.warn(`[spam-blocker] stale-block reconcile failed for ${redactEmail(normalized)}: ${e.message}`);
+    }
+  }
+  return counts;
 }
 
 async function isBlocked(fromAddress, { gmailId = null } = {}) {
@@ -340,6 +403,7 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
 module.exports = {
   blockSpamSender,
   unblockSender,
+  reconcileStaleAutoBlocks,
   isBlocked,
   domainFromAddress,
   domainMatches,

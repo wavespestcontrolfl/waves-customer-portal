@@ -25,6 +25,7 @@
  * silently empty run.
  */
 
+const psl = require('psl');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gmailClient = require('./gmail-client');
@@ -447,13 +448,14 @@ function hasAlignedAuth(authResults, fromDomain) {
   if (!auth || !domain) return false;
   // Relaxed (organizational-domain) alignment, mirroring DMARC: sibling
   // subdomains of one org domain align (news.example.com vs
-  // mailer.example.com). Naive eTLD+1 (last two labels) — fine for the
-  // .com/.net space this inbox lives in.
-  const orgDomain = (d) => String(d || '').split('.').slice(-2).join('.');
+  // mailer.example.com). Org domain is public-suffix-aware (psl) — a naive
+  // last-two-labels cut would call attacker.co.uk and customer.co.uk
+  // "aligned" (both reduce to co.uk). A domain that IS a public suffix has
+  // no org domain (psl.get → null) and can only align on exact match.
+  const orgDomain = (d) => psl.get(String(d || '')) || null;
+  const fromOrg = orgDomain(domain);
   const aligned = (value) => value === domain
-    || value.endsWith(`.${domain}`)
-    || domain.endsWith(`.${value}`)
-    || (orgDomain(value) && orgDomain(value) === orgDomain(domain));
+    || (fromOrg !== null && orgDomain(value) === fromOrg);
   const dkim = auth.match(/dkim=pass[^;]*/g) || [];
   for (const clause of dkim) {
     // header.i may carry a full identity (user@domain); align on the domain.
@@ -657,8 +659,11 @@ async function reconcilePendingDrafts(now = new Date()) {
         try {
           const { draftReplyForEmail } = require('./email-actions');
           const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();
-          await draftReplyForEmail(row, { customer, tone: row.classification === 'complaint' ? 'complaint' : 'service' });
-          counts.redrafted += 1;
+          // Returns a real draft id only when a Gmail draft was created —
+          // null covers gate-off and internally handled failures; counting
+          // those would report recoveries that never happened.
+          const draftId = await draftReplyForEmail(row, { customer, tone: row.classification === 'complaint' ? 'complaint' : 'service' });
+          if (draftId) counts.redrafted += 1;
         } catch (e) {
           logger.warn(`[inbox-hygiene] released-claim redraft failed (email ${row.id}): ${e.message}`);
         }

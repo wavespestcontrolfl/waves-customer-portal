@@ -478,3 +478,27 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     expect(patches).toEqual(['pending']);
   });
 });
+
+describe('hasAlignedAuth organizational-domain alignment', () => {
+  const { hasAlignedAuth } = require('../services/email/inbox-hygiene');
+
+  test('sibling subdomains of one org domain align (DMARC relaxed)', () => {
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=mail.customer.com', 'news.customer.com')).toBe(true);
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=customer.com', 'mail.customer.com')).toBe(true);
+  });
+
+  test('unrelated registrable domains never align', () => {
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=attacker.com', 'customer.com')).toBe(false);
+  });
+
+  test('multi-label public suffixes do not create false alignment', () => {
+    // Naive last-two-labels would reduce both to co.uk and "align" them.
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=attacker.co.uk', 'customer.co.uk')).toBe(false);
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=mail.customer.co.uk', 'customer.co.uk')).toBe(true);
+  });
+
+  test('private-registry suffixes (github.io) are org boundaries too', () => {
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=attacker.github.io', 'victim.github.io')).toBe(false);
+    expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=victim.github.io', 'victim.github.io')).toBe(true);
+  });
+});
