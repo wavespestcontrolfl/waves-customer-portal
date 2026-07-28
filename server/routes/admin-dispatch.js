@@ -21,7 +21,7 @@ const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-d
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients, calculateAppliedNutrients } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, amountToPounds } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -889,12 +889,20 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   ]);
   if (!profile) return [];
 
-  const county = String(profile.county || '').trim();
   // Stamped visit address OUTRANKS the turf-profile municipality (matches
   // the plan engine): the 1:1 profile describes the primary home, so a visit
   // stamped at a rental in another city must use the treated property's
-  // ordinances, not the profile's.
-  const city = String(svc.service_address_city || profile.municipality || svc.city || '').trim();
+  // ordinances, not the profile's — and when the stamped city diverges, the
+  // profile county is dropped too (the rental's county is unknown; keeping
+  // the primary home's county would OR its blackout onto the rental).
+  const stampedCity = String(svc.service_address_city || '').trim();
+  const profileCity = String(profile.municipality || '').trim();
+  const customerCity = String(svc.city || '').trim();
+  const stampedDiverges = !!stampedCity && [profileCity, customerCity]
+    .filter(Boolean)
+    .every((known) => known.toLowerCase() !== stampedCity.toLowerCase());
+  const county = stampedDiverges ? '' : String(profile.county || '').trim();
+  const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
 
   let ordinanceQuery = db('municipality_ordinances').where({ active: true });
@@ -3854,40 +3862,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const annualN = plan?.propertyGate?.annualN || null;
         const lawnSqft = Number(plan?.propertyGate?.lawnSqft || 0);
         const limit = Number(annualN?.limit);
-        if (Number.isFinite(limit) && limit > 0 && lawnSqft > 0 && Array.isArray(products) && products.length) {
+        // The catalog scan runs whenever products were submitted — the
+        // unquantified-unit detection must NOT hide behind the area/limit
+        // gate (an incomplete turf profile is exactly when quantification
+        // is unavailable and the gap most needs surfacing).
+        if (Array.isArray(products) && products.length) {
           const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
           const catalogRows = ids.length
-            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n', 'analysis_p', 'analysis_k')
+            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n')
             : [];
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
           const unquantifiedNProducts = [];
           for (const p of products) {
             const catalog = catalogById.get(String(p.productId));
-            if (!catalog) continue;
-            const applied = calculateAppliedNutrients({
-              product: catalog,
-              amount: p.totalAmount,
-              // Same normalization the persistence path uses: a "/gal" unit
-              // is a mix concentration whose total is concentrate amount —
-              // the raw unit would make calculateAppliedNutrients bail and
-              // silently drop the product from the projection.
-              amountUnit: baseQuantityUnit(p.amountUnit || p.rateUnit || null),
-              lawnSqft,
-            });
-            if (applied?.nAppliedPer1000) {
-              actualVisitN += applied.nAppliedPer1000;
-            } else if (!applied && Number(catalog.analysis_n || 0) > 0) {
+            if (!catalog || Number(catalog.analysis_n || 0) <= 0) continue;
+            // Same normalization the persistence path uses: a "/gal" unit is
+            // a mix concentration whose total is concentrate amount.
+            const pounds = amountToPounds(p.totalAmount, baseQuantityUnit(p.amountUnit || p.rateUnit || null));
+            if (pounds == null) {
               // Fluid-volume amounts can't convert to lb N without a per-
               // product density — the entire annual-N system (nutrient
               // ledger and plan projection share amountToPounds) excludes
               // them. Never SILENTLY: surface the gap as its own advisory
               // instead of inventing a density here.
               unquantifiedNProducts.push(catalog.name || 'nitrogen product');
+            } else if (lawnSqft > 0) {
+              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (lawnSqft / 1000);
             }
           }
-          const used = Number(annualN.used || 0);
-          if (actualVisitN > 0 && used + actualVisitN > limit) {
+          const used = Number(annualN?.used || 0);
+          if (Number.isFinite(limit) && limit > 0 && actualVisitN > 0 && used + actualVisitN > limit) {
             actualAnnualNBlocks.push({
               code: 'actual_annual_n_budget_exceeded',
               message: `Applied products add ${actualVisitN.toFixed(2)} lb N/1k (${(used + actualVisitN).toFixed(2)} of ${limit} lb N/1k for the year) — actuals exceed the annual N budget.`,
@@ -3896,7 +3901,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (unquantifiedNProducts.length) {
             actualAnnualNBlocks.push({
               code: 'unquantified_liquid_nitrogen',
-              message: `${[...new Set(unquantifiedNProducts)].join(', ')} was applied in a volume unit the nutrient ledger can't convert to lb N/1k — the annual-N projection excludes it; track it manually if the property is near its budget.`,
+              message: `${[...new Set(unquantifiedNProducts)].join(', ')} was applied in an amount the nutrient ledger can't convert to lb N/1k — the annual-N projection excludes it; track it manually if the property is near its budget.`,
             });
           }
         }

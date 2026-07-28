@@ -8557,10 +8557,17 @@ export function CompletionPanel({
   const [treatmentPlanSubstitutions, setTreatmentPlanSubstitutions] =
     useState([]);
   const [treatmentPlanError, setTreatmentPlanError] = useState("");
+  // Pending until the plan request settles — WaveGuard lawn completion waits
+  // on it so a fast/restored closeout can never POST before the compliance
+  // advisories had a chance to render.
+  const [treatmentPlanLoading, setTreatmentPlanLoading] = useState(false);
   const [protocolActions, setProtocolActions] = useState([]);
   const [protocolActionMeta, setProtocolActionMeta] = useState(null);
   const [protocolActionError, setProtocolActionError] = useState("");
   const [protocolActionsLoading, setProtocolActionsLoading] = useState(false);
+  // True only after a SUCCESSFUL load — an empty filtered result is a real
+  // "no product-backed actions" answer, distinct from unloaded/failed.
+  const [protocolActionsLoaded, setProtocolActionsLoaded] = useState(false);
   const [selectedProtocolActionLabels, setSelectedProtocolActionLabels] =
     useState([]);
   // label -> { scope, treatmentApplied } for completed actions, so the
@@ -9071,7 +9078,21 @@ export function CompletionPanel({
           .map((block) => block?.message)
           .filter(Boolean)
       : []),
+    // A failed plan fetch means the compliance advisories above CANNOT be
+    // computed — say so instead of rendering an empty (falsely clean) list.
+    ...(calibrationRequired && !isIncompleteVisit && treatmentPlanError
+      ? [
+          `WaveGuard plan unavailable (${treatmentPlanError}) — blackout/N-budget/protocol advisories can't be shown for this visit.`,
+        ]
+      : []),
   ];
+  // WaveGuard lawn completion waits for the plan request to settle so a fast
+  // or restored closeout can never POST before the advisories had a chance to
+  // render (the server records conditions now instead of rejecting them).
+  const closeoutAdvisoriesPending =
+    calibrationRequired &&
+    !isIncompleteVisit &&
+    (treatmentPlanLoading || (isLawn && protocolActionsLoading));
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
@@ -9090,6 +9111,8 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const completionCtaLabel = submitting
     ? "Completing..."
+    : closeoutAdvisoriesPending
+      ? "Loading plan…"
     : protocolActualsCompletionBlocked
       ? !selectedProducts.length
         ? "Products Applied Required"
@@ -9185,6 +9208,7 @@ export function CompletionPanel({
       }
     }
     setProtocolActionsLoading(true);
+    setProtocolActionsLoaded(false);
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
       .then((data) => {
         if (cancelled) return;
@@ -9196,6 +9220,7 @@ export function CompletionPanel({
         // tab keeps the full row set.
         setProtocolActions(isLawn ? rows.filter((a) => a?.product?.id) : rows);
         setProtocolActionMeta(data || null);
+        setProtocolActionsLoaded(true);
       })
       .catch((err) => {
         if (!cancelled)
@@ -9223,6 +9248,7 @@ export function CompletionPanel({
     if (!calibrationRequired) return;
     let cancelled = false;
     setTreatmentPlanError("");
+    setTreatmentPlanLoading(true);
     // No equipment/calibration selection in the closeout any more (owner
     // directive 2026-07-29) — the plan endpoint auto-selects the assigned
     // rig server-side when one exists.
@@ -9289,6 +9315,9 @@ export function CompletionPanel({
       .catch((err) => {
         if (!cancelled)
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
+      })
+      .finally(() => {
+        if (!cancelled) setTreatmentPlanLoading(false);
       });
     return () => {
       cancelled = true;
@@ -10360,6 +10389,12 @@ export function CompletionPanel({
       alert("Hang on — finishing the AI draft. Try again in a moment.");
       return;
     }
+    // WaveGuard lawn: the compliance advisories come from the plan request —
+    // completing before it settles would record conditions the tech never saw.
+    if (closeoutAdvisoriesPending) {
+      alert("Hang on — loading the WaveGuard plan. Try again in a moment.");
+      return;
+    }
     // The turf-height flag drives the (optional) gauge-reading section on lawn
     // visits; don't submit until its state is loaded so a pre-load submit can't
     // silently drop a reading/photo. The flag is session-cached so this rarely waits.
@@ -10629,11 +10664,11 @@ export function CompletionPanel({
       ).filter(
         (label) =>
           !isLawn ||
-          !protocolActions.length ||
-          protocolActions.some(
-            (action) =>
-              (action.label || action.note || action.raw || "") === label,
-          ),
+          (protocolActionsLoaded &&
+            protocolActions.some(
+              (action) =>
+                (action.label || action.note || action.raw || "") === label,
+            )),
       );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
@@ -13196,6 +13231,7 @@ export function CompletionPanel({
               disabled={
                 submitting ||
                 generating ||
+                closeoutAdvisoriesPending ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
               }
@@ -13203,6 +13239,7 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
+                  closeoutAdvisoriesPending ||
                   treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked
                     ? 0.5
@@ -14942,6 +14979,7 @@ export function CompletionPanel({
             disabled={
               submitting ||
               generating ||
+              closeoutAdvisoriesPending ||
               treeShrubCompletionBlocked ||
               protocolActualsCompletionBlocked
             }
@@ -14954,6 +14992,7 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
+                closeoutAdvisoriesPending ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
                   ? 0.6

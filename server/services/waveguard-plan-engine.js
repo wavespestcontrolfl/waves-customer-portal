@@ -983,13 +983,22 @@ function selectProtocolVisit(profile, serviceDate) {
 
 async function getApplicableOrdinances(knex, profile, cities = {}) {
   if (!profile) return [];
-  const county = String(profile.county || '').trim();
   // Same city resolution the completion path uses (actualProductBlackoutBlocks):
   // the STAMPED visit address outranks the turf-profile municipality — the 1:1
   // profile describes the primary home, so a visit stamped at a rental in
   // another city must evaluate the treated property's ordinances. Customer
-  // city is the last resort.
-  const city = String(cities.stampedCity || profile.municipality || cities.customerCity || '').trim();
+  // city is the last resort. When the stamped city DIVERGES from the profile's
+  // context, the profile county is dropped too — the query ORs county and city
+  // jurisdictions, and the rental's county is unknown, so keeping the primary
+  // home's county would bolt its blackout onto the rental's rules.
+  const stamped = String(cities.stampedCity || '').trim();
+  const profileCity = String(profile.municipality || '').trim();
+  const customerCity = String(cities.customerCity || '').trim();
+  const stampedDiverges = !!stamped && [profileCity, customerCity]
+    .filter(Boolean)
+    .every((known) => known.toLowerCase() !== stamped.toLowerCase());
+  const county = stampedDiverges ? '' : String(profile.county || '').trim();
+  const city = stamped || profileCity || customerCity;
   if (!county && !city) return [];
 
   let query = knex('municipality_ordinances').where({ active: true });
