@@ -116,7 +116,12 @@ function findingFacts(typedReport = {}) {
         : item.value),
     }))
     .filter((item) => item.label && item.value)
-    .slice(0, 8);
+    // WDO and other long typed schemas carry their core inspection fields
+    // (live activity, evidence, damage, treatment) well past slot 8 — a
+    // tight positional cap fed the narrative only administrative metadata
+    // (codex P2 #3007 r4). 24 covers every current schema with prompt room
+    // to spare.
+    .slice(0, 24);
 }
 
 // Words only — the raw score/maxScore NEVER enter the facts. The customer-
@@ -774,15 +779,64 @@ const DOMAIN_TERMS = [
 // action into completed work (codex P1 #3007 r2). Negative-valued findings
 // are excluded from the domain corpus entirely.
 const NEGATIVE_FINDING_VALUE_RE = /^(?:no\b|none\b|not\b|0(?:\.0*)?$|n\/a\b|false\b)/i;
+const NEGATED_SENTENCE_RE = /\b(no|not|none|never|without)\b/i;
+
+// Prose blocks contribute only their AFFIRMATIVE sentences to the corpus —
+// "No live roach activity was observed" must not ground a positive "live
+// roaches were observed" claim (codex P1 #3007 r4).
+function affirmativeSentences(block) {
+  return String(block || '')
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => sentence.trim() && !NEGATED_SENTENCE_RE.test(sentence))
+    .join(' ');
+}
 
 function domainCorpus(facts) {
   const positiveFacts = {
     ...facts,
+    recap: affirmativeSentences(facts.recap),
+    todaysResult: facts.todaysResult
+      ? {
+        headline: affirmativeSentences(facts.todaysResult.headline),
+        body: affirmativeSentences(facts.todaysResult.body),
+        nextStep: affirmativeSentences(facts.todaysResult.nextStep),
+      }
+      : null,
     findings: (facts.findings || []).filter(
       (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
     ),
   };
   return ` ${JSON.stringify(positiveFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+}
+
+// Explicit zero-state contradiction guard (codex P1 #3007 r4): the service
+// LABEL legitimately grounds the pest family ("Cockroach Control Service"),
+// so corpus filtering alone can't stop "live roaches were observed today"
+// on a report whose ratified copy says none were. Any NEGATED ratified
+// sentence naming a pest term rejects model sentences that assert an
+// observation of that same pest positively.
+const OBSERVATION_RE = /\b(observed|noted|seen|found|documented|present|active)\b/i;
+
+function contradictedZeroStates(text, facts) {
+  const problems = [];
+  const pestTerms = DOMAIN_TERMS.filter((term) => term.kind === 'pest' || term.kind === 'species');
+  const ratified = [facts.todaysResult?.headline, facts.todaysResult?.body, facts.recap]
+    .flatMap((block) => String(block || '').split(/(?<=[.!?])\s+/))
+    .filter((sentence) => NEGATED_SENTENCE_RE.test(sentence));
+  if (!ratified.length) return problems;
+  const zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
+  if (!zeroStatePests.length) return problems;
+  for (const sentence of String(text).split(/(?<=[.!?])\s+/)) {
+    if (NEGATED_SENTENCE_RE.test(sentence)) continue;
+    if (!OBSERVATION_RE.test(sentence)) continue;
+    for (const term of zeroStatePests) {
+      if (term.out.test(sentence)) {
+        problems.push('contradicted_zero_state');
+        break;
+      }
+    }
+  }
+  return problems;
 }
 
 function ungroundedDomainTerms(text, facts) {
@@ -849,7 +903,13 @@ function ungroundedClaims(rawText, facts) {
   const problems = [];
   const text = String(rawText || '');
   const allowed = groundedNumberSet(facts);
-  for (const token of numberTokens(text)) {
+  // Word-form numbers hit the GLOBAL check too (codex P1 #3007 r4):
+  // "follow up in twenty days" carries no raw digit, but 20 must still be
+  // grounded. The bare word "one" is exempt when no digit 1 was written —
+  // harmless prose ("one of the traps") is not a numeric claim.
+  const rawDigits = new Set(numberTokens(text));
+  for (const token of numberTokens(normalizeWordNumbers(text))) {
+    if (token === '1' && !rawDigits.has('1')) continue;
     const grounded = allowed.has(token)
       || allowed.has(String(Number(token)))
       || token.split(/[:.,]/).every((part) => allowed.has(part) || allowed.has(String(Number(part))));
@@ -860,6 +920,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...nextVisitProblems(text, facts));
   problems.push(...ungroundedDomainTerms(text, facts));
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
+  problems.push(...contradictedZeroStates(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month
@@ -907,7 +968,11 @@ function echoesWithheldName(text, applications = []) {
 // the pieces an accepted narrative must carry verbatim (appended when it
 // doesn't); dedup by exact string so body-embedded next-step copy appends
 // once.
-const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off|leave|allow)\b/i;
+// Broad by design (codex P1 #3007 r4): expectation/monitoring copy
+// ("Continue monitoring and contact us if activity returns") is as
+// mandatory as an imperative — an over-wide match only appends a ratified
+// sentence the narrative skipped, never loses one.
+const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off|leave|allow|continue|contact|monitor(?:ing)?|watch|expect(?:ed)?|call|reach out|schedule|recommend(?:ed)?|follow[-\s]?up|return(?:s)?)\b/i;
 
 function mandatoryCareCopy(todaysResult) {
   const sentences = [];

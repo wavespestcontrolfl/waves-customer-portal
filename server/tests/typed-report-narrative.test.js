@@ -120,6 +120,61 @@ test('typed count findings validate their own noun (codex r2: palms serviced)', 
   expect(ungroundedClaims('Twenty-one palms were serviced today.', palmFacts)).toContain('uncorroborated_count:21 palms');
 });
 
+test('zero-state polarity: negated ratified copy rejects positive observation claims', () => {
+  const clearedFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Cockroach Treatment',
+      todaysResult: { headline: 'No live roach activity was observed today.', body: 'We completed the scheduled service and monitoring today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'German cockroaches', value: 'german' }],
+    },
+    activity: null,
+  }));
+  // the ratified zero-state can't be flipped into a positive sighting —
+  // even though the service label grounds the roach family term
+  expect(ungroundedClaims('Live roaches were observed in the kitchen today.', clearedFacts))
+    .toContain('contradicted_zero_state');
+  // negated model copy restating the zero-state stays clean of this guard
+  expect(ungroundedClaims('No live roach activity was observed today.', clearedFacts)
+    .filter((p) => p === 'contradicted_zero_state')).toEqual([]);
+});
+
+test('word-form intervals hit the global number check', () => {
+  const facts = groundingFacts(roachInput());
+  // the ratified window is 10–14 days; "twenty days" has no raw digit but
+  // must still be grounded (codex P1 r4)
+  expect(ungroundedClaims('A follow-up in twenty days is recommended.', facts)).toContain('ungrounded_number:20');
+  expect(ungroundedClaims('A follow-up in fourteen days is recommended.', facts)).toEqual([]);
+});
+
+test('mandatory care copy covers expectation/monitoring sentences', async () => {
+  const zeroStateInput = roachInput({
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: {
+        headline: 'No bed bug activity was found today.',
+        body: 'Continue monitoring and contact us if activity returns.',
+        nextStep: null,
+      },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'Bed bugs', value: 'bed_bug' }],
+    },
+    activity: null,
+    photos: [],
+  });
+  const clean = 'Your bed bug follow-up visit is complete, and no bed bug activity was found during today’s inspection of the treated areas. We will keep supporting you between visits, and your next visit is scheduled for Monday, August 3, arriving 3–5 PM.';
+  const accepted = await applyTypedReportNarrative(zeroStateInput, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
+  });
+  expect(accepted).toContain('Continue monitoring and contact us if activity returns.');
+});
+
+test('long typed schemas keep their late findings (WDO shape)', () => {
+  const findings = Array.from({ length: 12 }, (_, i) => ({
+    fieldKey: `f${i}`, customerLabel: `Field ${i}`, customerValueLabel: `Value ${i}`, value: `v${i}`,
+  }));
+  const facts = groundingFacts(roachInput({ typedReport: { reportTypeLabel: 'WDO Inspection', todaysResult: null, findings } }));
+  expect(facts.findings).toHaveLength(12);
+});
+
 test('species qualifiers ground individually — the family term cannot launder a swap', () => {
   const facts = groundingFacts(roachInput()); // records German cockroaches
   expect(ungroundedClaims('German cockroaches were noted in the kitchen.', facts)).toEqual([]);
