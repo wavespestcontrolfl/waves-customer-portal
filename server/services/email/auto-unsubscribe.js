@@ -127,6 +127,9 @@ async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
       pinned = results[0];
     }
     const res = await requestPinned(current, options, pinned.address, pinned.family);
+    // Callers that need one-click semantics must know whether the FINAL
+    // response answered the original POST or a downgraded GET.
+    res.finalMethod = options.method || 'GET';
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get('location');
       if (!location) return res;
@@ -229,8 +232,10 @@ async function autoUnsubscribe(email) {
             },
             body: 'List-Unsubscribe=One-Click',
           });
-          // Only an RFC 8058 one-click 2xx is a CONFIRMED unsubscribe.
-          confirmed = res.ok;
+          // Only an RFC 8058 one-click 2xx that was STILL a POST at the
+          // final hop confirms — a 301/302/303 downgrade to GET may have
+          // merely loaded a preference page.
+          confirmed = res.ok && res.finalMethod === 'POST';
         }
         if (!res || !res.ok) {
           // A 2xx GET may just be a preference page — best-effort ATTEMPT,

@@ -428,14 +428,21 @@ router.post('/message/:id/reclassify', async (req, res) => {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
 
-    const wasQuarantined = /^spam_(quarantined|quarantine_ambiguous|trashing)/.test(email.auto_action || '');
+    // An in-flight trash claim cannot be cancelled — the sweep may already
+    // be inside trashMessage, and a label restore neither untrashes nor
+    // reliably races it. The claim resolves in seconds; retry then.
+    if ((email.auto_action || '') === 'spam_trashing') {
+      return res.status(409).json({ error: 'Message is mid-trash (quarantine sweep) — retry in a moment' });
+    }
+    const wasQuarantined = /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '');
 
-    // Classify FIRST — if the classifier is down (null result) the
-    // quarantine stays exactly as it was; nothing is restored on a failed
-    // reclassification.
+    // Classify FIRST — if the classifier is down (null result) or returns an
+    // off-vocabulary category, the quarantine stays exactly as it was;
+    // nothing is restored on an unrecognized verdict.
+    const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
     const classification = await classifyEmail(email);
-    if (!classification || !classification.category) {
-      return res.status(502).json({ error: 'Classifier unavailable — quarantine state unchanged' });
+    if (!classification || !EMAIL_CATEGORIES.includes(classification.category)) {
+      return res.status(502).json({ error: 'Classifier unavailable or off-vocabulary — quarantine state unchanged' });
     }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
