@@ -188,6 +188,9 @@ async function upsertEmail(parsed) {
     snippet: parsed.snippet,
     has_attachments: parsed.has_attachments,
     label_ids: JSON.stringify(parsed.label_ids),
+    // parseMessage has always extracted List-Unsubscribe; persisting it is
+    // what lets autoUnsubscribe's RFC 8058 one-click method actually fire.
+    list_unsubscribe: parsed.list_unsubscribe || null,
     received_at: parsed.received_at,
     is_read: parsed.is_read,
     is_starred: parsed.is_starred,

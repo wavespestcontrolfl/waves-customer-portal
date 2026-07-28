@@ -281,6 +281,84 @@ async function isConnected() {
   return !!(state?.refresh_token);
 }
 
+/**
+ * Create (or find) a user label and return its id. Gmail's modify API takes
+ * label IDs, not names, for custom labels — system labels (INBOX, SPAM,
+ * TRASH, IMPORTANT, STARRED) pass through by name. Cached per process; the
+ * create call races safely (a concurrent create returns 409 and the
+ * follow-up list finds the winner's label).
+ */
+const labelIdCache = new Map();
+async function ensureLabel(name) {
+  if (labelIdCache.has(name)) return labelIdCache.get(name);
+  const gmail = await getGmail();
+  const list = await gmail.users.labels.list({ userId: 'me' });
+  const existing = (list.data.labels || []).find((l) => l.name === name);
+  if (existing) {
+    labelIdCache.set(name, existing.id);
+    return existing.id;
+  }
+  try {
+    const created = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
+    });
+    labelIdCache.set(name, created.data.id);
+    return created.data.id;
+  } catch (e) {
+    const retry = await gmail.users.labels.list({ userId: 'me' });
+    const won = (retry.data.labels || []).find((l) => l.name === name);
+    if (won) {
+      labelIdCache.set(name, won.id);
+      return won.id;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Create a reply DRAFT in the given thread. Never sends — the draft sits in
+ * the thread for the operator's one-click review (owner rule: drafts never
+ * auto-send). Same header discipline as sendMessage.
+ */
+async function createDraft(to, subject, body, threadId = null, inReplyTo = null) {
+  const gmail = await getGmail();
+  const fromEmail = sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  const safeTo = sanitizeHeaderValue(to);
+  const safeSubject = encodeHeaderUtf8(subject);
+  const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
+  if (!safeTo) throw new Error('Recipient (to) is required');
+
+  const headers = [
+    `From: Waves Pest Control <${fromEmail}>`,
+    `To: ${safeTo}`,
+    `Subject: ${safeSubject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+  ];
+  if (safeInReplyTo) {
+    headers.push(`In-Reply-To: ${safeInReplyTo}`);
+    headers.push(`References: ${safeInReplyTo}`);
+  }
+  const raw = Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
+  const requestBody = { message: { raw } };
+  if (threadId) requestBody.message.threadId = threadId;
+  const res = await gmail.users.drafts.create({ userId: 'me', requestBody });
+  return res.data;
+}
+
+/** Thread metadata (per-message labelIds + headers) for reply detection. */
+async function getThread(threadId) {
+  const gmail = await getGmail();
+  const res = await gmail.users.threads.get({
+    userId: 'me',
+    id: threadId,
+    format: 'metadata',
+    metadataHeaders: ['From', 'Date'],
+  });
+  return res.data;
+}
+
 module.exports = {
   getAuthUrl,
   handleCallback,
@@ -290,6 +368,9 @@ module.exports = {
   getMessage,
   getAttachment,
   sendMessage,
+  createDraft,
+  ensureLabel,
+  getThread,
   modifyLabels,
   archiveMessage,
   trashMessage,

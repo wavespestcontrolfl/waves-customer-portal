@@ -231,20 +231,57 @@ async function executeAutoAction(email, classification) {
 }
 
 async function handleSpam(email) {
-  // 1. Trash in Gmail
-  try { await gmailClient.trashMessage(email.gmail_id); } catch (e) { /* non-critical */ }
+  const { isKnownSender, quarantineMessage } = require('./inbox-hygiene');
 
-  // 2. Block future emails from this sender
+  // 0. Known senders (customers, live leads, vendors, partners) are never a
+  // destructive target no matter what the classifier said — a misclassified
+  // customer email stays in the inbox, marked important.
+  const verdict = await isKnownSender(email.from_address);
+  if (verdict.known) {
+    try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
+    await db('emails').where({ id: email.id }).update({
+      auto_action: `spam_skipped_known_${verdict.kind}`,
+      updated_at: new Date(),
+    });
+    logger.info(`[email-actions] Spam verdict overridden — known ${verdict.kind} (email ${email.id})`);
+    return;
+  }
+
+  // 1. Legit bulk senders get an unsubscribe BEFORE quarantine: a real
+  // List-Unsubscribe header is an ESP-compliance signal, and unsubscribing
+  // stops the stream at the source. Nameless cold spam gets no unsubscribe —
+  // replying to true spammers confirms the address is live.
+  if (email.list_unsubscribe) {
+    try {
+      const { autoUnsubscribe } = require('./auto-unsubscribe');
+      await autoUnsubscribe(email);
+    } catch (e) {
+      logger.warn(`[email-actions] spam-path unsubscribe failed (email ${email.id}): ${e.message}`);
+    }
+  }
+
+  // 2. Quarantine instead of instant trash — 24h undo window, swept daily
+  // (inbox-hygiene). A misfire costs one label-click inside a day.
+  try {
+    await quarantineMessage(email);
+  } catch (e) {
+    // Quarantine needs the Gmail label API; if it fails, fall back to the
+    // pre-quarantine behavior rather than leaving spam in the inbox.
+    logger.warn(`[email-actions] quarantine failed, falling back to trash (email ${email.id}): ${e.message}`);
+    try { await gmailClient.trashMessage(email.gmail_id); } catch (e2) { /* non-critical */ }
+    await db('emails').where({ id: email.id }).update({
+      is_archived: true,
+      auto_action: 'spam_blocked',
+      updated_at: new Date(),
+    });
+  }
+
+  // 3. Block future emails from this sender (repeat mail routes straight to
+  // Trash via the sender filter — known junk needs no undo window).
   const { blockSpamSender } = require('./spam-blocker');
   await blockSpamSender(email);
 
-  // 3. Mark in DB
-  await db('emails').where({ id: email.id }).update({
-    is_archived: true,
-    auto_action: 'spam_blocked',
-    updated_at: new Date(),
-  });
-  logger.info(`[email-actions] Spam blocked (email ${email.id})`);
+  logger.info(`[email-actions] Spam quarantined + sender blocked (email ${email.id})`);
 }
 
 async function handleNewsletter(email) {
@@ -711,6 +748,55 @@ async function handleLeadInquiry(email, classification) {
   };
 }
 
+// ── Auto-draft replies (GATE_EMAIL_AUTO_DRAFTS, default OFF) ─────────────
+// Drafts a reply into the Gmail thread for customer requests/complaints so
+// the operator's review is one click on an already-written draft instead of
+// a from-scratch compose. NEVER sends (owner rule: drafts never auto-send).
+function emailAutoDraftsEnabled() {
+  const flag = process.env.GATE_EMAIL_AUTO_DRAFTS;
+  return flag === '1' || flag === 'true' || flag === 'on';
+}
+
+async function draftReplyForEmail(email, { customer = null, tone = 'service' } = {}) {
+  if (!emailAutoDraftsEnabled()) return null;
+  if (email.draft_gmail_id) return null; // re-classification must not mint a second draft
+  try {
+    const MODELS = require('../../config/models');
+    const { dispatchWithFallback } = require('../llm/call');
+    const firstName = (customer?.first_name || email.from_name || '').split(' ')[0] || 'there';
+    const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      text: [
+        'Draft a reply email from Waves Pest Control (a family-owned pest control and lawn care company in SW Florida) to the customer message below.',
+        `Greeting name: ${firstName}. Tone: warm, professional, concise (under 150 words). ${tone === 'complaint' ? 'This is a COMPLAINT — acknowledge specifically, apologize once without admitting fault beyond what the message states, and commit to a concrete next step.' : 'Answer what can be answered and offer a concrete next step.'}`,
+        'Never invent prices, dates, or promises. If the request needs information you do not have (a date, a price, an account detail), leave a [BRACKETED PLACEHOLDER] for the operator to fill in.',
+        'Output ONLY the reply body text — no subject line, no signature (the operator’s signature is appended automatically on send).',
+        '--- CUSTOMER MESSAGE ---',
+        `From: ${email.from_name || ''} <${email.from_address}>`,
+        `Subject: ${email.subject || ''}`,
+        String(email.body_text || email.snippet || '').slice(0, 4000),
+      ].join('\n'),
+      jsonMode: false,
+      maxTokens: 400,
+    });
+    if (!result.ok || !result.text) return null;
+    const htmlBody = String(result.text).trim().split(/\n{2,}/)
+      .map((p) => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
+    const draft = await gmailClient.createDraft(
+      email.from_address,
+      /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`,
+      htmlBody,
+      email.gmail_thread_id,
+      null
+    );
+    await db('emails').where({ id: email.id }).update({ draft_gmail_id: draft?.id || null, updated_at: new Date() });
+    logger.info(`[email-actions] Reply draft created for email ${email.id} (draft ${draft?.id})`);
+    return draft?.id || null;
+  } catch (e) {
+    logger.warn(`[email-actions] auto-draft failed (email ${email.id}): ${e.message}`);
+    return null;
+  }
+}
+
 async function handleCustomerRequest(email, classification) {
   let customer = await db('customers').where('email', email.from_address).first();
 
@@ -730,7 +816,10 @@ async function handleCustomerRequest(email, classification) {
       auto_action: 'matched_to_customer',
       updated_at: new Date(),
     });
+    // Known-customer conversation mail surfaces as important in Gmail.
+    try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
   }
+  await draftReplyForEmail(email, { customer, tone: 'service' });
 }
 
 async function handleComplaint(email, classification) {
@@ -752,6 +841,9 @@ async function handleComplaint(email, classification) {
     auto_action: 'complaint_flagged',
     updated_at: new Date(),
   });
+  // Complaints are always important in Gmail, matched or not.
+  try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT', 'STARRED'], []); } catch (e) { /* non-critical */ }
+  await draftReplyForEmail(email, { customer, tone: 'complaint' });
 
   try { await gmailClient.modifyLabels(email.gmail_id, ['STARRED'], []); } catch (e) { /* non-critical */ }
 
@@ -800,4 +892,8 @@ module.exports = {
   emailQuoteDraftsEnabled,
   parseExtractedAddress,
   maybeDraftEstimateFromEmailLead,
+  // Exported for unit testing the hands-off upgrade
+  handleSpam,
+  emailAutoDraftsEnabled,
+  draftReplyForEmail,
 };

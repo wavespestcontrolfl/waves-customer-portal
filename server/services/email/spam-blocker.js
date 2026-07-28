@@ -71,6 +71,12 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
   'twilio.com',
   'namecheap.com',
   'anthropic.com',
+  // Business-critical partners: the liability insurance broker and the
+  // marina whose COI requirement gates on-site work (2026-07-28 — the
+  // renewal thread was buried in a 1,900-item inbox while the policy
+  // lapsed; these can never be classified into a destructive action).
+  'flhins.com',
+  'rdmarina.com',
 ]);
 
 function normalizeAddress(value) {
@@ -125,6 +131,14 @@ async function blockSpamSender(email) {
   // Don't block customer emails
   const isCustomer = await db('customers').where('email', fromAddress).first();
   if (isCustomer) return;
+
+  // Don't block live leads either — a prospect whose first email tripped
+  // the classifier must stay reachable while the lead is open.
+  const isLead = await db('leads')
+    .where('email', fromAddress)
+    .whereNull('deleted_at')
+    .first();
+  if (isLead) return;
 
   // Check if already blocked
   const existingQuery = db('blocked_email_senders').where('email_address', fromAddress);

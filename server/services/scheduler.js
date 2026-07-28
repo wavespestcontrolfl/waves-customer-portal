@@ -2428,6 +2428,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
+  // Runs before the 7:30 digest so the digest reports what actually happened.
+  // =========================================================================
+  cron.schedule('50 6 * * *', async () => {
+    try {
+      const hygiene = require('./email/inbox-hygiene');
+      const swept = await hygiene.sweepQuarantine();
+      const rescued = await hygiene.rescueSpamFolder();
+      logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed, ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer)`);
+    } catch (err) {
+      logger.error(`[inbox-hygiene] Cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:30 AM — Morning email digest notification
   // =========================================================================
   cron.schedule('30 7 * * *', async () => {
@@ -2462,16 +2477,35 @@ function initScheduledJobs() {
           ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
           : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
       }
-      if (spam > 0) parts.push(`${spam} spam blocked`);
+      if (spam > 0) parts.push(`${spam} spam quarantined`);
+      const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
+      if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
+      const drafted = emails.filter(e => e.draft_gmail_id).length;
+      if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
+
+      // Follow-up nudges: inbound conversation mail nobody has answered.
+      // Failure here must not kill the digest \u2014 nudges degrade to absent.
+      let nudgeLines = '';
+      try {
+        const { collectUnansweredNudges } = require('./email/inbox-hygiene');
+        const nudges = await collectUnansweredNudges();
+        if (nudges.length) {
+          nudgeLines = ` Awaiting your reply: ${nudges
+            .map((n) => `${n.from_name || n.from_address} ("${(n.subject || '(no subject)').slice(0, 40)}")`)
+            .join('; ')}.`;
+        }
+      } catch (e) {
+        logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
+      }
 
       await db('notifications').insert({
         recipient_type: 'admin',
         category: 'email_digest',
         title: 'Morning Email Digest',
-        body: `${emails.length} emails overnight. ${parts.join(', ')}. Check /admin/email for details.`,
+        body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
         icon: '\uD83D\uDCE7',
         link: '/admin/email',
-        metadata: JSON.stringify({ severity: parseInt(unread?.c || 0) > 10 ? 'high' : 'low' }),
+        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines) ? 'high' : 'low' }),
         created_at: new Date(),
       }).catch(() => {});
 
