@@ -7704,7 +7704,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings.
+3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings. ONE exception: tech-confirmed LAWN ASSESSMENT scores supplied in GROUNDING CONTEXT are verified findings for this visit — you may (and should) reference them and their deltas even when the notes do not repeat them.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only.
 
@@ -7966,7 +7966,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       && !areas.length && !actions.length && !obs.length && !recs.length
       && !concernText.length
       && ratingNum === null;
-    if (assessmentWasOnlyInput && !contextSignals.hasLawnAssessment) {
+    if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
         code: 'lawn_assessment_grounding_unavailable',
@@ -8002,6 +8002,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
 
     const generated = await generateReportCopyWithFallback({ systemPrompt, userMessage: fullUserMessage });
     if (!generated.ok) {
+      // Assessment-only requests carry no structured facts the deterministic
+      // fallback can echo — generic completed-service prose without the
+      // scores must not become this visit's report. Fail retryable instead.
+      if (assessmentWasOnlyInput) {
+        logger.warn('[generate-report] both AI providers missed on an assessment-only request; refusing deterministic fallback', {
+          failures: generated.failures,
+        });
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
       const report = buildDeterministicReportCopy({
         serviceType: groundingServiceType,
         areas,
