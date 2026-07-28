@@ -428,8 +428,17 @@ async function autoDraftFlagship() {
   // generation once on incomplete coverage; then re-run the preflight on
   // the ACTUAL lineup and skip the week (fail closed) if it no longer
   // holds. Alternates are recomputed against the actual lineup below.
-  const draftedIdSet = (g) => new Set((g?.draft?.events || []).map((e) => String(e.eventId)));
-  let actualLineup = lineupEvents.filter((ev) => draftedIdSet(generated).has(String(ev.id)));
+  // Build the actual lineup from ALL scored events keyed by the drafted
+  // ids — safeEventIds may include refilled alternates that are not in
+  // lineupEvents, and deriving from lineupEvents alone would treat every
+  // successfully-generated replacement as missing.
+  const lineupFromDraft = (g) => {
+    const drafted = new Set((g?.draft?.events || []).map((e) => String(e.eventId)));
+    return safeEventIds.filter((id) => drafted.has(String(id)))
+      .map((id) => byId.get(id))
+      .filter(Boolean);
+  };
+  let actualLineup = lineupFromDraft(generated);
   if (actualLineup.length !== safeEventIds.length) {
     logger.warn(`[newsletter-autopilot] draft covered ${actualLineup.length}/${safeEventIds.length} locked events — regenerating once`);
     const retry = await createNewsletterDraft({
@@ -441,8 +450,16 @@ async function autoDraftFlagship() {
       issueReference: defaultTargetSendAt(weekOf),
       persist: false,
     });
-    const retryLineup = lineupEvents.filter((ev) => draftedIdSet(retry).has(String(ev.id)));
-    if (retryLineup.length > actualLineup.length) {
+    const retryLineup = lineupFromDraft(retry);
+    // Prefer the retry on strictly better coverage — or on EQUAL coverage
+    // when the retry's lineup passes the quality contract and the first
+    // draft's does not (cardinality alone would discard a passing retry
+    // and durably skip the week).
+    const preferRetry = retryLineup.length > actualLineup.length
+      || (retryLineup.length === actualLineup.length
+        && !preflightDigest(actualLineup, reqs).pass
+        && preflightDigest(retryLineup, reqs).pass);
+    if (preferRetry) {
       generated = retry;
       actualLineup = retryLineup;
     }

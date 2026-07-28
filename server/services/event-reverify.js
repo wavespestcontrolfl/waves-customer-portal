@@ -193,8 +193,12 @@ function pinnedGet(urlObj, address, family, { timeoutMs = FETCH_TIMEOUT_MS, maxB
         reject(err);
       };
       res.on('data', (chunk) => {
+        // Keep the PARTIAL chunk up to the cap — dropping a whole
+        // boundary-crossing chunk could discard the very bytes carrying
+        // the cancellation evidence and pass the event fail-open.
+        const room = maxBytes - total;
+        if (room > 0) chunks.push(chunk.length <= room ? chunk : chunk.slice(0, room));
         total += chunk.length;
-        if (total <= maxBytes) chunks.push(chunk);
         if (total >= maxBytes && !capped) {
           capped = true;
           req.destroy();
