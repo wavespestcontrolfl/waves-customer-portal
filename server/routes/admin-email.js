@@ -451,7 +451,10 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // quarantine intact for a retry rather than orphaning the message.
     if (wasQuarantined && classification.category !== 'spam') {
       const { cancelQuarantine } = require('../services/email/inbox-hygiene');
-      await cancelQuarantine(email);
+      // marketing_newsletter's own handler already archived the message —
+      // restoring INBOX would undo the new category's intended state, so
+      // only the quarantine label + sweep stamp are cleared for it.
+      await cancelQuarantine(email, { restoreInbox: classification.category !== 'marketing_newsletter' });
     }
 
     logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);

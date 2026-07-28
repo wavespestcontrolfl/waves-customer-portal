@@ -180,6 +180,24 @@ async function autoUnsubscribe(email) {
     logger.info(`[unsubscribe] Skipped: attempt already recorded (email ${email.id})`);
     return { method: 'none', confirmed: false, note: 'already attempted' };
   }
+  // The claim row lands BEFORE any external request — a crash mid-request
+  // leaves 'claimed', which the check above treats as attempted, so stale
+  // newsletter recovery can never repeat a live unsubscribe request.
+  // (Concurrent callers are already serialized by handleNewsletter's
+  // newsletter_processing row claim — the only path into this function.)
+  const [claim] = await db('email_unsubscribe_log').insert({
+    email_id: email.id,
+    from_domain: fromDomain,
+    unsubscribe_method: 'pending',
+    unsubscribe_url: null,
+    status: 'claimed',
+  }).returning('id');
+  const claimId = claim?.id ?? claim;
+  const settleClaim = async (method, url, status) => {
+    await db('email_unsubscribe_log').where({ id: claimId })
+      .update({ unsubscribe_method: method, unsubscribe_url: url, status })
+      .catch(() => {});
+  };
 
   // Method 1: Check List-Unsubscribe header (stored in extracted_data or label_ids context)
   // We need the raw headers — check if they were stored
@@ -224,13 +242,7 @@ async function autoUnsubscribe(email) {
         // stop the newsletter path from trying the body-link fallback.
         if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
-        await db('email_unsubscribe_log').insert({
-          email_id: email.id,
-          from_domain: fromDomain,
-          unsubscribe_method: 'list_header_url',
-          unsubscribe_url: urlMatch[1],
-          status: 'attempted',
-        });
+        await settleClaim(confirmed ? 'list_header_one_click' : 'list_header_get', urlMatch[1], confirmed ? 'confirmed' : 'attempted');
         logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id}, confirmed=${confirmed})`);
         return { method: confirmed ? 'list_header_one_click' : 'list_header_get', confirmed, url: urlMatch[1] };
       } catch (err) {
@@ -259,13 +271,7 @@ async function autoUnsubscribe(email) {
       // must not be recorded (or digested) as success.
       if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
-      await db('email_unsubscribe_log').insert({
-        email_id: email.id,
-        from_domain: fromDomain,
-        unsubscribe_method: 'body_link',
-        unsubscribe_url: unsubUrl,
-        status: 'attempted',
-      });
+      await settleClaim('body_link', unsubUrl, 'attempted');
       logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id}) — attempt only`);
       return { method: 'body_link', confirmed: false, url: unsubUrl };
     } catch (err) {

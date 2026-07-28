@@ -107,17 +107,19 @@ async function quarantineMessage(email) {
  * window): restore the message to INBOX, drop the Quarantine label, clear
  * the sweep stamp so nothing can trash it later.
  */
-async function cancelQuarantine(email) {
+async function cancelQuarantine(email, { restoreInbox = true } = {}) {
   const labelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
   // The Gmail restore comes FIRST and failure PROPAGATES — clearing the DB
   // state while the message still sits under the Quarantine label would
   // orphan it outside the inbox with nothing guarding it. The caller (the
   // reclassify route) surfaces the error and the quarantine stays intact
-  // for a retry.
-  await gmailClient.modifyLabels(email.gmail_id, ['INBOX'], [labelId]);
+  // for a retry. restoreInbox=false keeps the message archived (used when
+  // the replacement classification's own handler already archived it —
+  // e.g. marketing_newsletter — and un-archiving would undo that outcome).
+  await gmailClient.modifyLabels(email.gmail_id, restoreInbox ? ['INBOX'] : [], [labelId]);
   await db('emails').where({ id: email.id }).update({
     quarantined_at: null,
-    is_archived: false,
+    ...(restoreInbox ? { is_archived: false } : {}),
     updated_at: new Date(),
   });
   // The cancellation marker only lands when no new handler already recorded
@@ -216,7 +218,11 @@ async function sweepQuarantine(now = new Date()) {
         try {
           await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], [quarantineLabelId]);
         } catch (e) {
-          logger.warn(`[inbox-hygiene] known-sender restore label failed (email ${row.id}): ${e.message}`);
+          // Restore failed — keep the retryable quarantine state; clearing
+          // it now would strand the message outside INBOX unguarded. The
+          // next sweep re-runs this branch.
+          logger.warn(`[inbox-hygiene] known-sender restore label failed (email ${row.id}) — quarantine retained for retry: ${e.message}`);
+          continue;
         }
         restored += await db('emails')
           .where({ id: row.id, auto_action: 'spam_quarantined' })
