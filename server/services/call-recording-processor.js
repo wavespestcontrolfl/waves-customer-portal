@@ -265,6 +265,27 @@ Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and prop
 Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
+// Literal keyword hints for the gpt-transcribe family (the gpt-4o-transcribe
+// generation rejects the parameter, hence the model guard below). These are
+// the proper nouns prod transcripts have actually misheard — service-area
+// place names ("Englewood" → "Inglewood") and product/brand terms.
+const DEFAULT_TRANSCRIPTION_KEYWORDS = [
+  'Waves Pest Control', 'WaveGuard', 'Sentricon', 'Termidor', 'WDO',
+  'Bradenton', 'Sarasota', 'Venice', 'Parrish', 'Palmetto', 'Ellenton',
+  'Englewood', 'North Port', 'Port Charlotte', 'Lakewood Ranch', 'Myakka',
+];
+const ENV_TRANSCRIPTION_KEYWORDS = String(process.env.OPENAI_TRANSCRIPTION_KEYWORDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function transcriptionKeywords() {
+  return ENV_TRANSCRIPTION_KEYWORDS.length ? ENV_TRANSCRIPTION_KEYWORDS : DEFAULT_TRANSCRIPTION_KEYWORDS;
+}
+
+function modelSupportsKeywordHints(model) {
+  const m = String(model || '');
+  return m === 'gpt-transcribe' || m.startsWith('gpt-transcribe-')
+    || m === 'gpt-live-transcribe' || m.startsWith('gpt-live-transcribe-');
+}
 // Default tracks the newest stable Flash: Google retired gemini-2.5-flash
 // (rolling 404 brown-outs starting 2026-07-09), so a dead default here means
 // the fallback transcriber fails exactly when OpenAI needs it.
@@ -2821,7 +2842,33 @@ function providerTimeoutSignal(kind) {
   return AbortSignal.timeout(PROVIDER_FETCH_TIMEOUTS_MS[kind] || PROVIDER_FETCH_TIMEOUTS_MS.extraction);
 }
 
-async function downloadRecording(mp3Url) {
+// Twilio's recording-status webhook fires before the MP3 is reliably
+// fetchable from their CDN — an early authenticated download can 404 (handled
+// by the !res.ok throw) or, worse, return a truncated 200 whose partial audio
+// transcribes into a silently incomplete transcript that gets marked
+// processed forever. Prod recordings run ~7.8KB/s (64kbps mp3); a buffer far
+// below that floor for the recording's KNOWN duration is a partial read, not
+// a short call. The floor is deliberately loose (≈40% of the observed rate)
+// so a codec/bitrate change degrades to a no-op rather than false rejects.
+const MIN_AUDIO_BYTES_PER_SEC = Number(process.env.CALL_PROC_MIN_AUDIO_BYTES_PER_SEC) || 3000;
+const RECORDING_NOT_READY = 'RECORDING_NOT_READY';
+
+function verifyRecordingBuffer(buffer, expectedSeconds, contentLength) {
+  const bytes = buffer ? buffer.length : 0;
+  const declared = Number(contentLength);
+  if (Number.isFinite(declared) && declared > 0 && bytes < declared) {
+    return { ok: false, reason: 'short_read', bytes, declared };
+  }
+  const seconds = Number(expectedSeconds);
+  // Sub-3s recordings are legitimately tiny; the floor only means anything
+  // when the duration is known and non-trivial.
+  if (Number.isFinite(seconds) && seconds >= 3 && bytes < seconds * MIN_AUDIO_BYTES_PER_SEC) {
+    return { ok: false, reason: 'below_duration_floor', bytes, expected_min: seconds * MIN_AUDIO_BYTES_PER_SEC };
+  }
+  return { ok: true, bytes };
+}
+
+async function downloadRecording(mp3Url, opts = {}) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
   ).toString('base64');
@@ -2831,8 +2878,24 @@ async function downloadRecording(mp3Url) {
     redirect: 'follow',
     signal: providerTimeoutSignal('recording_download'),
   });
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+  if (!res.ok) {
+    const err = new Error(`Download failed: ${res.status}`);
+    // 404 on a URL Twilio just announced = CDN propagation lag, not a
+    // missing recording — callers treat it as retryable, same as a
+    // truncated buffer below.
+    if (res.status === 404 && opts.expectedSeconds) err.code = RECORDING_NOT_READY;
+    throw err;
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (opts.expectedSeconds) {
+    const verdict = verifyRecordingBuffer(buffer, opts.expectedSeconds, res.headers.get('content-length'));
+    if (!verdict.ok) {
+      const err = new Error(`Recording not ready: ${verdict.reason} (${verdict.bytes} bytes for ${opts.expectedSeconds}s)`);
+      err.code = RECORDING_NOT_READY;
+      throw err;
+    }
+  }
+  return buffer;
 }
 
 function normalizeOpenAITranscript(data) {
@@ -3030,6 +3093,9 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
       form.append('chunking_strategy', 'auto');
     } else {
       form.append('prompt', prompt);
+      if (modelSupportsKeywordHints(model)) {
+        for (const keyword of transcriptionKeywords()) form.append('keywords[]', keyword);
+      }
     }
     form.append('temperature', '0');
 
@@ -3228,7 +3294,22 @@ async function transcribeRecording(mp3Url, opts = {}) {
 async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
   try {
     logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
-    const audioBuffer = await downloadRecording(mp3Url);
+    let audioBuffer;
+    try {
+      audioBuffer = await downloadRecording(mp3Url, {
+        expectedSeconds: recordingDurationSeconds(opts.call || {}) || null,
+      });
+    } catch (err) {
+      if (err.code === RECORDING_NOT_READY) {
+        // CDN propagation lag (404 or truncated buffer for the known
+        // duration). Transcribing partial audio would persist a silently
+        // incomplete transcript, so surface not-ready and let the caller
+        // leave the row claimable for the next sweep instead.
+        logger.warn(`[call-proc] Recording not ready yet, deferring: ${err.message}`);
+        return { transcription: null, provider: null, notReady: true };
+      }
+      throw err;
+    }
     bufferRef.buffer = audioBuffer;
     logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
 
@@ -4292,10 +4373,16 @@ const CallRecordingProcessor = {
     // fallback is also missing/implausible.
     let primaryTranscriptRejected = false;
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
+    // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
+    // buffer for the known duration) — release the claim untouched instead
+    // of stamping no_transcription, so the next timer/cron attempt retries
+    // against complete audio.
+    let recordingNotReady = false;
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
       transcription = result.transcription;
+      recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
       // blurted on the recorded line must become a non-event — scrubbed
@@ -4373,6 +4460,22 @@ const CallRecordingProcessor = {
         );
         logger.info(`[call-proc] ${result.provider} transcription complete: ${transcription.length} chars`);
       }
+    }
+
+    // Recording not ready (CDN propagation): release the claim with the row
+    // left in its pre-claim shape — no no_transcription stamp, no attempt
+    // counters — so the 10-minute fallback timer / 5-minute cron retries
+    // against complete audio. Skips the Twilio-builtin fallback on purpose:
+    // real audio a few minutes from now beats Twilio's rough transcript.
+    if (!transcription && recordingNotReady) {
+      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+        processing_status: null,
+        processing_token: null,
+        processing_started_at: null,
+        updated_at: new Date(),
+      });
+      logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet`);
+      return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
 
     // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL.
@@ -9036,6 +9139,9 @@ CallRecordingProcessor._test = {
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
   downloadRecording,
+  verifyRecordingBuffer,
+  modelSupportsKeywordHints,
+  transcriptionKeywords,
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,
