@@ -7955,6 +7955,24 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
 
+    // Scores-only requests live or die by the assessment grounding: when the
+    // validated assessment was the ONLY substantive input and the grounding
+    // load then failed (or resolved to retake-pending), there is nothing real
+    // to write from — reject instead of returning generic copy the closeout
+    // would cache as this visit's report.
+    const assessmentWasOnlyInput = hasValidLawnAssessment
+      && !(serviceNotes || '').trim()
+      && !productsText.length
+      && !areas.length && !actions.length && !obs.length && !recs.length
+      && !concernText.length
+      && ratingNum === null;
+    if (assessmentWasOnlyInput && !contextSignals.hasLawnAssessment) {
+      return res.status(503).json({
+        error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
+        code: 'lawn_assessment_grounding_unavailable',
+      });
+    }
+
     // F2 (universal one-time services, ratified Q13): opt-in windowed comms
     // context on the recurring report draft. Rides the SAME grounding
     // authorization — an unauthorized caller degrades to a notes-only draft

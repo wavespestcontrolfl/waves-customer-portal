@@ -159,6 +159,23 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
         { customer_id: customerId, service_id: scheduledServiceId },
         knex,
       );
+      if (today) {
+        // The fallback runs when the client couldn't report its state (failed
+        // lookup / legacy caller) — so check for a retake HERE: a newer
+        // UNCONFIRMED row on the same visit supersedes the confirmed one, and
+        // presenting the old scores as this visit's result would resurrect
+        // exactly what the retake discarded.
+        const newerUnconfirmed = await knex('lawn_assessments')
+          .where({
+            customer_id: customerId,
+            service_id: scheduledServiceId,
+            confirmed_by_tech: false,
+          })
+          .where('created_at', '>', today.created_at)
+          .first('id')
+          .catch(() => null);
+        if (newerUnconfirmed) today = null;
+      }
     }
     // The prior row is bounded by the linked VISIT's scheduled_date, not the
     // assessment run date — lawn_assessments.service_date is when the photos

@@ -6088,6 +6088,10 @@ function LawnAssessmentCompletionBlock({
   async function analyze() {
     if (!service?.customerId || photos.length === 0) return;
     setAnalyzing(true);
+    // Same suspension as the confirmation POST: the vision analysis can run
+    // long, and a report generated mid-analysis would carry an explicit-null
+    // assessment state for scores that are about to be reviewed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/assess", {
@@ -6117,6 +6121,10 @@ function LawnAssessmentCompletionBlock({
       setError(err.message || "Assessment failed");
     } finally {
       setAnalyzing(false);
+      // Settled either way: post-analysis the row is unconfirmed (or the
+      // analysis failed with photos pending) — explicit null IS the true
+      // "review outstanding" state.
+      onReady?.(true);
     }
   }
 
