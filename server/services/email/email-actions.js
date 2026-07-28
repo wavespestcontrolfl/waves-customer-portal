@@ -234,17 +234,28 @@ async function handleSpam(email) {
   const { isKnownSender, quarantineMessage } = require('./inbox-hygiene');
 
   // 0. Known senders (customers, live leads, vendors, partners) are never a
-  // destructive target no matter what the classifier said — a misclassified
-  // customer email stays in the inbox, marked important.
+  // destructive target no matter what the classifier said — but the From
+  // address is attacker-typed text, so the inbox-keep + IMPORTANT promotion
+  // additionally requires Gmail's Authentication-Results to align (same bar
+  // as the spam-folder rescue). A known-LOOKING sender without aligned auth
+  // is treated as the spoof it resembles: it quarantines below (24h window;
+  // the deferred sender block can't fire on it — blockSpamSender skips
+  // customers/leads/vendors, so the real person's future mail stays safe).
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const { domainFromAddress } = require('./spam-blocker');
   const verdict = await isKnownSender(email.from_address);
-  if (verdict.known) {
+  const alignedAuth = hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address));
+  if (verdict.known && alignedAuth) {
     try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
     await db('emails').where({ id: email.id }).update({
       auto_action: `spam_skipped_known_${verdict.kind}`,
       updated_at: new Date(),
     });
-    logger.info(`[email-actions] Spam verdict overridden — known ${verdict.kind} (email ${email.id})`);
+    logger.info(`[email-actions] Spam verdict overridden — authenticated known ${verdict.kind} (email ${email.id})`);
     return;
+  }
+  if (verdict.known) {
+    logger.warn(`[email-actions] known-looking ${verdict.kind} sender FAILED authentication — quarantining as probable spoof (email ${email.id})`);
   }
 
   // 1. Legit bulk senders get an unsubscribe BEFORE quarantine — but a
@@ -253,10 +264,7 @@ async function handleSpam(email) {
   // fires when Gmail's Authentication-Results show the mail actually
   // authenticated as the domain it claims (same aligned-auth bar as the
   // spam-folder rescue). Everything else quarantines silently.
-  const { hasAlignedAuth } = require('./inbox-hygiene');
-  const { domainFromAddress } = require('./spam-blocker');
-  if (email.list_unsubscribe
-    && hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+  if (email.list_unsubscribe && alignedAuth) {
     try {
       const { autoUnsubscribe } = require('./auto-unsubscribe');
       await autoUnsubscribe(email);

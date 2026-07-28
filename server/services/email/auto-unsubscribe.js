@@ -59,7 +59,12 @@ function requestPinned(urlString, { method = 'GET', headers = {}, body = null } 
       method,
       headers,
       timeout: 10000,
-      lookup: (host, opts, cb) => cb(null, pinnedAddress, pinnedFamily),
+      // Node's agent may call the custom lookup with { all: true } — that
+      // shape REQUIRES an array result or every hostname request dies with
+      // ERR_INVALID_IP_ADDRESS.
+      lookup: (host, opts, cb) => (opts && opts.all
+        ? cb(null, [{ address: pinnedAddress, family: pinnedFamily }])
+        : cb(null, pinnedAddress, pinnedFamily)),
     }, (res) => {
       resolve({
         ok: res.statusCode >= 200 && res.statusCode < 300,

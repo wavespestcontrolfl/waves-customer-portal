@@ -107,12 +107,17 @@ async function sweepQuarantine(now = new Date()) {
   let trashed = 0;
   let restored = 0;
 
-  // Crash recovery FIRST: 'spam_trashing' is a seconds-long claim, so any
-  // row still carrying it at sweep start is a prior run that died mid-trash.
-  // Reconcile against live Gmail state — already trashed settles (and takes
-  // its deferred sender block); not trashed reverts to quarantined so the
-  // main pass below re-evaluates it normally.
-  const stuck = await db('emails').where('auto_action', 'spam_trashing').select('id', 'gmail_id', 'from_address');
+  // Crash recovery FIRST: 'spam_trashing' is a seconds-long claim, so a row
+  // still carrying it WELL past claim age is a prior run that died mid-trash.
+  // The 10-minute grace keeps a concurrently running sweep's fresh claims
+  // out of recovery (multi-pod safety). Reconcile against live Gmail state —
+  // already trashed settles (and takes its deferred sender block); not
+  // trashed reverts to quarantined so the main pass re-evaluates it.
+  const claimGraceCutoff = new Date(now.getTime() - 10 * 60000);
+  const stuck = await db('emails')
+    .where('auto_action', 'spam_trashing')
+    .where('updated_at', '<', claimGraceCutoff)
+    .select('id', 'gmail_id', 'from_address');
   for (const row of stuck) {
     try {
       const labels = await gmailClient.getMessageLabels(row.gmail_id);

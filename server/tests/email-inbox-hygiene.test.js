@@ -115,9 +115,13 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
   });
 
-  test('a known customer sender is never quarantined — marked important instead', async () => {
+  test('an AUTHENTICATED known customer sender is never quarantined — marked important instead', async () => {
     const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
-    await handleSpam({ ...EMAIL, from_address: 'jane@customer.example' });
+    await handleSpam({
+      ...EMAIL,
+      from_address: 'jane@customer.example',
+      authentication_results: 'mx.google.com; dkim=pass header.d=customer.example',
+    });
     expect(gmailClient.modifyLabels).toHaveBeenCalledWith('g-1', ['IMPORTANT'], []);
     expect(gmailClient.ensureLabel).not.toHaveBeenCalled();
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
@@ -125,11 +129,24 @@ describe('handleSpam — quarantine + known-sender guard', () => {
       .toBe('spam_skipped_known_customer');
   });
 
-  test('a live lead sender is protected the same way', async () => {
+  test('a live lead sender is protected the same way (when authenticated)', async () => {
     setupDb({ leads: [{ id: 'lead-1', email: 'prospect@new.example' }] });
-    await handleSpam({ ...EMAIL, from_address: 'prospect@new.example' });
+    await handleSpam({
+      ...EMAIL,
+      from_address: 'prospect@new.example',
+      authentication_results: 'mx.google.com; spf=pass smtp.mailfrom=prospect@new.example',
+    });
     expect(gmailClient.ensureLabel).not.toHaveBeenCalled();
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+  });
+
+  test('a known-LOOKING sender WITHOUT aligned auth quarantines as a probable spoof', async () => {
+    const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
+    await handleSpam({ ...EMAIL, from_address: 'jane@customer.example' }); // no auth results
+    expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
+    expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+    const patch = state.updates.find((u) => u.table === 'emails')?.patch;
+    expect(patch.auto_action).toBe('spam_quarantined');
   });
 
   test('AUTHENTICATED bulk spam with List-Unsubscribe gets unsubscribed before quarantine', async () => {
