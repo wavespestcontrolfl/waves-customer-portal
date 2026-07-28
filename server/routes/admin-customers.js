@@ -2855,7 +2855,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           effectiveDate: membershipEventAt,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.reactivated', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && !beforeHasMembership && afterHasMembership) {
+      } else if (!beforeHasMembership && afterHasMembership) {
+        // Effective-membership transition alone is the trigger (Codex #3011
+        // r9): a label becoming a REAL membership can happen WITHOUT the
+        // tier/rate fields changing — re-saving the same tier flips
+        // provenance to 'manual', or an established billing lane is selected
+        // — and membershipDetailsChanged compares only tier and rate.
         void AccountMembershipEmail.sendMembershipStarted({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2864,7 +2869,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
           idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && beforeHasMembership && !afterHasMembership) {
+      } else if (beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,

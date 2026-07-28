@@ -98,16 +98,24 @@ async function resolveRecurringCardPolicyForEstimate({
   // deposit resolver uses (legacy customer-linked estimates have no
   // membershipSnapshot). A failed live check keeps the card required.
   let isPlanMember = !!membership?.isExistingCustomer;
-  if (!isPlanMember && resolvedCustomerId) {
+  if (resolvedCustomerId) {
     try {
-      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
       // An auto-derived tier LABEL (waveguard_tier_source = 'auto') has no
       // established membership billing or saved-card protection — it must
-      // not waive the card-on-file capture gate (Codex #3011 r8 P1).
+      // not waive the card-on-file capture gate (Codex #3011 r8 P1). Live
+      // provenance overrides the frozen membershipSnapshot too (Codex r9):
+      // an estimate saved after the auto-stamp freezes
+      // isExistingCustomer: true, and that snapshot must not skip the
+      // SetupIntent for a label-only customer.
       const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
       const labelOnly = await isAutoDerivedTierLabelCustomer(resolvedCustomerId);
-      const rows = labelOnly ? [] : await loadExistingRecurringQualifyingRows(db, resolvedCustomerId);
-      isPlanMember = Array.isArray(rows) && rows.length > 0;
+      if (labelOnly) {
+        isPlanMember = false;
+      } else if (!isPlanMember) {
+        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+        const rows = await loadExistingRecurringQualifyingRows(db, resolvedCustomerId);
+        isPlanMember = Array.isArray(rows) && rows.length > 0;
+      }
     } catch (err) {
       logger.warn('[recurring-cof] live plan-customer check failed — card stays required', { error: err.message });
     }

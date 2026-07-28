@@ -859,6 +859,15 @@ function sanitizeUpdates(updates) {
     const dbCol = UPDATABLE_FIELDS[key];
     if (dbCol) clean[dbCol] = val;
   }
+  // Operator-facing tier writes carry 'manual' provenance (migration
+  // 20260728000001): a human confirming/changing a tier through the IB must
+  // never leave waveguard_tier_source = 'auto' behind, or the nightly
+  // auto-tier reconciler could silently undo the confirmed edit (Codex
+  // #3011 r9). Clearing the tier clears provenance with it. Covers both
+  // update_customer and bulk_update_customers, which share this sanitizer.
+  if (clean.waveguard_tier !== undefined) {
+    clean.waveguard_tier_source = clean.waveguard_tier ? 'manual' : null;
+  }
   clean.updated_at = new Date();
   return clean;
 }

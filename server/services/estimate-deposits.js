@@ -156,18 +156,26 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // while a wrongly granted exemption silently loses the commitment gate.
 async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm = false, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
-  if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
+  if (estimate?.customer_id && isDepositEnforced()) {
     try {
-      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
       // An auto-derived tier LABEL (waveguard_tier_source = 'auto': per-visit
       // customer stamped from upcoming recurring coverage) is not an
       // established membership billing relationship — it must not waive the
-      // acceptance-deposit commitment gate (Codex #3011 r8 P1).
+      // acceptance-deposit commitment gate (Codex #3011 r8 P1). Checked on
+      // LIVE provenance BEFORE honoring the frozen membershipSnapshot too
+      // (Codex r9): an estimate saved after the auto-stamp freezes
+      // isExistingCustomer: true, and that snapshot must not bypass the gate.
       const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
       const labelOnly = await isAutoDerivedTierLabelCustomer(estimate.customer_id);
-      const rows = labelOnly ? [] : await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
-      if (Array.isArray(rows) && rows.length > 0) {
-        member = { ...(member || {}), isExistingCustomer: true };
+      if (labelOnly && member?.isExistingCustomer) {
+        member = { ...member, isExistingCustomer: false };
+      }
+      if (!member?.isExistingCustomer && !labelOnly) {
+        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+        const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+        if (Array.isArray(rows) && rows.length > 0) {
+          member = { ...(member || {}), isExistingCustomer: true };
+        }
       }
     } catch (err) {
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });

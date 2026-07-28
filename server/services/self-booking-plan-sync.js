@@ -1074,6 +1074,31 @@ async function isAutoDerivedTierLabelCustomer(customerId, database = db) {
   }
 }
 
+// MESSAGING-facing variant — TRUE means "suppress the member send". Differs
+// from isAutoDerivedTierLabelCustomer in its failure direction (Codex #3011
+// r9 P1): the welcome SMS and app-intro email are optional courtesy sends
+// while the auto-tier contract is communication-silent, so when provenance
+// CANNOT be verified — lookup error, or a pre-migration schema whose
+// column-guarded enrollment stamped a tier with no source column to record
+// it — the safe outcome is a skipped courtesy message, never a false member
+// send. Uncertainty only suppresses while the auto-tier gate is on: before
+// the gate ever flips no labels exist, so messaging behaves exactly as
+// today.
+async function shouldSuppressMemberMessagingForTierLabel(customerId, database = db) {
+  if (!customerId) return false;
+  try {
+    const customerColumns = await columnInfo(database, 'customers');
+    if (!customerColumns.waveguard_tier_source) {
+      return isEnabled('autoWaveguardTierEnroll');
+    }
+    const customer = await database('customers').where({ id: customerId }).first();
+    if (!customer) return false;
+    return isAutoDerivedTierLabelRow(customer);
+  } catch {
+    return isEnabled('autoWaveguardTierEnroll');
+  }
+}
+
 // Tier audit rows ride the same handle as the tier write they describe, in a
 // nested savepoint: they commit and roll back WITH the caller's transaction
 // (no durable audit for an enrollment a failed accept rolled back), and an
@@ -1384,6 +1409,7 @@ module.exports = {
   resolveTreeShrubRecurringPlan,
   serviceFamilyKey,
   serviceRowCountsTowardWaveGuard,
+  shouldSuppressMemberMessagingForTierLabel,
   syncCustomerWaveGuardPlanFromScheduledServices,
   uniqueServiceFamilies,
 };

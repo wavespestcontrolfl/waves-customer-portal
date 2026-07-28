@@ -228,6 +228,12 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   // 2026-07-28, tier-only). Use the shared membership predicate, which rejects
   // explicit non-member tier sentinels (none/onetime/na/...).
   if (!isMembershipCustomerRow(customer)) return updates;
+  // An auto-derived label (waveguard_tier_source = 'auto') satisfies the
+  // membership predicate but is TIER-ONLY state owned by the runtime
+  // realignment — this member-repair pass must never stamp member_since,
+  // flip pipeline_stage, or reactivate off a label (Codex #3011 r9). Also
+  // excluded in candidateCustomers SQL; this is the fail-closed belt.
+  if (customer.waveguard_tier_source === 'auto') return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   const normalizedExistingTier = normalizeTierName(customer.waveguard_tier);
@@ -337,6 +343,14 @@ async function candidateCustomers(customerColumns) {
       ).orWhere('c.monthly_rate', '>', 0);
     })
     .orderBy('c.created_at', 'asc');
+  // Auto-derived labels are tier-only state owned by the runtime realignment
+  // — never candidates for the member-repair pass (Codex #3011 r9); the
+  // builder re-checks the same provenance as a fail-closed belt.
+  if (columnPresent(customerColumns, 'waveguard_tier_source')) {
+    query = query.where(function notAutoLabel() {
+      this.whereNull('c.waveguard_tier_source').orWhere('c.waveguard_tier_source', '!=', 'auto');
+    });
+  }
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
   query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
