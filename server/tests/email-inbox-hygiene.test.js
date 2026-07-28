@@ -239,6 +239,19 @@ describe('rescueSpamFolder', () => {
 describe('collectUnansweredNudges', () => {
   const { collectUnansweredNudges } = require('../services/email/inbox-hygiene');
 
+  test('several messages in one unanswered thread produce ONE nudge (latest inbound)', async () => {
+    setupDb({}, {
+      emails: [[
+        { id: 'e-1', gmail_thread_id: 't-same', from_address: 'a@x.example', subject: 'first ping', received_at: '2026-07-23T12:00:00Z' },
+        { id: 'e-2', gmail_thread_id: 't-same', from_address: 'a@x.example', subject: 'second ping', received_at: '2026-07-24T12:00:00Z' },
+      ]],
+    });
+    gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'], internalDate: '0' }] });
+    const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0].id).toBe('e-2'); // the thread's latest inbound message
+  });
+
   test('returns threads with no SENT message after the inbound mail; skips answered ones', async () => {
     setupDb({}, {
       emails: [[

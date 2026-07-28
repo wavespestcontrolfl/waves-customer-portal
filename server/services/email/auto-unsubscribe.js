@@ -156,6 +156,10 @@ async function autoUnsubscribe(email) {
         if (!res.ok) {
           res = await fetchPublicOnly(urlMatch[1], { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
         }
+        // A 404/500 on both attempts is a FAILED unsubscribe — reporting it
+        // as success would let the digest claim work that never happened and
+        // stop the newsletter path from trying the body-link fallback.
+        if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
         await db('email_unsubscribe_log').insert({
           email_id: email.id,

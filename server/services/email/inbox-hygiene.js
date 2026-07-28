@@ -224,8 +224,21 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
     .limit(25)
     .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'received_at');
 
-  const nudges = [];
+  // One nudge per Gmail thread (its LATEST inbound message) — several
+  // messages in one unanswered thread must not crowd other customers out of
+  // the capped digest list.
+  const latestPerThread = new Map();
   for (const email of candidates) {
+    const prev = latestPerThread.get(email.gmail_thread_id);
+    if (!prev || new Date(email.received_at) > new Date(prev.received_at)) {
+      latestPerThread.set(email.gmail_thread_id, email);
+    }
+  }
+  const deduped = [...latestPerThread.values()]
+    .sort((a, b) => new Date(a.received_at) - new Date(b.received_at));
+
+  const nudges = [];
+  for (const email of deduped) {
     if (nudges.length >= limit) break;
     try {
       const thread = await gmailClient.getThread(email.gmail_thread_id);
