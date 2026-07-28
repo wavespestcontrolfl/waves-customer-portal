@@ -3046,7 +3046,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // gate reweaves the typed data. NOTE: WDO inspections are OUT OF SCOPE
   // here — completion profiles exclude wdo_inspection from V1 and public
   // WDOs render on the project-report surface (codex P2 #3007 r7); a WDO
-  // narrative would be its own lane on that surface.
+  // narrative would be its own lane on that surface. COMPANION typed
+  // snapshots keep their ratified template bodies BY DESIGN (codex P2
+  // r14): the narrative upgrades the report's ONE summary surface; the
+  // companion cards are compliance record sections, and per-companion
+  // generation would multiply view-time LLM calls without a summary slot
+  // to fill.
   // The gate reweaves the
   // typed findings, activity reading, station counts, products, photo
   // evidence, and next same-line visit into the grounded narrative (same

@@ -1007,6 +1007,37 @@ function ungroundedPestQualifiers(text, corpus) {
   return problems;
 }
 
+// Free-text treatment LOCATIONS ground dynamically (codex P1 #3007 r14):
+// bed-bug rooms_treated is arbitrary text, so "treatment was completed in
+// the living room" must fail on a Primary-bedroom report even though
+// "living room" is outside the static lexicon. Every locative
+// prepositional phrase's content words must exist in the facts corpus
+// (generic property nouns allowlisted).
+const LOCATIVE_PHRASE_RE = /\b(?:in|inside|at|around|near|behind|under|along)\s+(?:the|your|their|our|each|every|all)?\s*([a-z][a-z\s-]{2,30}?)(?=[.,;:!?]|\s+(?:and|with|so|to|for|today|during|this)\b|$)/gi;
+const GENERIC_PLACE_WORDS = new Set([
+  'home', 'house', 'property', 'premises', 'building', 'structure', 'unit',
+  'area', 'areas', 'location', 'locations', 'placement', 'placements',
+  'visit', 'visits', 'service', 'treated', 'accessible', 'monitored',
+  'documented', 'active', 'affected', 'targeted', 'appropriate', 'key',
+  'listed', 'recorded', 'noted', 'interior', 'exterior', 'inside', 'outside',
+]);
+
+function ungroundedLocationPhrases(text, corpus) {
+  const problems = [];
+  for (const match of String(text).matchAll(new RegExp(LOCATIVE_PHRASE_RE.source, 'gi'))) {
+    // temporal phrases ("in fourteen days", "in two weeks") are not places
+    if (/\b(?:day|days|week|weeks|month|months|hour|hours|minute|minutes)\b/i.test(match[1])) continue;
+    const words = match[1].toLowerCase().split(/[^a-z]+/)
+      .filter((word) => word.length >= 4)
+      .map((word) => word.replace(/s$/, ''))
+      .filter((word) => !GENERIC_PLACE_WORDS.has(word) && !GENERIC_PLACE_WORDS.has(`${word}s`));
+    if (!words.length) continue;
+    const missing = words.filter((word) => !new RegExp(`\\b${word}`).test(corpus));
+    if (missing.length) problems.push(`ungrounded_location:${match[1].trim().toLowerCase()}`);
+  }
+  return problems;
+}
+
 function ungroundedDomainTerms(text, facts) {
   const problems = [];
   const corpus = domainCorpus(facts);
@@ -1018,6 +1049,7 @@ function ungroundedDomainTerms(text, facts) {
     }
   }
   problems.push(...ungroundedPestQualifiers(text, corpus));
+  problems.push(...ungroundedLocationPhrases(text, corpus));
   return problems;
 }
 
@@ -1141,6 +1173,42 @@ function unpairedActionLocations(text, facts) {
   return problems;
 }
 
+// A NEGATED model clause that names a distinctive word of a mandatory
+// care sentence contradicts it ("No follow-up is needed" vs "A follow-up
+// visit in 10\u201314 days is recommended") \u2014 appending the ratified copy after
+// would publish both claims (codex P1 #3007 r14). Common report nouns are
+// excluded so a legitimate zero-state ("no bed bug activity was found")
+// doesn't collide with care copy mentioning activity.
+const CARE_COMMON_WORDS = new Set([
+  'activity', 'service', 'services', 'treatment', 'treatments', 'treated',
+  'visit', 'visits', 'today', 'please', 'between', 'during', 'before',
+  'within', 'around', 'contact',
+]);
+
+function contradictedCareCopy(text, facts) {
+  const problems = [];
+  const careSentences = mandatoryCareCopy(facts.todaysResult || {});
+  if (!careSentences.length) return problems;
+  const clauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i))
+    .filter((clause) => NEGATED_SENTENCE_RE.test(clause));
+  if (!clauses.length) return problems;
+  for (const sentence of careSentences) {
+    const distinctive = sentence.toLowerCase().split(/[^a-z-]+/)
+      .filter((word) => word.length >= 6 && !CARE_COMMON_WORDS.has(word));
+    if (!distinctive.length) continue;
+    for (const clause of clauses) {
+      const lower = clause.toLowerCase();
+      if (distinctive.some((word) => lower.includes(word))) {
+        problems.push('contradicted_care_copy');
+        break;
+      }
+    }
+  }
+  return problems;
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -1173,6 +1241,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...contradictedZeroStates(text, facts));
   problems.push(...unpairedActionLocations(text, facts));
+  problems.push(...contradictedCareCopy(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month

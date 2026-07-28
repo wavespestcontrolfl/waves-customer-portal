@@ -174,6 +174,28 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('round-14 guards: free-text locations and care contradictions', () => {
+  const bedroomFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: 'Bed bug treatment completed today.', body: 'We treated the primary bedroom today.', nextStep: null },
+      findings: [{ fieldKey: 'rooms_treated', customerLabel: 'Rooms treated', customerValueLabel: 'Primary bedroom', value: 'Primary bedroom' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  // free-text room swap rejects even outside the static lexicon
+  expect(ungroundedClaims('Treatment was completed in the living room.', bedroomFacts)
+    .some((p) => p.startsWith('ungrounded_location'))).toBe(true);
+  expect(ungroundedClaims('Treatment was completed in the primary bedroom.', bedroomFacts)).toEqual([]);
+
+  // a negated clause naming a distinctive care word contradicts the copy
+  const facts = groundingFacts(roachInput());
+  expect(ungroundedClaims('No follow-up is needed after today’s service.', facts))
+    .toContain('contradicted_care_copy');
+});
+
 test('round-13 guards: activity contradiction, embedded recommendations, list cardinality, palmetto alias', async () => {
   // (a) positive activity-level assertion contradicts a zero state without
   // any observation verb
