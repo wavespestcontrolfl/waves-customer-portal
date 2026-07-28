@@ -981,14 +981,15 @@ function selectProtocolVisit(profile, serviceDate) {
   return { trackKey, track, month, visit };
 }
 
-async function getApplicableOrdinances(knex, profile, fallbackCity = null) {
+async function getApplicableOrdinances(knex, profile, cities = {}) {
   if (!profile) return [];
   const county = String(profile.county || '').trim();
   // Same city resolution the completion path uses (actualProductBlackoutBlocks):
-  // a turf profile with blank municipality still matches its city ordinance via
-  // the customer's/service's city, so the closeout advisory and the recorded
-  // completion condition agree.
-  const city = String(profile.municipality || fallbackCity || '').trim();
+  // the STAMPED visit address outranks the turf-profile municipality — the 1:1
+  // profile describes the primary home, so a visit stamped at a rental in
+  // another city must evaluate the treated property's ordinances. Customer
+  // city is the last resort.
+  const city = String(cities.stampedCity || profile.municipality || cities.customerCity || '').trim();
   if (!county && !city) return [];
 
   let query = knex('municipality_ordinances').where({ active: true });
@@ -1296,9 +1297,10 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
-  // Stamped visit address first — a rental in another municipality must not
-  // inherit the primary home's ordinance set.
-  const ordinances = await getApplicableOrdinances(knex, profile, service.service_address_city || service.city);
+  const ordinances = await getApplicableOrdinances(knex, profile, {
+    stampedCity: service.service_address_city,
+    customerCity: service.city,
+  });
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,

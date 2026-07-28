@@ -890,9 +890,11 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   if (!profile) return [];
 
   const county = String(profile.county || '').trim();
-  // Stamped visit address first (matches the plan engine): a rental in
-  // another municipality must not inherit the primary home's ordinances.
-  const city = String(profile.municipality || svc.service_address_city || svc.city || '').trim();
+  // Stamped visit address OUTRANKS the turf-profile municipality (matches
+  // the plan engine): the 1:1 profile describes the primary home, so a visit
+  // stamped at a rental in another city must use the treated property's
+  // ordinances, not the profile's.
+  const city = String(svc.service_address_city || profile.municipality || svc.city || '').trim();
   if (!county && !city) return [];
 
   let ordinanceQuery = db('municipality_ordinances').where({ active: true });
@@ -3865,7 +3867,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const applied = calculateAppliedNutrients({
               product: catalog,
               amount: p.totalAmount,
-              amountUnit: p.amountUnit,
+              // Same normalization the persistence path uses: a "/gal" unit
+              // is a mix concentration whose total is concentrate amount —
+              // the raw unit would make calculateAppliedNutrients bail and
+              // silently drop the product from the projection.
+              amountUnit: baseQuantityUnit(p.amountUnit || p.rateUnit || null),
               lawnSqft,
             });
             if (applied?.nAppliedPer1000) actualVisitN += applied.nAppliedPer1000;
