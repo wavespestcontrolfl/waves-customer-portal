@@ -41,9 +41,15 @@ const TOKEN_RE = /\bEA-[0-9a-f]{8}\b/i;
 const SWEEP_WINDOW_DAYS = 14;
 const EXECUTING_RECOVERY_MINUTES = 15;
 const SEND_CLAIM_STALE_MINUTES = 10;
-// Transient execution failures (engine advisory lock contention, timeouts,
-// connection blips) release the claim so the inbox reply retries next poll.
-const TRANSIENT_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|publisher is busy|retry in a moment|timeout|timed out|ECONN|EAI_AGAIN|deadlock|too many connections|temporar/i;
+// PROVABLY pre-side-effect failures (lock/busy contention happens before
+// any work starts; a deadlock rolls the transaction back) — safe to release
+// the claim and replay the reply next poll.
+const SAFE_RETRY_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|publisher is busy|retry in a moment|deadlock/i;
+// AMBIGUOUS failures (timeouts, connection drops): the side effect may have
+// completed before the error surfaced — a publish must NOT be blindly
+// replayed. The row stays 'executing' and the recovery sweep reconciles
+// from the persisted run/opportunity state instead.
+const AMBIGUOUS_ERROR_RE = /timeout|timed out|ECONN|EAI_AGAIN|too many connections|temporar/i;
 
 function emailApprovalsEnabled() {
   const { isEnabled } = require('../../config/feature-gates');
@@ -97,6 +103,12 @@ function escapeHtml(s) {
  * non-quoted line counts — quoted trails ("> approved") and signatures
  * never decide. Returns 'approved' | 'rejected' | null (ambiguous).
  */
+// Negation/hedge markers AFTER an "approved" prefix make the line ambiguous
+// ("approved? no", "approved — actually not approved", "approved… wait"):
+// a contradicted approval must never publish. Fail closed; the owner is
+// asked to reply again with a clean word.
+const APPROVAL_CONTRADICTION_RE = /[?]|\b(no|not|nope|don'?t|cancel|reject|hold|wait|stop|never|unless|actually)\b/i;
+
 function parseDecision(text) {
   const lines = String(text || '').split(/\r?\n/);
   for (const raw of lines) {
@@ -105,7 +117,10 @@ function parseDecision(text) {
     if (line.startsWith('>')) continue; // quoted reply trail
     if (/^On .{0,120}wrote:$/.test(line)) break; // start of quoted original
     if (/^not[\s-]+approved\b/i.test(line)) return 'rejected';
-    if (/^approved\b/i.test(line)) return 'approved';
+    if (/^approved\b/i.test(line)) {
+      const rest = line.replace(/^approved\b/i, '');
+      return APPROVAL_CONTRADICTION_RE.test(rest) ? null : 'approved';
+    }
     return null; // first substantive line says something else — fail closed
   }
   return null;
@@ -221,7 +236,22 @@ function draftPreview(run) {
   const title = payload?.title || payload?.frontmatter?.title || '(untitled draft)';
   const full = String(payload?.body || payload?.content || '');
   const truncated = full.length > DRAFT_EMAIL_MAX_CHARS;
-  return { title, body: full.slice(0, DRAFT_EMAIL_MAX_CHARS), truncated };
+  // Everything else the publisher ships (frontmatter: meta description,
+  // hero alt, schema, …) can carry competitor claims too — the owner must
+  // see ALL of it before approving, not just the body.
+  let metadata = null;
+  if (payload && typeof payload === 'object') {
+    const meta = { ...(typeof payload.frontmatter === 'object' && payload.frontmatter ? payload.frontmatter : {}) };
+    for (const [k, v] of Object.entries(payload)) {
+      if (k === 'body' || k === 'content' || k === 'frontmatter') continue;
+      meta[k] = v;
+    }
+    delete meta.title; // shown separately
+    if (Object.keys(meta).length) {
+      try { metadata = JSON.stringify(meta, null, 1).slice(0, 8000); } catch { metadata = null; }
+    }
+  }
+  return { title, body: full.slice(0, DRAFT_EMAIL_MAX_CHARS), truncated, metadata };
 }
 
 /**
@@ -262,7 +292,7 @@ async function sendApprovalRequest(run, opportunity = null) {
   if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
 
   const email = require('../email');
-  const { title, body: draftBody, truncated } = draftPreview(run);
+  const { title, body: draftBody, truncated, metadata } = draftPreview(run);
   const isCompetitor = row.kind === 'named_competitor_review';
   const senders = allowedSenders();
   const subject = `[${row.token}] Approve? ${title}`;
@@ -275,6 +305,7 @@ async function sendApprovalRequest(run, opportunity = null) {
     // The COMPLETE draft — approving publishes everything below, so
     // everything below must be in front of the owner.
     draftBody ? `<p><strong>Full draft (this exact content publishes on approval):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
+    metadata ? `<p><strong>Metadata (also publishes — meta description, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
     truncated ? '<p style="color:#b00;"><strong>Draft exceeds the email size cap — review it in /admin/seo before approving.</strong></p>' : '',
     '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>',
     '<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
@@ -440,15 +471,25 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
       }
       return { skipped: 'superseded' };
     }
-    if (TRANSIENT_ERROR_RE.test(message)) {
-      // Pre-side-effect transient failure: release the claim so the reply
-      // (still in the mailbox; the cursor only advances past handled
-      // messages) retries next poll.
+    if (SAFE_RETRY_ERROR_RE.test(message)) {
+      // Provably pre-side-effect: release the claim so the reply (still in
+      // the mailbox; the cursor only advances past handled messages)
+      // retries next poll.
       await db('content_email_approvals').where({ id: row.id })
         .update({ status: 'awaiting_reply', decision: null, decided_by: null, decided_at: null, last_error: message, updated_at: new Date() });
       const retryErr = new Error(`transient execution failure, will retry: ${message}`);
       retryErr.transient = true;
       throw retryErr;
+    }
+    if (AMBIGUOUS_ERROR_RE.test(message)) {
+      // The side effect may already have happened (e.g. a publish that
+      // timed out after opening the PR) — never blind-replay. The row stays
+      // 'executing' with the decision persisted; the recovery sweep
+      // reconciles from the actual run/opportunity state.
+      await db('content_email_approvals').where({ id: row.id })
+        .update({ last_error: `ambiguous failure, pending recovery: ${message}`.slice(0, 500), updated_at: new Date() });
+      logger.warn(`[email-approvals] ${row.token}: ambiguous execution failure — left for recovery reconcile (${message.slice(0, 120)})`);
+      return { skipped: 'ambiguous_failure_pending_recovery' };
     }
     // Hard failure AFTER the claim: record + surface loudly — the decision
     // is not silently lost, and the row never re-executes.
@@ -543,8 +584,7 @@ async function pollReplies() {
   }
   const mailbox = imapMailbox();
   if (!mailbox.password) return { skipped: 'imap_not_configured' };
-  const byToken = new Map(awaiting.filter((r) => r.email_sent_at).map((r) => [r.token.toLowerCase(), r]));
-  if (!byToken.size) return { checked: 0, decided: 0 };
+  if (!awaiting.some((r) => r.email_sent_at)) return { checked: 0, decided: 0 };
 
   const { ImapFlow } = require('imapflow');
   const client = new ImapFlow({
@@ -584,13 +624,15 @@ async function pollReplies() {
         const subject = msg.envelope?.subject || '';
         const tokenMatch = subject.match(TOKEN_RE);
         if (!tokenMatch) continue;
-        const row = byToken.get(tokenMatch[0].toLowerCase());
-        if (!row) continue;
         // Skip our own outbound approval email (no Re:, no In-Reply-To).
         if (!/^re:/i.test(subject) && !msg.envelope?.inReplyTo) continue;
+        // Row resolution is deferred to phase 2 with a FRESH db read — an
+        // approval created after this poll's snapshot (runner hook racing
+        // the sweep) must not have its reply discarded while the cursor
+        // advances past it.
         candidates.push({
           uid: msg.uid,
-          row,
+          token: tokenMatch[0].toLowerCase(),
           sender: String(msg.envelope?.from?.[0]?.address || '').toLowerCase(),
         });
       }
@@ -598,7 +640,12 @@ async function pollReplies() {
       // individually now that the generator is fully drained.
       candidates.sort((a, b) => a.uid - b.uid);
       for (const cand of candidates) {
-        const { row, sender } = cand;
+        const { sender } = cand;
+        // Fresh row read (see phase-1 note): tokens without any row are
+        // stale/junk and the cursor may pass them; an already-decided row
+        // is a duplicate reply.
+        const row = await db('content_email_approvals').whereRaw('LOWER(token) = ?', [cand.token]).first();
+        if (!row || row.status !== 'awaiting_reply' || !row.email_sent_at) continue;
         checked++;
         if (!senders.includes(sender)) {
           logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${maskEmail(sender)} — ignored`);
@@ -623,7 +670,6 @@ async function pollReplies() {
           const outcome = await executeDecision(row, decision, sender);
           if (!outcome.skipped) {
             decided++;
-            byToken.delete(row.token.toLowerCase());
             logger.info(`[email-approvals] ${row.token} ${decision} by ${maskEmail(sender)} → ${outcome.executed}`);
             await notifyAdmin(`Draft ${decision} via email`, `${row.token} (${row.kind}) ${decision} by ${maskEmail(sender)}.`);
           }
@@ -667,6 +713,7 @@ module.exports = {
     verifySenderAuthentication,
     draftPreview,
     TOKEN_RE,
-    TRANSIENT_ERROR_RE,
+    SAFE_RETRY_ERROR_RE,
+    AMBIGUOUS_ERROR_RE,
   },
 };

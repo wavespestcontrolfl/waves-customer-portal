@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/content/autonomous-review-queue', () => ({ decideReviewItem: jest.fn() }));
 
 const approvals = require('../services/content/email-approvals');
-const { parseDecision, extractReplyText, isApprovableKind, newToken, allowedSenders, approvalRecipient, imapMailbox, TOKEN_RE, TRANSIENT_ERROR_RE } = approvals._internals;
+const { parseDecision, extractReplyText, isApprovableKind, newToken, allowedSenders, approvalRecipient, imapMailbox, TOKEN_RE, SAFE_RETRY_ERROR_RE, AMBIGUOUS_ERROR_RE } = approvals._internals;
 
 describe('parseDecision — first non-quoted line decides, fail-closed otherwise', () => {
   test('plain approvals and rejections', () => {
@@ -43,6 +43,18 @@ describe('parseDecision — first non-quoted line decides, fail-closed otherwise
     expect(parseDecision('please approve')).toBe(null);
     expect(parseDecision('')).toBe(null);
     expect(parseDecision('approval pending')).toBe(null); // approved\b — "approval" must not match
+  });
+
+  test('a contradicted approval prefix never approves (Codex r4 P1)', () => {
+    expect(parseDecision('approved? no')).toBe(null);
+    expect(parseDecision('approved — actually not approved')).toBe(null);
+    expect(parseDecision('approved… wait, hold on')).toBe(null);
+    expect(parseDecision('approved unless the price changed')).toBe(null);
+    expect(parseDecision('Approved, do not delay')).toBe(null);
+    // Clean approvals still work.
+    expect(parseDecision('approved')).toBe('approved');
+    expect(parseDecision('Approved — looks good')).toBe('approved');
+    expect(parseDecision('APPROVED, ship it')).toBe('approved');
   });
 
   test('the "On … wrote:" quote header stops the scan', () => {
@@ -220,13 +232,34 @@ describe('executeDecision / finishExecution — recoverable claim state machine'
     expect(reviewQueue.decideReviewItem).toHaveBeenCalledWith('o', expect.objectContaining({ decision: 'dismiss' }));
   });
 
-  test('transient-error classifier covers the engine-lock 409 family, not ordinary failures', () => {
-    expect(TRANSIENT_ERROR_RE.test('engine lock held')).toBe(true);
-    expect(TRANSIENT_ERROR_RE.test('Request timed out')).toBe(true);
-    expect(TRANSIENT_ERROR_RE.test('deadlock detected')).toBe(true);
-    // The publisher's ACTUAL lock-contention message (Codex r2).
-    expect(TRANSIENT_ERROR_RE.test('Autonomous publisher is busy; retry in a moment')).toBe(true);
-    expect(TRANSIENT_ERROR_RE.test('draft failed the comparison gate')).toBe(false);
+  test('failure classifiers: lock/busy is safely retryable, timeouts are ambiguous, gate failures are neither (Codex r4)', () => {
+    expect(SAFE_RETRY_ERROR_RE.test('engine lock held')).toBe(true);
+    expect(SAFE_RETRY_ERROR_RE.test('Autonomous publisher is busy; retry in a moment')).toBe(true);
+    expect(SAFE_RETRY_ERROR_RE.test('deadlock detected')).toBe(true);
+    expect(SAFE_RETRY_ERROR_RE.test('Request timed out')).toBe(false); // may be post-side-effect
+    expect(AMBIGUOUS_ERROR_RE.test('Request timed out')).toBe(true);
+    expect(AMBIGUOUS_ERROR_RE.test('ECONNRESET')).toBe(true);
+    expect(SAFE_RETRY_ERROR_RE.test('draft failed the comparison gate')).toBe(false);
+    expect(AMBIGUOUS_ERROR_RE.test('draft failed the comparison gate')).toBe(false);
+  });
+
+  test('an ambiguous failure keeps the row executing for recovery — a publish is never blind-replayed (Codex r4)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockRejectedValue(new Error('Request timed out'));
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const result = await approvals._internals.executeDecision(ROW, 'approved', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'ambiguous_failure_pending_recovery' });
+    // No status reset to awaiting_reply — the executing claim stands.
+    expect(updates.some((u) => u.status === 'awaiting_reply')).toBe(false);
+    expect(updates.some((u) => u.status === 'failed')).toBe(false);
   });
 
   test('crash recovery reconciles an already-committed decision instead of reporting failure (Codex r2)', async () => {
