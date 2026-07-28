@@ -1323,14 +1323,21 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  // Link DESTINATIONS are not prose: a required citation like
-  // [company's plan page](https://www.trugreen.com/…) must not count as
-  // naming the competitor (the URL host is separately validated by the
-  // external-link guardrail). Anchor TEXT stays scanned. Length-preserving
-  // (URL chars become spaces) so indices still align with scanText.
+  // Name/tone machinery runs on the ASSOCIATED text: URLs resolving to a
+  // recognized competitor become that competitor's canonical name
+  // (length-preserving), so directed tone scans, unknown-competitor
+  // fail-close, and review routing treat every URL form like a name
+  // mention (Codex r4/r5). The PROSE-MENTION check below instead uses the
+  // BLANKED text — a citation destination is not a prose mention (r2).
   // Deliberately NOT applied to operatorBriefText below — a URL there is a
   // legitimate operator authorization signal.
-  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
+  const nameScanText = stripQuotesForNames(substituteCompetitorUrlsForNames(scanText));
+  // Allowlisted names that appear in the draft TEXT itself (URLs blanked) —
+  // the set the in-prose finding may fire on.
+  const textNamedKnown = new Set();
+  for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(stripLinkDestinationsForNames(scanText)))) {
+    if (m.inAllowlist) textNamedKnown.add(m.name);
+  }
   // Authorized names come from running the SAME mention detector over the
   // operator's brief text — both sides canonicalize identically, so a brief
   // that says "Massey" authorizes a draft that writes the canonical "Massey
@@ -1563,6 +1570,9 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in a sourced comparison table.`));
     }
   }
   for (const nm of unknown) {
@@ -1580,6 +1590,13 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       requiresHumanReview = true;
       continue;
     }
+    // Known only through a link DESTINATION (never named in the text):
+    // not a prose mention (r2) — but never invisible either; route to
+    // review (tone checks above already read the link's anchor/clauses).
+    if (!textNamedKnown.has(nm)) {
+      requiresHumanReview = true;
+      continue;
+    }
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
   }
@@ -1588,43 +1605,72 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   return { pass, findings, requiresHumanReview };
 }
 
-// Blank every http(s) URL substring with an equal run of spaces — covers
-// markdown link destinations, bare autolinks, and image srcs. Used ONLY for
-// competitor-NAME detection inputs: a link destination is not prose (its
-// host is validated by the external-link guardrail), but a brand token
-// inside it ("www.trugreen.com") would otherwise read as naming the
-// competitor and block operator-required citations. Length-preserving so
-// name-scan indices keep aligning with the original text.
+// URL boundary shared by every URL-aware name-scan transform. The class
+// stops at whitespace, markdown/HTML delimiters, AND the prose punctuation
+// that can sit flush against a URL (, ; | { } `) — otherwise
+// "https://…/plans,TruGreen offers" would mask the brand name and the gate
+// would fail OPEN (Codex r3). A comma/semicolon inside a real URL truncates
+// the mask early, which errs fail-CLOSED (the visible tail can only ADD a
+// prose mention and route to review, never hide one).
+const NAME_SCAN_URL_RE_SRC = 'https?:\\/\\/[^\\s)"\'<>\\],;`|{}]+';
+
+// Length-preserving URL transform for competitor-NAME detection inputs
+// (indices keep aligning with the original text). Two modes:
+//  - blank (default): every URL becomes spaces — a link destination is not
+//    a PROSE MENTION (its host is validated by the external-link guardrail),
+//    so operator-required citations don't self-block (Codex r2).
+//  - associate: a URL that RESOLVES to a recognized competitor is replaced
+//    by that competitor's canonical name (space-padded to the URL's length);
+//    unrecognized URLs still blank. Feeding THIS text to the ordinary
+//    name-driven machinery makes every URL form — inline, bare/autolink,
+//    HTML href, reference-style — behave exactly like a name mention for
+//    tone, unknown-competitor fail-close, the feature gate, and review
+//    routing (Codex r4/r5), while the prose-mention and caption checks keep
+//    the blanked text.
+function maskUrlsForNames(s, { associate = false } = {}) {
+  return String(s).replace(new RegExp(NAME_SCAN_URL_RE_SRC, 'gi'), (u) => {
+    if (associate) {
+      const hits = competitorFacts.findBusinessMentions(u.replace(/[^a-z0-9]+/gi, ' '));
+      const hit = hits.find((h) => h.name && h.name.length <= u.length);
+      if (hit) return hit.name + ' '.repeat(u.length - hit.name.length);
+    }
+    return ' '.repeat(u.length);
+  });
+}
 function stripLinkDestinationsForNames(s) {
-  // The class stops at whitespace, markdown/HTML delimiters, AND the prose
-  // punctuation that can sit flush against a URL (, ; | { } `) — otherwise
-  // "https://…/plans,TruGreen offers" would mask the brand name and the
-  // gate would fail OPEN. A comma/semicolon inside a real URL truncates the
-  // mask early, which errs fail-CLOSED (the visible tail can only ADD a
-  // prose mention and route to review, never hide one).
-  return String(s).replace(/https?:\/\/[^\s)"'<>\],;`|{}]+/gi, (u) => ' '.repeat(u.length));
+  return maskUrlsForNames(s);
+}
+function substituteCompetitorUrlsForNames(s) {
+  return maskUrlsForNames(s, { associate: true });
 }
 
-// Markdown links whose DESTINATION resolves to a recognized competitor.
-// The destination is deliberately NOT a prose mention (see
-// stripLinkDestinationsForNames), but the link still TARGETS that
-// competitor — so a disparaging/negative anchor must be treated as aimed
-// at it, and a linked allowlisted competitor still routes to
-// named-competitor review. Each hit carries the anchor text plus the
-// preceding same-sentence clause (bounded ~60 chars, the proximity idiom
-// the prose scans use) so tone checks read what the link is embedded in.
+// Evaluative negatives for link-anchored tone checks — the combined
+// directed-disparagement vocabulary (DISPARAGEMENT_RE plus the NEG_ADJ
+// evaluatives), since "[the worst company](url)" identifies its target only
+// through the URL and the noun-directed grammars can't see it (Codex r5).
+const LINKED_NEG_ADJ_RE = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'i');
+
+// Every URL — inline-markdown, bare/autolink, or HTML href — whose
+// DESTINATION resolves to a recognized competitor. The destination is
+// deliberately NOT a prose mention, but the link still TARGETS that
+// competitor — so tone checks read the anchor (when present) plus the
+// same-sentence clauses BEFORE and AFTER the link ("…](url) is dishonest"
+// accuses after the destination — Codex r5), and a linked allowlisted
+// competitor still routes to named-competitor review.
 function linkedCompetitorMentions(text) {
   const s = String(text);
   const out = [];
-  const linkRe = /\[([^\]]*)\]\(\s*<?(https?:\/\/[^)\s>]+)/g;
+  const re = new RegExp(`(?:\\[([^\\]]*)\\]\\(\\s*<?)?(${NAME_SCAN_URL_RE_SRC})`, 'gi');
   let m;
-  while ((m = linkRe.exec(s)) !== null) {
+  while ((m = re.exec(s)) !== null) {
     const anchor = m[1] || '';
     const urlTokens = (m[2] || '').replace(/[^a-z0-9]+/gi, ' ');
     for (const hit of competitorFacts.findBusinessMentions(urlTokens)) {
-      const before = s.slice(Math.max(0, m.index - 60), m.index);
-      const clause = before.split(/[.!?\n]/).pop() || '';
-      out.push({ name: hit.name, inAllowlist: hit.inAllowlist, anchor, context: `${clause} ${anchor}`.trim() });
+      const before = s.slice(Math.max(0, m.index - 80), m.index);
+      const pre = before.split(/[.!?\n]/).pop() || '';
+      const afterStart = m.index + m[0].length;
+      const post = (s.slice(afterStart, afterStart + 80).split(/[.!?\n]/)[0] || '').replace(/^[)>]*/, '');
+      out.push({ name: hit.name, inAllowlist: hit.inAllowlist, anchor, context: `${pre} ${anchor} ${post}`.trim() });
     }
   }
   return out;
@@ -1669,11 +1715,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // nameScanText share character indices) but can leave multiple spaces between
   // words — name lookups must stay whitespace-tolerant.
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  // Also blank link DESTINATIONS (length-preserving) — a required citation
-  // URL containing a brand token ("trugreen.com") is not a prose mention;
-  // the URL host is validated by the external-link guardrail instead.
-  // Anchor text stays scanned. Disparagement/ranking scans keep scanText.
-  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
+  // Name/tone machinery runs on the ASSOCIATED text: URLs resolving to a
+  // recognized competitor become that competitor's canonical name
+  // (length-preserving), so every URL form behaves like a name mention for
+  // tone, the feature gate, and review routing (Codex r4/r5). The
+  // prose-mention and unsourced-caption checks use the BLANKED text — a
+  // citation destination is not a prose mention (r2). Disparagement/
+  // ranking scans keep the original scanText.
+  const nameScanText = stripQuotesForNames(substituteCompetitorUrlsForNames(scanText));
+  // Allowlisted names present in the draft TEXT itself (URLs blanked) —
+  // the only names the unsourced-caption fill below may draw from.
+  const textNamedKnown = new Set();
+  for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(stripLinkDestinationsForNames(scanText)))) {
+    if (m.inAllowlist) textNamedKnown.add(m.name);
+  }
 
   const known = new Set();
   const unknown = new Set();
@@ -2193,7 +2248,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
 
   // Known competitors named only in prose (never in a table) have no caption → unsourced.
-  for (const n of known) if (!blockNamedKnown.has(n)) unsourcedKnown.add(n);
+  // Known ONLY through a link destination (never named in the text or a
+  // table block): no caption requirement — the r2 citation contract — but
+  // still counted in `known`, so the feature gate and review routing below
+  // see it (Codex r5).
+  for (const n of known) if (!blockNamedKnown.has(n) && textNamedKnown.has(n)) unsourcedKnown.add(n);
 
   // A competitor may be named ONLY inside the comparison table, where every cell
   // is validated against curated facts. A mention in the surrounding prose /
@@ -2222,6 +2281,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in the sourced comparison table.`));
     }
   }
 

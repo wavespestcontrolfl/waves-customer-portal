@@ -213,8 +213,36 @@ describe('comparison-table-gate', () => {
     const rClean = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
     expect(rClean.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
     expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
     expect(rClean.pass).toBe(true);
     expect(rClean.requiresHumanReview).toBe(true);
+  });
+
+  test('non-inline URL forms, trailing clauses, full vocabulary, unknown links, and the feature gate all hold (Codex r5)', () => {
+    // r5.1: bare URL — no markdown link — still associates for tone.
+    const bare = 'This dishonest company: https://www.trugreen.com/plans is one to avoid.';
+    const rBare = gate.evaluate({ body: `# Guide\n\n${bare}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rBare.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.3: accusation AFTER the link.
+    const trailing = '[This company](https://www.trugreen.com/plans) is dishonest.';
+    const rTrail = gate.evaluate({ body: `# Guide\n\n${trailing}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rTrail.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.4: NEG_ADJ evaluatives count for link-anchored disparagement.
+    const evalNeg = 'They are [the worst company](https://www.trugreen.com/plans) around.';
+    const rEval = gate.evaluate({ body: `# Guide\n\n${evalNeg}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rEval.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.2: a link to a recognized-but-uncurated competitor fails closed.
+    const unknown = 'Compare [their plans](https://www.mosquito-joe.com/plans) yourself.';
+    const rUnk = gate.evaluate({ body: `# Guide\n\n${unknown}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rUnk.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    const rUnkNoTable = gate.evaluate({ body: `# Guide\n\n${unknown}\n\nNo table.` }, { namedCompetitorEnabled: true });
+    expect(rUnkNoTable.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    // r5.5: with the feature gate OFF, a link-only known competitor is
+    // named-competitor usage — flagged, never silently auto-published.
+    const clean = 'Per [the published plan page](https://www.trugreen.com/plans), plans are annual.';
+    const rGate = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: false });
+    expect(rGate.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+    expect(rGate.pass).toBe(false);
   });
 
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
