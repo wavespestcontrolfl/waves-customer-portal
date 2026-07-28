@@ -569,3 +569,25 @@ jumps). See migration `20260728200000_mosquito_reprice_60_margin` for the
 the 2026-06 mosquito prices and should be recaptured against prod once the
 migration deploys — same post-deploy DB-parity recapture the 2026-06 reprice
 required.
+
+---
+
+## 2026-07-28 — Post-deploy DB-parity recapture (mosquito reprice + termite Trelona)
+
+DB-synced prod baselines (`*.baseline.json`) recaptured against live prod
+`pricing_config` (CAPTURE_BASELINE=1 with DATABASE_URL → public proxy) after
+the #3026 mosquito reprice deployed — the step the 2026-07-28 mosquito entry
+above called out. Both DB-mode suites verify green against prod afterward.
+
+Per-case attribution:
+- **Mosquito reprice #3026** (this lane): `mosquito_acre_waterfront_max_pressure`,
+  `platinum_bundle_4_qualifying_services_zone_a`,
+  `v1adapter_platinum_bundle_4_services_zone_a`,
+  `v1adapter_mosquito_waterfront_heavy_pressure`.
+- **Termite Trelona-only #3017** (merged + deployed 2026-07-28, DB baselines
+  were stale for it): `termite_basic_standard_perimeter`,
+  `v1adapter_termite_bait_three_systems` (Advance→Trelona install, new bait
+  rates).
+- **Additive T&S tier in prod config**: `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`
+  gained an `Enhanced` entry in `results.ts` — additive, no price changes to
+  existing entries.
