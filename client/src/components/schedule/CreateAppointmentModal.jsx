@@ -32,6 +32,7 @@ import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
+import { oneTimeMosquitoLadderPrice } from '../../lib/estimateEngine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -767,6 +768,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const lineDiscountAmount = (svc) => previewLineDiscount(svc?.lineDiscount, lineBaseAmount(svc));
   const lineNetAmount = (svc) => Math.max(0, Math.round((lineBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
+  // A price counts as "entered" when the field holds any finite number —
+  // including an explicit 0 (a deliberate waiver). Only a genuinely blank
+  // field activates the automatic lot-based mosquito price.
+  const lineHasEnteredPrice = (svc) => {
+    if (svc?.price === '' || svc?.price == null) return false;
+    return Number.isFinite(parseFloat(svc.price));
+  };
+  // Auto (lot-based) one-time mosquito charge the server will stamp when the
+  // field is left blank — resolved here so staff see the amount before
+  // scheduling; the server re-derives it authoritatively on submit.
+  const mosquitoAutoAmount = (svc) => {
+    if (svc?.service_key !== 'mosquito_one_time' || lineHasEnteredPrice(svc)) return null;
+    const lotSqft = Number(selectedCustomer?.lotSqft);
+    if (!Number.isFinite(lotSqft) || lotSqft <= 0) return null;
+    return oneTimeMosquitoLadderPrice(lotSqft);
+  };
+  const lineEffectiveBaseAmount = (svc) => (
+    lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
+  );
+  const lineEffectiveNetAmount = (svc) => Math.max(0, Math.round((lineEffectiveBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
   const matchingLineDiscounts = (idx) => {
     const svc = services[idx];
     const key = svc?.lineId || idx;
@@ -830,17 +851,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const clearLineDiscount = (idx) => {
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
   };
+  // Display totals use the EFFECTIVE amounts (entered price, or the auto
+  // lot-based mosquito charge) so the operator always sees what will bill.
   const subtotal = useMemo(() => {
     return services.reduce((sum, s) => {
-      return sum + lineBaseAmount(s);
+      return sum + lineEffectiveBaseAmount(s);
     }, 0);
-  }, [services]);
+  }, [services, selectedCustomer]);
   const lineDiscountTotal = useMemo(() => {
     return services.reduce((sum, s) => sum + lineDiscountAmount(s), 0);
   }, [services]);
   const netSubtotal = useMemo(() => {
-    return services.reduce((sum, s) => sum + lineNetAmount(s), 0);
-  }, [services]);
+    return services.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+  }, [services, selectedCustomer]);
   const totalDuration = useMemo(() => {
     if (services.length === 0) return defaultDurationMinutes || 60;
     return services.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
@@ -1177,7 +1200,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const firstGroupOfBooking = results.length === 0 && createdGroupKeysRef.current.size === 0;
       try {
         const [primary, ...extras] = group.lines;
-        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
+        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
         const groupHasPrice = group.lines.some((s) => {
           const n = parseFloat(s.price);
           return Number.isFinite(n) && n >= 0 && s.price !== '' && s.price != null;
@@ -1186,12 +1209,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const addons = extras.map((s) => {
           const basePrice = lineBaseAmount(s);
           const p = lineNetAmount(s);
+          // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
+          // must reach the server as 0 — the `> 0 ? : null` coercion below
+          // would otherwise turn it into null and the server would stamp the
+          // lot-ladder charge instead. Blank stays null so the ladder applies.
+          const preserveZero = s.service_key === 'mosquito_one_time' && lineHasEnteredPrice(s);
           return {
             serviceId: s.id || null,
             serviceName: s.name,
             name: s.name,
-            basePrice: basePrice > 0 ? basePrice : null,
-            price: p > 0 ? p : null,
+            basePrice: preserveZero ? basePrice : (basePrice > 0 ? basePrice : null),
+            price: preserveZero ? p : (p > 0 ? p : null),
             discountId: s.lineDiscount?.id || null,
             discountName: s.lineDiscount?.name || null,
             discountType: s.lineDiscount?.discount_type || null,
@@ -1223,8 +1251,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           serviceId: primary.id || null,
           // Blank-priced one-time mosquito must reach the server as null so
           // the lot-ladder default applies — groupHasPrice would otherwise
-          // coerce it to 0 when another line in the group carries a price.
-          primaryLinePrice: (primary.service_key === 'mosquito_one_time' && !(parseFloat(primary.price) > 0))
+          // coerce it to 0 when another line in the group carries a price. An
+          // ENTERED 0 (deliberate waiver) still goes through as 0.
+          primaryLinePrice: (primary.service_key === 'mosquito_one_time' && !lineHasEnteredPrice(primary))
             ? null
             : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary.lineDiscount ? {
@@ -1929,6 +1958,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     step="0.01"
                     style={{ ...inputStyle, paddingLeft: 24 }}
                   />
+                  {mosquitoAutoAmount(svc) != null && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      Auto: ${mosquitoAutoAmount(svc).toFixed(2)} (lot-based)
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>

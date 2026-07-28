@@ -50,6 +50,39 @@ import {
 
 /* ── helpers ────────────────────────────────────────────────── */
 
+// One-time mosquito base price for a treatable area, mirroring the
+// server-authoritative band (server/services/pricing-engine/constants.js
+// ONE_TIME.mosquito, repriced 2026-07 to ~25% under the one-time pest band)
+// and the server's 500-sf-step interpolation between bucket anchors
+// (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
+// Anchors and the over-acre increment ($40 / 10k sf over an acre) must stay
+// in sync with the server so previewed prices match what the server actually
+// charges. Also used by the schedule modal to show the auto (lot-based)
+// charge before submission.
+export function oneTimeMosquitoLadderPrice(treatableSqFt) {
+  let p;
+  if (treatableSqFt > 43560) {
+    p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
+  } else {
+    const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];
+    const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
+    p = otAnchors[otAnchors.length - 1][1];
+    if (stepped <= otAnchors[0][0]) {
+      p = otAnchors[0][1];
+    } else {
+      for (let i = 1; i < otAnchors.length; i++) {
+        if (stepped <= otAnchors[i][0]) {
+          const [as, ap] = otAnchors[i - 1];
+          const [bs, bp2] = otAnchors[i];
+          p = Math.round(ap + ((stepped - as) / (bs - as)) * (bp2 - ap));
+          break;
+        }
+      }
+    }
+  }
+  return p;
+}
+
 export function interpolate(v, b) {
   if (v <= b[0].at) return b[0].adj;
   if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
@@ -2410,33 +2443,7 @@ export function calculateEstimate(inputs) {
   if (svcOnetimeMosquito && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
-    // Mirrors the server-authoritative one-time mosquito band
-    // (server/services/pricing-engine/constants.js ONE_TIME.mosquito, repriced
-    // 2026-07 to ~25% under the one-time pest band) and the server's
-    // 500-sf-step interpolation between bucket anchors. Anchors and the
-    // over-acre increment ($40 / 10k sf over an acre) must stay in sync with
-    // the server so the previewed price matches what the server actually
-    // charges.
-    let p;
-    if (treatableSqFt > 43560) {
-      p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
-    } else {
-      const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];
-      const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
-      p = otAnchors[otAnchors.length - 1][1];
-      if (stepped <= otAnchors[0][0]) {
-        p = otAnchors[0][1];
-      } else {
-        for (let i = 1; i < otAnchors.length; i++) {
-          if (stepped <= otAnchors[i][0]) {
-            const [as, ap] = otAnchors[i - 1];
-            const [bs, bp2] = otAnchors[i];
-            p = Math.round(ap + ((stepped - as) / (bs - as)) * (bp2 - ap));
-            break;
-          }
-        }
-      }
-    }
+    const p = oneTimeMosquitoLadderPrice(treatableSqFt);
     const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
     const fp = Math.round((p + addOns) * rD);
     const detailParts = [];
