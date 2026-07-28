@@ -64,6 +64,11 @@ describe('stripSchedulerAuditText', () => {
     expect(stripSchedulerAuditText(note)).toBe('Gate code changed to 4412.');
   });
 
+  test('ordinary verbs do not make a note audit-shaped', () => {
+    const note = 'Updated gate code to 4412. No SMS sent.';
+    expect(stripSchedulerAuditText(note)).toBe('Updated gate code to 4412.');
+  });
+
   test('keeps prose that merely contains the no-SMS phrase mid-sentence', () => {
     const note = 'Gate code 4412. Customer has no mobile, so no SMS sent; call on arrival.';
     expect(stripSchedulerAuditText(note)).toBe(note);

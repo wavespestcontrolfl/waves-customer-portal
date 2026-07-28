@@ -38,11 +38,11 @@ const AUDIT_TAG_RE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)*_\d{4}_\d{2}\s*:/;
 // SMS sent; call on arrival.") must pass through untouched.
 const NO_SMS_STANDALONE_RE = /^no sms sent[.!]?$/i;
 // A standalone marker only consumes its predecessor when the predecessor
-// itself reads like a scheduler-audit entry: ops narration verbs
-// ("Clarified Dale Brush service line: …") or machine snake_case tokens.
-// A real staff note that happens to precede a marker ("Gate code changed
-// to 4412. No SMS sent.") must survive.
-const AUDIT_PREDECESSOR_RE = /^(clarified|moved|rescheduled|resched|cancelled|canceled|renamed|reverted|aligned|realigned|updated|merged|split)\b/i;
+// itself reads like a KNOWN scheduler-entry shape: the ops "Clarified …
+// service line: …" narration, or machine snake_case tokens. Ordinary staff
+// prose — even when it starts with a verb like "Updated" ("Updated gate
+// code to 4412. No SMS sent.") — must survive; when in doubt, keep the note.
+const AUDIT_PREDECESSOR_RE = /^clarified\b.*\bservice line\b/i;
 const SNAKE_TOKEN_RE = /\b[a-z0-9]+_[a-z0-9_]+\b/;
 
 function stripSchedulerAuditText(text) {

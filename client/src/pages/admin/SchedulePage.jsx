@@ -3386,7 +3386,13 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  // Classify from the RAW service type when the payload carries it: the
+  // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
+  // becomes "Tree & Shrub Care") while the server's line-scoped fields are
+  // classified from the raw value — the panel must agree with them.
+  const serviceCategory = detectServiceCategory(
+    service.serviceTypeRaw || service.serviceType,
+  );
   const isLawn = serviceCategory === "lawn";
   const [activeSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
