@@ -146,8 +146,15 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   // filters above catch and stamp).
   const nonRepeatedIds = new Set(nonRepeatedRows.map((row) => String(row.id)));
   const historicallyNewIds = new Set(historicallyNewRows.map((row) => String(row.id)));
+  const isAnnual = (row) => row.event_type === 'annual' || row.recurrence_type === 'annual';
   const policyDrops = rows
     .filter((row) => !historicallyNewIds.has(String(row.id)))
+    // An ANNUAL row dropped by the previously-featured filter is a
+    // time-dependent decision — isEditoriallyNewEvent re-admits it after
+    // the 300-day cooldown — so it stays unstamped and retries, like the
+    // eligibility drops below. Non-annual featured-history drops and all
+    // repeated-identity drops are permanent and stamp.
+    .filter((row) => !(nonRepeatedIds.has(String(row.id)) && isAnnual(row)))
     .map((row) => ({
       id: String(row.id),
       note: !nonRepeatedIds.has(String(row.id))

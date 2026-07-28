@@ -51,6 +51,29 @@ exports.up = async function up(knex) {
       curation_note: 'Requeued for editorial scoring (2026-07-28 rubric)',
       updated_at: knex.fn.now(),
     });
+
+  // The PRE-RUBRIC auto-curator's approvals bypass the floor the same
+  // way: approved_via='auto_curation' with curated_at set but no
+  // editorial_score (the old "would a reader go" standard — the pool
+  // behind the lackluster editions). Requeue the future ones for
+  // re-scoring under the rubric: back to pending with curated_at cleared
+  // so they re-enter the candidate query (drains at the 120-row run
+  // limit over a few daily runs). Genuinely manual approvals (NULL
+  // provenance on tier-2/3 sources) and the owner's sweep rows
+  // (approved_via='owner_sweep') are untouched, as are rows that already
+  // carry a rubric score.
+  await knex('events_raw')
+    .where({ admin_status: 'approved', approved_via: 'auto_curation' })
+    .whereNull('editorial_score')
+    .whereNull('merged_into')
+    .where('start_at', '>=', knex.fn.now())
+    .update({
+      admin_status: 'pending',
+      approved_via: null,
+      curated_at: null,
+      curation_note: 'Requeued for editorial scoring (2026-07-28 rubric)',
+      updated_at: knex.fn.now(),
+    });
 };
 
 exports.down = async function down(knex) {
