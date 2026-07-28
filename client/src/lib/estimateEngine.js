@@ -2239,13 +2239,17 @@ export function calculateEstimate(inputs) {
         },
       };
       wgServices.push({
-        name: termiteMonitoringTier === 'premier' ? 'Termite Bait (Premier)' : 'Termite Bait (Basic)',
+        // Tiers are retired (owner 2026-07-28) — no tier suffix, and the
+        // row bills the SAME bracket monthly the aggregates use (a flat
+        // 35/65 here would persist a row that disagrees with monthlyTotal,
+        // and acceptance/conversion bill from these rows).
+        name: 'Termite Bait',
         service: 'termite_bait',
-        mo: termiteMonitoringTier === 'premier' ? 65 : 35,
+        mo: monMonthly,
         // Quarterly station checks, billed per application (owner
         // 2026-07-20) — mirrors server priceTermiteBait visitsPerYear/perApp
-        // (perApp = monthly x 3, exact: $105 basic / $195 premier).
-        perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
+        // (perApp = monthly × 3, exact by construction).
+        perTreatment: Math.round(monMonthly * 3 * 100) / 100,
         visitsPerYear: 4,
       });
       // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +

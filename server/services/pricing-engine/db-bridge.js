@@ -1033,11 +1033,14 @@ async function syncConstantsFromDB(dbInstance) {
       // would silently double the small-home rate ($35 vs $19). The
       // migration rewrites the prod row to the new shape; an un-migrated
       // row simply leaves the in-code bracket defaults in force.
+      // money(), not r(): the admin validator accepts cent values and the
+      // client applier preserves them — whole-dollar rounding here would
+      // price a $19.50 base differently on server vs fallback.
       if (isPositiveNumber(Number(tm.base_monthly))) {
-        constants.TERMITE.monitoring.baseMonthly = r(Number(tm.base_monthly));
+        constants.TERMITE.monitoring.baseMonthly = money(Number(tm.base_monthly));
       }
       if (isNonNegativeNumber(Number(tm.step_monthly))) {
-        constants.TERMITE.monitoring.stepMonthly = r(Number(tm.step_monthly));
+        constants.TERMITE.monitoring.stepMonthly = money(Number(tm.step_monthly));
       }
       if (isPositiveNumber(Number(tm.bracket_stations))) {
         constants.TERMITE.monitoring.bracketStations = Math.round(Number(tm.bracket_stations));

@@ -920,6 +920,22 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
+  test('termite monitoring brackets sync CENT-precise and ignore the retired flat keys', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'termite_monitoring',
+      // Decimal admin values must survive to the cent (codex pre-push P1:
+      // r() rounded to whole dollars, pricing $19.50 differently on server
+      // vs the client fallback applier). Legacy basic/premier keys are
+      // ignored — honoring `basic` as a bracket base would double the
+      // small-home rate.
+      data: { pricing_model: 'station_brackets', base_monthly: 19.5, step_monthly: 4.25, bracket_stations: 5, basic: 35, premier: 65 },
+    }]);
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+    expect(constants.TERMITE.monitoring.baseMonthly).toBe(19.5);
+    expect(constants.TERMITE.monitoring.stepMonthly).toBe(4.25);
+    expect(constants.TERMITE.monitoring.bracketStations).toBe(5);
+  });
+
   test('rejects invalid termite DB overlay and restores previous constants', async () => {
     const db = pricingConfigDb([{
       config_key: 'termite_install',

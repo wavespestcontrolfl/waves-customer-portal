@@ -138,6 +138,14 @@ describe("termite station rental — client fallback engine", () => {
     // An ABSENT system resolves Trelona (menu is Trelona-only).
     expect(calculateEstimate(termiteInput({ termiteBaitSystem: undefined })).results.tmBait.sta)
       .toBe(tre.results.tmBait.sta);
+    // The persisted service ROW bills the same bracket amounts the
+    // aggregates use (codex pre-push P0: a flat 35/65 row beside a
+    // bracketed monthlyTotal would display one total and bill another —
+    // acceptance/conversion consume these rows).
+    const treRow = (tre.recurring?.services || []).find((s) => s.service === "termite_bait");
+    expect(treRow.name).toBe("Termite Bait");
+    expect(treRow.mo).toBe(tre.results.tmBait.monMonthly);
+    expect(treRow.perTreatment).toBe(Math.round(tre.results.tmBait.monMonthly * 3 * 100) / 100);
     // Server-tuned brackets apply and reset (kill-value pattern).
     applyServerTermiteMonitoringPricingConfig({ base_monthly: 25, step_monthly: 10, bracket_stations: 5 });
     expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.monMonthly)
