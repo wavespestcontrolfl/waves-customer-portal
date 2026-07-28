@@ -118,6 +118,14 @@ function parseMessage(msg) {
   const fromAddress = fromMatch && fromMatch[2] ? fromMatch[2].trim() : (fromRaw || '').trim();
 
   const listUnsubscribe = getHeader('List-Unsubscribe');
+  const listUnsubscribePost = getHeader('List-Unsubscribe-Post');
+  // Authentication-Results is only trustworthy when GMAIL wrote it — a
+  // sender can inject their own copy claiming dkim=pass. Take the first
+  // instance whose authserv-id is Google's receiving MX.
+  const trustedAuthResults = headers
+    .filter((h) => h.name.toLowerCase() === 'authentication-results')
+    .map((h) => h.value || '')
+    .find((v) => /^\s*mx\.google\.com[;\s]/i.test(v)) || null;
 
   const body = extractBody(msg.payload);
   const attachments = extractAttachments(msg.payload, msg.id);
@@ -141,9 +149,13 @@ function parseMessage(msg) {
     // RFC Message-ID — required (with In-Reply-To/References) for a reply
     // draft to join the source thread.
     message_id: getHeader('Message-ID') || null,
-    // Gmail's own SPF/DKIM/DMARC verdict — the spam-rescue sweep requires
-    // aligned authentication before reversing a spam classification.
-    authentication_results: getHeader('Authentication-Results') || null,
+    // RFC 8058 one-click consent — POST is only allowed when the sender
+    // explicitly declared it.
+    list_unsubscribe_post: listUnsubscribePost || null,
+    // Gmail's own SPF/DKIM/DMARC verdict (trusted authserv-id only) — the
+    // spam-rescue sweep and known-sender override require aligned
+    // authentication before trusting a From address.
+    authentication_results: trustedAuthResults,
     attachments,
     historyId: msg.historyId,
   };

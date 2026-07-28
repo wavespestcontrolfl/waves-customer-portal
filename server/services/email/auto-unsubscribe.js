@@ -150,18 +150,24 @@ async function autoUnsubscribe(email) {
         return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
       }
       try {
-        // Try POST first (RFC 8058 one-click) — hardened fetch: every hop
-        // DNS-validated public, redirects manual (see fetchPublicOnly).
-        let res = await fetchPublicOnly(urlMatch[1], {
-          method: 'POST',
-          headers: {
-            'User-Agent': 'Mozilla/5.0',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: 'List-Unsubscribe=One-Click',
-        });
-
-        if (!res.ok) {
+        // RFC 8058 one-click POST is only allowed when the sender DECLARED
+        // it via List-Unsubscribe-Post — a plain List-Unsubscribe URL may be
+        // a preference page never meant to receive a POST. Hardened fetch
+        // either way: every hop DNS-validated public, socket pinned,
+        // redirects manual (see fetchPublicOnly).
+        const oneClick = /list-unsubscribe=one-click/i.test(String(email.list_unsubscribe_post || ''));
+        let res;
+        if (oneClick) {
+          res = await fetchPublicOnly(urlMatch[1], {
+            method: 'POST',
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'List-Unsubscribe=One-Click',
+          });
+        }
+        if (!res || !res.ok) {
           res = await fetchPublicOnly(urlMatch[1], { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
         }
         // A 404/500 on both attempts is a FAILED unsubscribe — reporting it

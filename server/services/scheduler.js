@@ -2433,11 +2433,15 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('50 6 * * *', async () => {
     try {
-      const hygiene = require('./email/inbox-hygiene');
-      const swept = await hygiene.sweepQuarantine();
-      const rescued = await hygiene.rescueSpamFolder();
-      const drafts = await hygiene.reconcilePendingDrafts();
-      logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed (${swept.restored} restored), ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer, ${rescued.unauthenticated} unverified), draft claims: ${drafts.settled} settled/${drafts.released} released`);
+      // runExclusive: overlapping Railway instances scanning the same Spam
+      // ids would double-insert rescue/review notifications.
+      await runExclusive('inbox-hygiene', async () => {
+        const hygiene = require('./email/inbox-hygiene');
+        const swept = await hygiene.sweepQuarantine();
+        const rescued = await hygiene.rescueSpamFolder();
+        const drafts = await hygiene.reconcilePendingDrafts();
+        logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed (${swept.restored} restored), ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer, ${rescued.unauthenticated} unverified), draft claims: ${drafts.settled} settled/${drafts.released} released`);
+      });
     } catch (err) {
       logger.error(`[inbox-hygiene] Cron failed: ${err.message}`);
     }

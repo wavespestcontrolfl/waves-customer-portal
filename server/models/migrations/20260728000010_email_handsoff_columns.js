@@ -34,10 +34,16 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasColumn('emails', 'draft_claimed_at'))) {
     await knex.schema.alterTable('emails', (t) => t.timestamp('draft_claimed_at', { useTz: true }));
   }
+  if (!(await knex.schema.hasColumn('emails', 'list_unsubscribe_post'))) {
+    await knex.schema.alterTable('emails', (t) => t.text('list_unsubscribe_post'));
+  }
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('emails'))) return;
+  if (await knex.schema.hasColumn('emails', 'list_unsubscribe_post')) {
+    await knex.schema.alterTable('emails', (t) => t.dropColumn('list_unsubscribe_post'));
+  }
   if (await knex.schema.hasColumn('emails', 'draft_claimed_at')) {
     await knex.schema.alterTable('emails', (t) => t.dropColumn('draft_claimed_at'));
   }

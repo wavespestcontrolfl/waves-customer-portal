@@ -191,6 +191,7 @@ async function upsertEmail(parsed) {
     // parseMessage has always extracted List-Unsubscribe; persisting it is
     // what lets autoUnsubscribe's RFC 8058 one-click method actually fire.
     list_unsubscribe: parsed.list_unsubscribe || null,
+    list_unsubscribe_post: parsed.list_unsubscribe_post || null,
     // Message-ID threads reply drafts into the source conversation.
     message_id: parsed.message_id || null,
     // Gmail's SPF/DKIM verdict — gates the spam-path unsubscribe and the

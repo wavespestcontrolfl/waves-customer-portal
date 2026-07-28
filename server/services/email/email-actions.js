@@ -282,7 +282,7 @@ async function handleSpam(email) {
     // can report the failure.
     logger.warn(`[email-actions] quarantine failed at ${e.quarantineStage || 'unknown'} — left non-destructive (email ${email.id}): ${e.message}`);
     await db('emails').where({ id: email.id })
-      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, updated_at: new Date() })
+      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() })
       .catch(() => {});
   }
 }

@@ -84,9 +84,10 @@ async function quarantineMessage(email) {
   } catch (e) {
     e.quarantineStage = 'gmail'; // AMBIGUOUS — swap may have applied
     // De-stamp so the sweep never trashes a row whose Gmail state is
-    // unknown; the message stays wherever Gmail left it (non-destructive).
+    // unknown; is_archived resets too or a message still in the Gmail inbox
+    // would vanish from the portal's default email view indefinitely.
     await db('emails').where({ id: email.id, auto_action: 'spam_quarantined' })
-      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, updated_at: new Date() })
+      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() })
       .catch(() => {});
     throw e;
   }
