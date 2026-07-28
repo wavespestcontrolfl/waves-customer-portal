@@ -10619,8 +10619,21 @@ export function CompletionPanel({
           service.id,
         );
       }
+      // Lawn closeouts enforce the product-backed rule at submit too: a
+      // draft saved before the scout/task rows were filtered out can restore
+      // labels the selector no longer offers — they must not persist as
+      // completed protocol actions. Only applied once the (filtered) action
+      // set has loaded; pest keeps its fallback-chip labels untouched.
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
+      ).filter(
+        (label) =>
+          !isLawn ||
+          !protocolActions.length ||
+          protocolActions.some(
+            (action) =>
+              (action.label || action.note || action.raw || "") === label,
+          ),
       );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {

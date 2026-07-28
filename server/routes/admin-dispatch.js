@@ -3857,10 +3857,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (Number.isFinite(limit) && limit > 0 && lawnSqft > 0 && Array.isArray(products) && products.length) {
           const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
           const catalogRows = ids.length
-            ? await db('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'analysis_p', 'analysis_k')
+            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n', 'analysis_p', 'analysis_k')
             : [];
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
+          const unquantifiedNProducts = [];
           for (const p of products) {
             const catalog = catalogById.get(String(p.productId));
             if (!catalog) continue;
@@ -3874,13 +3875,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               amountUnit: baseQuantityUnit(p.amountUnit || p.rateUnit || null),
               lawnSqft,
             });
-            if (applied?.nAppliedPer1000) actualVisitN += applied.nAppliedPer1000;
+            if (applied?.nAppliedPer1000) {
+              actualVisitN += applied.nAppliedPer1000;
+            } else if (!applied && Number(catalog.analysis_n || 0) > 0) {
+              // Fluid-volume amounts can't convert to lb N without a per-
+              // product density — the entire annual-N system (nutrient
+              // ledger and plan projection share amountToPounds) excludes
+              // them. Never SILENTLY: surface the gap as its own advisory
+              // instead of inventing a density here.
+              unquantifiedNProducts.push(catalog.name || 'nitrogen product');
+            }
           }
           const used = Number(annualN.used || 0);
           if (actualVisitN > 0 && used + actualVisitN > limit) {
             actualAnnualNBlocks.push({
               code: 'actual_annual_n_budget_exceeded',
               message: `Applied products add ${actualVisitN.toFixed(2)} lb N/1k (${(used + actualVisitN).toFixed(2)} of ${limit} lb N/1k for the year) — actuals exceed the annual N budget.`,
+            });
+          }
+          if (unquantifiedNProducts.length) {
+            actualAnnualNBlocks.push({
+              code: 'unquantified_liquid_nitrogen',
+              message: `${[...new Set(unquantifiedNProducts)].join(', ')} was applied in a volume unit the nutrient ledger can't convert to lb N/1k — the annual-N projection excludes it; track it manually if the property is near its budget.`,
             });
           }
         }
