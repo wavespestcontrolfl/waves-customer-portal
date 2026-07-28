@@ -137,13 +137,20 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
   const pairMatch = (q) => q
     .whereRaw(`${NAME_KEY_SQL('first_name')} = ?`, [oldFirstKey])
     .whereRaw(`${NAME_KEY_SQL('last_name')} = ?`, [oldLastKey]);
+  // No-op rows are excluded: a case-only edit (old key == new key) also
+  // matches copies that ALREADY hold the exact new spelling, and rewriting
+  // those would bump updated_at (staleness/follow-up queries key on it) for
+  // nothing.
+  const pairDiff = (last) => (q) => q.where((w) => w
+    .whereRaw('first_name IS DISTINCT FROM ?', [newFirst])
+    .orWhereRaw('last_name IS DISTINCT FROM ?', [last]));
 
-  counts.leads += await pairMatch(
+  counts.leads += await pairDiff(newLast || null)(pairMatch(
     conn('leads')
       .where({ customer_id: customerId })
       .whereNull('deleted_at')
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
-  ).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
+  )).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
 
   // Estimates snapshot ONE display string, and an authored proposal snapshots
   // its own preparedFor which the PDF prints — per-row so the proposal patch
@@ -159,8 +166,13 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     const data = typeof row.estimate_data === 'string'
       ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
       : row.estimate_data;
+    const targetName = newFull.slice(0, 100);
     const preparedFor = data?.proposal?.preparedFor;
     const patchPreparedFor = !!(preparedFor && nameKey(preparedFor) === oldFullKey && preparedFor !== newFull);
+    // A case-only edit (old key == new key) also matches rows that ALREADY
+    // hold the exact new spelling everywhere — nothing displayed changes on
+    // those, so they get no write (and keep their delivery marker).
+    if (row.customer_name === targetName && !patchPreparedFor) continue;
     // The synthesized/sent PDF printed the OLD name (preparedFor falls back
     // to customer_name at build time) — the "PDF emailed" claim is stale
     // either way, so proposalDelivery drops with the sync and the next send
@@ -181,7 +193,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
       guarded = guarded.whereRaw("estimate_data #>> '{proposal,preparedFor}' IS NOT DISTINCT FROM ?", [preparedFor]);
     }
     const n = await guarded.update({
-      customer_name: newFull.slice(0, 100),
+      customer_name: targetName,
       estimate_data: conn.raw(expr, bindings),
       updated_at: now,
     });
@@ -195,7 +207,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
         .where({ id: row.id, customer_id: customerId, customer_name: row.customer_name })
         .whereIn('status', OPEN_ESTIMATE_STATUSES)
         .whereNull('archived_at')
-        .update({ customer_name: newFull.slice(0, 100), updated_at: now });
+        .update({ customer_name: targetName, updated_at: now });
     }
   }
 
@@ -206,26 +218,28 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .where({ customer_id: customerId, status: 'sending' })
     .whereNull('archived_at')
     .whereRaw(`${NAME_KEY_SQL('customer_name')} = ?`, [oldFullKey])
+    .whereRaw('customer_name IS DISTINCT FROM ?', [newFull.slice(0, 100)])
     .update({ customer_name: newFull.slice(0, 100), updated_at: now });
 
   // Active enrollments greet every remaining step from their denormalized
   // name; terminal enrollments are history.
-  counts.enrollments += await pairMatch(
+  counts.enrollments += await pairDiff(newLast || null)(pairMatch(
     conn('automation_enrollments').where({ customer_id: customerId, status: 'active' })
-  ).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
+  )).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
 
   // Newsletter greetings only carry a first name.
-  if (oldFirstKey && newFirst !== oldFirst) {
+  if (oldFirstKey) {
     counts.newsletter += await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .whereRaw(`${NAME_KEY_SQL('first_name')} = ?`, [oldFirstKey])
+      .whereRaw('first_name IS DISTINCT FROM ?', [newFirst])
       .update({ first_name: newFirst, updated_at: now });
   }
 
   // Promoter name columns are NOT NULL — an empty new last name stores ''.
-  counts.promoters += await pairMatch(
+  counts.promoters += await pairDiff(newLast)(pairMatch(
     conn('referral_promoters').where({ customer_id: customerId })
-  ).update({ first_name: newFirst, last_name: newLast, updated_at: now });
+  )).update({ first_name: newFirst, last_name: newLast, updated_at: now });
 
   // Delivery/reminder emails address recipient_name; signed_name and the
   // legal *_snapshot columns are never rewritten (see header).
@@ -233,18 +247,19 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .where({ customer_id: customerId })
     .whereNotIn('status', TERMINAL_CONTRACT_STATUSES)
     .whereRaw(`${NAME_KEY_SQL('recipient_name')} = ?`, [oldFullKey])
+    .whereRaw('recipient_name IS DISTINCT FROM ?', [newFull.slice(0, 180)])
     .update({ recipient_name: newFull.slice(0, 180), updated_at: now });
 
   // Recovery touches (SMS and ~24h email) greet from the intent row — only
   // rows still awaiting a touch matter. IS NOT TRUE mirrors the recovery
   // sender's own pending predicates (the flags are nullable).
-  counts.bookingIntents += await pairMatch(
+  counts.bookingIntents += await pairDiff(newLast || null)(pairMatch(
     conn('booking_intents')
       .where({ customer_id: customerId })
       .whereRaw('suppressed IS NOT TRUE')
       .whereNull('converted_at')
       .where((q) => q.whereRaw('followup_sms_sent IS NOT TRUE').orWhereRaw('followup_email_sent IS NOT TRUE'))
-  ).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
+  )).update({ first_name: newFirst, last_name: newLast || null, updated_at: now });
 
   // Queued template runs render their body from the stored payload — greeting
   // variables captured before the correction would print the old name. Same

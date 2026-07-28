@@ -127,6 +127,28 @@ describe('propagateCustomerNameChange', () => {
     expect(conn.__updates('leads')[0].arg.first_name).toBe('Cathy');
   });
 
+  test('a case-only edit never touches an already-correct estimate (delivery marker survives)', async () => {
+    // A case-only edit's OLD key also matches rows already holding the exact
+    // NEW spelling — those get no write at all, so their "PDF emailed" state
+    // is preserved.
+    const conn = makeConn({
+      estimates: {
+        rows: [{
+          id: 'est-1',
+          customer_name: 'Cathy Nunes Furao',
+          estimate_data: { proposal: { preparedFor: 'Cathy Nunes Furao' }, proposalDelivery: { sentAt: 'x' } },
+        }],
+      },
+    });
+    await propagateCustomerNameChange({
+      before: { id: 'cust-1', first_name: 'cathy', last_name: 'nunes furao' },
+      after: { id: 'cust-1', first_name: 'Cathy', last_name: 'Nunes Furao' },
+    }, conn);
+    // The only estimates write allowed is the column-only 'sending' sync —
+    // nothing may carry an estimate_data patch.
+    expect(conn.__updates('estimates').every((u) => u.arg.estimate_data === undefined)).toBe(true);
+  });
+
   test('no-ops when the name did not actually change', async () => {
     const conn = makeConn();
     const counts = await propagateCustomerNameChange({
