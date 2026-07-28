@@ -308,7 +308,17 @@ describe('propagateCustomerPhoneChange', () => {
     expect(conn.__calls).toHaveLength(0);
   });
 
-  test('a removal or non-NANP new phone is never propagated', async () => {
+  test('a supported international new number propagates (repo preserves non-NANP phones)', async () => {
+    const conn = makeConn();
+    const counts = await propagateCustomerPhoneChange({
+      before: PHONE_BEFORE,
+      after: { id: 'cust-1', phone: '+442079460958' },
+    }, conn);
+    expect(counts.leads).toBe(1);
+    expect(conn.__updates('leads')[0].arg.phone).toBe('+442079460958');
+  });
+
+  test('a removal or partial new phone is never propagated', async () => {
     const conn = makeConn();
     expect(await propagateCustomerPhoneChange({
       before: PHONE_BEFORE, after: { id: 'cust-1', phone: '' },

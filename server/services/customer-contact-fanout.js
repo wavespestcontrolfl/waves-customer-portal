@@ -368,9 +368,12 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
   const oldVariants = phoneDigitVariants(before && before.phone);
   const newPhone = cleanText(after && after.phone) || '';
   const newKey = phoneKey(newPhone);
-  // The NEW phone must be a full NANP number before it fans out; the OLD side
-  // only needs to have been something (that is what gets corrected).
-  if (!customerId || !oldVariants.length || newKey.length !== 10 || oldVariants.includes(newKey)) return counts;
+  // The NEW phone must be a full number before it fans out; the OLD side only
+  // needs to have been something (that is what gets corrected). 10 digits =
+  // NANP; up to 15 covers the international numbers the repository's phone
+  // handling explicitly preserves (normalizePhoneForStorage keeps non-NANP
+  // input verbatim) — shorter fragments never propagate.
+  if (!customerId || !oldVariants.length || newKey.length < 10 || newKey.length > 15 || oldVariants.includes(newKey)) return counts;
 
   const now = new Date();
   const digitPlaceholders = oldVariants.map(() => '?').join(', ');
