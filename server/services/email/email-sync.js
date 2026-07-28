@@ -191,6 +191,8 @@ async function upsertEmail(parsed) {
     // parseMessage has always extracted List-Unsubscribe; persisting it is
     // what lets autoUnsubscribe's RFC 8058 one-click method actually fire.
     list_unsubscribe: parsed.list_unsubscribe || null,
+    // Message-ID threads reply drafts into the source conversation.
+    message_id: parsed.message_id || null,
     received_at: parsed.received_at,
     is_read: parsed.is_read,
     is_starred: parsed.is_starred,

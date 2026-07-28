@@ -1,3 +1,5 @@
+const dns = require('dns').promises;
+const net = require('net');
 const db = require('../../models/db');
 const logger = require('../logger');
 
@@ -18,6 +20,62 @@ function isSafePublicUrl(rawUrl) {
   // IPv6 unique-local / link-local
   if (/^\[?(fc|fd|fe80)/i.test(host)) return false;
   return true;
+}
+
+/** True when an IP literal is private/loopback/link-local/metadata space. */
+function isPrivateAddress(ip) {
+  const v = net.isIP(ip);
+  if (!v) return true; // unparseable — treat as unsafe
+  const addr = ip.toLowerCase();
+  if (v === 4) {
+    return /^127\./.test(addr) || /^10\./.test(addr) || /^192\.168\./.test(addr)
+      || /^169\.254\./.test(addr) || /^172\.(1[6-9]|2\d|3[01])\./.test(addr)
+      || /^0\./.test(addr) || addr === '255.255.255.255' || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr);
+  }
+  // IPv6: loopback, unspecified, unique-local, link-local, IPv4-mapped private
+  if (addr === '::1' || addr === '::') return true;
+  if (/^(fc|fd|fe8|fe9|fea|feb)/.test(addr)) return true;
+  if (addr.startsWith('::ffff:')) return isPrivateAddress(addr.slice(7));
+  return false;
+}
+
+/**
+ * SSRF-hardened fetch for UNTRUSTED, sender-controlled URLs. The header/body
+ * URL check alone is not enough: a public hostname can resolve to a private
+ * address, and an open redirect can bounce the request to
+ * internal/metadata endpoints. Every hop (redirects included, max 3) is
+ * string-validated AND DNS-resolved with every returned address required to
+ * be public before any request is issued; redirects are followed manually so
+ * an unvalidated hop can never fire. (DNS answers are not pinned to the
+ * socket — a sub-TTL rebinding race remains theoretically possible — but no
+ * hop with a private resolution is ever requested.)
+ */
+async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
+  let current = rawUrl;
+  for (let hop = 0; hop < maxHops; hop += 1) {
+    if (!isSafePublicUrl(current)) throw new Error(`unsafe URL refused (hop ${hop})`);
+    const { hostname } = new URL(current);
+    if (!net.isIP(hostname)) {
+      const results = await dns.lookup(hostname, { all: true });
+      if (!results.length || results.some((r) => isPrivateAddress(r.address))) {
+        throw new Error(`private/unresolvable host refused (hop ${hop})`);
+      }
+    } else if (isPrivateAddress(hostname)) {
+      throw new Error(`private IP literal refused (hop ${hop})`);
+    }
+    const res = await fetch(current, { ...options, redirect: 'manual' });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) return res;
+      current = new URL(location, current).toString();
+      // Redirect hops downgrade to GET (mirrors browser semantics for 301/302
+      // POSTs) and never re-send the one-click body to a new host.
+      options = { headers: options.headers, method: 'GET' };
+      continue;
+    }
+    return res;
+  }
+  throw new Error('too many redirects');
 }
 
 async function autoUnsubscribe(email) {
@@ -47,10 +105,10 @@ async function autoUnsubscribe(email) {
         return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
       }
       try {
-        // Try POST first (RFC 8058 one-click)
-        let res = await fetch(urlMatch[1], {
+        // Try POST first (RFC 8058 one-click) — hardened fetch: every hop
+        // DNS-validated public, redirects manual (see fetchPublicOnly).
+        let res = await fetchPublicOnly(urlMatch[1], {
           method: 'POST',
-          redirect: 'follow',
           headers: {
             'User-Agent': 'Mozilla/5.0',
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -59,7 +117,7 @@ async function autoUnsubscribe(email) {
         });
 
         if (!res.ok) {
-          res = await fetch(urlMatch[1], { method: 'GET', redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0' } });
+          res = await fetchPublicOnly(urlMatch[1], { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
         }
 
         await db('email_unsubscribe_log').insert({
@@ -89,9 +147,8 @@ async function autoUnsubscribe(email) {
       return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
     }
     try {
-      await fetch(unsubUrl, {
+      await fetchPublicOnly(unsubUrl, {
         method: 'GET',
-        redirect: 'follow',
         headers: { 'User-Agent': 'Mozilla/5.0' },
       });
 
@@ -112,4 +169,4 @@ async function autoUnsubscribe(email) {
   return { method: 'none', note: 'No unsubscribe mechanism found' };
 }
 
-module.exports = { autoUnsubscribe };
+module.exports = { autoUnsubscribe, fetchPublicOnly, isPrivateAddress, isSafePublicUrl };

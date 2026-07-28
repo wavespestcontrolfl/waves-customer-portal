@@ -2480,7 +2480,7 @@ function initScheduledJobs() {
       if (spam > 0) parts.push(`${spam} spam quarantined`);
       const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
       if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
-      const drafted = emails.filter(e => e.draft_gmail_id).length;
+      const drafted = emails.filter(e => e.draft_gmail_id && e.draft_gmail_id !== 'pending').length;
       if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
       // Follow-up nudges: inbound conversation mail nobody has answered.

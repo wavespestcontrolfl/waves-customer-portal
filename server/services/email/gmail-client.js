@@ -138,6 +138,12 @@ function parseMessage(msg) {
     is_read: !(msg.labelIds || []).includes('UNREAD'),
     is_starred: (msg.labelIds || []).includes('STARRED'),
     list_unsubscribe: listUnsubscribe || null,
+    // RFC Message-ID — required (with In-Reply-To/References) for a reply
+    // draft to join the source thread.
+    message_id: getHeader('Message-ID') || null,
+    // Gmail's own SPF/DKIM/DMARC verdict — the spam-rescue sweep requires
+    // aligned authentication before reversing a spam classification.
+    authentication_results: getHeader('Authentication-Results') || null,
     attachments,
     historyId: msg.historyId,
   };
@@ -347,6 +353,13 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
   return res.data;
 }
 
+/** Live labelIds for one message — the quarantine sweep's operator-veto check. */
+async function getMessageLabels(messageId) {
+  const gmail = await getGmail();
+  const res = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'minimal' });
+  return res.data.labelIds || [];
+}
+
 /** Thread metadata (per-message labelIds + headers) for reply detection. */
 async function getThread(threadId) {
   const gmail = await getGmail();
@@ -371,6 +384,7 @@ module.exports = {
   createDraft,
   ensureLabel,
   getThread,
+  getMessageLabels,
   modifyLabels,
   archiveMessage,
   trashMessage,

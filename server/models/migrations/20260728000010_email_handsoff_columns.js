@@ -25,10 +25,16 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasColumn('emails', 'draft_gmail_id'))) {
     await knex.schema.alterTable('emails', (t) => t.text('draft_gmail_id'));
   }
+  if (!(await knex.schema.hasColumn('emails', 'message_id'))) {
+    await knex.schema.alterTable('emails', (t) => t.text('message_id'));
+  }
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('emails'))) return;
+  if (await knex.schema.hasColumn('emails', 'message_id')) {
+    await knex.schema.alterTable('emails', (t) => t.dropColumn('message_id'));
+  }
   if (await knex.schema.hasColumn('emails', 'draft_gmail_id')) {
     await knex.schema.alterTable('emails', (t) => t.dropColumn('draft_gmail_id'));
   }

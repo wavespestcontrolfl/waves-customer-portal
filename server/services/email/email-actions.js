@@ -759,7 +759,15 @@ function emailAutoDraftsEnabled() {
 
 async function draftReplyForEmail(email, { customer = null, tone = 'service' } = {}) {
   if (!emailAutoDraftsEnabled()) return null;
-  if (email.draft_gmail_id) return null; // re-classification must not mint a second draft
+  // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
+  // time reclassification (which runs auto-actions twice with the same
+  // object) or a concurrent worker gets here. Only the caller that flips
+  // NULL → 'pending' drafts; everyone else no-ops.
+  const claimed = await db('emails')
+    .where({ id: email.id })
+    .whereNull('draft_gmail_id')
+    .update({ draft_gmail_id: 'pending', updated_at: new Date() });
+  if (!claimed) return null;
   try {
     const MODELS = require('../../config/models');
     const { dispatchWithFallback } = require('../llm/call');
@@ -778,23 +786,50 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       jsonMode: false,
       maxTokens: 400,
     });
-    if (!result.ok || !result.text) return null;
+    if (!result.ok || !result.text) {
+      await releaseDraftClaim(email.id);
+      return null;
+    }
     const htmlBody = String(result.text).trim().split(/\n{2,}/)
       .map((p) => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
+    // In-Reply-To/References carry the inbound Message-ID — Gmail needs them
+    // (plus threadId and a matching subject) for the draft to join the
+    // source thread. Pre-migration rows without a stored message_id fetch it
+    // live.
+    let inReplyTo = email.message_id || null;
+    if (!inReplyTo) {
+      try {
+        const fresh = await gmailClient.getMessage(email.gmail_id);
+        inReplyTo = fresh?.message_id || null;
+      } catch (e) { /* draft still lands, threading degrades */ }
+    }
     const draft = await gmailClient.createDraft(
       email.from_address,
       /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`,
       htmlBody,
       email.gmail_thread_id,
-      null
+      inReplyTo
     );
-    await db('emails').where({ id: email.id }).update({ draft_gmail_id: draft?.id || null, updated_at: new Date() });
-    logger.info(`[email-actions] Reply draft created for email ${email.id} (draft ${draft?.id})`);
-    return draft?.id || null;
+    if (!draft?.id) {
+      await releaseDraftClaim(email.id);
+      return null;
+    }
+    await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+      .update({ draft_gmail_id: draft.id, updated_at: new Date() });
+    logger.info(`[email-actions] Reply draft created for email ${email.id} (draft ${draft.id})`);
+    return draft.id;
   } catch (e) {
+    await releaseDraftClaim(email.id).catch(() => {});
     logger.warn(`[email-actions] auto-draft failed (email ${email.id}): ${e.message}`);
     return null;
   }
+}
+
+// A failed draft attempt hands the claim back so the next classification
+// pass can retry — only the 'pending' placeholder is ever cleared.
+async function releaseDraftClaim(emailId) {
+  await db('emails').where({ id: emailId, draft_gmail_id: 'pending' })
+    .update({ draft_gmail_id: null, updated_at: new Date() });
 }
 
 async function handleCustomerRequest(email, classification) {

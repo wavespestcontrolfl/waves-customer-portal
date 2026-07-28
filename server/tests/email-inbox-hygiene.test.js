@@ -19,6 +19,7 @@ jest.mock('../services/email/gmail-client', () => ({
   listMessages: jest.fn(async () => []),
   getMessage: jest.fn(),
   getThread: jest.fn(),
+  getMessageLabels: jest.fn(async () => ['Label_42']),
   createDraft: jest.fn(async () => ({ id: 'draft-1' })),
 }));
 jest.mock('../services/email/auto-unsubscribe', () => ({
@@ -40,10 +41,11 @@ const CHAIN_METHODS = [
 ];
 
 /** Chainable knex mock — per-table FIFO first() queues, select() resolves rows. */
-function setupDb(firstResults = {}, selectResults = {}) {
+function setupDb(firstResults = {}, selectResults = {}, updateResults = {}) {
   const state = { inserts: [], updates: [], updateFilters: [] };
   const firstQueues = Object.fromEntries(Object.entries(firstResults).map(([t, rows]) => [t, [...rows]]));
   const selectQueues = Object.fromEntries(Object.entries(selectResults).map(([t, rows]) => [t, [...rows]]));
+  const updateQueues = Object.fromEntries(Object.entries(updateResults).map(([t, rows]) => [t, [...rows]]));
 
   db.mockImplementation((table) => {
     const builder = {};
@@ -66,7 +68,8 @@ function setupDb(firstResults = {}, selectResults = {}) {
     builder.update = jest.fn(async (patch) => {
       state.updates.push({ table, patch });
       state.updateFilters.push({ table, filters: [...filters] });
-      return 1;
+      const q = updateQueues[table];
+      return q && q.length ? q.shift() : 1;
     });
     builder.insert = jest.fn((row) => {
       state.inserts.push({ table, row });
@@ -150,23 +153,35 @@ describe('handleSpam — quarantine + known-sender guard', () => {
 describe('sweepQuarantine', () => {
   const { sweepQuarantine } = require('../services/email/inbox-hygiene');
 
-  test('trashes aged quarantined rows, re-asserting the quarantined state', async () => {
+  test('claims atomically, then trashes aged quarantined rows', async () => {
     const state = setupDb({}, { emails: [[{ id: 'e-old', gmail_id: 'g-old' }]] });
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-old');
     expect(result.trashed).toBe(1);
-    const guard = state.updateFilters.find((u) => u.table === 'emails');
-    expect(JSON.stringify(guard.filters)).toContain('spam_quarantined');
-    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action)
-      .toBe('spam_trashed_after_quarantine');
+    const actions = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
+    // claim BEFORE the destructive call, settle after
+    expect(actions).toEqual(['spam_trashing', 'spam_trashed_after_quarantine']);
   });
 
-  test('one failed trash never aborts the sweep', async () => {
-    setupDb({}, { emails: [[{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
+  test('an operator label-restore vetoes the trash — state cleared, message kept', async () => {
+    const state = setupDb({}, { emails: [[{ id: 'e-back', gmail_id: 'g-back' }]] });
+    gmailClient.getMessageLabels.mockResolvedValueOnce(['INBOX']);
+    const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ trashed: 0, restored: 1 });
+    const patch = state.updates.find((u) => u.table === 'emails').patch;
+    expect(patch.auto_action).toBe('quarantine_restored');
+    expect(patch.quarantined_at).toBeNull();
+  });
+
+  test('a failed trash releases the claim and never aborts the sweep', async () => {
+    const state = setupDb({}, { emails: [[{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
     gmailClient.trashMessage.mockRejectedValueOnce(new Error('gone'));
     const result = await sweepQuarantine();
     expect(result.trashed).toBe(1);
     expect(gmailClient.trashMessage).toHaveBeenCalledTimes(2);
+    const actions = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
+    expect(actions).toContain('spam_quarantined'); // claim released for retry
   });
 });
 
@@ -176,11 +191,32 @@ describe('rescueSpamFolder', () => {
   test('moves a known customer out of SPAM, marks important, rings the bell', async () => {
     const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
     gmailClient.listMessages.mockResolvedValueOnce([{ id: 'spam-1' }]);
-    gmailClient.getMessage.mockResolvedValueOnce({ from_address: 'jane@customer.example', from_name: 'Jane', subject: 'Where is my report?' });
+    gmailClient.getMessage.mockResolvedValueOnce({
+      from_address: 'jane@customer.example',
+      from_name: 'Jane',
+      subject: 'Where is my report?',
+      authentication_results: 'mx.google.com; dkim=pass header.i=@customer.example header.d=customer.example; spf=pass smtp.mailfrom=jane@customer.example',
+    });
     const counts = await rescueSpamFolder();
     expect(gmailClient.modifyLabels).toHaveBeenCalledWith('spam-1', ['INBOX', 'IMPORTANT'], ['SPAM']);
-    expect(counts).toEqual({ scanned: 1, rescued: 1, customers: 1 });
+    expect(counts).toEqual({ scanned: 1, rescued: 1, customers: 1, unauthenticated: 0 });
     expect(state.inserts.find((i) => i.table === 'notifications').row.category).toBe('email_rescue');
+  });
+
+  test('a spoofed known sender (no aligned auth) is NEVER rescued — review bell instead', async () => {
+    const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
+    gmailClient.listMessages.mockResolvedValueOnce([{ id: 'spam-3' }]);
+    gmailClient.getMessage.mockResolvedValueOnce({
+      from_address: 'jane@customer.example',
+      from_name: 'Jane',
+      subject: 'urgent wire transfer',
+      authentication_results: 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none',
+    });
+    const counts = await rescueSpamFolder();
+    expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
+    expect(counts.rescued).toBe(0);
+    expect(counts.unauthenticated).toBe(1);
+    expect(state.inserts.find((i) => i.table === 'notifications').row.category).toBe('email_rescue_review');
   });
 
   test('unknown senders stay in SPAM', async () => {
@@ -220,6 +256,7 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     from_name: 'Jane Customer',
     subject: 'Can you come Friday?',
     body_text: 'Can you come Friday instead of Monday?',
+    message_id: '<inbound-123@mail.example>',
   };
 
   test('gate off → no draft, no LLM call', async () => {
@@ -240,16 +277,21 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
       'Re: Can you come Friday?',
       expect.stringContaining('<p>'),
       'thread-1',
-      null
+      '<inbound-123@mail.example>'
     );
-    expect(state.updates.find((u) => u.table === 'emails').patch.draft_gmail_id).toBe('draft-1');
+    // claim first ('pending'), then the settled draft id
+    const draftPatches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(draftPatches).toEqual(['pending', 'draft-1']);
   });
 
-  test('an email that already has a draft never gets a second one', async () => {
+  test('the Postgres claim (not stale memory) is the dedup guard — lost claim means no draft', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    setupDb();
-    const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL, draft_gmail_id: 'draft-existing' });
+    // claim update returns 0: another worker (or a prior classification pass)
+    // already holds/held the claim, even though the in-memory row looks free.
+    setupDb({}, {}, { emails: [0] });
+    const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL, draft_gmail_id: null });
     expect(result).toBeNull();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
   });
 
@@ -257,8 +299,12 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
     setupDb();
     dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
+    const state = setupDb();
     const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL });
     expect(result).toBeNull();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    // the claim is handed back for a future retry
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(patches).toEqual(['pending', null]);
   });
 });

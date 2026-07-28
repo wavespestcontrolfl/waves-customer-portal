@@ -65,37 +65,96 @@ async function quarantineMessage(email) {
   });
 }
 
-/** Trash quarantined mail older than the undo window. */
+/**
+ * Trash quarantined mail older than the undo window. The undo contract is
+ * label-based: an operator who drags the message back to the inbox (or off
+ * the Quarantine label) has vetoed the classification, so the sweep
+ * re-reads the message's LIVE Gmail labels before touching it — the DB
+ * row's auto_action alone is stale the moment a human acts in Gmail. Each
+ * row is also claimed atomically in the DB before the destructive call so
+ * a concurrent sweep/rescue can't double-fire.
+ */
 async function sweepQuarantine(now = new Date()) {
   const cutoff = new Date(now.getTime() - QUARANTINE_HOURS * 3600000);
+  const quarantineLabelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
   const rows = await db('emails')
     .where('auto_action', 'spam_quarantined')
     .where('quarantined_at', '<', cutoff)
     .select('id', 'gmail_id');
   let trashed = 0;
+  let restored = 0;
   for (const row of rows) {
     try {
-      await gmailClient.trashMessage(row.gmail_id);
-      // Re-assert the quarantined state so a concurrent operator rescue
-      // (auto_action moved off 'spam_quarantined') is never overwritten.
-      trashed += await db('emails')
+      // Live-label veto check: back in INBOX or off the Quarantine label
+      // means the operator rescued it — clear the quarantine state.
+      const labels = await gmailClient.getMessageLabels(row.gmail_id);
+      const rescuedByOperator = labels.includes('INBOX') || !labels.includes(quarantineLabelId);
+      if (rescuedByOperator) {
+        restored += await db('emails')
+          .where({ id: row.id, auto_action: 'spam_quarantined' })
+          .update({ auto_action: 'quarantine_restored', quarantined_at: null, is_archived: false, updated_at: new Date() });
+        continue;
+      }
+      // Atomic claim BEFORE the destructive call.
+      const claimed = await db('emails')
         .where({ id: row.id, auto_action: 'spam_quarantined' })
-        .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+        .update({ auto_action: 'spam_trashing', updated_at: new Date() });
+      if (!claimed) continue;
+      try {
+        await gmailClient.trashMessage(row.gmail_id);
+        trashed += await db('emails')
+          .where({ id: row.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+      } catch (trashErr) {
+        // Release the claim so tomorrow's sweep retries.
+        await db('emails')
+          .where({ id: row.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+        throw trashErr;
+      }
     } catch (e) {
-      logger.warn(`[inbox-hygiene] quarantine trash failed for email ${row.id}: ${e.message}`);
+      logger.warn(`[inbox-hygiene] quarantine sweep failed for email ${row.id}: ${e.message}`);
     }
   }
-  if (trashed) logger.info(`[inbox-hygiene] quarantine sweep trashed ${trashed} message(s)`);
-  return { trashed };
+  if (trashed || restored) logger.info(`[inbox-hygiene] quarantine sweep: ${trashed} trashed, ${restored} operator-restored`);
+  return { trashed, restored };
+}
+
+/**
+ * True when Gmail's own Authentication-Results header shows the message
+ * actually authenticated as the domain it claims: DKIM pass whose d= aligns
+ * with the From domain, or SPF pass whose validated domain aligns. A From
+ * header is attacker-typed text — without aligned authentication, "rescuing"
+ * a spam-foldered message would let anyone spoof a customer or Stripe and
+ * have Gmail's phishing verdict reversed automatically.
+ */
+function hasAlignedAuth(authResults, fromDomain) {
+  const auth = String(authResults || '').toLowerCase();
+  const domain = String(fromDomain || '').toLowerCase();
+  if (!auth || !domain) return false;
+  const aligned = (value) => value === domain || value.endsWith(`.${domain}`) || domain.endsWith(`.${value}`);
+  const dkim = auth.match(/dkim=pass[^;]*/g) || [];
+  for (const clause of dkim) {
+    const d = clause.match(/header\.[di]=@?([a-z0-9.-]+)/);
+    if (d && aligned(d[1])) return true;
+  }
+  const spf = auth.match(/spf=pass[^;]*/g) || [];
+  for (const clause of spf) {
+    const d = clause.match(/(?:smtp\.mailfrom|smtp\.helo)=(?:[^@\s;]*@)?([a-z0-9.-]+)/);
+    if (d && aligned(d[1])) return true;
+  }
+  return false;
 }
 
 /**
  * Rescue known senders out of Gmail's spam folder. Recent window only —
  * Gmail purges spam at 30 days and yesterday's sweep covered yesterday.
+ * Rescue REQUIRES aligned SPF/DKIM evidence; a known-looking sender without
+ * it gets a review notification instead of a move (spoof containment).
  */
 async function rescueSpamFolder() {
   const messages = await gmailClient.listMessages('in:spam newer_than:2d', 50);
-  const counts = { scanned: 0, rescued: 0, customers: 0 };
+  const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   for (const m of messages || []) {
     counts.scanned += 1;
     try {
@@ -103,6 +162,22 @@ async function rescueSpamFolder() {
       const fromAddress = full?.from_address;
       const verdict = await isKnownSender(fromAddress);
       if (!verdict.known) continue;
+      if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress))) {
+        // Looks like someone we know but did not authenticate as them —
+        // exactly what a phish looks like. Never auto-reverse Gmail's
+        // verdict; park a review notification instead.
+        counts.unauthenticated += 1;
+        await db('notifications').insert({
+          recipient_type: 'admin',
+          category: 'email_rescue_review',
+          title: 'Spam-foldered mail claims a known sender (unverified)',
+          body: `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
+          icon: '⚠️',
+          link: '/admin/email',
+          created_at: new Date(),
+        }).catch(() => {});
+        continue;
+      }
       await gmailClient.modifyLabels(m.id, ['INBOX', 'IMPORTANT'], ['SPAM']);
       counts.rescued += 1;
       if (verdict.kind === 'customer') {
@@ -163,6 +238,7 @@ module.exports = {
   QUARANTINE_LABEL,
   QUARANTINE_HOURS,
   isKnownSender,
+  hasAlignedAuth,
   quarantineMessage,
   sweepQuarantine,
   rescueSpamFolder,
