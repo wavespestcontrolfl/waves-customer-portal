@@ -445,7 +445,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
         // then the deferred sender block — skipping it here would leave the
         // sender permanently unblocked after an inline recovery.
         const settled = await db('emails').where({ id: email.id, auto_action: 'spam_trashing' })
-          .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() });
+          .update({ auto_action: 'spam_trashed_block_pending', quarantined_at: null, updated_at: new Date() });
         if (settled) {
           const { settleDeferredBlock } = require('../services/email/inbox-hygiene');
           await settleDeferredBlock(email);

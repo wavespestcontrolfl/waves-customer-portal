@@ -217,7 +217,13 @@ async function unblockSender(id) {
     try {
       const gmailClient = require('./gmail-client');
       const auth = await gmailClient.getAuthClient();
-      if (auth) {
+      if (!auth) {
+        // A stored filter id with no Gmail connection means the filter is
+        // STILL routing this sender to Trash — deleting our record would
+        // report an unblock that never happened.
+        return { error: 'Gmail not connected — filter cannot be removed; retry after reconnecting' };
+      }
+      {
         const gmail = google.gmail({ version: 'v1', auth });
         await gmail.users.settings.filters.delete({ userId: 'me', id: blocked.gmail_filter_id });
         logger.info(`[spam-blocker] Gmail filter removed: ${blocked.gmail_filter_id}`);
