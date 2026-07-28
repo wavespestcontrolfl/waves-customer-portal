@@ -45,13 +45,11 @@ function clickLearningEnabled() {
   return process.env.NEWSLETTER_CLICK_LEARNING !== 'false';
 }
 
-/** Public base for tracking URLs (mirrors the portal host convention). */
-function trackingBaseUrl() {
-  return process.env.PUBLIC_PORTAL_URL || 'https://portal.wavespestcontrol.com';
-}
-
 function trackingUrl(engagementToken, eventId) {
-  return `${trackingBaseUrl()}/api/public/newsletter/e/${encodeURIComponent(engagementToken)}/${eventId}`;
+  // Canonical portal-url helper — normalization (trailing slashes) and
+  // legacy-fallback handling live there, never re-derived here.
+  const { portalUrl } = require('../utils/portal-url');
+  return portalUrl(`/api/public/newsletter/e/${encodeURIComponent(engagementToken)}/${eventId}`);
 }
 
 /** All evclick event ids present in a body. */
@@ -115,12 +113,18 @@ async function recordEventClick({ engagementToken, eventId }, knex = db) {
     const { parseLockedEventIds } = require('./newsletter-event-selection');
     const lockedIds = parseLockedEventIds(send?.event_ids).map((id) => String(id).toLowerCase());
     const position = lockedIds.indexOf(String(eventId).toLowerCase());
+    if (position < 0) {
+      // The event is not in this send's lineup — anyone holding a delivery
+      // URL could otherwise swap in an arbitrary events_raw UUID and
+      // poison the rollup and future scoring. Redirect, never record.
+      return { redirectUrl: destination, recorded: false };
+    }
     await knex('newsletter_event_clicks')
       .insert({
         send_id: delivery.send_id,
         event_id: eventId,
         engagement_token: engagementToken,
-        position: position >= 0 ? position : null,
+        position,
         kind: 'details',
       })
       .onConflict(['send_id', 'event_id', 'engagement_token', 'kind'])
@@ -152,20 +156,50 @@ function rateAdjustment(keyClicks, keyEvents, overallRate, { cap, minEvents = MI
 async function computeLearnedAdjustments(knex = db) {
   try {
     const since = new Date(Date.now() - LEARNING_WINDOW_DAYS * 24 * 3600 * 1000);
-    const rows = await knex('newsletter_event_clicks as c')
-      .join('events_raw as e', 'e.id', 'c.event_id')
-      .where('c.clicked_at', '>=', since)
-      .select('c.event_id', 'e.novelty_type', 'e.region_zone');
-    if (rows.length < MIN_TOTAL_CLICKS) return { categoryAdj: new Map(), zoneAdj: new Map() };
-
-    const perEvent = new Map();
-    for (const r of rows) {
-      const key = String(r.event_id);
-      if (!perEvent.has(key)) perEvent.set(key, { clicks: 0, category: r.novelty_type || 'unknown', zone: r.region_zone || 'unknown' });
-      perEvent.get(key).clicks += 1;
+    // Denominator = SENT LINEUP APPEARANCES (send × event), not click
+    // rows — an event that shipped and got zero clicks must contribute
+    // its zero, or poor performers can never accumulate negative
+    // evidence, and repeat appearances must count separately.
+    const { parseLockedEventIds } = require('./newsletter-event-selection');
+    const sentSends = await knex('newsletter_sends')
+      .where({ status: 'sent' })
+      .where('sent_at', '>=', since)
+      .whereNotNull('event_ids')
+      .select('id', 'event_ids');
+    const appearances = [];
+    for (const s of sentSends) {
+      for (const eventId of parseLockedEventIds(s.event_ids)) {
+        appearances.push({ sendId: String(s.id), eventId: String(eventId).toLowerCase() });
+      }
     }
-    const events = [...perEvent.values()];
-    const overallRate = events.reduce((a, e) => a + e.clicks, 0) / events.length;
+    if (!appearances.length) return { categoryAdj: new Map(), zoneAdj: new Map() };
+
+    const eventMeta = new Map(
+      (await knex('events_raw')
+        .whereIn('id', [...new Set(appearances.map((a) => a.eventId))])
+        .select('id', 'novelty_type', 'region_zone'))
+        .map((r) => [String(r.id).toLowerCase(), r]),
+    );
+    const clickCounts = new Map(
+      (await knex('newsletter_event_clicks')
+        .where('clicked_at', '>=', since)
+        .select('send_id', 'event_id')
+        .count('* as n')
+        .groupBy('send_id', 'event_id'))
+        .map((r) => [`${r.send_id}:${String(r.event_id).toLowerCase()}`, Number(r.n)]),
+    );
+
+    const events = appearances.map((a) => {
+      const meta = eventMeta.get(a.eventId) || {};
+      return {
+        clicks: clickCounts.get(`${a.sendId}:${a.eventId}`) || 0,
+        category: meta.novelty_type || 'unknown',
+        zone: meta.region_zone || 'unknown',
+      };
+    });
+    const totalClicks = events.reduce((a, e) => a + e.clicks, 0);
+    if (totalClicks < MIN_TOTAL_CLICKS) return { categoryAdj: new Map(), zoneAdj: new Map() };
+    const overallRate = totalClicks / events.length;
 
     const groupBy = (field) => {
       const g = new Map();
