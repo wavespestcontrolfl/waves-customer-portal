@@ -486,20 +486,40 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // sweep (which compare-and-sets on 'spam_quarantined') can't trash it
     // while the classifier runs. Losing the claim race → retry-soon 409.
     let claimedForReclass = false;
-    if ((email.auto_action || '') === 'spam_quarantined') {
+    let claimedFromState = null;
+    const CLAIMABLE_STATES = ['spam_quarantined', 'spam_quarantine_ambiguous'];
+    if (CLAIMABLE_STATES.includes(email.auto_action || '')) {
+      claimedFromState = email.auto_action;
       const claimed = await db('emails')
-        .where({ id: email.id, auto_action: 'spam_quarantined' })
+        .where({ id: email.id, auto_action: claimedFromState })
         .update({ auto_action: 'spam_reclassifying', updated_at: new Date() });
       if (!claimed) {
-        return res.status(409).json({ error: 'Quarantine sweep is acting on this message — retry in a moment' });
+        return res.status(409).json({ error: 'Another process is acting on this message — retry in a moment' });
       }
       claimedForReclass = true;
       email.auto_action = 'spam_reclassifying';
+    } else if ((email.auto_action || '') === 'spam_reclassifying') {
+      // Active claim from another request — only a STALE one (crashed call)
+      // may be taken over; a live one gets a retry-soon 409 so two verdicts
+      // can never race the same cancellation.
+      const claimAgeMs = Date.now() - new Date(email.updated_at || 0).getTime();
+      if (claimAgeMs < 10 * 60000) {
+        return res.status(409).json({ error: 'Another reclassification is in progress — retry in a moment' });
+      }
+      const takeover = await db('emails')
+        .where({ id: email.id, auto_action: 'spam_reclassifying' })
+        .where('updated_at', '<', new Date(Date.now() - 10 * 60000))
+        .update({ auto_action: 'spam_reclassifying', updated_at: new Date() });
+      if (!takeover) {
+        return res.status(409).json({ error: 'Another reclassification is in progress — retry in a moment' });
+      }
+      claimedForReclass = true;
+      claimedFromState = 'spam_quarantined';
     }
     const revertReclassClaim = async () => {
       if (!claimedForReclass) return;
       await db('emails').where({ id: email.id, auto_action: 'spam_reclassifying' })
-        .update({ auto_action: 'spam_quarantined', updated_at: new Date() })
+        .update({ auto_action: claimedFromState || 'spam_quarantined', updated_at: new Date() })
         .catch(() => {});
     };
 

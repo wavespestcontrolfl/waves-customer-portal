@@ -191,6 +191,28 @@ async function sweepQuarantine(now = new Date()) {
     logger.warn(`[inbox-hygiene] stale reclassify-claim revert failed: ${e.message}`);
   }
 
+  // Cancellations stranded mid-commit: a reclassification's new handler
+  // overwrote auto_action, then the process died before cancelQuarantine —
+  // the row keeps quarantined_at + the Gmail label but no quarantine-lane
+  // auto_action, so no other recovery can see it. quarantined_at is the
+  // authoritative marker: finish the cancellation.
+  try {
+    const strandedCancels = await db('emails')
+      .whereNotNull('quarantined_at')
+      .whereNotIn('auto_action', ['spam_quarantined', 'spam_quarantine_ambiguous', 'spam_trashing', 'spam_reclassifying'])
+      .select('id', 'gmail_id');
+    for (const row of strandedCancels) {
+      try {
+        await cancelQuarantine(row);
+      } catch (e) {
+        logger.warn(`[inbox-hygiene] stranded-cancel completion failed (email ${row.id}): ${e.message}`);
+      }
+    }
+    if (strandedCancels.length) logger.info(`[inbox-hygiene] completed ${strandedCancels.length} stranded quarantine cancellation(s)`);
+  } catch (e) {
+    logger.warn(`[inbox-hygiene] stranded-cancel scan failed: ${e.message}`);
+  }
+
   // Retry sender blocks that failed after a successful trash on a prior
   // sweep — 'spam_trashed_block_pending' is the retryable state.
   const blockPending = await db('emails')
