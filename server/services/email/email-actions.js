@@ -866,6 +866,18 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     return trx('emails')
       .where({ id: email.id, draft_gmail_id: 'pending' })
       .where('draft_claimed_at', '<', staleCutoff)
+      .whereNotExists(
+        // Same active-claim guard as the fresh path, minus this row: a
+        // NEWER thread row's fresh claim does its Gmail/LLM work AFTER
+        // releasing the advisory lock, so taking over the stale row now
+        // would run concurrently with it and mint a duplicate draft.
+        trx('emails as e2')
+          .select(trx.raw('1'))
+          .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
+          .whereRaw('e2.id <> ?', [email.id])
+          .where('e2.draft_gmail_id', 'pending')
+          .where('e2.draft_claimed_at', '>=', staleCutoff)
+      )
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
   });
   if (!claimed) return null;

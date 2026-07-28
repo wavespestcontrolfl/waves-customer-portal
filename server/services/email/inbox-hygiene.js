@@ -486,63 +486,75 @@ async function rescueSpamFolder(now = new Date()) {
   const windowDays = lastScanAt
     ? Math.min(30, Math.max(2, Math.ceil((now.getTime() - lastScanAt) / 86400000) + 1))
     : 30;
-  // Paginated: a junk burst must not push a buried customer email past a
-  // single-page cap. 500 ids over the window is far above observed spam
-  // volume; if it ever truncates, say so (no silent caps).
-  const { messages, truncated } = await gmailClient.listAllMessages(`in:spam newer_than:${windowDays}d`, 500, { includeSpamTrash: true });
-  if (truncated) logger.warn('[inbox-hygiene] spam rescue hit the 500-message cap — oldest spam not scanned this pass');
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   let perMessageFailures = 0;
-  for (const m of messages || []) {
-    counts.scanned += 1;
-    try {
-      const full = await gmailClient.getMessage(m.id);
-      const fromAddress = full?.from_address;
-      const verdict = await isKnownSender(fromAddress);
-      if (!verdict.known) continue;
-      if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress))) {
-        // Looks like someone we know but did not authenticate as them —
-        // exactly what a phish looks like. Never auto-reverse Gmail's
-        // verdict; park a review notification instead.
-        counts.unauthenticated += 1;
-        // Idempotent across sweeps: the same message sits in the 2-day
-        // window for two runs and retries — one review bell per Gmail id.
-        const already = await db('notifications')
-          .where('category', 'email_rescue_review')
-          .whereRaw("metadata::jsonb ->> 'gmail_message_id' = ?", [m.id])
-          .first()
-          .catch(() => null);
-        if (already) continue;
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'email_rescue_review',
-          title: 'Spam-foldered mail claims a known sender (unverified)',
-          body: `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
-          icon: '⚠️',
-          link: '/admin/email',
-          metadata: JSON.stringify({ gmail_message_id: m.id }),
-          created_at: new Date(),
-        }).catch(() => {});
-        continue;
+  // Drain the WHOLE window in 500-id batches — a junk burst bigger than one
+  // batch must not hide older buried mail behind the cap, and an undrained
+  // pass must not advance the watermark (which would shrink the next window
+  // past the unscanned remainder). MAX_BATCHES is a runaway backstop far
+  // above observed volume; hitting it holds the watermark and says so.
+  const MAX_BATCHES = 20;
+  let pageToken = null;
+  let undrained = false;
+  for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
+    const { messages, truncated, nextPageToken } = await gmailClient.listAllMessages(`in:spam newer_than:${windowDays}d`, 500, { includeSpamTrash: true, pageToken });
+    for (const m of messages || []) {
+      counts.scanned += 1;
+      try {
+        const full = await gmailClient.getMessage(m.id);
+        const fromAddress = full?.from_address;
+        const verdict = await isKnownSender(fromAddress);
+        if (!verdict.known) continue;
+        if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress))) {
+          // Looks like someone we know but did not authenticate as them —
+          // exactly what a phish looks like. Never auto-reverse Gmail's
+          // verdict; park a review notification instead.
+          counts.unauthenticated += 1;
+          // Idempotent across sweeps: the same message sits in the 2-day
+          // window for two runs and retries — one review bell per Gmail id.
+          const already = await db('notifications')
+            .where('category', 'email_rescue_review')
+            .whereRaw("metadata::jsonb ->> 'gmail_message_id' = ?", [m.id])
+            .first()
+            .catch(() => null);
+          if (already) continue;
+          await db('notifications').insert({
+            recipient_type: 'admin',
+            category: 'email_rescue_review',
+            title: 'Spam-foldered mail claims a known sender (unverified)',
+            body: `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
+            icon: '⚠️',
+            link: '/admin/email',
+            metadata: JSON.stringify({ gmail_message_id: m.id }),
+            created_at: new Date(),
+          }).catch(() => {});
+          continue;
+        }
+        await gmailClient.modifyLabels(m.id, ['INBOX', 'IMPORTANT'], ['SPAM']);
+        counts.rescued += 1;
+        if (verdict.kind === 'customer') {
+          counts.customers += 1;
+          await db('notifications').insert({
+            recipient_type: 'admin',
+            category: 'email_rescue',
+            title: 'Customer email rescued from Spam',
+            body: `${full.from_name || fromAddress}: "${(full.subject || '(no subject)').slice(0, 80)}" was in Gmail Spam — moved back to the inbox and marked important.`,
+            icon: '\u{1F6DF}',
+            link: '/admin/email',
+            created_at: new Date(),
+          }).catch(() => {});
+        }
+        logger.info(`[inbox-hygiene] rescued ${verdict.kind} email from spam (${m.id})`);
+      } catch (e) {
+        perMessageFailures += 1;
+        logger.warn(`[inbox-hygiene] spam rescue failed for message ${m.id}: ${e.message}`);
       }
-      await gmailClient.modifyLabels(m.id, ['INBOX', 'IMPORTANT'], ['SPAM']);
-      counts.rescued += 1;
-      if (verdict.kind === 'customer') {
-        counts.customers += 1;
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'email_rescue',
-          title: 'Customer email rescued from Spam',
-          body: `${full.from_name || fromAddress}: "${(full.subject || '(no subject)').slice(0, 80)}" was in Gmail Spam — moved back to the inbox and marked important.`,
-          icon: '\u{1F6DF}',
-          link: '/admin/email',
-          created_at: new Date(),
-        }).catch(() => {});
-      }
-      logger.info(`[inbox-hygiene] rescued ${verdict.kind} email from spam (${m.id})`);
-    } catch (e) {
-      perMessageFailures += 1;
-      logger.warn(`[inbox-hygiene] spam rescue failed for message ${m.id}: ${e.message}`);
+    }
+    if (!truncated) break;
+    pageToken = nextPageToken;
+    if (batch === MAX_BATCHES - 1) {
+      undrained = true;
+      logger.warn(`[inbox-hygiene] spam rescue stopped after ${MAX_BATCHES * 500} messages — watermark held so the remainder is re-scanned next run`);
     }
   }
   // Every message failing is not N isolated blips — it's a systemic Gmail
@@ -550,9 +562,10 @@ async function rescueSpamFolder(now = new Date()) {
   if (counts.scanned > 0 && perMessageFailures === counts.scanned) {
     throw new Error(`spam rescue failed on all ${counts.scanned} message(s) — systemic Gmail failure`);
   }
-  // Watermark advances ONLY on a fully clean pass — any per-message failure
-  // keeps the window wide so the failed message is re-scanned next run.
-  if (syncState && perMessageFailures === 0) {
+  // Watermark advances ONLY on a fully clean, fully drained pass — a
+  // per-message failure or an undrained window keeps the next scan wide so
+  // the missed messages are re-scanned.
+  if (syncState && perMessageFailures === 0 && !undrained) {
     await db('email_sync_state').where('id', syncState.id)
       .update({ last_spam_scan_at: now })
       .catch((e) => logger.warn(`[inbox-hygiene] spam-scan watermark update failed: ${e.message}`));

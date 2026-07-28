@@ -496,7 +496,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // quarantined_at survives a handler overwriting auto_action (it only
     // clears on a SUCCESSFUL cancel), so a failed Gmail restore stays
     // retryable on the next reclassify regardless of auto_action state.
-    const wasQuarantined = restoredFromTrash
+    let wasQuarantined = restoredFromTrash
       || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '')
       || !!email.quarantined_at;
 
@@ -537,6 +537,15 @@ router.post('/message/:id/reclassify', async (req, res) => {
       }
       claimedForReclass = true;
       claimedFromState = email.quarantined_at ? 'spam_quarantined' : 'spam_quarantine_ambiguous';
+      // EVERY entry path into 'spam_reclassifying' starts from a
+      // quarantine-lane state (quarantined / ambiguous / restored
+      // spam_trashed_*), but a crash before the verdict persisted may have
+      // wiped the in-row evidence — a restored-trash origin carries a NULL
+      // quarantined_at, so the flag computed above reads false. Treat any
+      // stale takeover as quarantine-origin so a non-spam verdict still
+      // runs the commit phase (sender unblock + quarantine cancel) instead
+      // of reporting success while the sender's Gmail filter stays active.
+      wasQuarantined = true;
     }
     const revertReclassClaim = async () => {
       if (!claimedForReclass) return;

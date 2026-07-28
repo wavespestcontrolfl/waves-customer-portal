@@ -510,7 +510,7 @@ describe('rescueSpamFolder scan window', () => {
     setupDb();
     gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: false });
     await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
-    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:30d', 500, { includeSpamTrash: true });
+    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:30d', 500, { includeSpamTrash: true, pageToken: null });
   });
 
   test('window widens to cover the gap since the last successful sweep', async () => {
@@ -518,7 +518,7 @@ describe('rescueSpamFolder scan window', () => {
     setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-20T12:00:00Z' }] });
     gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: false });
     await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
-    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:9d', 500, { includeSpamTrash: true });
+    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:9d', 500, { includeSpamTrash: true, pageToken: null });
   });
 
   test('a clean pass stamps the watermark; a pass with per-message failures does not', async () => {
@@ -537,10 +537,63 @@ describe('rescueSpamFolder scan window', () => {
     // Failed message stays in the next window — watermark must NOT advance.
     expect(state2.updates.find((u) => u.table === 'email_sync_state')).toBeUndefined();
   });
+
+  test('drains multiple batches until the window is exhausted, then stamps the watermark', async () => {
+    const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    gmailClient.listAllMessages
+      .mockResolvedValueOnce({ messages: [{ id: 's1' }], truncated: true, nextPageToken: 'p2' })
+      .mockResolvedValueOnce({ messages: [{ id: 's2' }], truncated: false, nextPageToken: null });
+    gmailClient.getMessage
+      .mockResolvedValueOnce({ from_address: 'junk@blaster.example' })
+      .mockResolvedValueOnce({ from_address: 'junk2@blaster.example' });
+    const counts = await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(counts.scanned).toBe(2);
+    expect(gmailClient.listAllMessages).toHaveBeenNthCalledWith(2, 'in:spam newer_than:2d', 500, { includeSpamTrash: true, pageToken: 'p2' });
+    expect(state.updates.find((u) => u.table === 'email_sync_state')).toBeDefined();
+  });
+
+  test('an undrained window (batch backstop) holds the watermark', async () => {
+    const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    for (let i = 0; i < 20; i += 1) {
+      gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: true, nextPageToken: `p${i}` });
+    }
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(gmailClient.listAllMessages).toHaveBeenCalledTimes(20);
+    // Remainder unscanned — the next run must re-cover this window.
+    expect(state.updates.find((u) => u.table === 'email_sync_state')).toBeUndefined();
+  });
 });
 
 describe('reply drafts honor Reply-To', () => {
   const { draftReplyForEmail } = require('../services/email/email-actions');
+
+  test('a stale same-row takeover is blocked while ANOTHER thread row holds a fresh claim', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    // Both the fresh claim (row already 'pending') and the guarded takeover
+    // updates return 0 — the takeover's NOT EXISTS sees the sibling's fresh
+    // claim.
+    const state = setupDb({}, {}, { emails: [0, 0] });
+    const result = await draftReplyForEmail({
+      id: 'e-stale',
+      gmail_id: 'g-stale',
+      gmail_thread_id: 't-shared',
+      from_address: 'jane@customer.example',
+      from_name: 'Jane Customer',
+      subject: 'Can you come Friday?',
+      body_text: 'Can you come Friday instead of Monday?',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<inbound-stale@mail.example>',
+      received_at: '2026-07-28T10:00:00Z',
+      draft_gmail_id: 'pending',
+    });
+    expect(result).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    // The takeover update carries the same active-thread-claim guard as the
+    // fresh path.
+    const emailUpdates = state.updateFilters.filter((u) => u.table === 'emails');
+    const takeover = emailUpdates[emailUpdates.length - 1];
+    expect(takeover.filters.some((f) => f.method === 'whereNotExists')).toBe(true);
+  });
 
   test('a validated Reply-To beats a relay From when addressing the draft', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';

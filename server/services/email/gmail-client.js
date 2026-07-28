@@ -296,12 +296,31 @@ async function trashMessage(messageId) {
 
 async function getHistory(startHistoryId) {
   const gmail = await getGmail();
-  const res = await gmail.users.history.list({
-    userId: 'me',
-    startHistoryId,
-    historyTypes: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'],
-  });
-  return res.data;
+  // Bulk label sweeps (quarantine, spam rescue) can span multiple history
+  // pages in one run — advancing the sync cursor after a single page would
+  // permanently skip the later pages' messages. Drain the whole feed; a
+  // backlog too deep to drain is treated like an expired cursor (the error
+  // message carries 'historyId' so email-sync falls back to a full resync
+  // instead of advancing past unseen changes).
+  const history = [];
+  let latestHistoryId = null;
+  let pageToken;
+  for (let page = 0; page < 50; page += 1) {
+    const res = await gmail.users.history.list({
+      userId: 'me',
+      startHistoryId,
+      historyTypes: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'],
+      pageToken,
+    });
+    if (res.data.history) history.push(...res.data.history);
+    if (res.data.historyId) latestHistoryId = res.data.historyId;
+    pageToken = res.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  if (pageToken) {
+    throw new Error('historyId backlog exceeds 50 pages — full resync required');
+  }
+  return { history: history.length ? history : undefined, historyId: latestHistoryId };
 }
 
 async function isConnected() {
@@ -389,26 +408,28 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
 /**
  * Paginated message listing — walks nextPageToken up to `cap` ids so a
  * burst of junk can't hide older matches behind a single-page limit.
+ * Callers that must drain BEYOND the cap resume with the returned
+ * nextPageToken (pass it back as opts.pageToken).
  */
-async function listAllMessages(query = '', cap = 500, { includeSpamTrash = false } = {}) {
+async function listAllMessages(query = '', cap = 500, { includeSpamTrash = false, pageToken = null } = {}) {
   const gmail = await getGmail();
   const ids = [];
-  let pageToken;
+  let token = pageToken || undefined;
   while (ids.length < cap) {
     const res = await gmail.users.messages.list({
       userId: 'me',
       q: query,
       maxResults: Math.min(100, cap - ids.length),
-      pageToken,
+      pageToken: token,
       // messages.list EXCLUDES Spam/Trash by default even when the query
       // says in:spam — the caller must opt in.
       includeSpamTrash,
     });
     ids.push(...(res.data.messages || []));
-    pageToken = res.data.nextPageToken;
-    if (!pageToken) break;
+    token = res.data.nextPageToken;
+    if (!token) break;
   }
-  return { messages: ids, truncated: !!pageToken };
+  return { messages: ids, truncated: !!token, nextPageToken: token || null };
 }
 
 /** Live labelIds for one message — the quarantine sweep's operator-veto check. */
