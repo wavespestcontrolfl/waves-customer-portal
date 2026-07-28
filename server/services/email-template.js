@@ -209,17 +209,18 @@ function ctaButton(href, label) {
 
 const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
 
-// Edition identity by newsletter type (owner directive 2026-07-17): the
-// flagship weekly masthead is "Fresh This Week — A local weekend guide from
-// the Waves crew", rendered under the 2026 Waves logo. The beehiiv-hosted
-// masthead IMAGE stays retired — header art must never depend on the old
-// beehiiv account's CDN. Every other lane (Pest Insider, automation drips)
-// keeps the generic publication identity.
+// Edition identity by newsletter type (owner directive 2026-07-28): the
+// flagship weekly masthead is "The Waves Newsletter" — no subtitle, no
+// spacer under the H1 — rendered under the 2026 Waves logo. This replaces
+// the short-lived "Fresh This Week" identity (2026-07-17). The
+// beehiiv-hosted masthead IMAGE stays retired — header art must never
+// depend on the old beehiiv account's CDN. Every other lane (Pest Insider,
+// automation drips) keeps the generic publication identity.
 const FLAGSHIP_NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 const NEWSLETTER_IDENTITIES = {
   [FLAGSHIP_NEWSLETTER_TYPE]: {
-    title: 'Fresh This Week',
-    tagline: 'A local weekend guide from the Waves crew',
+    title: 'The Waves Newsletter',
+    tagline: '',
   },
   default: { title: 'Waves Newsletter', tagline: '' },
 };

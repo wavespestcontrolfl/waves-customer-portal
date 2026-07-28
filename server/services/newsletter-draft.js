@@ -81,7 +81,7 @@ function formatEventBlock(events) {
  * styled metadata blocks, and per-event sections server-side.
  */
 function buildFlagshipSystemPrompt(voice, month) {
-  return `You write Fresh This Week — Waves Pest Control's weekly local weekend guide ("A local weekend guide from the Waves crew") — for readers from North Port to Tampa.
+  return `You write The Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
 This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide written like a friend texting "yo, here's what's actually worth doing."
 
