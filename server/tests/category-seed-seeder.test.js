@@ -40,14 +40,16 @@ const VALID_BRIEF = {
 };
 
 describe('category-seed-seeder: shipped manifest', () => {
-  test('the shipped manifest loads and validates (24 lawn + 8 tree-shrub)', () => {
+  test('the shipped manifest loads and validates (24 lawn + 8 tree-shrub + 11 pest-ID + 1 mosquito-ID)', () => {
     const m = seeder.loadManifest();
-    expect(m.briefs.length).toBe(32);
+    expect(m.briefs.length).toBe(44);
     const ids = m.briefs.map((b) => b.id);
     expect(new Set(ids).size).toBe(ids.length);
     const services = m.briefs.map((b) => seeder._internals.serviceForBrief(b));
     expect(services.filter((s) => s === 'lawn').length).toBe(24);
     expect(services.filter((s) => s === 'tree-shrub').length).toBe(8);
+    expect(services.filter((s) => s === 'pest').length).toBe(11);
+    expect(services.filter((s) => s === 'mosquito').length).toBe(1);
     for (const b of m.briefs) {
       expect(b.action).toBe('new_supporting_blog');
       expect(b.sources.length).toBeGreaterThan(0);
@@ -64,9 +66,9 @@ describe('category-seed-seeder: shipped manifest', () => {
 });
 
 describe('category-seed-seeder: manifest validation', () => {
-  test('rejects a non-lawn/tree-shrub slug and a non-blog action', () => {
-    expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, slug: '/pest-control/nope/' }])))
-      .toThrow(/slug must start with \/lawn-care\/ or \/tree-shrub\//);
+  test('rejects an unknown slug prefix and a non-blog action', () => {
+    expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, slug: '/rodent-control/nope/' }])))
+      .toThrow(/slug must start with one of/);
     expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, action: 'refresh_existing_page' }])))
       .toThrow(/action must be new_supporting_blog/);
   });
@@ -321,6 +323,21 @@ describe('shipped-manifest content rules', () => {
       const [, month, day] = b.window.split('-').map(Number);
       const inBlackout = (month > 6 || (month === 6 && day >= 1)) && (month < 10);
       expect(inBlackout).toBe(false);
+    }
+  });
+
+  test('pest-ID briefs are identification-first with a sourced interesting-facts section and no FAQ on blocked pests', () => {
+    const m = seeder.loadManifest();
+    const pestId = m.briefs.filter((b) => /^P\d+$/.test(b.id));
+    expect(pestId.length).toBe(12);
+    for (const b of pestId) {
+      const outline = b.outline.join(' ');
+      expect(outline).toMatch(/interesting facts/i);
+      expect(outline).toMatch(/UF\/IFAS/);
+      expect(b.verify_notes.join(' ')).toMatch(/Identification-first/);
+      if (seeder._internals.blockedTopicIdFor(b)) {
+        expect(seeder._internals.briefRequestsFaq(b)).toBe(false);
+      }
     }
   });
 

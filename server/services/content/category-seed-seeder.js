@@ -79,13 +79,17 @@ const EXPIRES_DAYS_AFTER_AVAILABLE = 45;
 // 2026-07-27: "timed drip, wins its slot").
 const DEFAULT_SCORE = 80;
 
-// slug prefix → engine service category. Both are real service ids in
-// blog-seo-contract (category lawn-care / tree-shrub, service targets
-// /lawn-care/ and /tree-shrub-care/), so the service-link and category
-// gates work unchanged.
+// slug prefix → engine service category. All are real service ids in
+// blog-seo-contract (categories lawn-care / tree-shrub / pest-control /
+// mosquito, with service targets /lawn-care/, /tree-shrub-care/,
+// /pest-control-services/, /mosquito-control/), so the service-link and
+// category gates work unchanged. pest/mosquito added 2026-07-28 for the
+// pest-identification series (owner GO).
 const SERVICE_BY_SLUG_PREFIX = [
   ['/lawn-care/', 'lawn'],
   ['/tree-shrub/', 'tree-shrub'],
+  ['/pest-control/', 'pest'],
+  ['/mosquito/', 'mosquito'],
 ];
 
 // FAQ-blocked pest topics (mirrors content-guardrails.FAQ_BLOCKED_SERVICES
@@ -175,7 +179,7 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
       throw new Error(`category seed ${brief.id}: action must be new_supporting_blog (got "${brief.action}")`);
     }
     if (!serviceForBrief(brief)) {
-      throw new Error(`category seed ${brief.id}: slug must start with /lawn-care/ or /tree-shrub/ (got "${brief.slug || ''}")`);
+      throw new Error(`category seed ${brief.id}: slug must start with one of ${SERVICE_BY_SLUG_PREFIX.map(([p]) => p).join(', ')} (got "${brief.slug || ''}")`);
     }
     if (seenSlugs.has(brief.slug)) {
       throw new Error(`category seed manifest has a duplicate slug: ${brief.slug}`);

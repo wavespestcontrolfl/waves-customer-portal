@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "set": "category-seed-v1",
   "owner": "adam",
-  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree-shrub have no calculator flow); (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year).",
+  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree-shrub have no calculator flow); (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year). PEST-ID SERIES (v2, owner GO 2026-07-28, Orkin-style identification with more depth): each pest-ID brief is IDENTIFICATION-FIRST (measurements, colors, distinguishing marks, look-alike comparisons) — never a 'get rid of X' treatment post (that family already exists; link into it instead); every ID claim and every item in the mandatory 'Interesting facts' section must trace to the cited UF/IFAS source (Featured Creatures profiles preferred) — no folklore, no unsourced trivia; FAQ-blocked pests (roaches, rodents, bed bugs, spiders, wasps, termites) get NO FAQ section.",
   "cta_codes": {
     "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
     "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
@@ -1385,6 +1385,543 @@
         "Tree-shrub facts bank is unverified — no service-scope claims; this is a plant-selection guide, not a service pitch.",
         "The internal link targets T06 from this manifest — verify it has published and resolves; drop if not yet live.",
         "Do not present the existing /lawn-care/drought-tolerant-plants/ post's content — check it for overlap and link it instead if it resolves on the live sitemap."
+      ]
+    },
+    {
+      "id": "P01",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/tiny-ant-identification-florida/",
+      "working_title": "Which Tiny Ant Is in Your Kitchen? Ghost, Sugar, and Pharaoh Ants Compared",
+      "primary_kw": "tiny ants in kitchen identification",
+      "secondary_kws": [
+        "ghost ant vs sugar ant",
+        "little black ants florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-08-05",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "The tiny ants trailing across SWFL kitchens are usually one of three species with different habits and different fixes — a side-by-side ID (size, color, trail behavior, nesting) tells you which one you have before anyone reaches for a spray.",
+      "outline": [
+        "The 10-second triage: where the trail is, what they are eating, time of day",
+        "Ghost ant ID: pale translucent abdomen, dark head, erratic trails (per UF/IFAS Featured Creatures)",
+        "Sugar ant vs the catch-all name: what people actually mean in Florida",
+        "Pharaoh ant ID and why misidentifying THIS one matters (budding colonies)",
+        "Side-by-side comparison table: size, color, trail, nest location, difficulty",
+        "Interesting facts: sourced UF/IFAS trivia (colony sizes, multiple queens, why crushing trails backfires)",
+        "When ID says call a pro; link the get-rid-of guides for treatment"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull the UF/IFAS Featured Creatures profiles for ghost ant and Pharaoh ant; verify every size/color/behavior claim; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/get-rid-of-ghost-ants-in-sarasota/",
+        "/pest-control/get-rid-of-sugar-ants/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "Verify both get-rid-of links resolve on the live sitemap."
+      ]
+    },
+    {
+      "id": "P02",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/carpenter-ant-or-termite-damage/",
+      "working_title": "Carpenter Ant or Termite? How to Read the Damage Before You Panic",
+      "primary_kw": "carpenter ant vs termite damage",
+      "secondary_kws": [
+        "wood damage identification",
+        "sawdust from wood holes"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-08-12",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Carpenter ants and termites both leave evidence in wood, but the evidence is opposite: clean excavated galleries and coarse frass versus mud, moisture, and eaten grain — reading it correctly changes everything about urgency and cost.",
+      "outline": [
+        "Why the confusion is expensive in both directions",
+        "Carpenter ant evidence per UF/IFAS: smooth galleries ACROSS the grain, frass piles with insect parts",
+        "Termite evidence: mud tubes, blistered paint, galleries WITH the grain, no sawdust",
+        "The swarmer check: waist, wings, antennae — the three-point ID",
+        "Where each shows up in SWFL homes (moisture wood vs slab entry)",
+        "Interesting facts: sourced UF/IFAS trivia (carpenter ants do not eat wood; night foraging)",
+        "Which one means call now: honest urgency ranking; link the termite and ant resources"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull the UF/IFAS Featured Creatures carpenter ant profile and UF/IFAS termite ID guidance; verify gallery/frass/swarmer claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/termite-control/",
+        "/pest-control/get-rid-of-carpenter-ants/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
+        "Do not duplicate the existing drywood-vs-subterranean post — this is ant-vs-termite, stay in that lane."
+      ]
+    },
+    {
+      "id": "P03",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/florida-roach-identification/",
+      "working_title": "Palmetto Bug, German Roach, or Smokybrown? Identifying Florida Roaches Room by Room",
+      "primary_kw": "florida roach identification",
+      "secondary_kws": [
+        "palmetto bug vs cockroach",
+        "types of roaches in florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-08-19",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Which roach you are seeing — and WHERE — is the whole diagnosis: an American wandering in from the rain is a different problem from German roaches breeding behind the fridge, and the ID takes ten seconds once you know the marks.",
+      "outline": [
+        "The location rule: bathroom floor at night vs kitchen cabinet hinges",
+        "American cockroach (palmetto bug) ID per UF/IFAS: size, the figure-8 pronotum mark, flight",
+        "German cockroach ID: the two racing stripes, why size means infestation not relief",
+        "Smokybrown ID: uniform mahogany, attic and soffit pressure",
+        "Comparison table: size, marks, where found, flies?, infestation risk",
+        "Interesting facts: sourced UF/IFAS trivia (why \"palmetto bug\" is a euphemism, survival feats)",
+        "What each ID means for action; link the get-rid-of guides"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull the UF/IFAS Featured Creatures profiles for American, German, and smokybrown cockroaches; verify all marks/measurements; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/get-rid-of-german-cockroaches/",
+        "/pest-control/get-rid-of-roaches/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "FAQ-blocked pest — do not add an FAQ section or FAQPage schema."
+      ]
+    },
+    {
+      "id": "P04",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/rat-or-mouse-identification-florida/",
+      "working_title": "Roof Rat, Norway Rat, or Mouse? Reading Droppings, Sounds, and Entry Points",
+      "primary_kw": "roof rat vs norway rat",
+      "secondary_kws": [
+        "rat droppings identification",
+        "noises in attic at night florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-08-26",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "You rarely see the rodent — you see evidence. Droppings shape, noise location, and greasy rub marks identify the species, and the species tells you where the entry is: roof rats own SWFL attics, Norway rats the ground line.",
+      "outline": [
+        "Start with the droppings: shape and size comparison per UF/IFAS",
+        "Sound mapping: attic at dusk vs walls at ground level",
+        "Roof rat ID and why SWFL is roof-rat country (citrus, palms, soffits)",
+        "Norway rat ID: burrows, ground-level entry",
+        "House mouse ID and why \"small rat\" is usually wrong",
+        "Rub marks, gnawing, and the flashlight checklist",
+        "Interesting facts: sourced UF/IFAS trivia (climbing ability, gnawing force)",
+        "Species → entry point → next step; link the rodent guides"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "https://edis.ifas.ufl.edu/",
+        "Pull UF/IFAS rodent identification guidance (roof rat / Norway rat / house mouse); verify droppings and behavior claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/rodent-control/",
+        "/pest-control/roof-rats-biology/",
+        "/pest-control/get-rid-of-rats-in-bradenton/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
+        "Rodent stays core service — no wildlife-trapping content (owner directive)."
+      ]
+    },
+    {
+      "id": "P05",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/bug-bite-identification-florida/",
+      "working_title": "What Bit You Last Night? Bed Bug, Flea, and Mite Bites Compared",
+      "primary_kw": "bed bug bites vs flea bites",
+      "secondary_kws": [
+        "bug bite identification",
+        "waking up with bites florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-09-02",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Bite pattern, location on the body, and timing narrow the suspect list fast — bed bugs, fleas, and mites each leave a different signature, and UF/IFAS guidance is clear that the bites alone are never a confirmed ID without finding the insect.",
+      "outline": [
+        "The honest caveat first, per UF/IFAS: bites are evidence, not diagnosis — confirmation means finding the pest",
+        "Bed bug signature: linear clusters, exposed skin, the mattress-seam inspection that confirms",
+        "Flea signature: ankles and lower legs, pets in the household, the white-sock test",
+        "Rodent/bird mite possibility: the one people never suspect (link rat-mites post)",
+        "Pattern comparison table: location, grouping, timing, confirming evidence",
+        "Interesting facts: sourced UF/IFAS trivia (bed bug detection difficulty, flea jump mechanics)",
+        "The inspection checklist before you treat anything; when to bring in a pro"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull UF/IFAS bed bug and flea Featured Creatures/EDIS pages; verify bite-pattern and inspection claims; DO NOT give medical advice — describe patterns, direct medical questions to a physician; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/rat-mites-bradenton-fl/",
+        "/pest-control/bed-bug-treatment-bradenton/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
+        "No medical claims — bite reactions vary; say so and defer to physicians."
+      ]
+    },
+    {
+      "id": "P06",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/florida-wasp-identification/",
+      "working_title": "Paper Wasp, Yellowjacket, or Mud Dauber? Know Before You Knock It Down",
+      "primary_kw": "florida wasp identification",
+      "secondary_kws": [
+        "wasp nest identification",
+        "yellow jacket vs paper wasp"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-09-09",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "The nest tells you the wasp, and the wasp tells you the risk: open-comb paper wasps, hidden-cavity yellowjackets, and solitary mud daubers sit at completely different aggression levels — knocking down the wrong one is how people get swarmed.",
+      "outline": [
+        "Read the NEST first: open umbrella comb vs enclosed cavity vs mud tubes (per UF/IFAS)",
+        "Paper wasp ID and temperament",
+        "Yellowjacket ID: ground/cavity nests, defensive radius, late-season aggression",
+        "Mud dauber ID: the harmless one that eats spiders",
+        "Cicada killer cameo: terrifying looking, nearly harmless",
+        "Risk table: nest type, aggression, sting risk, DIY-or-pro",
+        "Interesting facts: sourced UF/IFAS trivia (paper-making, dauber spider hunting)",
+        "Which nests to leave alone and which need professional removal"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull UF/IFAS Featured Creatures profiles for paper wasps, yellowjackets, and mud daubers; verify nest/behavior claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/mud-dauber-wasps/",
+        "/pest-control/get-rid-of-paper-wasps/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
+        "Never call any stinging-insect approach \"safe\" — site compliance language rules."
+      ]
+    },
+    {
+      "id": "P07",
+      "action": "new_supporting_blog",
+      "slug": "/mosquito/mosquito-species-southwest-florida/",
+      "working_title": "The Three Mosquitoes That Actually Bite You in Southwest Florida",
+      "primary_kw": "types of mosquitoes in florida",
+      "secondary_kws": [
+        "mosquito species identification",
+        "day biting mosquitoes"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-09-16",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "Of Florida’s dozens of mosquito species, a homeowner mostly meets three — and they differ in when they bite, where they breed, and what they carry, which is why time-of-day is the most useful ID clue you have.",
+      "outline": [
+        "Day-biter vs dusk-biter: the first ID split",
+        "Aedes aegypti and albopictus ID per UF/IFAS: container breeders, the white markings, day biting",
+        "Culex ID: the dusk/night biter, stagnant-water breeder",
+        "Where each breeds on a SWFL lot: bromeliads, gutters, plant saucers, retention edges",
+        "What each can carry, stated per UF/IFAS/FDOH sources without alarmism",
+        "Interesting facts: sourced UF/IFAS trivia (flight range differences, egg drought survival)",
+        "The 10-minute yard audit mapped to species; link the mosquito guides"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull UF/IFAS Featured Creatures profiles for Aedes aegypti, Aedes albopictus, and Culex species; verify markings, biting time, breeding claims; disease claims only as stated by UF/IFAS or FDOH; snapshot at draft."
+      ],
+      "internal_links": [
+        "/mosquito-control/",
+        "/mosquito/professional-mosquito-treatment/",
+        "/pest-control/plants-that-keep-mosquitoes-away/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "Verify both internal links resolve on the live sitemap (mosquito posts may live under /mosquito/ or /pest-control/ — check actual URLs)."
+      ]
+    },
+    {
+      "id": "P08",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/silverfish-earwig-booklice-identification/",
+      "working_title": "Silverfish, Earwig, or Booklouse? The Moisture Pests Hiding in Florida Bathrooms",
+      "primary_kw": "silverfish identification",
+      "secondary_kws": [
+        "earwig vs silverfish",
+        "tiny bugs in bathroom florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-09-23",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "The small gray-brown insects in SWFL bathrooms and closets are moisture indicators first and pests second — telling silverfish, earwigs, and booklice apart matters less for treatment than for what they say about humidity.",
+      "outline": [
+        "Why they are all in the bathroom: the moisture connection",
+        "Silverfish ID per UF/IFAS: carrot shape, three tail filaments, the wiggle",
+        "Earwig ID: the pincers that scare people and what they are actually for",
+        "Booklice ID: the tiny one on damp paper and walls",
+        "What each eats and what damage is real vs imagined",
+        "Comparison table + humidity fixes that outperform sprays",
+        "Interesting facts: sourced UF/IFAS trivia (silverfish antiquity, earwig folklore vs reality)",
+        "When numbers mean a moisture problem worth professional eyes"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull UF/IFAS Featured Creatures/EDIS pages for silverfish, earwigs, and psocids; verify ID and diet claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/get-rid-of-silverfish/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference."
+      ]
+    },
+    {
+      "id": "P09",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/no-see-um-vs-mosquito-bites/",
+      "working_title": "No-See-Ums vs. Mosquitoes: Why Your \"Mosquito Problem\" Might Be Something Smaller",
+      "primary_kw": "no see um vs mosquito",
+      "secondary_kws": [
+        "biting midges florida",
+        "invisible biting bugs"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-09-30",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "If bites arrive through window screens at dawn near the coast, the culprit is usually biting midges, not mosquitoes — and because they breed in salt-marsh muck instead of standing water, everything about prevention changes.",
+      "outline": [
+        "The screen clue: no-see-ums pass standard mesh, mosquitoes do not",
+        "No-see-um ID per UF/IFAS: size, the burning bite, dawn/dusk pressure",
+        "Coastal geography: why Venice and coastal Bradenton feel it worse",
+        "Breeding difference: salt marsh vs container water — why yard dumping does not fix midges",
+        "What actually helps: screen mesh size, fans, timing, per UF/IFAS",
+        "Interesting facts: sourced UF/IFAS trivia (wing-beat, the name)",
+        "Setting honest expectations; link the no-see-um and mosquito posts"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull the UF/IFAS Featured Creatures biting-midges (Culicoides) page; verify size, breeding, screen and control claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/mosquito-control/",
+        "/pest-control/no-see-um-bradenton-fl/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "Complement, not duplicate, the existing no-see-um-bradenton post — cross-check before writing."
+      ]
+    },
+    {
+      "id": "P10",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/lawn-mound-identification-florida/",
+      "working_title": "What Made That Mound? Fire Ants, Pavement Ants, and Mole Crickets Compared",
+      "primary_kw": "mounds in lawn identification",
+      "secondary_kws": [
+        "fire ant mound identification",
+        "small dirt piles in grass"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-10-07",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "Not every mound in a SWFL lawn is fire ants — pavement ants, mole crickets, and even earthworms leave look-alike soil piles, and poking the wrong one is either pointless or painful, so read the mound before acting.",
+      "outline": [
+        "The no-poke triage: mound shape, location, soil texture",
+        "Fire ant mound ID per UF/IFAS: no center hole, fluffy worked soil, the swarm response",
+        "Pavement ant piles: small, cratered, along edges and driveways",
+        "Mole cricket sign: raised tunnels more than mounds (link the mole cricket post)",
+        "Earthworm castings: the harmless look-alike that gets sprayed anyway",
+        "Comparison table: shape, hole, location, response when disturbed",
+        "Interesting facts: sourced UF/IFAS trivia (fire ant raft behavior, colony relocation)",
+        "Which mound means action now; link the fire ant guides"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull the UF/IFAS Featured Creatures red imported fire ant profile and pavement ant/mole cricket references; verify mound-morphology claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/get-rid-of-fire-ants/",
+        "/lawn-care/mole-crickets-bahia-sarasota-fl/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "The mole-cricket link targets L07 from this manifest — verify it has published and resolves; drop if not yet live."
+      ]
+    },
+    {
+      "id": "P11",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/millipede-vs-centipede-florida/",
+      "working_title": "Millipede or Centipede? The Rainy-Season Invaders on Your Lanai",
+      "primary_kw": "millipede vs centipede",
+      "secondary_kws": [
+        "worms curling up on porch",
+        "centipede in house florida"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-10-14",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "Summer rains push both into lanais and garages, but they could not be more different: slow vegetarian millipedes that curl into coils, and fast predatory centipedes that can pinch — the ID takes one look at legs and speed.",
+      "outline": [
+        "The one-look ID: legs per segment, speed, and the curl test (per UF/IFAS)",
+        "Millipede ID and the rainy-season migration phenomenon",
+        "Centipede ID: the Florida blue and house centipede, what a pinch is like",
+        "Why neither wants to live indoors (and what that means for control)",
+        "The moisture and mulch connection at the foundation line",
+        "Interesting facts: sourced UF/IFAS trivia (leg counts, millipede defensive chemistry)",
+        "Exclusion beats spraying: door sweeps, mulch pullback; when mass migrations warrant help"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "Pull UF/IFAS millipede and centipede pages; verify leg/behavior/seasonal claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/pest-control-services/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference."
+      ]
+    },
+    {
+      "id": "P12",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/eastern-lubber-grasshopper-florida/",
+      "working_title": "The Giant Yellow Grasshopper Eating Your Garden: Eastern Lubbers, Explained",
+      "primary_kw": "eastern lubber grasshopper",
+      "secondary_kws": [
+        "giant grasshopper florida",
+        "yellow and black grasshopper"
+      ],
+      "intent": "informational pest identification",
+      "window": "2026-10-21",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "The hand-sized yellow grasshopper stripping SWFL ornamentals every summer is the eastern lubber — flightless, toxic to predators, nearly untreatable at adult size, and a textbook case where timing (the black nymph stage) is the whole game.",
+      "outline": [
+        "ID at both life stages per UF/IFAS: the black-with-yellow-stripe nymph vs the giant yellow adult",
+        "Why birds will not solve this: the toxicity defense",
+        "What they eat in SWFL landscapes: crinum, amaryllis, citrus leaves",
+        "The control window: hand-picking and treating NYMPHS in spring, why adults shrug everything off",
+        "Interesting facts: sourced UF/IFAS trivia (hissing/foam display, flightlessness)",
+        "Damage triage on ornamentals; link tree-shrub resources",
+        "Honest close: what a pro can and cannot do about lubbers"
+      ],
+      "sources": [
+        "https://entnemdept.ufl.edu/creatures/",
+        "https://gardeningsolutions.ifas.ufl.edu/",
+        "Pull the UF/IFAS Featured Creatures eastern lubber profile; verify life-stage, toxicity, and host claims; snapshot at draft."
+      ],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/pest-control-services/"
+      ],
+      "verify_notes": [
+        "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference."
       ]
     }
   ]
