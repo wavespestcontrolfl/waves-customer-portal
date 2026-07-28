@@ -294,28 +294,24 @@ async function rescueSpamFolder() {
 async function collectUnansweredNudges(now = new Date(), limit = 5) {
   const newest = new Date(now.getTime() - NUDGE_AFTER_DAYS * 86400000);
   const oldest = new Date(now.getTime() - NUDGE_WINDOW_DAYS * 86400000);
-  const candidates = await db('emails')
-    .whereIn('classification', NUDGE_CATEGORIES)
-    .where('is_archived', false)
-    .whereBetween('received_at', [oldest, newest])
-    .orderBy('received_at', 'asc')
-    // Wide pre-dedupe window: the cap must land AFTER thread grouping or one
-    // chatty thread's messages would consume every candidate slot.
-    .limit(100)
-    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'received_at');
-
-  // One nudge per Gmail thread (its LATEST inbound message) — several
-  // messages in one unanswered thread must not crowd other customers out of
-  // the capped digest list.
-  const latestPerThread = new Map();
-  for (const email of candidates) {
-    const prev = latestPerThread.get(email.gmail_thread_id);
-    if (!prev || new Date(email.received_at) > new Date(prev.received_at)) {
-      latestPerThread.set(email.gmail_thread_id, email);
-    }
-  }
-  const deduped = [...latestPerThread.values()]
-    .sort((a, b) => new Date(a.received_at) - new Date(b.received_at));
+  // Thread grouping happens IN SQL (latest inbound row per thread) BEFORE
+  // any cap — a chatty thread or a pile of answered rows can never consume
+  // the candidate window and hide other unanswered customers.
+  const res = await db.raw(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (gmail_thread_id)
+         id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at
+       FROM emails
+       WHERE classification = ANY(?)
+         AND is_archived = false
+         AND received_at BETWEEN ? AND ?
+       ORDER BY gmail_thread_id, received_at DESC
+     ) latest_per_thread
+     ORDER BY received_at ASC
+     LIMIT 40`,
+    [NUDGE_CATEGORIES, oldest, newest]
+  );
+  const deduped = res?.rows || [];
 
   const nudges = [];
   for (const email of deduped) {

@@ -49,7 +49,15 @@ function setupDb(firstResults = {}, selectResults = {}, updateResults = {}) {
   const selectQueues = Object.fromEntries(Object.entries(selectResults).map(([t, rows]) => [t, [...rows]]));
   const updateQueues = Object.fromEntries(Object.entries(updateResults).map(([t, rows]) => [t, [...rows]]));
 
-  db.raw = jest.fn((sql) => ({ __raw: sql }));
+  db.raw = jest.fn(async (sql, bindings) => {
+    const q = selectQueues.__raw;
+    return { rows: q && q.length ? q.shift() : [], __raw: sql, __bindings: bindings };
+  });
+  db.transaction = jest.fn(async (cb) => {
+    const trx = (table) => db(table);
+    trx.raw = db.raw;
+    return cb(trx);
+  });
   db.mockImplementation((table) => {
     const builder = {};
     const filters = [];
@@ -274,22 +282,20 @@ describe('rescueSpamFolder', () => {
 describe('collectUnansweredNudges', () => {
   const { collectUnansweredNudges } = require('../services/email/inbox-hygiene');
 
-  test('several messages in one unanswered thread produce ONE nudge (latest inbound)', async () => {
-    setupDb({}, {
-      emails: [[
-        { id: 'e-1', gmail_thread_id: 't-same', from_address: 'a@x.example', subject: 'first ping', received_at: '2026-07-23T12:00:00Z' },
-        { id: 'e-2', gmail_thread_id: 't-same', from_address: 'a@x.example', subject: 'second ping', received_at: '2026-07-24T12:00:00Z' },
-      ]],
-    });
+  test('the SQL grouping asks for one latest-inbound row per thread before any cap', async () => {
+    setupDb({}, { __raw: [[{ id: 'e-2', gmail_thread_id: 't-same', from_address: 'a@x.example', subject: 'second ping', received_at: '2026-07-24T12:00:00Z' }]] });
     gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'], internalDate: '0' }] });
     const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
     expect(nudges).toHaveLength(1);
-    expect(nudges[0].id).toBe('e-2'); // the thread's latest inbound message
+    expect(nudges[0].id).toBe('e-2');
+    const sql = db.raw.mock.calls[0][0];
+    expect(sql).toContain('DISTINCT ON (gmail_thread_id)');
+    expect(sql).toContain('received_at DESC');
   });
 
   test('returns threads with no SENT message after the inbound mail; skips answered ones', async () => {
     setupDb({}, {
-      emails: [[
+      __raw: [[
         { id: 'e-a', gmail_thread_id: 't-a', from_address: 'a@x.example', subject: 'A', received_at: '2026-07-24T12:00:00Z' },
         { id: 'e-b', gmail_thread_id: 't-b', from_address: 'b@x.example', subject: 'B', received_at: '2026-07-24T12:00:00Z' },
       ]],

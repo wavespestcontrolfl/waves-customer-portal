@@ -767,18 +767,23 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   // object) or a concurrent worker gets here. Only the caller that flips
   // NULL → 'pending' drafts; everyone else no-ops.
   // The claim is THREAD-scoped, not just email-scoped: two inbound messages
-  // in one conversation must produce one draft, so the claim only wins when
-  // no other email in the thread already holds one.
-  let claimed = await db('emails')
-    .where({ id: email.id })
-    .whereNull('draft_gmail_id')
-    .whereNotExists(
-      db('emails as e2')
-        .select(db.raw('1'))
-        .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
-        .whereNotNull('e2.draft_gmail_id')
-    )
-    .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
+  // in one conversation must produce one draft. A transaction-scoped
+  // advisory lock on the thread id serializes concurrent workers claiming
+  // DIFFERENT rows of the same thread — without it, both statements can
+  // pass the NOT EXISTS and mint duplicate drafts.
+  let claimed = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [String(email.gmail_thread_id)]);
+    return trx('emails')
+      .where({ id: email.id })
+      .whereNull('draft_gmail_id')
+      .whereNotExists(
+        trx('emails as e2')
+          .select(trx.raw('1'))
+          .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
+          .whereNotNull('e2.draft_gmail_id')
+      )
+      .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
+  });
   if (!claimed) {
     // Stale-claim recovery: a crash mid-attempt leaves 'pending' forever.
     // Age is judged by the DEDICATED draft_claimed_at stamp — updated_at is
