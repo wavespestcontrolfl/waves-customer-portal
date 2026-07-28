@@ -60,6 +60,13 @@ describe('email spam blocker safety helpers', () => {
           }),
         };
       }
+      if (table === 'customers') {
+        return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => null) })) };
+      }
+      if (table === 'leads') {
+        const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
+      }
       throw new Error(`unexpected table ${table}`);
     });
 
@@ -74,6 +81,10 @@ describe('email spam blocker safety helpers', () => {
       }
       if (table === 'customers') {
         return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => null) })) };
+      }
+      if (table === 'leads') {
+        const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
       }
       if (table === 'vendor_email_domains') {
         return { where: jest.fn(() => ({ first: jest.fn(async () => ({ domain: 'vendor.example' })) })) };

@@ -251,6 +251,23 @@ async function isBlocked(fromAddress) {
   const domain = domainFromAddress(normalized);
   if (!domain) return false;
 
+  // Identity checks come FIRST — a stale exact block recorded before a
+  // sender became a customer/open lead, or before their domain joined the
+  // operational set, must not keep auto-trashing their mail. (Shared
+  // mailbox providers like gmail.com are NOT identity — exact blocks on
+  // those still apply below.)
+  if (isOperationalDomain(domain)) return false;
+  const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first();
+  if (isCustomer) return false;
+  const isOpenLead = await db('leads')
+    .whereRaw('LOWER(email) = ?', [normalized])
+    .whereNull('deleted_at')
+    .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+    .first();
+  if (isOpenLead) return false;
+
+  // Exact sender blocks still outrank the vendor-DOMAIN fail-open (a domain
+  // is not an identity — one bad sender at a vendor domain stays blocked).
   const exactBlocked = await db('blocked_email_senders')
     .where('email_address', normalized)
     .first();
@@ -259,11 +276,6 @@ async function isBlocked(fromAddress) {
     await db('blocked_email_senders').where({ id: exactBlocked.id }).increment('blocked_count', 1);
     return true;
   }
-
-  // Known customers, vendors, and protected roots must fail open for broad
-  // domain blocks. Exact sender blocks were already honored above.
-  const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first();
-  if (isCustomer) return false;
 
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();
   if (isVendor) return false;

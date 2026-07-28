@@ -843,14 +843,16 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       .where({ id: email.id })
       .whereNull('draft_gmail_id')
       .whereNotExists(
-        // ACTIVE claims only — a settled draft that the operator already
-        // reviewed and sent must not suppress drafting for the customer's
-        // NEXT reply in the thread (the live DRAFT-label check below covers
-        // drafts that still exist in Gmail).
+        // ACTIVE FRESH claims only — a settled draft never blocks (the live
+        // DRAFT-label check below covers drafts still in Gmail), and a STALE
+        // pending claim on an OLDER thread row must not block a newer
+        // inbound message forever (the reconciler settles the stale row
+        // against the fresh draft afterwards).
         trx('emails as e2')
           .select(trx.raw('1'))
           .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
           .where('e2.draft_gmail_id', 'pending')
+          .where('e2.draft_claimed_at', '>=', new Date(Date.now() - 3600000))
       )
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
   });

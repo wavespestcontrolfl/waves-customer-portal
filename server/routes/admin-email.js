@@ -523,13 +523,15 @@ router.post('/message/:id/reclassify', async (req, res) => {
         .catch(() => {});
     };
 
-    // Classify FIRST — if the classifier is down (null result) or returns an
-    // off-vocabulary category, the quarantine stays exactly as it was;
-    // nothing is restored on an unrecognized verdict.
-    const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
+    // PURE classification first (classifyEmailContent has no side effects) —
+    // vocabulary is validated BEFORE anything is persisted or any auto-action
+    // fires, so an off-vocabulary verdict truthfully leaves every state
+    // unchanged. Only after validation does the route persist the category
+    // and run the auto-action exactly once.
+    const { EMAIL_CATEGORIES, classifyEmailContent } = require('../services/email/email-classifier');
     let classification;
     try {
-      classification = await classifyEmail(email);
+      classification = await classifyEmailContent(email);
     } catch (classifyErr) {
       await revertReclassClaim();
       throw classifyErr;
@@ -545,11 +547,13 @@ router.post('/message/:id/reclassify', async (req, res) => {
     }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
+      classification_confidence: classification.confidence,
       extracted_data: JSON.stringify(classification),
+      updated_at: new Date(),
     });
-    // NOTE: classifyEmail already executed the auto-action for the new
-    // category — running executeAutoAction again here was the double-action
-    // path (duplicate drafts/unsubscribes flagged in review).
+    if (classification.category !== 'spam') {
+      await executeAutoAction(email, classification);
+    }
 
     // A successful NON-spam verdict on a quarantined row is the operator
     // saying "not spam" — undo the quarantine (Gmail labels + sweep stamp).
