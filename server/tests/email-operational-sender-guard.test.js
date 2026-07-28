@@ -8,20 +8,26 @@
  */
 
 const { shouldSkipAutoAction } = require('../services/email/email-actions');
+const GOOG = (d) => `mx.google.com; dkim=pass header.d=${d}`;
 const { autoUnsubscribe } = require('../services/email/auto-unsubscribe');
 const { isOperationalDomain, domainFromAddress } = require('../services/email/spam-blocker');
 
 describe('email shouldSkipAutoAction — operational-sender guard', () => {
+  test('an operational-LOOKING sender without aligned auth does NOT skip (spoof falls through to quarantine)', () => {
+    expect(shouldSkipAutoAction('spam', 'billing@stripe.com')).toBe(false);
+    expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example')).toBe(false);
+  });
+
   test('skips spam and marketing_newsletter actions for Waves senders', () => {
-    expect(shouldSkipAutoAction('marketing_newsletter', 'events@wavespestcontrol.com')).toBe(true);
-    expect(shouldSkipAutoAction('marketing_newsletter', 'newsletter@wavespestcontrol.com')).toBe(true);
-    expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com')).toBe(true);
-    expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@portal.wavespestcontrol.com')).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'events@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'newsletter@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@portal.wavespestcontrol.com', GOOG('portal.wavespestcontrol.com'))).toBe(true);
   });
 
   test('skips destructive actions for other operational domains (Google security notices etc.)', () => {
-    expect(shouldSkipAutoAction('spam', 'no-reply@accounts.google.com')).toBe(true);
-    expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@google.com')).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'no-reply@accounts.google.com', GOOG('accounts.google.com'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@google.com', GOOG('google.com'))).toBe(true);
   });
 
   test('external newsletters and spam still get auto-actioned', () => {

@@ -15,9 +15,15 @@ const { whereLiveCustomer } = require('../customer-stages');
  * Non-destructive handlers (leads, vendor invoices) are unaffected.
  */
 const DESTRUCTIVE_CATEGORIES = new Set(['spam', 'marketing_newsletter']);
-function shouldSkipAutoAction(category, fromAddress) {
-  return DESTRUCTIVE_CATEGORIES.has(category)
-    && isOperationalDomain(domainFromAddress(fromAddress));
+function shouldSkipAutoAction(category, fromAddress, authResults) {
+  if (!DESTRUCTIVE_CATEGORIES.has(category)) return false;
+  if (!isOperationalDomain(domainFromAddress(fromAddress))) return false;
+  // The operational skip only applies when the mail actually AUTHENTICATED
+  // as the operational domain it claims — otherwise a spoofed "stripe.com"
+  // spam would be skipped untouched. Unauthenticated look-alikes fall
+  // through to the handlers, where spam quarantines them as probable spoofs.
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  return hasAlignedAuth(authResults, domainFromAddress(fromAddress));
 }
 
 // ── Email → draft-estimate (GATE_EMAIL_QUOTE_DRAFTS, default OFF) ────────
@@ -190,7 +196,7 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
 
 async function executeAutoAction(email, classification) {
   try {
-    if (shouldSkipAutoAction(classification.category, email.from_address)) {
+    if (shouldSkipAutoAction(classification.category, email.from_address, email.authentication_results)) {
       await db('emails').where({ id: email.id }).update({
         auto_action: 'operational_sender_skipped',
         updated_at: new Date(),
@@ -777,10 +783,14 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       .where({ id: email.id })
       .whereNull('draft_gmail_id')
       .whereNotExists(
+        // ACTIVE claims only — a settled draft that the operator already
+        // reviewed and sent must not suppress drafting for the customer's
+        // NEXT reply in the thread (the live DRAFT-label check below covers
+        // drafts that still exist in Gmail).
         trx('emails as e2')
           .select(trx.raw('1'))
           .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
-          .whereNotNull('e2.draft_gmail_id')
+          .where('e2.draft_gmail_id', 'pending')
       )
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
   });
