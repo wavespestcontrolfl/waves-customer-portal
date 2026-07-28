@@ -3,36 +3,46 @@
  * content runs (owner directive 2026-07-28).
  *
  * Flow:
- *  1. The autonomous runner parks a run as completed_pending_review with an
- *     APPROVABLE kind (named_competitor_review or trust_build_*). The runner
- *     calls sendApprovalRequest() fire-and-forget — the owner gets an email
- *     at APPROVAL_EMAIL_TO with a draft preview and a subject token.
- *  2. The owner replies to that email with exactly "approved" or
- *     "not approved" (first non-quoted line of the reply).
- *  3. pollReplies() (cron, every 10 min, gated) reads the inbox via IMAP
- *     (read-only), matches subject tokens against awaiting rows, verifies
- *     the sender allowlist, and executes the decision through the SAME
- *     entrypoints the operator script uses. Everything else — unknown
- *     sender, ambiguous wording, already-decided token — is ignored
- *     fail-closed and surfaced as an admin notification.
+ *  1. A run parks as completed_pending_review with an APPROVABLE kind
+ *     (named_competitor_review or trust_build_*). The runner fires
+ *     notifyParkedRun() (fast path); every poll also SWEEPS for approvable
+ *     parked runs with no approval row (crash-safe path — also covers lanes
+ *     that park outside the generic hook, e.g. GBP trust-build).
+ *  2. The owner replies to the approval email with exactly "approved" or
+ *     "not approved" (first non-quoted line).
+ *  3. pollReplies() (cron, every 10 min, advisory-locked, gated) reads the
+ *     reply mailbox via IMAP (read-only), matches subject tokens, verifies
+ *     the FAIL-CLOSED sender allowlist, and executes decisions through
+ *     autonomous-review-queue.decideReviewItem — the SAME decision engine
+ *     as the admin portal, so run/opportunity transitions and stale-run
+ *     binding stay single-sourced.
  *
- * Only the two kinds with a scripted approve path get emails; other parked
- * kinds (gate_fail, publisher_adapter_unavailable, …) keep their existing
- * admin-bell + manual flow.
+ * Trust boundary (all three must pass): subject token proves WHICH run;
+ * APPROVAL_ALLOWED_SENDERS proves WHO (fail closed — no default: contact@
+ * is a shared staff inbox, per the same rule newsletter-proof encodes);
+ * an unambiguous first-line decision proves WHAT. Everything else is
+ * ignored fail-closed. Sender addresses are masked in logs (AGENTS.md PII
+ * rule); the full address lives only in the decision audit record.
  *
- * Trust boundary: the token proves the reply is about a specific run; the
- * sender allowlist (APPROVAL_ALLOWED_SENDERS) proves who decided. Both must
- * pass. A decision is executed at most once (status flip is the guard).
+ * Execution is claim-first via an 'executing' state: a crash mid-execution
+ * is recovered by the next poll (stale-executing sweep); transient failures
+ * (engine lock, timeouts) release the claim so the still-present inbox
+ * reply retries. decideReviewItem's run-state assertions make re-execution
+ * safe (at-least-once with idempotent transitions).
  */
 
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { maskEmail } = require('../newsletter-proof');
 
-const DEFAULT_TO = 'contact@wavespestcontrol.com';
-const DEFAULT_ALLOWED = 'contact@wavespestcontrol.com,lakewoodranchpestcontrol1@gmail.com';
 const APPROVABLE_KIND_RE = /^(named_competitor_review|trust_build_\d+_of_\d+)$/;
 const TOKEN_RE = /\bEA-[0-9a-f]{8}\b/i;
+const SWEEP_WINDOW_DAYS = 14;
+const EXECUTING_RECOVERY_MINUTES = 15;
+// Transient execution failures (engine advisory lock contention, timeouts,
+// connection blips) release the claim so the inbox reply retries next poll.
+const TRANSIENT_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|timeout|timed out|ECONN|EAI_AGAIN|deadlock|too many connections|temporar/i;
 
 function emailApprovalsEnabled() {
   const { isEnabled } = require('../../config/feature-gates');
@@ -40,12 +50,31 @@ function emailApprovalsEnabled() {
 }
 
 function approvalRecipient() {
-  return String(process.env.APPROVAL_EMAIL_TO || DEFAULT_TO).trim();
+  return String(process.env.APPROVAL_EMAIL_TO || 'contact@wavespestcontrol.com').trim();
 }
 
+/**
+ * FAIL CLOSED: no default approver. contact@ is the shared inbox non-owner
+ * staff work from (see newsletter-proof.approvalSenders for the same rule),
+ * so the owner must explicitly name approver address(es) via
+ * APPROVAL_ALLOWED_SENDERS before any reply can execute a decision.
+ */
 function allowedSenders() {
-  return String(process.env.APPROVAL_ALLOWED_SENDERS || DEFAULT_ALLOWED)
+  return String(process.env.APPROVAL_ALLOWED_SENDERS || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * The mailbox replies actually land in — email.js always sends FROM
+ * contact@ (no Reply-To), so this is the contact account regardless of any
+ * APPROVAL_EMAIL_TO override. Overridable separately for testing.
+ */
+function imapMailbox() {
+  return {
+    user: String(process.env.APPROVAL_IMAP_USER || process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com').trim(),
+    password: process.env.APPROVAL_IMAP_PASSWORD || process.env.GOOGLE_SMTP_PASSWORD || null,
+    host: process.env.APPROVAL_IMAP_HOST || 'imap.gmail.com',
+  };
 }
 
 function isApprovableKind(kind) {
@@ -64,7 +93,7 @@ function escapeHtml(s) {
 
 /**
  * Parse the owner's decision from reply text. Only the FIRST non-empty,
- * non-quoted line counts — quoted trails ("> approved?") and signatures
+ * non-quoted line counts — quoted trails ("> approved") and signatures
  * never decide. Returns 'approved' | 'rejected' | null (ambiguous).
  */
 function parseDecision(text) {
@@ -81,40 +110,60 @@ function parseDecision(text) {
   return null;
 }
 
+function decodePartBody(headers, body) {
+  if (/content-transfer-encoding:\s*base64/i.test(headers)) {
+    try { return Buffer.from(body.replace(/\s+/g, ''), 'base64').toString('utf8'); } catch { return body; }
+  }
+  if (/content-transfer-encoding:\s*quoted-printable/i.test(headers)) {
+    return body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  }
+  return body;
+}
+
+function splitHeadersBody(part) {
+  const idxCrlf = part.indexOf('\r\n\r\n');
+  const idxLf = part.indexOf('\n\n');
+  const headerEnd = idxCrlf !== -1 ? idxCrlf + 4 : idxLf !== -1 ? idxLf + 2 : -1;
+  if (headerEnd === -1) return null;
+  return { headers: part.slice(0, headerEnd), body: part.slice(headerEnd) };
+}
+
 /**
- * Extract readable text from a raw RFC822 message. Prefers the text/plain
- * MIME part (decoding quoted-printable / base64); falls back to a
- * tag-stripped whole-source read. Conservative by design — an unparseable
- * body simply yields no decision.
+ * Extract readable text from a raw RFC822 message. Recurses through nested
+ * multipart containers (multipart/mixed wrapping multipart/alternative is
+ * the normal shape for replies with inline signature images), prefers the
+ * first text/plain leaf, decodes base64/quoted-printable in single-part
+ * messages too, and falls back to a tag-stripped read. Conservative — an
+ * unparseable body simply yields no decision.
  */
-function extractReplyText(source) {
+function extractReplyText(source, depth = 0) {
   const raw = String(source || '');
+  if (depth > 4) return '';
   const boundaryMatch = raw.match(/boundary="?([^";\r\n]+)"?/i);
   if (boundaryMatch) {
-    const parts = raw.split(`--${boundaryMatch[1]}`);
+    const parts = raw.split(`--${boundaryMatch[1]}`).slice(1);
+    // First pass: direct text/plain leaves. Second pass: recurse into
+    // nested multipart parts.
     for (const part of parts) {
-      const headerEnd = part.indexOf('\r\n\r\n') !== -1 ? part.indexOf('\r\n\r\n') + 4
-        : part.indexOf('\n\n') !== -1 ? part.indexOf('\n\n') + 2 : -1;
-      if (headerEnd === -1) continue;
-      const headers = part.slice(0, headerEnd);
-      if (!/content-type:\s*text\/plain/i.test(headers)) continue;
-      let body = part.slice(headerEnd);
-      if (/content-transfer-encoding:\s*base64/i.test(headers)) {
-        try { body = Buffer.from(body.replace(/\s+/g, ''), 'base64').toString('utf8'); } catch { /* keep raw */ }
-      } else if (/content-transfer-encoding:\s*quoted-printable/i.test(headers)) {
-        body = body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      const split = splitHeadersBody(part);
+      if (!split) continue;
+      if (/content-type:\s*text\/plain/i.test(split.headers)) {
+        return decodePartBody(split.headers, split.body);
       }
-      return body;
+    }
+    for (const part of parts) {
+      const split = splitHeadersBody(part);
+      if (!split) continue;
+      if (/content-type:\s*multipart\//i.test(split.headers)) {
+        const nested = extractReplyText(part, depth + 1);
+        if (nested && parseDecision(nested) !== null) return nested;
+        if (nested) return nested;
+      }
     }
   }
-  // Single-part or unrecognized structure: take everything after the headers,
-  // strip tags so an HTML-only reply still yields its text.
-  const headerEnd = raw.indexOf('\r\n\r\n') !== -1 ? raw.indexOf('\r\n\r\n') + 4
-    : raw.indexOf('\n\n') !== -1 ? raw.indexOf('\n\n') + 2 : 0;
-  let body = raw.slice(headerEnd);
-  if (/content-transfer-encoding:\s*quoted-printable/i.test(raw.slice(0, headerEnd))) {
-    body = body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
-  }
+  const split = splitHeadersBody(raw);
+  if (!split) return raw;
+  const body = decodePartBody(split.headers, split.body);
   return body.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
 }
 
@@ -153,6 +202,7 @@ async function sendApprovalRequest(run, opportunity = null) {
   const email = require('../email');
   const { title, excerpt } = draftPreview(run);
   const isCompetitor = row.kind === 'named_competitor_review';
+  const senders = allowedSenders();
   const subject = `[${row.token}] Approve? ${title}`;
   const bodyHtml = [
     `<p><strong>${isCompetitor ? 'Named-competitor draft' : 'Trust-build draft'}</strong> is parked for your decision.</p>`,
@@ -163,8 +213,11 @@ async function sendApprovalRequest(run, opportunity = null) {
     excerpt ? `<p><strong>Draft opening:</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;">${escapeHtml(excerpt)}…</blockquote>` : '',
     '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>',
     '<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
-    isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is discarded and the topic is closed.</p>'
-      : '<p>approved → the draft earns trust-build credit toward auto-publish; not approved → no credit.</p>',
+    isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is dismissed and the topic is closed.</p>'
+      : '<p>approved → the draft earns trust-build credit toward auto-publish; not approved → the item is dismissed.</p>',
+    senders.length
+      ? `<p style="color:#666;font-size:13px;">Replies are accepted only from: ${senders.map(escapeHtml).join(', ')}.</p>`
+      : '<p style="color:#b00;font-size:13px;">No approver addresses are configured (APPROVAL_ALLOWED_SENDERS) — replies cannot be processed until one is set.</p>',
   ].join('\n');
 
   const result = await email.send({ to: approvalRecipient(), subject, heading: 'Content approval needed', body: bodyHtml });
@@ -177,141 +230,10 @@ async function sendApprovalRequest(run, opportunity = null) {
   return { row, sent: true };
 }
 
-async function executeDecision(row, decision, sender) {
-  // Claim the row first — the status flip is the at-most-once guard.
-  const claimed = await db('content_email_approvals')
-    .where({ id: row.id, status: 'awaiting_reply' })
-    .update({ status: decision, decided_by: `email:${sender}`, decided_at: new Date(), updated_at: new Date() });
-  if (!claimed) return { skipped: 'already_decided' };
-
-  try {
-    if (decision === 'approved') {
-      if (row.kind === 'named_competitor_review') {
-        const runner = require('./autonomous-runner');
-        const result = await runner.approveAndPublishNamedCompetitor(row.opportunity_id, { runId: row.run_id, approvedBy: `email:${sender}` });
-        return { executed: 'publish', result };
-      }
-      await db('autonomous_runs').where({ id: row.run_id }).update({
-        trust_build_approved_at: new Date(),
-        trust_build_approved_by: `email:${sender}`,
-        updated_at: new Date(),
-      });
-      return { executed: 'trust_build_credit' };
-    }
-    // rejected — close the run + opportunity out of the review queue.
-    await db('autonomous_runs')
-      .where({ id: row.run_id, outcome: 'completed_pending_review' })
-      .update({
-        skip_reason: `${row.kind === 'named_competitor_review' ? 'named_competitor' : 'trust_build'}_rejected`,
-        reviewer_notes: db.raw(`COALESCE(reviewer_notes, '') || ' | REJECTED via email by ' || ?`, [sender]),
-        updated_at: new Date(),
-      });
-    if (row.opportunity_id) {
-      await db('opportunity_queue')
-        .where({ id: row.opportunity_id, status: 'pending_review' })
-        .update({ status: 'skipped', skip_reason: 'rejected_by_owner_email', updated_at: new Date() });
-    }
-    return { executed: 'rejected' };
-  } catch (err) {
-    // Execution failed AFTER the claim: record it and surface loudly — the
-    // decision is not silently lost, and the row never re-executes.
-    await db('content_email_approvals').where({ id: row.id }).update({ status: 'failed', last_error: String(err.message).slice(0, 500), updated_at: new Date() });
-    throw err;
-  }
-}
-
-async function notifyAdmin(title, body) {
-  try {
-    const NotificationService = require('../notification-service');
-    await NotificationService.create({ recipientType: 'admin', recipientId: null, category: 'content', title, body, link: '/admin/seo' });
-  } catch (err) {
-    logger.warn(`[email-approvals] admin notification failed: ${err.message}`);
-  }
-}
-
 /**
- * Cron entrypoint: read the inbox (read-only), match replies to awaiting
- * tokens, execute decisions. Also retries approval emails whose first send
- * failed. Skips the IMAP connection entirely when nothing is awaiting.
- */
-async function pollReplies() {
-  if (!emailApprovalsEnabled()) return { skipped: 'gate_off' };
-  const awaiting = await db('content_email_approvals').where({ status: 'awaiting_reply' });
-  if (!awaiting.length) return { checked: 0, decided: 0 };
-
-  // Retry unsent approval emails (first send failed) before polling.
-  for (const row of awaiting.filter((r) => !r.email_sent_at)) {
-    const run = await db('autonomous_runs').where({ id: row.run_id }).first();
-    if (run) await sendApprovalRequest(run).catch((err) => logger.warn(`[email-approvals] resend ${row.token} failed: ${err.message}`));
-  }
-
-  const password = process.env.GOOGLE_SMTP_PASSWORD;
-  if (!password) return { skipped: 'imap_not_configured' };
-  const byToken = new Map(awaiting.filter((r) => r.email_sent_at).map((r) => [r.token.toLowerCase(), r]));
-  if (!byToken.size) return { checked: 0, decided: 0 };
-
-  const { ImapFlow } = require('imapflow');
-  const client = new ImapFlow({
-    host: process.env.APPROVAL_IMAP_HOST || 'imap.gmail.com',
-    port: 993,
-    secure: true,
-    auth: { user: approvalRecipient(), pass: password },
-    logger: false,
-  });
-
-  let checked = 0; let decided = 0;
-  try {
-    await client.connect();
-    const lock = await client.getMailboxLock('INBOX', { readOnly: true });
-    try {
-      const oldest = awaiting.reduce((min, r) => (r.email_sent_at && (!min || r.email_sent_at < min) ? r.email_sent_at : min), null);
-      const since = new Date((oldest ? new Date(oldest).getTime() : Date.now()) - 86400_000);
-      for await (const msg of client.fetch({ since }, { envelope: true, source: true })) {
-        const subject = msg.envelope?.subject || '';
-        const tokenMatch = subject.match(TOKEN_RE);
-        if (!tokenMatch) continue;
-        const row = byToken.get(tokenMatch[0].toLowerCase());
-        if (!row) continue;
-        checked++;
-        const sender = String(msg.envelope?.from?.[0]?.address || '').toLowerCase();
-        if (!sender || sender === approvalRecipient().toLowerCase() && msg.envelope?.inReplyTo == null && !msg.envelope?.subject?.match(/^re:/i)) {
-          // Our own outbound approval email (Gmail files sent mail into
-          // All Mail; INBOX normally excludes it, but guard anyway): the
-          // original has our token and no Re:/In-Reply-To — never a decision.
-          continue;
-        }
-        if (!allowedSenders().includes(sender)) {
-          logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${sender} — ignored`);
-          await notifyAdmin('Approval reply from unknown sender ignored', `${row.token}: reply from ${sender} was ignored. Only ${allowedSenders().join(', ')} may decide.`);
-          continue;
-        }
-        const decision = parseDecision(extractReplyText(msg.source));
-        if (!decision) {
-          logger.info(`[email-approvals] ambiguous reply for ${row.token} from ${sender} — ignored (reply must start with "approved" or "not approved")`);
-          await notifyAdmin('Approval reply was ambiguous', `${row.token}: your reply didn't start with "approved" or "not approved" — nothing was done. Reply again with one of those exact words first.`);
-          continue;
-        }
-        const outcome = await executeDecision(row, decision, sender);
-        if (!outcome.skipped) {
-          decided++;
-          byToken.delete(row.token.toLowerCase());
-          logger.info(`[email-approvals] ${row.token} ${decision} by ${sender} → ${outcome.executed}`);
-          await notifyAdmin(`Draft ${decision} via email`, `${row.token} (${row.kind}) ${decision} by ${sender}.`);
-        }
-      }
-    } finally {
-      lock.release();
-    }
-  } finally {
-    await client.logout().catch(() => {});
-  }
-  return { checked, decided };
-}
-
-/**
- * Runner hook: fetch the freshly-parked run and send the approval email.
- * Fire-and-forget from the runner — a notification failure never affects
- * the run outcome (pollReplies retries unsent emails each cycle).
+ * Runner hook (fast path): fetch the freshly-parked run and email it.
+ * Fire-and-forget — the sweep in pollReplies() guarantees delivery even if
+ * the process dies before this runs.
  */
 async function notifyParkedRun(runId) {
   if (!emailApprovalsEnabled()) return { skipped: 'gate_off' };
@@ -325,6 +247,255 @@ async function notifyParkedRun(runId) {
   return sendApprovalRequest(run, opp);
 }
 
+/**
+ * Crash-safe discovery: approvable parked runs whose opportunity is still
+ * pending_review but that have NO approval row — covers a process exit
+ * before the runner hook fired AND lanes that park outside the generic
+ * hook (e.g. the GBP trust-build branch).
+ */
+async function sweepUnnotifiedRuns() {
+  const cutoff = new Date(Date.now() - SWEEP_WINDOW_DAYS * 86400_000);
+  const orphans = await db('autonomous_runs as r')
+    .join('opportunity_queue as o', 'o.id', 'r.opportunity_id')
+    .leftJoin('content_email_approvals as a', 'a.run_id', 'r.id')
+    .whereNull('a.id')
+    .where('r.outcome', 'completed_pending_review')
+    .where('r.shadow_mode', false)
+    .where('o.status', 'pending_review')
+    .where('r.created_at', '>', cutoff)
+    .select('r.id', 'r.skip_reason');
+  let sent = 0;
+  for (const run of orphans) {
+    if (!isApprovableKind(run.skip_reason)) continue;
+    const result = await notifyParkedRun(run.id).catch((err) => {
+      logger.warn(`[email-approvals] sweep notify for run ${run.id} failed: ${err.message}`);
+      return null;
+    });
+    if (result?.sent) sent++;
+  }
+  return { swept: orphans.length, sent };
+}
+
+async function executeDecision(row, decision, sender) {
+  // Claim into a RECOVERABLE 'executing' state first (decision + sender
+  // persisted), so a crash mid-execution is retried by the recovery sweep
+  // instead of losing the owner's decision.
+  const claimed = await db('content_email_approvals')
+    .where({ id: row.id, status: 'awaiting_reply' })
+    .update({ status: 'executing', decision, decided_by: `email:${sender}`, decided_at: new Date(), updated_at: new Date() });
+  if (!claimed) return { skipped: 'already_decided' };
+  return finishExecution({ ...row, decision, decided_by: `email:${sender}` }, decision, sender);
+}
+
+async function finishExecution(row, decision, sender) {
+  // Delegate to the SAME decision engine the admin review queue uses —
+  // approve/dismiss semantics, opportunity transitions (trust-build →
+  // done/trust_build_approved; dismiss → skipped), and the stale-run
+  // binding (expectedRunId → 409 when a newer run replaced the emailed
+  // one) stay single-sourced. Re-execution after a crash is safe: the
+  // run-state assertions there reject an already-transitioned item.
+  const reviewQueue = require('./autonomous-review-queue');
+  const reviewDecision = decision === 'rejected' ? 'dismiss'
+    : row.kind === 'named_competitor_review' ? 'approve_named_competitor'
+    : 'approve_trust_build';
+  try {
+    await reviewQueue.decideReviewItem(row.opportunity_id, {
+      decision: reviewDecision,
+      reviewer: `email:${sender}`,
+      note: 'decided via owner email reply',
+      expectedRunId: row.run_id,
+    });
+    await db('content_email_approvals').where({ id: row.id })
+      .update({ status: decision, last_error: null, updated_at: new Date() });
+    return { executed: reviewDecision };
+  } catch (err) {
+    const message = String(err.message || '').slice(0, 500);
+    const stale = err.statusCode === 409 && /changed since|newer run/i.test(message);
+    if (stale) {
+      // The emailed draft was replaced — never apply the reply to a draft
+      // the owner didn't see. Supersede and email the current one instead.
+      await db('content_email_approvals').where({ id: row.id })
+        .update({ status: 'superseded', last_error: message, updated_at: new Date() });
+      await notifyAdmin('Approval reply matched an outdated draft', `${row.token}: a newer draft replaced the one you were emailed — nothing was applied. A fresh approval email is on its way.`);
+      const latest = await db('autonomous_runs')
+        .where({ opportunity_id: row.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
+        .orderBy('created_at', 'desc').first();
+      if (latest && isApprovableKind(latest.skip_reason)) {
+        await sendApprovalRequest(latest).catch(() => {});
+      }
+      return { skipped: 'superseded' };
+    }
+    if (TRANSIENT_ERROR_RE.test(message)) {
+      // Pre-side-effect transient failure: release the claim so the reply
+      // (still in the mailbox; the cursor only advances past handled
+      // messages) retries next poll.
+      await db('content_email_approvals').where({ id: row.id })
+        .update({ status: 'awaiting_reply', decision: null, decided_by: null, decided_at: null, last_error: message, updated_at: new Date() });
+      const retryErr = new Error(`transient execution failure, will retry: ${message}`);
+      retryErr.transient = true;
+      throw retryErr;
+    }
+    // Hard failure AFTER the claim: record + surface loudly — the decision
+    // is not silently lost, and the row never re-executes.
+    await db('content_email_approvals').where({ id: row.id })
+      .update({ status: 'failed', last_error: message, updated_at: new Date() });
+    await notifyAdmin('Approval decision failed to execute', `${row.token}: your "${decision}" reply was received but execution failed (${message.slice(0, 200)}). The item is still parked — check /admin/seo.`);
+    throw err;
+  }
+}
+
+/** Recover 'executing' rows orphaned by a crash mid-execution. */
+async function recoverExecutingRows() {
+  const staleBefore = new Date(Date.now() - EXECUTING_RECOVERY_MINUTES * 60_000);
+  const stuck = await db('content_email_approvals')
+    .where({ status: 'executing' })
+    .where('updated_at', '<', staleBefore);
+  for (const row of stuck) {
+    const sender = String(row.decided_by || '').replace(/^email:/, '');
+    if (!row.decision || !sender) {
+      await db('content_email_approvals').where({ id: row.id })
+        .update({ status: 'failed', last_error: 'executing row missing decision/sender', updated_at: new Date() });
+      continue;
+    }
+    logger.info(`[email-approvals] recovering executing row ${row.token}`);
+    await finishExecution(row, row.decision, sender).catch((err) => {
+      if (!err.transient) logger.warn(`[email-approvals] recovery of ${row.token} failed: ${err.message}`);
+    });
+  }
+  return { recovered: stuck.length };
+}
+
+async function notifyAdmin(title, body) {
+  try {
+    const NotificationService = require('../notification-service');
+    await NotificationService.create({ recipientType: 'admin', recipientId: null, category: 'content', title, body, link: '/admin/seo' });
+  } catch (err) {
+    logger.warn(`[email-approvals] admin notification failed: ${err.message}`);
+  }
+}
+
+async function getCursor() {
+  const row = await db('content_email_approval_state').where({ id: 1 }).first();
+  return row ? Number(row.last_uid) : null;
+}
+
+async function setCursor(uid) {
+  await db('content_email_approval_state')
+    .insert({ id: 1, last_uid: uid, updated_at: new Date() })
+    .onConflict('id')
+    .merge({ last_uid: uid, updated_at: new Date() });
+}
+
+/**
+ * Cron entrypoint (advisory-locked by the scheduler): sweep unnotified
+ * runs, retry unsent emails, recover crashed executions, then read the
+ * reply mailbox and execute decisions. A persisted UID cursor advances
+ * past every HANDLED message (including ambiguous/unauthorized ones, so
+ * they notify exactly once); messages are fetched envelope-first and the
+ * raw source is downloaded only for token-matching subjects.
+ */
+async function pollReplies() {
+  if (!emailApprovalsEnabled()) return { skipped: 'gate_off' };
+
+  await recoverExecutingRows();
+  await sweepUnnotifiedRuns();
+
+  const awaiting = await db('content_email_approvals').where({ status: 'awaiting_reply' });
+  if (!awaiting.length) return { checked: 0, decided: 0 };
+
+  // Retry unsent approval emails (first send failed) before polling.
+  for (const row of awaiting.filter((r) => !r.email_sent_at)) {
+    const run = await db('autonomous_runs').where({ id: row.run_id }).first();
+    if (run) await sendApprovalRequest(run).catch((err) => logger.warn(`[email-approvals] resend ${row.token} failed: ${err.message}`));
+  }
+
+  const senders = allowedSenders();
+  if (!senders.length) {
+    logger.warn('[email-approvals] APPROVAL_ALLOWED_SENDERS is not set — replies cannot be processed (fail closed)');
+    return { skipped: 'no_approvers_configured' };
+  }
+  const mailbox = imapMailbox();
+  if (!mailbox.password) return { skipped: 'imap_not_configured' };
+  const byToken = new Map(awaiting.filter((r) => r.email_sent_at).map((r) => [r.token.toLowerCase(), r]));
+  if (!byToken.size) return { checked: 0, decided: 0 };
+
+  const { ImapFlow } = require('imapflow');
+  const client = new ImapFlow({
+    host: mailbox.host,
+    port: 993,
+    secure: true,
+    auth: { user: mailbox.user, pass: mailbox.password },
+    logger: false,
+  });
+
+  let checked = 0; let decided = 0;
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX', { readOnly: true });
+    try {
+      const cursor = await getCursor();
+      let range;
+      if (cursor === null) {
+        // First run: seed from the oldest outstanding email's send time.
+        const oldest = awaiting.reduce((min, r) => (r.email_sent_at && (!min || r.email_sent_at < min) ? r.email_sent_at : min), null);
+        range = { since: new Date((oldest ? new Date(oldest).getTime() : Date.now()) - 3600_000) };
+      } else {
+        range = `${cursor + 1}:*`;
+      }
+      let maxUid = cursor || 0;
+      for await (const msg of client.fetch(range, { uid: true, envelope: true }, { uid: typeof range === 'string' })) {
+        if (msg.uid <= maxUid && typeof range === 'string') continue; // `${n}:*` includes n when mailbox has nothing newer
+        maxUid = Math.max(maxUid, msg.uid);
+        const subject = msg.envelope?.subject || '';
+        const tokenMatch = subject.match(TOKEN_RE);
+        if (!tokenMatch) continue;
+        const row = byToken.get(tokenMatch[0].toLowerCase());
+        if (!row) continue;
+        const sender = String(msg.envelope?.from?.[0]?.address || '').toLowerCase();
+        // Skip our own outbound approval email (no Re:, no In-Reply-To).
+        if (!/^re:/i.test(subject) && !msg.envelope?.inReplyTo) continue;
+        checked++;
+        if (!senders.includes(sender)) {
+          logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${maskEmail(sender)} — ignored`);
+          await notifyAdmin('Approval reply from unauthorized sender ignored', `${row.token}: a reply from ${maskEmail(sender)} was ignored. Only the configured approver address(es) may decide.`);
+          continue;
+        }
+        const full = await client.fetchOne(msg.uid, { source: true }, { uid: true });
+        const decision = parseDecision(extractReplyText(full?.source));
+        if (!decision) {
+          logger.info(`[email-approvals] ambiguous reply for ${row.token} from ${maskEmail(sender)} — ignored`);
+          await notifyAdmin('Approval reply was ambiguous', `${row.token}: your reply didn't start with "approved" or "not approved" — nothing was done. Reply again with one of those exact words first.`);
+          continue;
+        }
+        try {
+          const outcome = await executeDecision(row, decision, sender);
+          if (!outcome.skipped) {
+            decided++;
+            byToken.delete(row.token.toLowerCase());
+            logger.info(`[email-approvals] ${row.token} ${decision} by ${maskEmail(sender)} → ${outcome.executed}`);
+            await notifyAdmin(`Draft ${decision} via email`, `${row.token} (${row.kind}) ${decision} by ${maskEmail(sender)}.`);
+          }
+        } catch (err) {
+          if (err.transient) {
+            // Do NOT advance the cursor past this reply — rewind so the
+            // retry re-reads it next poll.
+            maxUid = Math.min(maxUid, msg.uid - 1);
+            logger.warn(`[email-approvals] ${row.token}: ${err.message}`);
+            break; // stop processing; cursor stays before this message
+          }
+          throw err;
+        }
+      }
+      if (maxUid > (cursor || 0)) await setCursor(maxUid);
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+  return { checked, decided };
+}
+
 module.exports = {
   sendApprovalRequest,
   notifyParkedRun,
@@ -336,8 +507,13 @@ module.exports = {
     newToken,
     allowedSenders,
     approvalRecipient,
+    imapMailbox,
     executeDecision,
+    finishExecution,
+    recoverExecutingRows,
+    sweepUnnotifiedRuns,
     draftPreview,
     TOKEN_RE,
+    TRANSIENT_ERROR_RE,
   },
 };

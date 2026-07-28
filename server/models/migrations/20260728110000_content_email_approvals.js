@@ -26,8 +26,13 @@ exports.up = async function up(knex) {
     // The run's skip_reason at send time (named_competitor_review /
     // trust_build_<n>_of_<m>) — decides which approve path executes.
     t.string('kind', 60).notNullable();
-    // awaiting_reply → approved | rejected | failed
+    // awaiting_reply → executing → approved | rejected | superseded | failed
+    // ('executing' is the crash-recoverable claim state; 'superseded' means
+    // a newer run replaced the emailed one before the reply arrived).
     t.string('status', 20).notNullable().defaultTo('awaiting_reply');
+    // The parsed reply decision, persisted at claim time so a crash during
+    // execution can be recovered without re-reading the mailbox.
+    t.string('decision', 10);
     t.timestamp('email_sent_at');
     t.text('decided_by'); // "email:<sender>" — audit, never trusted alone
     t.timestamp('decided_at');
@@ -35,8 +40,21 @@ exports.up = async function up(knex) {
     t.timestamps(true, true);
     t.index('status');
   });
+
+  // Single-row IMAP cursor: the highest mailbox UID the poller has fully
+  // handled. Advancing it past ambiguous/unauthorized replies is what makes
+  // their admin notifications fire exactly once.
+  const hasState = await knex.schema.hasTable('content_email_approval_state');
+  if (!hasState) {
+    await knex.schema.createTable('content_email_approval_state', (t) => {
+      t.smallint('id').primary(); // always 1
+      t.bigInteger('last_uid').notNullable().defaultTo(0);
+      t.timestamp('updated_at').notNullable().defaultTo(knex.fn.now());
+    });
+  }
 };
 
 exports.down = async function down(knex) {
+  await knex.schema.dropTableIfExists('content_email_approval_state');
   await knex.schema.dropTableIfExists('content_email_approvals');
 };

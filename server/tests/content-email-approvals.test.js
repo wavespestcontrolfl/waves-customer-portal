@@ -9,8 +9,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+jest.mock('../services/content/autonomous-review-queue', () => ({ decideReviewItem: jest.fn() }));
+
 const approvals = require('../services/content/email-approvals');
-const { parseDecision, extractReplyText, isApprovableKind, newToken, allowedSenders, approvalRecipient, TOKEN_RE } = approvals._internals;
+const { parseDecision, extractReplyText, isApprovableKind, newToken, allowedSenders, approvalRecipient, imapMailbox, TOKEN_RE, TRANSIENT_ERROR_RE } = approvals._internals;
 
 describe('parseDecision — first non-quoted line decides, fail-closed otherwise', () => {
   test('plain approvals and rejections', () => {
@@ -75,6 +77,27 @@ describe('extractReplyText — MIME decoding', () => {
     const raw = 'Content-Type: text/html\r\n\r\n<div>approved</div>';
     expect(parseDecision(extractReplyText(raw))).toBe('approved');
   });
+
+  test('single-part base64 body decodes before parsing (Codex r1)', () => {
+    const b64 = Buffer.from('approved\n', 'utf8').toString('base64');
+    const raw = `Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n${b64}`;
+    expect(parseDecision(extractReplyText(raw))).toBe('approved');
+  });
+
+  test('nested multipart/mixed wrapping multipart/alternative resolves the text/plain leaf (Codex r1)', () => {
+    // Normal shape for a reply carrying an inline signature image.
+    const raw = [
+      'Content-Type: multipart/mixed; boundary="outer"', '',
+      '--outer', 'Content-Type: multipart/alternative; boundary="inner"', '',
+      '--inner', 'Content-Type: text/plain; charset=UTF-8', '',
+      'not approved', '',
+      '--inner', 'Content-Type: text/html', '',
+      '<b>not approved</b>', '--inner--', '',
+      '--outer', 'Content-Type: image/png; name="sig.png"', 'Content-Transfer-Encoding: base64', '',
+      'iVBORw0KGgo=', '--outer--',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('rejected');
+  });
 });
 
 describe('token + kind + sender guards', () => {
@@ -94,9 +117,18 @@ describe('token + kind + sender guards', () => {
     expect(isApprovableKind('')).toBe(false);
   });
 
-  test('sender allowlist and recipient default to the owner inbox and are env-overridable', () => {
+  test('the sender allowlist FAILS CLOSED — no default approver (contact@ is a shared staff inbox)', () => {
+    const prev = process.env.APPROVAL_ALLOWED_SENDERS;
+    delete process.env.APPROVAL_ALLOWED_SENDERS;
+    try {
+      expect(allowedSenders()).toEqual([]); // nobody can approve until configured
+    } finally {
+      if (prev !== undefined) process.env.APPROVAL_ALLOWED_SENDERS = prev;
+    }
+  });
+
+  test('recipient defaults to the owner inbox; allowlist is env-set and normalized', () => {
     expect(approvalRecipient()).toBe('contact@wavespestcontrol.com');
-    expect(allowedSenders()).toContain('contact@wavespestcontrol.com');
     const prevA = process.env.APPROVAL_ALLOWED_SENDERS;
     const prevT = process.env.APPROVAL_EMAIL_TO;
     process.env.APPROVAL_ALLOWED_SENDERS = 'Adam@Example.com , second@example.com';
@@ -109,18 +141,89 @@ describe('token + kind + sender guards', () => {
       if (prevT === undefined) delete process.env.APPROVAL_EMAIL_TO; else process.env.APPROVAL_EMAIL_TO = prevT;
     }
   });
+
+  test('the IMAP mailbox is the fixed reply inbox, decoupled from APPROVAL_EMAIL_TO (Codex r1)', () => {
+    const prevT = process.env.APPROVAL_EMAIL_TO;
+    process.env.APPROVAL_EMAIL_TO = 'somewhere-else@example.com';
+    try {
+      // email.js always sends FROM contact@ with no Reply-To — replies land
+      // in the contact account regardless of the destination override.
+      expect(imapMailbox().user).toBe(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+    } finally {
+      if (prevT === undefined) delete process.env.APPROVAL_EMAIL_TO; else process.env.APPROVAL_EMAIL_TO = prevT;
+    }
+  });
 });
 
-describe('executeDecision — at-most-once claim', () => {
-  test('an already-decided row is never executed twice', async () => {
+describe('executeDecision / finishExecution — recoverable claim state machine', () => {
+  const ROW = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review' };
+
+  function mockDb({ claim = 1 } = {}) {
     const db = require('../models/db');
-    const update = jest.fn().mockResolvedValue(0); // claim misses: not awaiting
-    db.mockReturnValue({ where: jest.fn().mockReturnValue({ update }) });
-    const result = await approvals._internals.executeDecision(
-      { id: 'x', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', status: 'approved' },
-      'approved', 'contact@wavespestcontrol.com'
-    );
+    const updates = [];
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((payload) => { updates.push(payload); return Promise.resolve(updates.length === 1 ? claim : 1); }),
+        first: jest.fn().mockResolvedValue(null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    return updates;
+  }
+
+  test('an already-decided row is never executed twice', async () => {
+    const updates = mockDb({ claim: 0 });
+    const result = await approvals._internals.executeDecision(ROW, 'approved', 'owner@example.com');
     expect(result).toEqual({ skipped: 'already_decided' });
-    expect(update).toHaveBeenCalledTimes(1); // only the claim attempt, no execution
+    expect(updates).toHaveLength(1); // only the claim attempt
+  });
+
+  test('the claim persists decision + sender in a recoverable executing state (Codex r1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockResolvedValue({});
+    const updates = mockDb();
+    const result = await approvals._internals.executeDecision(ROW, 'approved', 'owner@example.com');
+    expect(updates[0]).toMatchObject({ status: 'executing', decision: 'approved', decided_by: 'email:owner@example.com' });
+    expect(reviewQueue.decideReviewItem).toHaveBeenCalledWith('o', expect.objectContaining({
+      decision: 'approve_named_competitor',
+      expectedRunId: 'r',
+    }));
+    expect(updates[1]).toMatchObject({ status: 'approved' });
+    expect(result.executed).toBe('approve_named_competitor');
+  });
+
+  test('a transient failure releases the claim so the inbox reply retries (Codex r1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockRejectedValue(new Error('engine lock held: another run is in progress'));
+    const updates = mockDb();
+    await expect(approvals._internals.executeDecision(ROW, 'approved', 'owner@example.com'))
+      .rejects.toMatchObject({ transient: true });
+    expect(updates[1]).toMatchObject({ status: 'awaiting_reply', decision: null, decided_by: null });
+  });
+
+  test('a stale-run 409 supersedes instead of applying to the newer draft (Codex r1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    const err = new Error('This item changed since you opened it (a newer run replaced the reviewed one)');
+    err.statusCode = 409;
+    reviewQueue.decideReviewItem.mockRejectedValue(err);
+    const updates = mockDb();
+    const result = await approvals._internals.executeDecision(ROW, 'rejected', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'superseded' });
+    expect(updates[1]).toMatchObject({ status: 'superseded' });
+  });
+
+  test('rejection maps to the review queue dismiss decision', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockResolvedValue({});
+    mockDb();
+    await approvals._internals.executeDecision(ROW, 'rejected', 'owner@example.com');
+    expect(reviewQueue.decideReviewItem).toHaveBeenCalledWith('o', expect.objectContaining({ decision: 'dismiss' }));
+  });
+
+  test('transient-error classifier covers the engine-lock 409 family, not ordinary failures', () => {
+    expect(TRANSIENT_ERROR_RE.test('engine lock held')).toBe(true);
+    expect(TRANSIENT_ERROR_RE.test('Request timed out')).toBe(true);
+    expect(TRANSIENT_ERROR_RE.test('deadlock detected')).toBe(true);
+    expect(TRANSIENT_ERROR_RE.test('draft failed the comparison gate')).toBe(false);
   });
 });

@@ -1053,9 +1053,13 @@ function initScheduledJobs() {
   cron.schedule('*/10 * * * *', async () => {
     if (!isEnabled('contentEmailApprovals')) return;
     try {
-      const emailApprovals = require('./content/email-approvals');
-      const result = await emailApprovals.pollReplies();
-      if (result?.decided) logger.info(`Email approvals: ${result.decided} decision(s) executed`);
+      // runExclusive: a deploy-overlap second instance must not double-send
+      // approval emails or double-process replies.
+      await runExclusive('email-approval-poll', async () => {
+        const emailApprovals = require('./content/email-approvals');
+        const result = await emailApprovals.pollReplies();
+        if (result?.decided) logger.info(`Email approvals: ${result.decided} decision(s) executed`);
+      });
     } catch (err) { logger.error(`Email-approval poll failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
