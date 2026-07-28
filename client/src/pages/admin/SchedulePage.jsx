@@ -540,8 +540,8 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       // Surface the server's error body — completion handlers branch on
-      // err.code (completion_billing_required and friends), so a bare
-      // "HTTP 409" string breaks the billing-detour routing.
+      // err.code (lawn_assessment_stale and friends), so a bare
+      // "HTTP 409" string breaks that routing.
       let body = null;
       try { body = await r.json(); } catch { /* non-JSON error */ }
       const err = new Error(body?.error || `HTTP ${r.status}`);
@@ -697,10 +697,6 @@ export function completionPreferencesNeedDraft({
     // draft. Typed minutes ride along like any other text field.
     || backfillCloseout !== backfillCloseoutDefault
     || String(backfillTimeOnSite || "").trim() !== "";
-}
-
-export function normalizeCompletionDetourPhotos(photos) {
-  return Array.isArray(photos) ? photos : [];
 }
 
 // timeOnSite fragment of the completion POST body. The panel's running
@@ -7958,14 +7954,9 @@ export function CompletionPanel({
   onClose,
   onSubmit,
   onViewDetails,
-  // Typed specialty completion (PR 3): parent-owned routes for the
-  // billing-required 409 (opens the checkout flow) and the success-screen
-  // follow-up CTA (wired by PR 4 — the button only renders when provided).
-  onBillingRequired,
+  // Typed specialty completion (PR 4): parent-owned success-screen
+  // follow-up CTA (the button only renders when provided).
   onScheduleFollowup,
-  billingDetourPhotos = [],
-  onDiscardBillingDetour,
-  onBillingDetourPhotosChange,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -8166,11 +8157,8 @@ export function CompletionPanel({
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
-  // of base64 images can exceed its quota). Dispatch keeps them in memory
-  // across the billing checkout detour and passes them back on remount.
-  const [servicePhotos, setServicePhotos] = useState(() =>
-    normalizeCompletionDetourPhotos(billingDetourPhotos),
-  );
+  // of base64 images can exceed its quota).
+  const [servicePhotos, setServicePhotos] = useState([]);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -8500,9 +8488,6 @@ export function CompletionPanel({
   useEffect(() => {
     servicePhotosRef.current = servicePhotos;
   }, [servicePhotos]);
-  useEffect(() => {
-    onBillingDetourPhotosChange?.(service.id, servicePhotos);
-  }, [onBillingDetourPhotosChange, service.id, servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -9733,11 +9718,10 @@ export function CompletionPanel({
 
   function discardDraft() {
     localStorage.removeItem(completionDraftKey(service.id));
-    // Photos survive checkout in parent memory rather than localStorage. A
-    // deliberate Discard must clear both stores or old evidence remains
-    // attached to the otherwise-reset completion.
+    // Photos live in memory rather than localStorage. A deliberate Discard
+    // must clear them too or old evidence remains attached to the
+    // otherwise-reset completion.
     setServicePhotos([]);
-    onDiscardBillingDetour?.();
     setSavedDraft(null);
     setShowDraftPrompt(false);
   }
@@ -11000,33 +10984,7 @@ export function CompletionPanel({
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
-      const billingRequired =
-        e?.status === 409 &&
-        (e?.code === "completion_billing_required" ||
-          /invoice or payment is required/i.test(e?.message || ""));
-      if (billingRequired) {
-        // Typed one-time billing gate — route to the existing checkout
-        // flow. Flush the draft synchronously first: the panel unmounts on
-        // detour, which cancels the debounced write and would lose edits
-        // made in the last 700ms.
-        if (draftSnapshotRef.current) {
-          try {
-            localStorage.setItem(
-              completionDraftKey(service.id),
-              JSON.stringify(draftSnapshotRef.current),
-            );
-          } catch { /* storage full — draft prompt simply won't restore */ }
-        }
-        alert(
-          "An invoice or payment is required before completing this one-time service." +
-            (onBillingRequired ? " Opening checkout." : ""),
-        );
-        if (onBillingRequired) {
-          onBillingRequired(service, { servicePhotos });
-        }
-      } else {
-        alert("Failed to complete service: " + e.message);
-      }
+      alert("Failed to complete service: " + e.message);
     }
     setSubmitting(false);
   }

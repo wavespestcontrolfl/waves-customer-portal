@@ -532,9 +532,9 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
 }
 
 // Release a post-commit side-effects claim so the NEXT retry resumes
-// IMMEDIATELY (Codex P0, PR #2897 fix round: the typed one-time backfill
-// review-invoice mint is a REQUIRED side effect — see admin-dispatch's
-// backfillTypedOneTimeMintRequired — and its failure must leave the attempt
+// IMMEDIATELY (Codex P0, PR #2897 fix round: a backfill review-invoice mint
+// is a REQUIRED side effect — see admin-dispatch's
+// backfillExpectedMintAtCommit — and its failure must leave the attempt
 // resumable, never finalized succeeded). 'side_effects_pending' is the
 // machinery's explicit resumable-at-side-effects state: claimSideEffectsRun
 // claims it with NO stale-window gate, unlike a stranded
