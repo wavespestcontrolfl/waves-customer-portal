@@ -219,6 +219,13 @@ async function upsertEmail(parsed) {
       is_starred: parsed.is_starred,
       is_archived: !labelIds.includes('INBOX') || labelIds.includes('TRASH'),
       label_ids: JSON.stringify(labelIds),
+      // Backfill the header captures on resync — pre-migration rows would
+      // otherwise fail the authentication gates closed forever and never
+      // regain unsubscribe/threading capability.
+      list_unsubscribe: parsed.list_unsubscribe || existing.list_unsubscribe || null,
+      list_unsubscribe_post: parsed.list_unsubscribe_post || existing.list_unsubscribe_post || null,
+      message_id: parsed.message_id || existing.message_id || null,
+      authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),
     });
     return false; // not new

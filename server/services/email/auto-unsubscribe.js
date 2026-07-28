@@ -184,6 +184,7 @@ async function autoUnsubscribe(email) {
         // either way: every hop DNS-validated public, socket pinned,
         // redirects manual (see fetchPublicOnly).
         const oneClick = /list-unsubscribe=one-click/i.test(String(email.list_unsubscribe_post || ''));
+        let confirmed = false;
         let res;
         if (oneClick) {
           res = await fetchPublicOnly(urlMatch[1], {
@@ -194,8 +195,12 @@ async function autoUnsubscribe(email) {
             },
             body: 'List-Unsubscribe=One-Click',
           });
+          // Only an RFC 8058 one-click 2xx is a CONFIRMED unsubscribe.
+          confirmed = res.ok;
         }
         if (!res || !res.ok) {
+          // A 2xx GET may just be a preference page — best-effort ATTEMPT,
+          // never reported as confirmed.
           res = await fetchPublicOnly(urlMatch[1], { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
         }
         // A 404/500 on both attempts is a FAILED unsubscribe — reporting it
@@ -210,8 +215,8 @@ async function autoUnsubscribe(email) {
           unsubscribe_url: urlMatch[1],
           status: 'attempted',
         });
-        logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id})`);
-        return { method: 'list_header_url', url: urlMatch[1] };
+        logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id}, confirmed=${confirmed})`);
+        return { method: confirmed ? 'list_header_one_click' : 'list_header_get', confirmed, url: urlMatch[1] };
       } catch (err) {
         logger.warn(`[unsubscribe] List-Unsubscribe URL failed: ${err.message}`);
       }
@@ -245,8 +250,8 @@ async function autoUnsubscribe(email) {
         unsubscribe_url: unsubUrl,
         status: 'attempted',
       });
-      logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id})`);
-      return { method: 'body_link', url: unsubUrl };
+      logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id}) — attempt only`);
+      return { method: 'body_link', confirmed: false, url: unsubUrl };
     } catch (err) {
       logger.warn(`[unsubscribe] Body link failed: ${err.message}`);
     }

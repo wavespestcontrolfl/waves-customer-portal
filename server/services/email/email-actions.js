@@ -297,20 +297,27 @@ async function handleNewsletter(email) {
   // 1. Archive in Gmail
   try { await gmailClient.archiveMessage(email.gmail_id); } catch (e) { /* non-critical */ }
 
-  // 2. Try to unsubscribe
+  // 2. Try to unsubscribe. Only a CONFIRMED completion (RFC 8058 one-click
+  // 2xx) is recorded — and digested — as unsubscribed; a best-effort GET on
+  // a preference page is an attempt, not a claim.
   let unsubMethod = 'none';
+  let unsubConfirmed = false;
   try {
     const { autoUnsubscribe } = require('./auto-unsubscribe');
     const result = await autoUnsubscribe(email);
     unsubMethod = result.method;
+    unsubConfirmed = !!result.confirmed;
   } catch (e) {
     logger.warn(`[email-actions] Unsubscribe failed (email ${email.id}): ${e.message}`);
   }
 
   // 3. Mark in DB
+  const newsletterAction = unsubConfirmed
+    ? `newsletter_unsubscribed:${unsubMethod}`
+    : (unsubMethod !== 'none' ? `newsletter_unsub_attempted:${unsubMethod}` : 'newsletter_archived');
   await db('emails').where({ id: email.id }).update({
     is_archived: true,
-    auto_action: unsubMethod !== 'none' ? `newsletter_unsubscribed:${unsubMethod}` : 'newsletter_archived',
+    auto_action: newsletterAction,
     updated_at: new Date(),
   });
 }
