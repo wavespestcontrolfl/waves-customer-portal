@@ -4435,11 +4435,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Treatment Zone Mapper trace = explicit exterior scope (the
             // trace is drawn on the satellite exterior) — keeps the
             // dry-down timer on typed closeouts that hide area chips.
+            // Savepoint-isolated (codex P2 #3007 r6): if the optional
+            // treatment_zone_maps table is absent, a raw failed query would
+            // ABORT the whole completion transaction — a nested knex
+            // transaction rolls back only the savepoint and the completion
+            // proceeds with chip/action scope.
             let tracedExteriorZone = false;
             try {
-              tracedExteriorZone = !!(await trx('treatment_zone_maps')
+              tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
-                .first());
+                .first()));
             } catch { /* table optional — scope falls back to chips/actions */ }
             const advisoryNormalized = buildCompletionAdvisory({
               advisoryDefaults: advisoryDefaultsForVisit,

@@ -107,8 +107,18 @@ function deviceFacts(applications = []) {
     .slice(0, 8);
 }
 
+// Chemical/compliance fields (termite products_used, EPA registration,
+// percent solution…) never reach the prompt or grounding corpus — the
+// system prompt withholds product names/rates/EPA details, and a manually
+// entered legacy product value wouldn't match the applications-based echo
+// guard (codex P2 #3007 r6). The typed card still renders these on the
+// report itself.
+const CHEMICAL_FINDING_LABEL_RE = /\b(products?|epa|registration|percent|solution|active\s+ingredients?|rates?|concentration|chemicals?)\b/i;
+
 function findingFacts(typedReport = {}) {
   return (Array.isArray(typedReport?.findings) ? typedReport.findings : [])
+    .filter((item) => !CHEMICAL_FINDING_LABEL_RE.test(String(item.customerLabel || item.technicianLabel || ''))
+      && !CHEMICAL_FINDING_LABEL_RE.test(String(item.fieldKey || '').replace(/_/g, ' ')))
     .map((item) => ({
       label: cleanText(item.customerLabel || item.technicianLabel),
       value: cleanText(item.customerValueLabel != null && item.customerValueLabel !== ''

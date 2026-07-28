@@ -227,6 +227,25 @@ test('mandatory care copy covers expectation/monitoring sentences', async () => 
   expect(accepted).toContain('Continue monitoring and contact us if activity returns.');
 });
 
+test('chemical/compliance findings never reach the narrative facts', () => {
+  const facts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Termite Treatment',
+      todaysResult: { headline: 'Termite treatment completed today.', body: 'We completed the scheduled treatment today.', nextStep: null },
+      findings: [
+        { fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'Subterranean termites', value: 'subterranean' },
+        { fieldKey: 'products_used', customerLabel: 'Products used', customerValueLabel: 'Termidor HE', value: 'Termidor HE' },
+        { fieldKey: 'epa_registration', customerLabel: 'EPA registration', customerValueLabel: '7969-329', value: '7969-329' },
+        { fieldKey: 'percent_solution', customerLabel: 'Percent solution', customerValueLabel: '0.125%', value: '0.125' },
+      ],
+    },
+  }));
+  expect(facts.findings).toEqual([{ label: 'Target pest', value: 'Subterranean termites' }]);
+  const message = buildUserMessage(facts);
+  expect(message).not.toContain('Termidor');
+  expect(message).not.toContain('7969');
+});
+
 test('long typed schemas keep their late findings (WDO shape)', () => {
   const findings = Array.from({ length: 12 }, (_, i) => ({
     fieldKey: `f${i}`, customerLabel: `Field ${i}`, customerValueLabel: `Value ${i}`, value: `v${i}`,

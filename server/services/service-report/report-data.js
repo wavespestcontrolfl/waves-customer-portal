@@ -3036,6 +3036,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Kill switch: unset GATE_TYPED_REPORT_NARRATIVE.
   if (
     serviceLine !== 'rodent'
+    // Lawn and tree & shrub have their own specialized narrative layers
+    // (applyLawnReportNarrative / the T&S V2 composition) — a second
+    // generic summary would duplicate or conflict with them, and this
+    // engine's guards don't ground agronomic claims (codex P2 #3007 r6).
+    && serviceLine !== 'lawn'
+    && serviceLine !== 'tree_shrub'
     && typedSnapshot
     && visitSummarySource !== 'technician_report'
     && typedSnapshot.todaysResult?.bodySource !== 'technician_report'
