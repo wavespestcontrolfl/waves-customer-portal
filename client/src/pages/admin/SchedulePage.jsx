@@ -6153,11 +6153,14 @@ function LawnAssessmentCompletionBlock({
       onReady?.(true);
     } catch (err) {
       setError(err.message || "Confirm failed");
-      // Ambiguous failure: the write may have COMMITTED with the response
-      // lost, so the parent's null id can't be trusted as "unconfirmed".
-      // Report failed — the payload omits the field and the server grounds
-      // from its own visit-linked lookup, which sees the true DB state.
-      onReady?.("failed");
+      // A definitive 4xx rejection means the write did NOT commit — null is
+      // the true state (retake still pending), so readiness returns true and
+      // the explicit-null payload keeps any superseded row suppressed.
+      // Ambiguous failures (network, 5xx, lost response) report failed: the
+      // write may have committed, so the server grounds from DB truth.
+      const definitiveRejection =
+        Number(err?.status) >= 400 && Number(err?.status) < 500;
+      onReady?.(definitiveRejection ? true : "failed");
     } finally {
       setConfirming(false);
     }
@@ -10145,7 +10148,11 @@ export function CompletionPanel({
       payload.pestActivityRating !== null ||
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
-      Boolean(payload.lawnAssessmentId);
+      Boolean(payload.lawnAssessmentId) ||
+      // The omitted-field fallback state must REACH the server — after a
+      // failed lookup the client can't know whether a visit-linked confirmed
+      // row exists; the server's validated gate decides.
+      (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied) {
