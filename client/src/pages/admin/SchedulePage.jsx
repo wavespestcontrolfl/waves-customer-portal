@@ -3475,12 +3475,15 @@ export function ProtocolPanel({ service, onClose }) {
           // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
           // panel's CLASSIFIED category as that token so the lookup always
           // matches the panel's line, even for raw aliases ("Bora-Care",
-          // "Aeration") carrying none of the tokens. Categories the endpoint
-          // has no token for (e.g. rodent) fall back to the normalized label,
-          // preserving its existing behavior.
+          // "Aeration") carrying none of the tokens. "pest" is also the
+          // classifier's rodent/unknown fallback though, so that token is
+          // only sent when the label genuinely says pest — rodent and
+          // unknown labels keep their token-less (unfiltered) lookup.
           `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(
-            PHOTO_LOOKUP_TYPE_BY_CATEGORY[serviceCategory] ||
-              service.serviceType,
+            (serviceCategory !== "pest" ||
+            /\bpest\b/.test(panelServiceType.toLowerCase())
+              ? PHOTO_LOOKUP_TYPE_BY_CATEGORY[serviceCategory]
+              : null) || service.serviceType,
           )}&month=${month}`,
         ),
         adminFetch(
