@@ -414,6 +414,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const r = await adminFetch(`/admin/services?${params}`);
         setServiceResults((r.services || []).map((s) => ({
           id: s.id,
+          service_key: s.service_key,
           name: s.name,
           category: s.category,
           billing_type: s.billing_type,
@@ -612,7 +613,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
   };
   const addServiceFromCatalog = (svc) => {
-    const defaultPrice = svc.priceMin || svc.base_price || '';
+    // One-time mosquito is priced by the lot-based ladder on the server when
+    // no price is typed (owner decision 2026-07-28) — leave the field empty so
+    // the server computes it from the customer's lot size; typing still wins.
+    const defaultPrice = svc.service_key === 'mosquito_one_time'
+      ? ''
+      : (svc.priceMin || svc.base_price || '');
     const inferred = inferServiceCadence(svc);
     setServices((arr) => [
       ...arr,
@@ -1914,7 +1920,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     type="number"
                     value={svc.price ?? ''}
                     onChange={(e) => updateServicePrice(idx, e.target.value)}
-                    placeholder="0.00"
+                    placeholder={svc.service_key === 'mosquito_one_time' ? 'Auto (lot-based)' : '0.00'}
                     step="0.01"
                     style={{ ...inputStyle, paddingLeft: 24 }}
                   />

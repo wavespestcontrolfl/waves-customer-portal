@@ -1025,7 +1025,28 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
 
-  const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
+  // One-time mosquito default follows the lot-based ladder (owner decision
+  // 2026-07-28) instead of the flat catalog price. An explicitly typed price
+  // still wins; catalog base_price remains the fallback when the customer has
+  // no lot size on file.
+  let mosquitoLadderDefault = null;
+  if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
+    const lotSqFt = Number(customer?.lot_sqft);
+    if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
+      try {
+        const { priceOneTimeMosquito } = require('../services/pricing-engine');
+        const quote = priceOneTimeMosquito({ lotSqFt });
+        if (Number.isFinite(Number(quote?.price)) && Number(quote.price) > 0) {
+          mosquitoLadderDefault = Number(quote.price);
+        }
+      } catch (e) {
+        logger.warn(`[schedule] mosquito ladder default failed, using catalog price: ${e.message}`);
+      }
+    }
+  }
+  const primaryBaseFallback = mosquitoLadderDefault != null
+    ? mosquitoLadderDefault
+    : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
   const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
     serviceKey: serviceRecord?.service_key,
