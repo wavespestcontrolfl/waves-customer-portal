@@ -463,9 +463,29 @@ router.post('/message/:id/reclassify', async (req, res) => {
         return res.status(409).json({ error: 'Message is in Gmail Trash — restore it there first, then reclassify' });
       }
       restoredFromTrash = true;
+      // The sweep's deferred sender block already fired for this row — an
+      // operator restoring + reclassifying the message is also vetoing that
+      // block, or every future email from this sender keeps going straight
+      // to Trash via the persistent filter.
+      try {
+        const blocked = await db('blocked_email_senders')
+          .whereRaw('LOWER(email_address) = ?', [String(email.from_address || '').toLowerCase()])
+          .where({ reason: 'spam_auto' })
+          .first();
+        if (blocked) {
+          const { unblockSender } = require('../services/email/spam-blocker');
+          await unblockSender(blocked.id);
+        }
+      } catch (e) {
+        logger.warn(`[email] restored-from-trash unblock failed (email ${email.id}): ${e.message}`);
+      }
     }
+    // quarantined_at survives a handler overwriting auto_action (it only
+    // clears on a SUCCESSFUL cancel), so a failed Gmail restore stays
+    // retryable on the next reclassify regardless of auto_action state.
     const wasQuarantined = restoredFromTrash
-      || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '');
+      || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '')
+      || !!email.quarantined_at;
 
     // Classify FIRST — if the classifier is down (null result) or returns an
     // off-vocabulary category, the quarantine stays exactly as it was;
