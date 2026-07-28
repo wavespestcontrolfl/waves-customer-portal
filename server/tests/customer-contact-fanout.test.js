@@ -127,6 +127,25 @@ describe('propagateCustomerNameChange', () => {
     expect(conn.__updates('leads')[0].arg.first_name).toBe('Cathy');
   });
 
+  test('a custom preparedFor leaves the proposal and its delivery marker untouched (column-only)', async () => {
+    // The PDF prints the CUSTOM addressee (a landlord's estimate addressed to
+    // the tenant) — the column rewrite doesn't change the PDF, so the "PDF
+    // emailed" state must survive.
+    const conn = makeConn({
+      estimates: {
+        rows: [{
+          id: 'est-1',
+          customer_name: 'Kathy Nunez',
+          estimate_data: { proposal: { preparedFor: 'Tenant Tina' }, proposalDelivery: { sentAt: 'x' } },
+        }],
+      },
+    });
+    await propagateCustomerNameChange({ before: NAME_BEFORE, after: NAME_AFTER }, conn);
+    const estSync = conn.__updates('estimates')[0].arg;
+    expect(estSync.customer_name).toBe('Cathy Nunes Furao');
+    expect(estSync.estimate_data).toBeUndefined();
+  });
+
   test('a case-only edit never touches an already-correct estimate (delivery marker survives)', async () => {
     // A case-only edit's OLD key also matches rows already holding the exact
     // NEW spelling — those get no write at all, so their "PDF emailed" state

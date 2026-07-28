@@ -173,11 +173,14 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     // hold the exact new spelling everywhere — nothing displayed changes on
     // those, so they get no write (and keep their delivery marker).
     if (row.customer_name === targetName && !patchPreparedFor) continue;
-    // The synthesized/sent PDF printed the OLD name (preparedFor falls back
-    // to customer_name at build time) — the "PDF emailed" claim is stale
-    // either way, so proposalDelivery drops with the sync and the next send
-    // re-stamps it (same rule as the email fan-out; jsonb minus is a no-op
-    // when the key is absent and NULL stays NULL).
+    // The delivery marker drops only when the PDF-visible name actually
+    // moves: preparedFor matching the old name gets patched, and a MISSING
+    // preparedFor means the synthesized PDF fell back to customer_name — the
+    // one being rewritten. A CUSTOM preparedFor (a landlord's estimate
+    // addressed to the tenant) leaves the PDF untouched, so its "PDF
+    // emailed" state survives a column-only sync. jsonb minus is a no-op
+    // when the key is absent and NULL stays NULL.
+    const dropDelivery = patchPreparedFor || !preparedFor;
     const expr = patchPreparedFor
       ? "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'"
       : "estimate_data - 'proposalDelivery'";
@@ -194,7 +197,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     }
     const n = await guarded.update({
       customer_name: targetName,
-      estimate_data: conn.raw(expr, bindings),
+      ...(dropDelivery ? { estimate_data: conn.raw(expr, bindings) } : {}),
       updated_at: now,
     });
     counts.estimates += n;
