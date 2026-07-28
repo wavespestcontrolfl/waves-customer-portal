@@ -494,14 +494,14 @@ async function autoDraftFlagship() {
       logger.warn(`[newsletter-autopilot] coverage retry failed (${retryErr.message}) — keeping the first draft`);
     }
     const retryLineup = lineupFromDraft(retry);
-    // Prefer the retry on strictly better coverage — or on EQUAL coverage
-    // when the retry's lineup passes the quality contract and the first
-    // draft's does not (cardinality alone would discard a passing retry
-    // and durably skip the week).
-    const preferRetry = retryLineup.length > actualLineup.length
-      || (retryLineup.length === actualLineup.length
-        && !preflightDigest(actualLineup, reqs).pass
-        && preflightDigest(retryLineup, reqs).pass);
+    // A PASSING retry beats a failing first draft regardless of count —
+    // a 5-event multi-source retry must not lose to a 6-event
+    // single-source first draft that would durably skip the week. Only
+    // when both share the same pass/fail result does coverage decide.
+    const firstPass = preflightDigest(actualLineup, reqs).pass;
+    const retryPass = preflightDigest(retryLineup, reqs).pass;
+    const preferRetry = (retryPass && !firstPass)
+      || (retryPass === firstPass && retryLineup.length > actualLineup.length);
     if (preferRetry) {
       generated = retry;
       actualLineup = retryLineup;
