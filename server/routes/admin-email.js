@@ -433,6 +433,12 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // 409; a STALE one (sweep died mid-trash; next recovery is the daily
     // cron) is reconciled inline against live Gmail state so the operator
     // isn't blocked for a day.
+    if ((email.auto_action || '') === 'spam_trashed_blocking') {
+      // settleDeferredBlock holds a seconds-long claim (Gmail filter
+      // creation in flight); a crashed claim is reverted to block_pending by
+      // the sweep's grace-period recovery, which this route handles.
+      return res.status(409).json({ error: 'Sender block is being applied — retry in a moment' });
+    }
     if ((email.auto_action || '') === 'spam_trashing') {
       const claimAgeMs = Date.now() - new Date(email.updated_at || 0).getTime();
       if (claimAgeMs < 10 * 60000) {
@@ -556,18 +562,27 @@ router.post('/message/:id/reclassify', async (req, res) => {
       await revertReclassClaim();
       return res.status(502).json({ error: 'Classifier unavailable or off-vocabulary — quarantine state unchanged' });
     }
-    if (classification.category === 'spam') {
-      // Still spam — hand the claim back so the normal quarantine flow
-      // (window + sweep) resumes untouched.
-      await revertReclassClaim();
-    }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
       classification_confidence: classification.confidence,
       extracted_data: JSON.stringify(classification),
       updated_at: new Date(),
     });
-    if (classification.category !== 'spam') {
+    if (classification.category === 'spam') {
+      if (restoredFromTrash) {
+        // The message is live in Gmail again — reverting to a stale trashed
+        // state would lie about reality. Give it a fresh quarantine cycle.
+        claimedForReclass = false;
+        await executeAutoAction(email, classification);
+      } else if (claimedForReclass) {
+        // Already quarantined — hand the claim back so the normal
+        // quarantine flow (window + sweep) resumes untouched.
+        await revertReclassClaim();
+      } else {
+        // Ordinary inbox mail freshly judged spam must actually quarantine.
+        await executeAutoAction(email, classification);
+      }
+    } else {
       await executeAutoAction(email, classification);
     }
 
