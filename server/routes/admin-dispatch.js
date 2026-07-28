@@ -4392,11 +4392,42 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 ),
               }
               : reportConfig.advisoryDefaults;
+            // Treatment Zone Mapper trace = explicit exterior scope (the
+            // trace is drawn on the satellite exterior) — keeps the
+            // dry-down timer on typed closeouts that hide area chips.
+            // Savepoint-isolated (codex P2 #3007 r6): if the optional
+            // treatment_zone_maps table is absent, a raw failed query would
+            // ABORT the whole completion transaction — a nested knex
+            // transaction rolls back only the savepoint and the completion
+            // proceeds with chip/action scope.
+            let tracedExteriorZone = false;
+            try {
+              tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
+                .where({ scheduled_service_id: svc.id })
+                .first()));
+            } catch (traceErr) {
+              // Only the EXPECTED missing-table case means "no trace". Any
+              // other failure (timeout, permissions) fails CLOSED by
+              // preserving the exterior timer: the persisted advisory is
+              // unrecoverable once zeroed, and showing dry-down guidance
+              // unnecessarily is safer than silently dropping it
+              // (codex P1 #3007 r8).
+              const missingTable = traceErr?.code === '42P01'
+                || /no such table|does not exist/i.test(String(traceErr?.message || ''));
+              if (!missingTable) {
+                tracedExteriorZone = true;
+                logger.warn('[completion] treatment-zone trace lookup failed; preserving exterior re-entry', {
+                  serviceId: svc.id,
+                  error: String(traceErr?.message || traceErr),
+                });
+              }
+            }
             const advisoryNormalized = buildCompletionAdvisory({
               advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
               protocolActionScopes: reportProtocolActionScopes,
               applications: products || [],
+              tracedExteriorZone,
             });
             recordInsert.advisory = serializeJsonb(advisoryNormalized);
             const interiorBefore = reportConfig.advisoryDefaults?.interior_reentry_min ?? null;
@@ -7161,7 +7192,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
-            record,
+            // Trace evidence resolved here (async) so the sync SMS builder
+            // can apply the same read-time exterior normalization the
+            // report does (codex P2 #3007 r12).
+            record: {
+              ...record,
+              scheduled_service_id: record.scheduled_service_id || svc.id,
+              // The applied products can be the only exterior evidence
+              // (application_area) — the sync SMS normalizer needs them
+              // (codex P1 #3007 r13).
+              applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
+              tracedExteriorZone: await require('../services/service-report/reentry')
+                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
+            },
             service: svc,
             reportUrl,
             smsReportUrl: reportSmsUrl,

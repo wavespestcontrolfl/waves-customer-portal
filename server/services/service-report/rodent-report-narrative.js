@@ -41,7 +41,12 @@ const {
   formatArrivalWindow,
 } = require('./visit-summary-narrative');
 
-const PROMPT_VERSION = 'rodent_report_narrative_v1';
+// v2: the narrative covers EVERY typed specialty report (cockroach, bed
+// bug, termite bait, rodent… on the V1 report surface; WDO renders on the
+// project-report surface and is out of scope) — the prompt generalized from rodent-
+// only wording (owner ask 2026-07-27, second lane). File name kept (no
+// renames); rodent remains a thin alias over the same engine.
+const PROMPT_VERSION = 'typed_report_narrative_v2';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -90,7 +95,11 @@ function deviceFacts(applications = []) {
         // Registered products reach the model only as a generic category —
         // the name never enters the prompt, so it cannot leak into copy.
         name: nameable ? name : null,
-        category: cleanText(product.category) || 'rodent control product',
+        // Service-neutral fallback: this engine serves every typed line
+        // now, and the catalog category is nullable — a cockroach or
+        // termite report must never describe its product as rodent
+        // control (codex P2 #3007).
+        category: cleanText(product.category) || 'treatment product',
         summary: nameable ? cleanText(product.service_report_summary).slice(0, 200) || null : null,
         nameable,
       };
@@ -99,8 +108,18 @@ function deviceFacts(applications = []) {
     .slice(0, 8);
 }
 
+// Chemical/compliance fields (termite products_used, EPA registration,
+// percent solution…) never reach the prompt or grounding corpus — the
+// system prompt withholds product names/rates/EPA details, and a manually
+// entered legacy product value wouldn't match the applications-based echo
+// guard (codex P2 #3007 r6). The typed card still renders these on the
+// report itself.
+const CHEMICAL_FINDING_LABEL_RE = /\b(products?|epa|registration|percent|solution|active\s+ingredients?|rates?|concentration|chemicals?|amounts?|gallons?)\b/i;
+
 function findingFacts(typedReport = {}) {
   return (Array.isArray(typedReport?.findings) ? typedReport.findings : [])
+    .filter((item) => !CHEMICAL_FINDING_LABEL_RE.test(String(item.customerLabel || item.technicianLabel || ''))
+      && !CHEMICAL_FINDING_LABEL_RE.test(String(item.fieldKey || '').replace(/_/g, ' ')))
     .map((item) => ({
       label: cleanText(item.customerLabel || item.technicianLabel),
       value: cleanText(item.customerValueLabel != null && item.customerValueLabel !== ''
@@ -108,7 +127,12 @@ function findingFacts(typedReport = {}) {
         : item.value),
     }))
     .filter((item) => item.label && item.value)
-    .slice(0, 8);
+    // WDO and other long typed schemas carry their core inspection fields
+    // (live activity, evidence, damage, treatment) well past slot 8 — a
+    // tight positional cap fed the narrative only administrative metadata
+    // (codex P2 #3007 r4). 24 covers every current schema with prompt room
+    // to spare.
+    .slice(0, 24);
 }
 
 // Words only — the raw score/maxScore NEVER enter the facts. The customer-
@@ -160,6 +184,7 @@ function photoFacts(photos = []) {
 function groundingFacts({
   recap,
   serviceTypeDisplay,
+  reportTypeLabel = null,
   typedReport = null,
   activity = null,
   stationSummary = null,
@@ -168,16 +193,21 @@ function groundingFacts({
   photos = [],
   nextAppointment = null,
 } = {}) {
+  // Date + window ONLY: the next appointment's service NAME can carry a
+  // different pest (broad same-line match — a bed-bug report may have a
+  // Cockroach Control follow-up) and would ground cross-pest claims if it
+  // entered the facts (codex P1 r15). The prompt copies date/window
+  // verbatim and never needs the name.
   const nextVisit = nextAppointment && nextAppointment.scheduledDate
     ? {
       date: formatNextVisitDate(nextAppointment.scheduledDate),
       window: formatArrivalWindow(nextAppointment.windowStart),
-      serviceType: cleanText(nextAppointment.serviceType) || null,
     }
     : null;
   return {
     recap: cleanText(recap),
-    serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'rodent service',
+    serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
+    reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
     todaysResult: typedReport?.todaysResult
       ? {
         headline: cleanText(typedReport.todaysResult.headline) || null,
@@ -267,7 +297,13 @@ function deterministicSummary(facts) {
       }
       parts.push(`${s.checked} of ${s.total} bait station${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
     } else {
-      parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected.`);
+      // Generic station programs (termite bait): a positive activity-status
+      // count is map-recorded fact and renders; zero adds no claim (the
+      // typed report's ratified copy owns absence wording — codex P2 #3007).
+      const activityClause = s.stationsWithActivity > 0
+        ? `, with activity observed at ${s.stationsWithActivity} station${s.stationsWithActivity === 1 ? '' : 's'}`
+        : '';
+      parts.push(`${s.checked} of ${s.total} station${s.total === 1 ? '' : 's'} were inspected${activityClause}.`);
     }
   }
   if (facts.photoEvidence.length) {
@@ -281,19 +317,21 @@ function deterministicSummary(facts) {
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control rodent service report.
+const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
 
-You are given grounding facts: the technician's recap message, the report's ratified result copy, customer-labeled findings (species, traps checked), the property's rodent activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/station check counts, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled rodent visit.
+You are given grounding facts: the technician's recap message, the report type, the report's ratified result copy, customer-labeled findings (target pest, areas noted, work completed), the property's activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/bait-station check counts when the program uses them, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled visit.
 
 Rules:
 - 4 to 7 short sentences in one or two short paragraphs. Plain, calm, professional language. No greeting, no headings, no markdown, no bullet lists.
-- Facts only: never invent work, counts, captures, sightings, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
+- Facts only: never invent work, counts, captures, sightings, locations, or evidence that is not in the facts. Never contradict the recap or ratified result copy.
+- When the findings tag specific pests (e.g. German cockroaches, roof rats, subterranean termites), name the main one(s) in plain language — never a pest that is not tagged.
 - Write every count as a numeral, exactly as it appears in the facts. Never introduce a number that is not in the facts.
-- Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof rodents are gone or the issue is resolved.
+- Station counts count LOCATIONS with a status, not events: "trapsWithCaptureRecorded: 2" means a capture was recorded at 2 traps — never "2 captures". "stationsWithBaitConsumption" means that many stations showed bait consumption. Zero is stated as "no captures were recorded" / "no bait consumption was observed" — never as proof the pests are gone or the issue is resolved.
 - When a capture or bait consumption IS recorded, state it ONLY in the grounded generic form ("a capture was recorded at 2 traps", "bait consumption was observed at 1 station") — never invent species, rooms, or other details the facts do not carry.
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
-- If photo evidence is provided, briefly and calmly reference what was documented (for example, droppings observed in the attic) — it shows the customer what the service is tracking.
+- If photo evidence is provided, briefly and calmly reference what was documented — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
+- If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
 - If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
 
@@ -320,16 +358,25 @@ function numberTokens(text) {
 // traps" can't route around the numeral checks (codex round-2 P1). "one" is
 // included deliberately — the partitive filter below keeps "one of the
 // traps" from tripping the count check.
-const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/gi;
+const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/gi;
 const WORD_NUMBER_VALUES = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
   eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
   fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
-  nineteen: 19, twenty: 20,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
 };
 
 function normalizeWordNumbers(text) {
-  return String(text || '').replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]));
+  return String(text || '')
+    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
+    // recombine compound word-numbers the word pass split — hyphenated
+    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
+    // — so they can't slip a smaller grounded digit past the count
+    // validators (codex P2 r3 + P1 r8)
+    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
+      ? String(Number(tens) + Number(ones))
+      : full));
 }
 
 function collectNumbers(set, value) {
@@ -368,15 +415,24 @@ function factNumbers(facts) {
   const inaccessible = roleSet(s.inaccessible);
   const capturesAt = roleSet(s.trapsWithCaptureRecorded); // "a capture recorded at N traps"
   const consumptionAt = roleSet(s.stationsWithBaitConsumption); // "consumption observed at N stations"
+  const activityAt = roleSet(s.stationsWithActivity); // "activity observed at N stations" (termite bait)
   const captureTotals = new Set(); // "N captures" — only a typed finding grounds this
+  // Typed station findings route to their ROLE, never the roster pool —
+  // "Stations with activity: 2" must not let "2 stations on the property"
+  // pass as a roster claim (codex P1 #3007 r5).
   (facts.findings || []).forEach((finding) => {
     const n = Number(String(finding.value).trim());
     if (!Number.isFinite(n)) return;
-    if (/captur/i.test(finding.label)) captureTotals.add(n);
-    else if (/check|inspect/i.test(finding.label)) checked.add(n);
-    else if (/trap|station|device/i.test(finding.label)) total.add(n);
+    const label = String(finding.label);
+    if (/captur/i.test(label)) captureTotals.add(n);
+    else if (/consum/i.test(label)) consumptionAt.add(n);
+    else if (/activit/i.test(label)) activityAt.add(n);
+    else if (/inaccess/i.test(label)) inaccessible.add(n);
+    else if (/servic/i.test(label)) serviced.add(n);
+    else if (/check|inspect/i.test(label)) checked.add(n);
+    else if (/trap|station|device|total/i.test(label)) total.add(n);
   });
-  return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, captureTotals };
+  return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, activityAt, captureTotals };
 }
 
 // "N traps" / "N of M stations" claims validated per noun, role, and
@@ -412,6 +468,9 @@ function contextualCountProblems(text, facts) {
     let allowed;
     if (/captur/i.test(lead)) allowed = roles.capturesAt;
     else if (/consum/i.test(lead)) allowed = roles.consumptionAt;
+    // "termite activity was observed at 2 stations" — the activity-status
+    // location count on termite bait maps (codex P2 #3007)
+    else if (/activit/i.test(lead)) allowed = roles.activityAt;
     // bare roster claims ("your 7 traps") fall through to the roster size
     else allowed = roleFrom(trail) || roleFrom(lead) || roles.total;
     if (!allowed.has(Number(first))) problems.push(`uncorroborated_count:${full.trim()}`);
@@ -637,6 +696,638 @@ function nextVisitProblems(text, facts) {
   return problems;
 }
 
+// ---------------------------------------------------------------------------
+// Domain-term grounding (codex P1 #3007): with the engine generalized to
+// every typed line, the facts-only contract must cover PEST NAMES,
+// TREATMENT ACTIONS, and LOCATIONS — a bed-bug report whose model output
+// claims "German cockroaches in the attic" or "gel bait was applied" must
+// fall back even though no numeral, banned word, or product name appears.
+// Each recognized term in the OUTPUT must match somewhere in the grounding
+// facts (JSON-serialized, normalized); `out` finds the claim, `corpus`
+// checks the facts. Fail-closed: an unmatched term rejects the summary.
+// ---------------------------------------------------------------------------
+const DOMAIN_TERMS = [
+  // pests
+  { kind: 'pest', out: /\b(?:cock)?roach(?:es)?\b/i, corpus: /\b(?:cock)?roach/ },
+  { kind: 'pest', out: /\bbed\s*bugs?\b/i, corpus: /\bbed\s*bug/ },
+  { kind: 'pest', out: /\btermites?\b/i, corpus: /\btermite/ },
+  { kind: 'pest', out: /\brodents?\b/i, corpus: /\brodent/ },
+  { kind: 'pest', out: /\brats?\b/i, corpus: /\brat\b|\brats\b/ },
+  { kind: 'pest', out: /\bmice\b|\bmouse\b/i, corpus: /\bmice\b|\bmouse\b/ },
+  { kind: 'pest', out: /\bants?\b/i, corpus: /\bants?\b/ },
+  { kind: 'pest', out: /\bspiders?\b/i, corpus: /\bspider/ },
+  { kind: 'pest', out: /\bwasps?\b/i, corpus: /\bwasp/ },
+  { kind: 'pest', out: /\bmosquito(?:es)?\b/i, corpus: /\bmosquito/ },
+  { kind: 'pest', out: /\bfleas?\b/i, corpus: /\bflea/ },
+  { kind: 'pest', out: /\bticks?\b/i, corpus: /\btick/ },
+  { kind: 'pest', out: /\bsilverfish\b/i, corpus: /\bsilverfish/ },
+  { kind: 'pest', out: /\bearwigs?\b/i, corpus: /\bearwig/ },
+  { kind: 'pest', out: /\bcrickets?\b/i, corpus: /\bcricket/ },
+  { kind: 'pest', out: /\bbeetles?\b/i, corpus: /\bbeetle/ },
+  { kind: 'pest', out: /\bscorpions?\b/i, corpus: /\bscorpion/ },
+  { kind: 'pest', out: /\bmoths?\b/i, corpus: /\bmoth/ },
+  { kind: 'pest', out: /\bfly\b|\bflies\b/i, corpus: /\bfly\b|\bflies\b/ },
+  { kind: 'pest', out: /\bgnats?\b/i, corpus: /\bgnat/ },
+  { kind: 'pest', out: /\bmidges?\b/i, corpus: /\bmidge/ },
+  { kind: 'pest', out: /\bcentipedes?\b/i, corpus: /\bcentipede/ },
+  { kind: 'pest', out: /\bmillipedes?\b/i, corpus: /\bmillipede/ },
+  { kind: 'pest', out: /\bpillbugs?\b/i, corpus: /\bpillbug/ },
+  { kind: 'pest', out: /\bsowbugs?\b/i, corpus: /\bsowbug/ },
+  { kind: 'pest', out: /\bspringtails?\b/i, corpus: /\bspringtail/ },
+  { kind: 'pest', out: /\bstink\s*bugs?\b/i, corpus: /\bstink\s*bug/ },
+  { kind: 'pest', out: /\bfirebrats?\b/i, corpus: /\bfirebrat/ },
+  { kind: 'pest', out: /\bbooklice\b|\bpsocids?\b/i, corpus: /\bbooklice|\bpsocid/ },
+  { kind: 'pest', out: /\bchinch\s*bugs?\b/i, corpus: /\bchinch/ },
+  { kind: 'pest', out: /\bwebworms?\b/i, corpus: /\bwebworm/ },
+  { kind: 'pest', out: /\barmyworms?\b/i, corpus: /\barmyworm/ },
+  { kind: 'pest', out: /\bgrubs?\b/i, corpus: /\bgrub/ },
+  { kind: 'pest', out: /\bbees?\b/i, corpus: /\bbees?\b/ },
+  { kind: 'pest', out: /\bhornets?\b/i, corpus: /\bhornet/ },
+  { kind: 'pest', out: /\byellow\s*jackets?\b/i, corpus: /\byellow\s*jacket/ },
+  { kind: 'pest', out: /\bsnails?\b/i, corpus: /\bsnail/ },
+  { kind: 'pest', out: /\bslugs?\b/i, corpus: /\bslug/ },
+  { kind: 'pest', out: /\bnests?\b/i, corpus: /\bnest/ },
+  // species QUALIFIERS (codex P1 #3007 r3): the family term alone must not
+  // ground a different species — German cockroaches recorded, "American
+  // cockroaches" claimed, must reject. Each qualifier grounds only itself.
+  { kind: 'species', out: /\bgerman\b/i, corpus: /\bgerman/ },
+  { kind: 'species', out: /\bpalmetto\s*bugs?\b/i, corpus: /\bpalmetto/ },
+  { kind: 'species', out: /\bamerican\b/i, corpus: /\bamerican/ },
+  { kind: 'species', out: /\bsmoky[-\s]?brown\b/i, corpus: /\bsmoky\s?brown/ },
+  { kind: 'species', out: /\boriental\b/i, corpus: /\boriental/ },
+  { kind: 'species', out: /\bbrown[-\s]?banded\b/i, corpus: /\bbrown\s?banded/ },
+  { kind: 'species', out: /\broof\s+rats?\b/i, corpus: /\broof\s+rat/ },
+  { kind: 'species', out: /\bnorway\b/i, corpus: /\bnorway/ },
+  { kind: 'species', out: /\bsubterranean\b/i, corpus: /\bsubterranean/ },
+  { kind: 'species', out: /\bdrywood\b/i, corpus: /\bdrywood/ },
+  { kind: 'species', out: /\bdampwood\b/i, corpus: /\bdampwood/ },
+  { kind: 'species', out: /\bformosan\b/i, corpus: /\bformosan/ },
+  // wildlife species (wildlife_trapping typed schema — codex P1 #3007 r2):
+  // the narrative must never swap the recorded animal
+  { kind: 'pest', out: /\braccoons?\b/i, corpus: /\braccoon/ },
+  { kind: 'pest', out: /\bo?possums?\b/i, corpus: /\bo?possum/ },
+  { kind: 'pest', out: /\bsquirrels?\b/i, corpus: /\bsquirrel/ },
+  { kind: 'pest', out: /\barmadillos?\b/i, corpus: /\barmadillo/ },
+  { kind: 'pest', out: /\bbats?\b/i, corpus: /\bbats?\b/ },
+  { kind: 'pest', out: /\bbirds?\b/i, corpus: /\bbirds?\b/ },
+  { kind: 'pest', out: /\bsnakes?\b/i, corpus: /\bsnake/ },
+  { kind: 'pest', out: /\biguanas?\b/i, corpus: /\biguana/ },
+  { kind: 'pest', out: /\bcoyotes?\b/i, corpus: /\bcoyote/ },
+  // palm/plant specialty organisms and diseases (palm_injection typed
+  // schema — codex P1 #3007 r8): grounded like any pest, and their
+  // negative findings drive zero states
+  { kind: 'pest', out: /\bganoderma\b/i, corpus: /\bganoderma/ },
+  { kind: 'pest', out: /\bconks?\b/i, corpus: /\bconk/ },
+  { kind: 'pest', out: /\bweevils?\b/i, corpus: /\bweevil/ },
+  { kind: 'pest', out: /\bmites?\b/i, corpus: /\bmites?\b/ },
+  { kind: 'pest', out: /\bscale\s+insects?\b/i, corpus: /\bscale/ },
+  { kind: 'pest', out: /\bwhitefl(?:y|ies)\b/i, corpus: /\bwhitefl/ },
+  { kind: 'pest', out: /\baphids?\b/i, corpus: /\baphid/ },
+  { kind: 'pest', out: /\bmealybugs?\b/i, corpus: /\bmealybug/ },
+  { kind: 'pest', out: /\bthrips\b/i, corpus: /\bthrips/ },
+  { kind: 'pest', out: /\bfusarium\b/i, corpus: /\bfusarium/ },
+  { kind: 'pest', out: /\bbud\s+rot\b/i, corpus: /\bbud\s+rot/ },
+  { kind: 'pest', out: /\blethal\s+bronzing\b/i, corpus: /\blethal\s+bronzing/ },
+  { kind: 'pest', out: /\blethal\s+yellowing\b/i, corpus: /\blethal\s+yellowing/ },
+  // treatment actions
+  { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
+  { kind: 'action', out: /\bbait(?:s|ed|ing)?\b/i, corpus: /\bbait/ },
+  { kind: 'action', out: /\bgrowth\s+regulator/i, corpus: /\bgrowth\s+regulator/ },
+  { kind: 'action', out: /\bcracks?\s*(?:and|&)\s*crevices?/i, corpus: /\bcrack\w*\s+(?:and\s+)?crevice/ },
+  { kind: 'action', out: /\bflush[-\s]?out\b/i, corpus: /\bflush\s*out/ },
+  { kind: 'action', out: /\bexclusion\b/i, corpus: /\bexclusion/ },
+  { kind: 'action', out: /\bsanitation\b/i, corpus: /\bsanitation/ },
+  { kind: 'action', out: /\bdust(?:ed|ing)?\b/i, corpus: /\bdust/ },
+  { kind: 'action', out: /\bfog(?:ged|ging)?\b/i, corpus: /\bfog/ },
+  { kind: 'action', out: /\bspray(?:ed|ing)?\b/i, corpus: /\bspray/ },
+  { kind: 'action', out: /\bheat\s+treat/i, corpus: /\bheat\s+treat/ },
+  { kind: 'action', out: /\bsteam(?:ed|ing)?\b/i, corpus: /\bsteam/ },
+  { kind: 'action', out: /\bvacuum/i, corpus: /\bvacuum/ },
+  { kind: 'action', out: /\bencasements?\b/i, corpus: /\bencasement/ },
+  { kind: 'action', out: /\binject/i, corpus: /\binject/ },
+  { kind: 'action', out: /\bgranular\b/i, corpus: /\bgranular/ },
+  { kind: 'action', out: /\bbarrier\b/i, corpus: /\bbarrier/ },
+  { kind: 'action', out: /\btraps?\b|\btrapped\b|\btrapping\b/i, corpus: /\btrap/ },
+  { kind: 'action', out: /\bmonitor(?:s|ed|ing)?\b/i, corpus: /\bmonitor/ },
+  // generic completion verbs (codex P1 r11): 'we treated the kitchen' on an
+  // inspection-only report must find completed-work evidence
+  { kind: 'action', out: /\btreat(?:ed|ing|ments?)?\b/i, corpus: /\btreat/ },
+  { kind: 'action', out: /\bappl(?:y|ied|ying|ications?)\b/i, corpus: /\bappl/ },
+  { kind: 'action', out: /\binstall(?:ed|ing|ations?)?\b/i, corpus: /\binstall/ },
+  // chemical application quantities stay on the typed card — the filtered
+  // facts never ground them, so any mention rejects (codex P2 r15)
+  { kind: 'action', out: /\bgallons?\b|\bounces?\b|\bmillilit(?:er|re)s?\b|\blit(?:er|re)s?\b/i, corpus: /\bgallon|\bounce|\bmillilit|\blit(?:er|re)/ },
+  // locations
+  { kind: 'location', out: /\bkitchens?\b/i, corpus: /\bkitchen/ },
+  { kind: 'location', out: /\bbath(?:room)?s?\b/i, corpus: /\bbath/ },
+  { kind: 'location', out: /\bbedrooms?\b/i, corpus: /\bbedroom/ },
+  { kind: 'location', out: /\battics?\b/i, corpus: /\battic/ },
+  { kind: 'location', out: /\bgarages?\b/i, corpus: /\bgarage/ },
+  { kind: 'location', out: /\blaundry\b/i, corpus: /\blaundry/ },
+  { kind: 'location', out: /\bpantry\b/i, corpus: /\bpantry/ },
+  { kind: 'location', out: /\bclosets?\b/i, corpus: /\bcloset/ },
+  { kind: 'location', out: /\bbasements?\b/i, corpus: /\bbasement/ },
+  { kind: 'location', out: /\bcrawl\s*space/i, corpus: /\bcrawl\s*space/ },
+  { kind: 'location', out: /\blanai\b/i, corpus: /\blanai/ },
+  { kind: 'location', out: /\bpatios?\b/i, corpus: /\bpatio/ },
+  { kind: 'location', out: /\bpools?\b/i, corpus: /\bpool/ },
+  { kind: 'location', out: /\bdriveways?\b/i, corpus: /\bdriveway/ },
+  { kind: 'location', out: /\bperimeters?\b/i, corpus: /\bperimeter/ },
+  { kind: 'location', out: /\bfoundations?\b/i, corpus: /\bfoundation/ },
+  { kind: 'location', out: /\beaves\b/i, corpus: /\beaves\b/ },
+  { kind: 'location', out: /\bsoffits?\b/i, corpus: /\bsoffit/ },
+  { kind: 'location', out: /\bdishwashers?\b/i, corpus: /\bdishwasher/ },
+  { kind: 'location', out: /\brefrigerators?\b|\bfridge\b/i, corpus: /\brefrigerator|\bfridge/ },
+  { kind: 'location', out: /\bstoves?\b/i, corpus: /\bstove/ },
+  { kind: 'location', out: /\bovens?\b/i, corpus: /\boven/ },
+  { kind: 'location', out: /\bsinks?\b/i, corpus: /\bsink/ },
+  { kind: 'location', out: /\bbaseboards?\b/i, corpus: /\bbaseboard/ },
+  { kind: 'location', out: /\bwall\s*voids?\b/i, corpus: /\bwall\s*void/ },
+  { kind: 'location', out: /\bstations?\b/i, corpus: /\bstation/ },
+  { kind: 'location', out: /\bfence\b/i, corpus: /\bfence/ },
+];
+
+// A finding whose VALUE is negative ("Monitors placed: No") must not
+// ground its label's action — the label alone would promote a declined
+// action into completed work (codex P1 #3007 r2). Negative-valued findings
+// are excluded from the domain corpus entirely.
+const NEGATIVE_FINDING_VALUE_RE = /^(?:no\b|none\b|not\b|0(?:\.0*)?$|n\/a\b|false\b)/i;
+const NEGATED_SENTENCE_RE = /\b(no|not|none|never|without)\b/i;
+
+// Prose blocks contribute only their AFFIRMATIVE sentences to the corpus —
+// "No live roach activity was observed" must not ground a positive "live
+// roaches were observed" claim (codex P1 #3007 r4).
+function affirmativeSentences(block) {
+  return String(block || '')
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => sentence.trim() && !NEGATED_SENTENCE_RE.test(sentence))
+    .join(' ');
+}
+
+function domainCorpus(facts) {
+  const positiveFacts = {
+    ...facts,
+    recap: affirmativeSentences(facts.recap),
+    todaysResult: facts.todaysResult
+      ? {
+        headline: affirmativeSentences(facts.todaysResult.headline),
+        body: affirmativeSentences(facts.todaysResult.body),
+        nextStep: affirmativeSentences(facts.todaysResult.nextStep),
+      }
+      : null,
+    findings: (facts.findings || []).filter(
+      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
+    ),
+  };
+  return ` ${JSON.stringify(positiveFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+}
+
+// Explicit zero-state contradiction guard (codex P1 #3007 r4): the service
+// LABEL legitimately grounds the pest family ("Cockroach Control Service"),
+// so corpus filtering alone can't stop "live roaches were observed today"
+// on a report whose ratified copy says none were. Any NEGATED ratified
+// sentence naming a pest term rejects model sentences that assert an
+// observation of that same pest positively.
+const OBSERVATION_RE = /\b(observed|noted|seen|found|documented|present|active|visible|spotted|detected)\b/i;
+
+function contradictedZeroStates(text, facts) {
+  const problems = [];
+  const pestTerms = DOMAIN_TERMS.filter((term) => term.kind === 'pest' || term.kind === 'species');
+  // Negative-valued FINDINGS carry zero states too (codex P1 #3007 r7):
+  // "Live roaches observed: No" negates the sighting even when no
+  // headline/body sentence spells it out.
+  const negativeFindings = (facts.findings || [])
+    .filter((finding) => NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()))
+    .map((finding) => `${finding.label} ${finding.value}`);
+  const ratified = [facts.todaysResult?.headline, facts.todaysResult?.body, facts.recap]
+    .flatMap((block) => String(block || '').split(/(?<=[.!?])\s+/))
+    .filter((sentence) => NEGATED_SENTENCE_RE.test(sentence))
+    .concat(negativeFindings);
+  if (!ratified.length) return problems;
+  let zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
+  // Generic zero states ("No active signs observed during today's
+  // service.") name no pest — the report's IDENTITY supplies it, so a
+  // zero-activity bed-bug report still rejects "live bed bugs were found"
+  // (codex P1 #3007 r8). Only a generic ACTIVITY negation triggers the
+  // inference; an unrelated negative finding ("Monitors placed: No") on a
+  // positive-activity report must not.
+  if (!zeroStatePests.length) {
+    const genericZeroState = ratified.some((sentence) => /\bno\b[^.!?]*\b(signs?|activity|evidence)\b/i.test(sentence));
+    if (genericZeroState) {
+      const identity = `${facts.serviceTypeDisplay || ''} ${facts.reportTypeLabel || ''}`;
+      zeroStatePests = pestTerms.filter((term) => term.out.test(identity));
+    }
+  }
+  if (!zeroStatePests.length) return problems;
+  // Clause scope (codex P1 #3007 r5): "No concerns were reported, but live
+  // roaches were observed" carries the contradiction in its second clause —
+  // a negator elsewhere in the sentence must not shield it.
+  const clauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet|although|though)\b/i));
+  for (const clause of clauses) {
+    if (NEGATED_SENTENCE_RE.test(clause)) continue;
+    // Positive ACTIVITY-level assertions ("cockroach activity was high")
+    // contradict a zero state without any observation verb (codex P1 r13).
+    if (!OBSERVATION_RE.test(clause) && !/\bactivit/i.test(clause)) continue;
+    for (const term of zeroStatePests) {
+      if (term.out.test(clause)) {
+        problems.push('contradicted_zero_state');
+        break;
+      }
+    }
+  }
+  return problems;
+}
+
+// ACTION terms ground only against completed-work evidence — affirmative
+// findings/ratified copy, devices, photo evidence — never the service or
+// report LABEL: "Termite Bait Station" in the title must not prove "we
+// baited the stations" on a visit whose Bait-replaced finding says No
+// (codex P1 #3007 r5). Pest/species/location terms keep the full corpus
+// (the label legitimately grounds the pest family).
+// Recommendation/future-work sentences are NOT completed-work evidence,
+// wherever they live — typed snapshot builders embed nextStep into the
+// body (codex P1 r13), and advisory phrasing must never ground an action
+// as performed.
+const RECOMMENDATION_SENTENCE_RE = /\b(recommend(?:ed|s)?|should|please|we\s+will|will\s+be|consider|schedule[sd]?)\b/i;
+
+function completedWorkSentence(sentence, nextStep) {
+  const trimmed = String(sentence || '').trim();
+  if (!trimmed) return false;
+  if (NEGATED_SENTENCE_RE.test(trimmed)) return false;
+  if (RECOMMENDATION_SENTENCE_RE.test(trimmed)) return false;
+  // imperative care/expectation copy ("Continue monitoring and contact
+  // us…") is customer guidance, not completed work (codex P2 r16)
+  if (CARE_SENTENCE_RE.test(trimmed)) return false;
+  if (nextStep && String(nextStep).includes(trimmed)) return false;
+  return true;
+}
+
+const RECOMMENDATION_FINDING_LABEL_RE = /\b(recommend(?:ed|ation)?s?|advis(?:ed|ory)?|suggest(?:ed|ion)?s?|next\s+steps?)\b/i;
+
+function actionCorpus(facts) {
+  const workFacts = {
+    // recommendation-labeled findings ("Recommended service: Rodent
+    // exclusion") are FUTURE work, not completed work (codex P1 r15)
+    findings: (facts.findings || []).filter(
+      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())
+        && !RECOMMENDATION_FINDING_LABEL_RE.test(String(finding.label)),
+    ),
+    recap: String(facts.recap || '')
+      .split(/(?<=[.!?])\s+/)
+      .filter((sentence) => completedWorkSentence(sentence, facts.todaysResult?.nextStep))
+      .join(' '),
+    // nextStep is RECOMMENDATION copy, not completed work — "Exclusion
+    // recommended" must not ground "we completed exclusion today" (codex
+    // P1 r11). It stays in the general corpus and the mandatory-care path.
+    todaysResult: facts.todaysResult
+      ? {
+        headline: affirmativeSentences(facts.todaysResult.headline),
+        body: String(facts.todaysResult.body || '')
+          .split(/(?<=[.!?])\s+/)
+          .filter((sentence) => completedWorkSentence(sentence, facts.todaysResult.nextStep))
+          .join(' '),
+      }
+      : null,
+    devices: facts.devices,
+    photoSummary: facts.photoSummary,
+    photoEvidence: facts.photoEvidence,
+  };
+  return ` ${JSON.stringify(workFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+}
+
+// Dynamic pest QUALIFIERS (codex P2 #3007 r10): the free-text target_pest
+// field supports species the static list can't enumerate (ghost/fire/
+// carpenter ants…). Any non-stopword adjective directly before a pest
+// family word must appear WITH that family in the facts — "fire ants" on a
+// ghost-ant report rejects even though "ants" alone is grounded.
+const QUALIFIED_PEST_FAMILY_RE = /\b([a-z-]{3,})\s+((?:cock)?roach(?:es)?|ants?|termites?|rats?|spiders?|wasps?|bees?|hornets?|crickets?|beetles?|moths?|scorpions?|weevils?|mites?)\b/gi;
+const PEST_QUALIFIER_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'any', 'some', 'all', 'these', 'those', 'other',
+  'more', 'most', 'few', 'several', 'many', 'target', 'live', 'dead', 'active',
+  'adult', 'young', 'visible', 'new', 'newly', 'existing', 'remaining',
+  'additional', 'possible', 'potential', 'recorded', 'documented', 'observed',
+  'no', 'not', 'none', 'nearby', 'occasional', 'invading', 'household',
+]);
+
+function ungroundedPestQualifiers(text, corpus) {
+  const problems = [];
+  for (const match of String(text).matchAll(new RegExp(QUALIFIED_PEST_FAMILY_RE.source, 'gi'))) {
+    const qualifier = match[1].toLowerCase();
+    if (PEST_QUALIFIER_STOPWORDS.has(qualifier)) continue;
+    const familyStem = match[2].toLowerCase().replace(/(?:es|s)$/, '');
+    const phraseRe = new RegExp(`\\b${qualifier.replace(/[-\s]+/g, '\\s*')}\\s+${familyStem}`, 'i');
+    if (!phraseRe.test(corpus)) {
+      problems.push(`ungrounded_pest_qualifier:${match[0].toLowerCase()}`);
+    }
+  }
+  return problems;
+}
+
+// Free-text treatment LOCATIONS ground dynamically (codex P1 #3007 r14):
+// bed-bug rooms_treated is arbitrary text, so "treatment was completed in
+// the living room" must fail on a Primary-bedroom report even though
+// "living room" is outside the static lexicon. Every locative
+// prepositional phrase's content words must exist in the facts corpus
+// (generic property nouns allowlisted).
+const LOCATIVE_PHRASE_RE = /\b(?:in|inside|at|around|near|behind|under|along)\s+(?:the|your|their|our|each|every|all)?\s*([a-z][a-z\s-]{2,30}?)(?=[.,;:!?]|\s+(?:and|with|so|to|for|today|during|this)\b|$)/gi;
+const GENERIC_PLACE_WORDS = new Set([
+  'home', 'house', 'property', 'premises', 'building', 'structure', 'unit',
+  'area', 'areas', 'location', 'locations', 'placement', 'placements',
+  'visit', 'visits', 'service', 'treated', 'accessible', 'monitored',
+  'documented', 'active', 'affected', 'targeted', 'appropriate', 'key',
+  'listed', 'recorded', 'noted', 'interior', 'exterior', 'inside', 'outside',
+  // schedule words — 'at the next visit' is time, not place
+  'next', 'upcoming', 'scheduled', 'following', 'future', 'current',
+  'previous', 'last', 'first', 'same',
+]);
+
+function ungroundedLocationPhrases(text, corpus) {
+  const problems = [];
+  for (const match of String(text).matchAll(new RegExp(LOCATIVE_PHRASE_RE.source, 'gi'))) {
+    // temporal phrases ("in fourteen days", "in two weeks") are not places
+    if (/\b(?:day|days|week|weeks|month|months|hour|hours|minute|minutes)\b/i.test(match[1])) continue;
+    const words = match[1].toLowerCase().split(/[^a-z]+/)
+      .filter((word) => word.length >= 4)
+      .map((word) => word.replace(/s$/, ''))
+      .filter((word) => !GENERIC_PLACE_WORDS.has(word) && !GENERIC_PLACE_WORDS.has(`${word}s`));
+    if (!words.length) continue;
+    const missing = words.filter((word) => !new RegExp(`\\b${word}`).test(corpus));
+    if (missing.length) problems.push(`ungrounded_location:${match[1].trim().toLowerCase()}`);
+  }
+  return problems;
+}
+
+function ungroundedDomainTerms(text, facts) {
+  const problems = [];
+  const corpus = domainCorpus(facts);
+  const actions = actionCorpus(facts);
+  for (const term of DOMAIN_TERMS) {
+    const match = String(text).match(new RegExp(term.out.source, 'i'));
+    if (match && !term.corpus.test(term.kind === 'action' ? actions : corpus)) {
+      problems.push(`ungrounded_${term.kind}:${match[0].toLowerCase()}`);
+    }
+  }
+  problems.push(...ungroundedPestQualifiers(text, corpus));
+  problems.push(...ungroundedLocationPhrases(text, corpus));
+  return problems;
+}
+
+// Typed COUNT findings get role validation of their own (codex P1 #3007
+// r2): "Palms serviced: 1" must reject "27 palms were serviced" even when
+// 27 is grounded elsewhere (a next-visit date). Every numeral followed
+// (within a word) by a noun that appears in a numeric finding's label must
+// equal that finding's value. Trap/station/device/capture nouns are
+// excluded — the station role validator owns them.
+const ROLE_VALIDATED_NOUN_STEMS = new Set(['trap', 'station', 'device', 'capture']);
+
+function typedCountRoles(facts) {
+  const map = new Map(); // noun stem -> Set of grounded values
+  const COUNT_STEM_STOPWORDS = new Set(['with', 'and', 'per', 'for', 'the', 'from', 'this', 'that', 'today']);
+  const register = (value, words) => {
+    words
+      .filter((word) => word.length >= 3 && !COUNT_STEM_STOPWORDS.has(word))
+      .forEach((word) => {
+        const stem = word.replace(/s$/, '');
+        if (ROLE_VALIDATED_NOUN_STEMS.has(stem)) return;
+        if (!map.has(stem)) map.set(stem, new Set());
+        map.get(stem).add(value);
+      });
+  };
+  (facts.findings || []).forEach((finding) => {
+    const raw = String(finding.value).trim();
+    const labelWords = String(finding.label).toLowerCase().split(/[^a-z]+/);
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      register(n, labelWords);
+      return;
+    }
+    // Unit-bearing quantities ("120 linear feet", "27 gallons" — codex P2
+    // r10): the numeral binds to its UNIT words as well as the label, so a
+    // swap ("27 linear feet") can't reuse a numeral grounded by another
+    // field.
+    const unitMatch = /^(\d+(?:\.\d+)?)\s+([a-z][a-z\s-]*)$/i.exec(raw);
+    if (unitMatch) {
+      register(Number(unitMatch[1]), [...labelWords, ...unitMatch[2].toLowerCase().split(/[^a-z]+/)]);
+      return;
+    }
+    // LIST-valued findings carry an implicit cardinality (codex P1 r13):
+    // "Rooms treated: Bedroom" grounds bedroom-count 1, so "we treated 3
+    // bedrooms" can't borrow a date numeral. Negative values register
+    // nothing.
+    if (!NEGATIVE_FINDING_VALUE_RE.test(raw) && /^[a-z]/i.test(raw)) {
+      const items = raw.split(',').map((item) => item.trim()).filter(Boolean);
+      const itemWords = items.flatMap((item) => item.toLowerCase().split(/[^a-z]+/));
+      register(items.length, [...labelWords, ...itemWords]);
+    }
+  });
+  return map;
+}
+
+function typedCountProblems(text, facts) {
+  const problems = [];
+  const rolesByNoun = typedCountRoles(facts);
+  if (!rolesByNoun.size) return problems;
+  for (const match of String(text).matchAll(/\b(\d+)((?:\s+[a-z-]+){1,2})/gi)) {
+    const value = Number(match[1]);
+    for (const word of match[2].trim().toLowerCase().split(/\s+/)) {
+      const stem = word.replace(/s$/, '');
+      if (!rolesByNoun.has(stem)) continue;
+      if (!rolesByNoun.get(stem).has(value)) {
+        problems.push(`uncorroborated_count:${match[1]} ${word}`);
+      }
+      break; // first mapped noun decides the role for this numeral
+    }
+  }
+  return problems;
+}
+
+// Action–location PAIRING (codex P1 #3007 r7): "we sprayed the kitchen"
+// must not pass just because a perimeter spray grounds "spray" and a
+// kitchen ACTIVITY finding grounds "kitchen" — a sentence that claims an
+// action at a location requires some single completed-work fact recording
+// them together. Work facts = affirmative ratified sentences, positive
+// findings (label+value), and device entries.
+function completedWorkStrings(facts) {
+  const strings = [];
+  const norm = (value) => ` ${String(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  // nextStep + recommendation-shaped sentences excluded: recommendations
+  // are not completed work, even when embedded in the body (codex P1 r11/r13)
+  [facts.recap, facts.todaysResult?.headline, facts.todaysResult?.body]
+    .forEach((block) => String(block || '').split(/(?<=[.!?])\s+/).forEach((sentence) => {
+      if (completedWorkSentence(sentence, facts.todaysResult?.nextStep)) strings.push(norm(sentence));
+    }));
+  (facts.findings || []).forEach((finding) => {
+    if (!NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())
+      && !RECOMMENDATION_FINDING_LABEL_RE.test(String(finding.label))) {
+      strings.push(norm(`${finding.label} ${finding.value}`));
+    }
+  });
+  (facts.devices || []).forEach((device) => {
+    strings.push(norm(`${device.name || ''} ${device.category || ''} ${device.summary || ''}`));
+  });
+  return strings;
+}
+
+function unpairedActionLocations(text, facts) {
+  const problems = [];
+  const actionTerms = DOMAIN_TERMS.filter((term) => term.kind === 'action');
+  const locationTerms = DOMAIN_TERMS.filter((term) => term.kind === 'location');
+  const work = completedWorkStrings(facts);
+  for (const sentence of String(text).split(/(?<=[.!?])\s+/)) {
+    const actions = actionTerms.filter((term) => term.out.test(sentence));
+    if (!actions.length) continue;
+    const locations = locationTerms.filter((term) => term.out.test(sentence));
+    // free-text locative phrases pair too ("we sprayed in the primary
+    // suite" — codex P2 r16), and so do DIRECT OBJECTS of treatment verbs
+    // ("we treated the primary suite"): each distinctive word acts as a
+    // location that must pair with the sentence's actions in a work fact
+    const objectRe = /\b(?:treat(?:ed)?|spray(?:ed)?|dust(?:ed)?|servic(?:ed)?|bait(?:ed)?|steam(?:ed)?|vacuum(?:ed)?|monitor(?:ed)?)\s+(?:the|your|their|our)\s+([a-z][a-z\s-]{2,30}?)(?=[.,;:!?]|\s+(?:and|with|so|to|for|today|during|this)\b|$)/gi;
+    const phraseMatches = [
+      ...String(sentence).matchAll(new RegExp(LOCATIVE_PHRASE_RE.source, 'gi')),
+      ...String(sentence).matchAll(objectRe),
+    ];
+    for (const phrase of phraseMatches) {
+      if (/\b(?:day|days|week|weeks|month|months|hour|hours|minute|minutes)\b/i.test(phrase[1])) continue;
+      phrase[1].toLowerCase().split(/[^a-z]+/)
+        .filter((word) => word.length >= 4)
+        .map((word) => word.replace(/s$/, ''))
+        .filter((word) => !GENERIC_PLACE_WORDS.has(word) && !GENERIC_PLACE_WORDS.has(`${word}s`))
+        .forEach((word) => locations.push({ corpus: new RegExp(`\\b${word}`) }));
+    }
+    if (!locations.length) continue;
+    // EVERY action×location pair asserted by the sentence must co-occur in
+    // one work fact (codex P1 #3007 r8): with "sprayed the kitchen" and
+    // "baited the bathroom" on record, the swapped "we sprayed the bathroom
+    // and baited the kitchen" must fail — per-location some-action matching
+    // let each location borrow the other clause's action. Fail-closed: a
+    // true compound sentence whose pairs weren't recorded together falls
+    // back to deterministic copy.
+    const everyPairGrounded = actions.every((action) => locations.every(
+      (location) => work.some((fact) => action.corpus.test(fact) && location.corpus.test(fact)),
+    ));
+    if (!everyPairGrounded) problems.push('unpaired_action_location');
+  }
+  return problems;
+}
+
+// Qualitative activity wording must match the grounded reading (codex P2
+// r16): a report grounded "High activity" cannot narrate "activity was
+// low", and a baseline visit (no trend recorded) cannot claim improvement
+// or worsening.
+const ACTIVITY_LEVEL_WORDS = ['severe', 'heavy', 'high', 'elevated', 'moderate', 'medium', 'light', 'low', 'minimal'];
+const TREND_DOWN_RE = /\b(improv\w*|decreas\w*|declin\w*|eas(?:ed|ing)|down|lower|dropp?\w*)\b/i;
+const TREND_UP_RE = /\b(worsen\w*|increas\w*|ris(?:e|en|ing)|rose|higher|escalat\w*)\b/i;
+
+function contradictedActivityWording(text, facts) {
+  const problems = [];
+  if (!facts.activity) return problems;
+  const factsLevel = ACTIVITY_LEVEL_WORDS.find((word) => String(facts.activity.levelWord || '').toLowerCase().includes(word)) || null;
+  const trendText = String(facts.activity.trendWord || '').toLowerCase();
+  const factsTrend = TREND_DOWN_RE.test(trendText) ? 'down' : (TREND_UP_RE.test(trendText) ? 'up' : null);
+  const allActivityClauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i))
+    .filter((clause) => /\bactivit/i.test(clause));
+  // A NEGATED activity claim ("no cockroach activity was observed")
+  // contradicts a POSITIVE grounded reading just as directly (codex P1
+  // r17) — the zero-state guard covers only the opposite direction.
+  const readingIsPositive = factsLevel !== null && !/\b(no|none|zero)\b/.test(String(facts.activity.levelWord || '').toLowerCase());
+  if (readingIsPositive) {
+    for (const clause of allActivityClauses) {
+      if (NEGATED_SENTENCE_RE.test(clause)) problems.push('contradicted_activity_negative');
+    }
+  }
+  const clauses = allActivityClauses.filter((clause) => !NEGATED_SENTENCE_RE.test(clause));
+  for (const clause of clauses) {
+    const lower = clause.toLowerCase();
+    const claimedLevel = ACTIVITY_LEVEL_WORDS.find((word) => new RegExp(`\\b${word}\\b`).test(lower)) || null;
+    if (claimedLevel && claimedLevel !== factsLevel) problems.push('contradicted_activity_level');
+    const claimsDown = TREND_DOWN_RE.test(lower);
+    const claimsUp = TREND_UP_RE.test(lower);
+    if ((claimsDown && factsTrend !== 'down') || (claimsUp && factsTrend !== 'up')) {
+      problems.push('contradicted_activity_trend');
+    }
+  }
+  return problems;
+}
+
+// Invented product/chemical identifiers reject independently of the
+// recorded applications (codex P2 r16): the echo guard only knows the
+// visit's own products, so an unrecorded brand or active ingredient
+// ("Termidor", "fipronil") needs its own lexicon ban.
+const PRODUCT_LEXICON_RE = /\b(termidor|taurus|alpine|gentrol|talstar|temprid|advion|maxforce|vendetta|contrac|ditrac|essentria|cyzmic|onslaught|tekko|nyguard|precor|altosid|premise|termador|bora-?care|timbor|suspend\s+(?:sc|polyzone)|demand\s+cs|fipronil|bifenthrin|imidacloprid|deltamethrin|cyfluthrin|permethrin|cypermethrin|lambda-?cyhalothrin|hydramethylnon|indoxacarb|abamectin|dinotefuran|hydroprene|pyriproxyfen|novaluron|noviflumuron|hexaflumuron|chlorfenapyr|thiamethoxam)\b/i;
+
+function inventedProductIdentifiers(text, facts) {
+  const match = String(text).match(new RegExp(PRODUCT_LEXICON_RE.source, 'i'));
+  if (!match) return [];
+  // nameable device names are the only allowed product words
+  const nameable = (facts.devices || []).filter((d) => d.nameable && d.name).map((d) => d.name.toLowerCase());
+  if (nameable.some((name) => name.includes(match[0].toLowerCase()))) return [];
+  return [`invented_product:${match[0].toLowerCase()}`];
+}
+
+// A NEGATED model clause that names a distinctive word of a mandatory
+// care sentence contradicts it ("No follow-up is needed" vs "A follow-up
+// visit in 10\u201314 days is recommended") \u2014 appending the ratified copy after
+// would publish both claims (codex P1 #3007 r14). Common report nouns are
+// excluded so a legitimate zero-state ("no bed bug activity was found")
+// doesn't collide with care copy mentioning activity.
+const CARE_COMMON_WORDS = new Set([
+  'activity', 'service', 'services', 'treatment', 'treatments', 'treated',
+  'visit', 'visits', 'today', 'please', 'between', 'during', 'before',
+  'within', 'around', 'contact',
+]);
+
+// Positive PERMISSION language reverses care copy without a negator
+// ("you may disturb the treated areas" vs "keep areas undisturbed" —
+// codex P1 r17), and prefixed care words hide their stems ("undisturbed"
+// vs "disturb"), so both clause families and de-prefixed stems are
+// checked.
+// Subject-bound forms only: "so the treatment can work" is care copy
+// itself, not a permission grant.
+const PERMISSION_RE = /\b(?:you\s+(?:may|can)|customers?\s+(?:may|can)|are\s+free\s+to|feel\s+free\s+to|it\s+is\s+(?:now\s+)?(?:fine|okay|ok)\s+to|no\s+need\s+to)\b/i;
+
+function careStems(sentence) {
+  const stems = new Set();
+  sentence.toLowerCase().split(/[^a-z-]+/)
+    .filter((word) => word.length >= 6 && !CARE_COMMON_WORDS.has(word))
+    .forEach((word) => {
+      stems.add(word);
+      const dePrefixed = word.replace(/^(?:un|non)/, '');
+      if (dePrefixed !== word && dePrefixed.length >= 5) {
+        stems.add(dePrefixed.replace(/(?:ed|ing)$/, ''));
+      }
+    });
+  return [...stems];
+}
+
+function contradictedCareCopy(text, facts) {
+  const problems = [];
+  const careSentences = mandatoryCareCopy(facts.todaysResult || {});
+  if (!careSentences.length) return problems;
+  const allClauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i));
+  const negatedClauses = allClauses.filter((clause) => NEGATED_SENTENCE_RE.test(clause));
+  const permissionClauses = allClauses.filter((clause) => !NEGATED_SENTENCE_RE.test(clause) && PERMISSION_RE.test(clause));
+  if (!negatedClauses.length && !permissionClauses.length) return problems;
+  for (const sentence of careSentences) {
+    const stems = careStems(sentence);
+    if (!stems.length) continue;
+    const hit = [...negatedClauses, ...permissionClauses].some((clause) => {
+      const lower = clause.toLowerCase();
+      return stems.some((stem) => lower.includes(stem));
+    });
+    if (hit) {
+      problems.push('contradicted_care_copy');
+      break;
+    }
+  }
+  return problems;
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -646,7 +1337,17 @@ function ungroundedClaims(rawText, facts) {
   const problems = [];
   const text = String(rawText || '');
   const allowed = groundedNumberSet(facts);
-  for (const token of numberTokens(text)) {
+  // Word-form numbers hit the GLOBAL check too (codex P1 #3007 r4):
+  // "follow up in twenty days" carries no raw digit, but 20 must still be
+  // grounded. The bare word "one" is exempt when no digit 1 was written —
+  // harmless prose ("one of the traps") is not a numeric claim.
+  const rawDigits = new Set(numberTokens(text));
+  // "one" is exempt only in its partitive idiom ("one of the traps") — a
+  // bare "one day"/"one treatment" is a numeric claim and validates like
+  // any digit (codex P1 #3007 r5).
+  const bareOne = /\bone\b(?!\s+of\b)/i.test(text);
+  for (const token of numberTokens(normalizeWordNumbers(text))) {
+    if (token === '1' && !rawDigits.has('1') && !bareOne) continue;
     const grounded = allowed.has(token)
       || allowed.has(String(Number(token)))
       || token.split(/[:.,]/).every((part) => allowed.has(part) || allowed.has(String(Number(part))));
@@ -655,6 +1356,13 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
   problems.push(...nextVisitProblems(text, facts));
+  problems.push(...ungroundedDomainTerms(text, facts));
+  problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
+  problems.push(...contradictedZeroStates(text, facts));
+  problems.push(...unpairedActionLocations(text, facts));
+  problems.push(...contradictedCareCopy(text, facts));
+  problems.push(...contradictedActivityWording(text, facts));
+  problems.push(...inventedProductIdentifiers(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month
@@ -697,12 +1405,34 @@ function echoesWithheldName(text, applications = []) {
     });
 }
 
+// Sentences the ratified copy marks as customer OBLIGATIONS — imperative
+// care markers in the typed body — plus every next-step sentence. These are
+// the pieces an accepted narrative must carry verbatim (appended when it
+// doesn't); dedup by exact string so body-embedded next-step copy appends
+// once.
+// Broad by design (codex P1 #3007 r4): expectation/monitoring copy
+// ("Continue monitoring and contact us if activity returns") is as
+// mandatory as an imperative — an over-wide match only appends a ratified
+// sentence the narrative skipped, never loses one.
+const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off|leave|allow|continue|contact|monitor(?:ing)?|watch|expect(?:ed)?|call|reach out|schedule|recommend(?:ed)?|follow[-\s]?up|return(?:s)?)\b/i;
+
+function mandatoryCareCopy(todaysResult) {
+  const sentences = [];
+  const split = (block) => String(block || '').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  split(todaysResult?.body).forEach((sentence) => {
+    if (CARE_SENTENCE_RE.test(sentence)) sentences.push(sentence);
+  });
+  sentences.push(...split(todaysResult?.nextStep));
+  return [...new Set(sentences)];
+}
+
 /**
- * Returns the detailed Visit Summary string for a rodent typed report, or
- * the deterministic fallback. Never throws; never returns unguarded model
- * copy.
+ * Returns the detailed Visit Summary string for a typed specialty report
+ * (rodent, cockroach, bed bug, termite bait, … — V1 surface only; WDO is
+ * project-report territory), or the deterministic
+ * fallback. Never throws; never returns unguarded model copy.
  */
-async function applyRodentReportNarrative(input = {}, deps = {}) {
+async function applyTypedReportNarrative(input = {}, deps = {}) {
   const facts = groundingFacts(input);
   if (!facts.recap && !facts.todaysResult) return cleanText(input.recap);
 
@@ -744,14 +1474,24 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
       banned.push(...ungroundedClaims(text, facts));
       if (!banned.length) {
         value = text;
+        // Care-instruction preservation is ENFORCED, not requested (codex
+        // P1 r2 + P2 r3): on the Pest V2 override surface the narrative
+        // replaces the ratified body, so BOTH the next-step copy and any
+        // mandatory care sentences embedded in the ratified body (flea
+        // cooperation/aftercare etc.) must survive verbatim. Sentences the
+        // narrative only paraphrased are appended in ratified form (the
+        // client's containment rule then renders each once, in the body).
+        for (const sentence of mandatoryCareCopy(facts.todaysResult)) {
+          if (!value.includes(sentence)) value = `${value} ${sentence}`.trim();
+        }
       } else {
-        logger.warn(`[rodent-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
+        logger.warn(`[typed-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
       }
     } else if (res && !res.ok) {
-      logger.warn(`[rodent-narrative] miss (${res.reason}); using deterministic summary`);
+      logger.warn(`[typed-narrative] miss (${res.reason}); using deterministic summary`);
     }
   } catch (err) {
-    logger.warn(`[rodent-narrative] failed: ${err.message}; using deterministic summary`);
+    logger.warn(`[typed-narrative] failed: ${err.message}; using deterministic summary`);
   }
 
   _cache.set(cacheKey, { at: Date.now(), value });
@@ -760,7 +1500,10 @@ async function applyRodentReportNarrative(input = {}, deps = {}) {
 }
 
 module.exports = {
-  applyRodentReportNarrative,
+  applyTypedReportNarrative,
+  // Back-compat alias — the rodent refresh (GATE_RODENT_REPORT_REFRESH)
+  // shipped against this name; same engine.
+  applyRodentReportNarrative: applyTypedReportNarrative,
   // exported for tests
   _test: {
     groundingFacts,

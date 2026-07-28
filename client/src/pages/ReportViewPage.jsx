@@ -2356,9 +2356,30 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
+  // The gated typed-report narrative (summarySource 'typed_narrative')
+  // replaces the template body ONLY here when Pest/Mosquito V2 suppresses
+  // the legacy Visit Summary section — this card is then the report's one
+  // summary surface. Non-V2 typed reports render the narrative in the
+  // Visit Summary section instead and keep the ratified template body here
+  // (both would otherwise show the same paragraph twice).
+  // The deterministic fallback narrative LEADS with the headline this card
+  // already renders as its <h2> — strip that leading repeat so a guard
+  // miss doesn't print the headline twice (codex P2 #3007 r2).
+  let body = bodyOverride || result.body;
+  if (bodyOverride) {
+    const headline = String(result.headline).replace(/\.$/, '');
+    // Strip only a TRUE duplicate — headline followed by sentence-ending
+    // punctuation (the deterministic fallback's "Headline. Body…" shape).
+    // A headline flowing into a longer sentence ("…was high today, with
+    // German cockroaches noted…") keeps the full sentence; slicing at a
+    // comma would publish a paragraph starting ", with …" (codex P2 r3).
+    if (body.startsWith(headline) && /^[.!?]/.test(body.slice(headline.length))) {
+      body = body.slice(headline.length).replace(/^[.!?]\s*/, '').trim() || result.body;
+    }
+  }
   return (
     <section data-glass="card" className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
@@ -2367,10 +2388,15 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {result.body && <p className="ai-summary-body">{result.body}</p>}
+      {body && <p className="ai-summary-body">{body}</p>}
       {/* The snapshot builder embeds nextStep in body on most paths — only
-          render the bullet when it adds something the paragraph doesn't. */}
-      {result.nextStep && !(result.body || '').includes(result.nextStep) && (
+          render the bullet when it adds something the paragraph doesn't.
+          This containment rule applies to the narrative override too: the
+          prompt asks the narrative to carry the follow-up, but only actual
+          containment may hide the explicit instruction — a paraphrase
+          keeps the bullet (mild repetition beats a dropped care step,
+          codex P2 #3007). */}
+      {result.nextStep && !(body || '').includes(result.nextStep) && (
         <div className="ai-summary-bullets">
           <div className="ai-summary-bullet">{result.nextStep}</div>
         </div>
@@ -8009,7 +8035,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             for pest to match. */}
         {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
-        <TodaysResultCard typedReport={data.typedReport} />
+        <TodaysResultCard
+          typedReport={data.typedReport}
+          bodyOverride={data.summarySource === 'typed_narrative' && (data.pestReportV2 || data.mosquitoReportV2)
+            ? cleanVisitSummary(data.summary)
+            : null}
+        />
 
         <RecapVideoCard recap={data.recap} token={token} />
 

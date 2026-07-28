@@ -12,7 +12,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
-const { applyRodentReportNarrative } = require('./rodent-report-narrative');
+const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
@@ -417,7 +417,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     .replace(/[^a-z0-9]+/g, ' ');
   // Area chips are a controlled vocabulary and remain a valid scope signal.
   const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
+  // fence/trash cover the controlled pest-area chips "Fence line" and
+  // "Trash area" — clearly exterior choices that previously fell through
+  // and (under the explicit-exterior rule) would wrongly zero the
+  // customer's dry-down timer (codex P1 #3007).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
@@ -425,18 +429,43 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     hasInterior: textInterior || action.hasInterior,
     hasExterior: textExterior || action.hasExterior,
     hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+    // TRUE only when a recognized interior/exterior LOCATION signal exists.
+    // Target-only text (product target names) makes hasExplicitScope true
+    // without classifying anything — the write-path defer must key on this
+    // instead, or a trace saved later can't restore the timer (codex P1
+    // #3007 r13).
+    hasLocationSignal: textInterior || textExterior || action.hasInterior || action.hasExterior,
   };
 }
 
-function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [] } = {}) {
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   const scope = treatmentScope({ service, applications, zones });
 
   if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
-  if (normalized.exterior_reentry_min != null && scope.hasExplicitScope && scope.hasInterior && !scope.hasExterior) {
-    normalized.exterior_reentry_min = 0;
+  // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
+  // the visit explicitly classified exterior treatment — never as a
+  // default timer. A visit with no recorded scope at all therefore shows
+  // no exterior row (previously both service-line default timers rendered).
+  // This subsumes the old interior-only branch: explicitly-interior visits
+  // have hasExterior false and zero out here the same way.
+  // WRITE-path callers set deferUnknownExteriorZeroing: an UNKNOWN scope
+  // keeps the stored duration so a treatment-zone trace saved AFTER
+  // completion can still surface the timer — the read-time normalizer
+  // (trace-aware) makes the final display call, and stored zero would be
+  // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
+  // still zeroes at write.
+  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
+    // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
+    // Mapper trace can be saved AFTER completion even when the visit
+    // recorded interior locations, and a stored zero is unrecoverable.
+    // Every DISPLAY surface (report payload, re-entry card, SMS, email)
+    // normalizes at read time with trace evidence and zeroes there.
+    if (!deferUnknownExteriorZeroing) {
+      normalized.exterior_reentry_min = 0;
+    }
   }
 
   return normalized;
@@ -447,7 +476,26 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // resolved here is what the customer sees — the report build can only zero it
 // further, never restore it. Kept as a pure helper so the scope wiring is
 // directly testable without the full /complete route harness.
-function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [] } = {}) {
+// Shared trace-evidence resolver (read paths + SMS/email delivery): a
+// technician-traced treatment zone is explicit exterior scope. Only the
+// expected missing-table error means "no trace" — a transient failure
+// preserves the exterior timer rather than suppressing customer safety
+// guidance (codex P1 #3007 r9/r17). Lives here (not reentry.js) so the
+// report payload's own advisory normalization can use it without a
+// require cycle.
+async function resolveTracedExteriorZone(record, knex = db) {
+  if (!record?.scheduled_service_id) return false;
+  try {
+    return !!(await knex('treatment_zone_maps')
+      .where({ scheduled_service_id: record.scheduled_service_id })
+      .first());
+  } catch (traceErr) {
+    return !(traceErr?.code === '42P01'
+      || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+  }
+}
+
+function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
   return normalizeAdvisoryForTreatmentScope(advisoryDefaults, {
     service: {
       areas_serviced: completionAreas,
@@ -457,6 +505,16 @@ function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], 
       },
     },
     applications,
+    // A technician-traced treatment zone is explicit exterior evidence: the
+    // trace is drawn over the property's satellite exterior. Typed T&S
+    // closeouts hide areasServiced and clear applicationArea, so without
+    // this the explicit-exterior rule would zero the dry-down timer on a
+    // visit whose treatment location WAS captured (codex P1 #3007 r5).
+    zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    // Unknown scope keeps the stored duration at write time — a trace saved
+    // after completion must still be able to surface the timer, and the
+    // read-time normalizer makes the final display decision.
+    deferUnknownExteriorZeroing: true,
   });
 }
 
@@ -2464,11 +2522,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
+  const payloadTracedExteriorZone = await resolveTracedExteriorZone(service, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
-  }, { service, applications });
+  }, {
+    service,
+    applications,
+    zones: payloadTracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+  });
   const metrics = buildMetrics(config, {
     onSiteMin,
     treatedZoneIds,
@@ -3004,6 +3067,62 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Typed-report narrative for EVERY OTHER typed specialty report on the
+  // V1 surface (owner ask 2026-07-27, second lane): cockroach, bed bug,
+  // termite bait, … keep the frozen recap/template as their summary — the
+  // gate reweaves the typed data. NOTE: WDO inspections are OUT OF SCOPE
+  // here — completion profiles exclude wdo_inspection from V1 and public
+  // WDOs render on the project-report surface (codex P2 #3007 r7); a WDO
+  // narrative would be its own lane on that surface. COMPANION typed
+  // snapshots keep their ratified template bodies BY DESIGN (codex P2
+  // r14): the narrative upgrades the report's ONE summary surface; the
+  // companion cards are compliance record sections, and per-companion
+  // generation would multiply view-time LLM calls without a summary slot
+  // to fill.
+  // The gate reweaves the
+  // typed findings, activity reading, station counts, products, photo
+  // evidence, and next same-line visit into the grounded narrative (same
+  // engine + guard stack as the rodent refresh). Precedence unchanged: the
+  // tech's reviewed "Generate AI report" copy still wins — both the summary
+  // slot and a snapshot whose Today's Result body came from it. LIVE VIEWS
+  // ONLY, so pdf/static/sms_preview output never varies with the gate (no
+  // PDF cache-key impact). The client shows the narrative in whichever
+  // summary surface the report renders: the legacy Visit Summary section,
+  // or the Today's Result body when Pest/Mosquito V2 suppresses that
+  // section (summarySource === 'typed_narrative' drives the override).
+  // Kill switch: unset GATE_TYPED_REPORT_NARRATIVE.
+  if (
+    serviceLine !== 'rodent'
+    // Lawn and tree & shrub have their own specialized narrative layers
+    // (applyLawnReportNarrative / the T&S V2 composition) — a second
+    // generic summary would duplicate or conflict with them, and this
+    // engine's guards don't ground agronomic claims (codex P2 #3007 r6).
+    && serviceLine !== 'lawn'
+    && serviceLine !== 'tree_shrub'
+    && typedSnapshot
+    && visitSummarySource !== 'technician_report'
+    && typedSnapshot.todaysResult?.bodySource !== 'technician_report'
+    && opts.mode === 'live'
+    && process.env.GATE_TYPED_REPORT_NARRATIVE === 'true'
+  ) {
+    const narrated = await applyTypedReportNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: linkedServiceName,
+      reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
+      typedReport: typedSnapshot,
+      activity,
+      stationSummary: stationMap?.summary || null,
+      stationProgram: stationMap?.program || null,
+      applications,
+      photos: photoPayload,
+      nextAppointment,
+    }).catch(() => null);
+    if (narrated && narrated !== visitSummary) {
+      visitSummary = narrated;
+      visitSummarySource = 'typed_narrative';
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -3067,7 +3186,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     summary: visitSummary,
     // 'technician_report' when summary is the tech-reviewed AI report copy,
-    // 'rodent_narrative' when the gated rodent narrative composed it,
+    // 'rodent_narrative' / 'typed_narrative' when a gated narrative
+    // composed it (typed_narrative also drives the client's Today's Result
+    // body override on V2-suppressed summaries),
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
@@ -3177,6 +3298,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
   calculateLawnOverallScore,

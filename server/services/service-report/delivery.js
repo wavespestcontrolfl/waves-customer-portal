@@ -127,10 +127,22 @@ function buildServiceReportV1DeliveryContext({
   const smsType = serviceReportV1SmsType({ hasInvoiceLink });
   // Frozen V2 synthesis line (write-gate) — keeps the text on-message with the report.
   const summaryLine = summaryLineParam || frozenSmsSummary(record);
+  // The STORED advisory defers exterior zeroing on unknown scope (so a
+  // trace saved after completion can restore the timer) — the SMS is a
+  // DISPLAY surface and must apply the same read-time normalization the
+  // report does, or the completion text promises an exterior re-entry
+  // window the report won't show (codex P2 #3007 r12). Trace evidence
+  // rides record.tracedExteriorZone, resolved by the caller.
+  const { normalizeAdvisoryForTreatmentScope } = require('./report-data');
+  const displayAdvisory = normalizeAdvisoryForTreatmentScope(record.advisory, {
+    service: record,
+    applications: Array.isArray(record.applications) ? record.applications : [],
+    zones: record.tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+  });
   const vars = buildServiceReportV1SmsVars({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
-    advisory: record.advisory,
+    advisory: displayAdvisory,
     fallbackAdvisory: config.advisoryDefaults,
     payUrl,
   });
@@ -138,7 +150,7 @@ function buildServiceReportV1DeliveryContext({
   const body = buildServiceReportV1Sms({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
-    advisory: record.advisory,
+    advisory: displayAdvisory,
     fallbackAdvisory: config.advisoryDefaults,
     payUrl,
     summaryLine,
