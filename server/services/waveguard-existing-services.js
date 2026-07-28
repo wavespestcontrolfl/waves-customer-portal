@@ -210,10 +210,17 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   const catalogById = await loadCatalogFieldsByRowId(database, customerId);
   const today = etDateString();
-  return rows.filter((r) => {
-    if (!rowPassesGatedPricingEvidence(r, today)) return false;
+  // The kept rows are returned ENRICHED with their catalog identity (Codex
+  // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
+  // repricing paths built on it) must derive families from the same joined
+  // identity this filter qualified on, or a generic 'Lawn Care' row linked
+  // to lawn_care_monthly contributes no family and a stale different-family
+  // label contributes the wrong one.
+  const kept = [];
+  for (const r of rows) {
+    if (!rowPassesGatedPricingEvidence(r, today)) continue;
     const joined = { ...r, ...(catalogById.get(r.id) || {}) };
-    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) return false;
+    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) continue;
     // Qualify from the JOINED identity, not service_type alone (Codex #3011
     // r10): a stale 'Tree & Shrub Care' service_type linked to the
     // non-qualifying palm_injection catalog service must not count as a
@@ -222,17 +229,29 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
     // palm/token word boundaries match; the commercial/rodent classes were
     // already removed per-field above, so concatenation here only feeds the
     // keyword/palm logic, which is order-independent.
-    const joinedText = [joined.service_type, joined.service_key, joined.service_name]
-      .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
-    return toQualifyingKeys(joinedText).length > 0;
-  });
+    if (toQualifyingKeys(qualifyingRowText(joined)).length === 0) continue;
+    kept.push(joined);
+  }
+  return kept;
+}
+
+// Classification text for a qualifying row: rows enriched with catalog
+// identity (the gated loadExistingRecurringQualifyingRows path) classify on
+// the joined, underscore-normalized text; plain rows classify on
+// service_type alone — byte-identical to the legacy behavior (Codex #3011
+// r11: the reducer must see the same identity the gated filter qualified
+// on).
+function qualifyingRowText(row = {}) {
+  if (!row.service_key && !row.service_name) return row.service_type;
+  return [row.service_type, row.service_key, row.service_name]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
 }
 
 // Distinct qualifying service keys from a set of rows.
 function qualifyingKeysFromRows(rows = []) {
   const keys = new Set();
   for (const r of rows) {
-    toQualifyingKeys(r.service_type).forEach((key) => keys.add(key));
+    toQualifyingKeys(qualifyingRowText(r)).forEach((key) => keys.add(key));
   }
   return [...keys];
 }

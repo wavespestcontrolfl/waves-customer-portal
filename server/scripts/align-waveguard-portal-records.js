@@ -302,11 +302,13 @@ function buildNoPlanEnrollmentUpdates(customer, detectedKeys, columns) {
   if (!columnPresent(columns, 'waveguard_tier')) return updates;
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   if (!inferredTier) return updates;
+  // Enrollment REQUIRES persistable provenance (Codex #3011 r11 P1,
+  // mirrors the runtime builder): a tier stamped without
+  // waveguard_tier_source would surface as a NULL-provenance "member" once
+  // the migration lands. On a pre-migration schema the pass enrolls nobody.
+  if (!columnPresent(columns, 'waveguard_tier_source')) return updates;
   updates.waveguard_tier = inferredTier;
-  // Provenance: mark the stamp as auto-derived so only these tiers are ever
-  // auto-realigned or excluded from member messaging (mirrors the runtime
-  // enrollment path; Codex #3011 r7 P1). Column-guarded for older envs.
-  if (columnPresent(columns, 'waveguard_tier_source')) updates.waveguard_tier_source = 'auto';
+  updates.waveguard_tier_source = 'auto';
   return updates;
 }
 
@@ -353,17 +355,21 @@ async function candidateCustomers(customerColumns) {
   // realignment — never candidates for the member-repair pass (Codex #3011
   // r9). Narrowed to rows still in label shape (Codex r10): a converted
   // label (positive rate or paid lane, provenance still 'auto') is a real
-  // member and must remain repairable. The builder re-checks via
-  // isAutoDerivedTierLabelRow as the fail-closed belt.
+  // member and must remain repairable. Expressed POSITIVELY, never as
+  // NOT(...) over nullable columns (Codex r11 P2): SQL three-valued logic
+  // makes NOT(source = 'auto' AND ...) evaluate to NULL — filtering out —
+  // for the NULL-provenance zero-rate legacy members this repair pass
+  // exists to fix. A row stays a candidate when ANY of these holds: no /
+  // non-auto provenance, a positive rate, or an explicit non-label lane.
+  // The builder re-checks via isAutoDerivedTierLabelRow as the belt.
   if (columnPresent(customerColumns, 'waveguard_tier_source')) {
-    query = query.whereNot(function stillLabelOnly() {
-      this.where('c.waveguard_tier_source', 'auto')
-        .andWhere(function noRate() {
-          this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
-        });
+    query = query.where(function notStillLabelOnly() {
+      this.whereNull('c.waveguard_tier_source')
+        .orWhere('c.waveguard_tier_source', '!=', 'auto')
+        .orWhere('c.monthly_rate', '>', 0);
       if (columnPresent(customerColumns, 'billing_mode')) {
-        this.andWhere(function labelLane() {
-          this.whereNull('c.billing_mode').orWhereIn('c.billing_mode', ['per_visit', 'one_time']);
+        this.orWhere(function paidLane() {
+          this.whereNotNull('c.billing_mode').whereNotIn('c.billing_mode', ['per_visit', 'one_time']);
         });
       }
     });

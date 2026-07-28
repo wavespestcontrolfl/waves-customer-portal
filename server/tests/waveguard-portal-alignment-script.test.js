@@ -18,6 +18,7 @@ describe('WaveGuard portal alignment script helpers', () => {
     pipeline_stage: {},
     pipeline_stage_changed_at: {},
     waveguard_tier: {},
+    waveguard_tier_source: {},
     monthly_rate: {},
     member_since: {},
   };
@@ -265,28 +266,35 @@ describe('WaveGuard portal alignment script helpers', () => {
       earliest_service_date: '2026-10-08',
     };
 
-    // Exactly { waveguard_tier } — never monthly_rate (billing-cron would
-    // start monthly-charging), never member_since / pipeline_stage / active.
+    // Exactly { waveguard_tier, waveguard_tier_source: 'auto' } — never
+    // monthly_rate (billing-cron would start monthly-charging), never
+    // member_since / pipeline_stage / active.
     expect(buildNoPlanEnrollmentUpdates(noPlanCustomer, ['pest_control_quarterly'], customerColumns))
-      .toEqual({ waveguard_tier: 'Bronze' });
+      .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
     expect(buildNoPlanEnrollmentUpdates(noPlanCustomer, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns))
-      .toEqual({ waveguard_tier: 'Silver' });
+      .toEqual({ waveguard_tier: 'Silver', waveguard_tier_source: 'auto' });
     expect(buildNoPlanEnrollmentUpdates(noPlanCustomer, ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly'], customerColumns))
-      .toEqual({ waveguard_tier: 'Gold' });
+      .toEqual({ waveguard_tier: 'Gold', waveguard_tier_source: 'auto' });
     expect(buildNoPlanEnrollmentUpdates(
       noPlanCustomer,
       ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly', 'termite_bait_quarterly'],
       customerColumns,
-    )).toEqual({ waveguard_tier: 'Platinum' });
+    )).toEqual({ waveguard_tier: 'Platinum', waveguard_tier_source: 'auto' });
 
     // Cadence variants of one family never overcount the tier.
     expect(buildNoPlanEnrollmentUpdates(noPlanCustomer, ['lawn_care_monthly', 'lawn_care_6week'], customerColumns))
-      .toEqual({ waveguard_tier: 'Bronze' });
+      .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
 
     // Explicit non-member sentinels are still "No Plan" for this pass — the
     // 2026-07-28 directive keys on upcoming recurring coverage, not the old label.
     expect(buildNoPlanEnrollmentUpdates({ ...noPlanCustomer, waveguard_tier: 'none' }, ['pest_control_quarterly'], customerColumns))
-      .toEqual({ waveguard_tier: 'Bronze' });
+      .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
+
+    // Pre-migration schema (no provenance column): the pass refuses to
+    // enroll — a stamp without recorded provenance would surface as a
+    // NULL-provenance "member" once the migration lands (Codex #3011 r11).
+    expect(buildNoPlanEnrollmentUpdates(noPlanCustomer, ['pest_control_quarterly'], { waveguard_tier: {}, monthly_rate: {} }))
+      .toEqual({});
   });
 
   test('--enroll-no-plan pass fail-closes on members, commercial, and no evidence', () => {

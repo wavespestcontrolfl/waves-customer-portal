@@ -316,9 +316,11 @@ describe('self-booking plan sync helpers', () => {
     expect(buildNoPlanTierEnrollmentUpdates({ ...noPlan, waveguard_tier: 'none' }, ['pest_control_quarterly'], customerColumns).updates)
       .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
 
-    // Pre-migration environment (no provenance column): tier-only stamp.
+    // Pre-migration environment (no provenance column): enrollment REFUSES
+    // to stamp — a tier without recorded provenance would surface as a
+    // NULL-provenance "member" once the migration lands (Codex #3011 r11).
     expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly'], { waveguard_tier: {}, monthly_rate: {} }).updates)
-      .toEqual({ waveguard_tier: 'Bronze' });
+      .toEqual({});
   });
 
   test('tier auto-enrollment fail-closes on members, commercial, and no evidence', () => {

@@ -618,12 +618,15 @@ function buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerCo
   if (isMembershipCustomerRow(customer || {})) return { updates, detectedFamilyKeys, inferredTier: null };
   if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') return { updates, detectedFamilyKeys, inferredTier: null };
   if (!inferredTier || !customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
+  // Enrollment REQUIRES persistable provenance (Codex #3011 r11 P1): a tier
+  // stamped without waveguard_tier_source would surface as a NULL-provenance
+  // "member" once the migration lands — permanently waiving deposits,
+  // receiving member comms, and exempt from realignment. Until the column
+  // exists, no enrollment happens (the nightly reconcile picks the customer
+  // up after the migration runs).
+  if (!customerColumns.waveguard_tier_source) return { updates, detectedFamilyKeys, inferredTier };
   updates.waveguard_tier = inferredTier;
-  // Provenance: only 'auto'-stamped tiers are ever auto-realigned/cleared or
-  // treated as label-only by the messaging gates (Codex #3011 r7 P1 — a
-  // legacy member's NULL-lane tier has no provenance and must stay
-  // untouchable). Column-guarded for pre-migration environments.
-  if (customerColumns.waveguard_tier_source) updates.waveguard_tier_source = 'auto';
+  updates.waveguard_tier_source = 'auto';
   return { updates, detectedFamilyKeys, inferredTier };
 }
 
@@ -1084,15 +1087,28 @@ function isAutoDerivedTierLabelRow(customer = {}) {
 // is skipped. Both err away from granting member benefits on uncertainty.
 async function tierLabelStatus(customerId, database = db) {
   if (!customerId) return 'not_label';
-  const unverifiable = () => (isEnabled('autoWaveguardTierEnroll') ? 'unknown' : 'not_label');
   try {
     const customerColumns = await columnInfo(database, 'customers');
-    if (!customerColumns.waveguard_tier_source) return unverifiable();
+    if (!customerColumns.waveguard_tier_source) {
+      // Missing COLUMN is decidable by the gate: labels can only have been
+      // stamped by gate-on code, which ships with (and deploys after) the
+      // migration — so a schema without the column plus a dark gate means no
+      // label can exist ('not_label', legacy behavior byte-identical), while
+      // gate-on against the pre-migration schema may stamp unrecorded labels
+      // ('unknown'). Enrollment additionally refuses to stamp without the
+      // column (see buildNoPlanTierEnrollmentUpdates), making this window
+      // belt-and-braces.
+      return isEnabled('autoWaveguardTierEnroll') ? 'unknown' : 'not_label';
+    }
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return 'not_label';
     return isAutoDerivedTierLabelRow(customer) ? 'label' : 'not_label';
   } catch {
-    return unverifiable();
+    // Lookup ERROR is never decidable: previously stamped labels survive the
+    // kill switch, so uncertainty stays 'unknown' regardless of the gate
+    // (Codex #3011 r11) — the money gates keep their deposit/SetupIntent
+    // required and the messaging gates stay silent until a clean read.
+    return 'unknown';
   }
 }
 
