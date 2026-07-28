@@ -35,6 +35,13 @@ describe('parseMessage Reply-To validation', () => {
 
   test('rejects multi-recipient lists (header smuggling)', () => {
     expect(parseMessage(msgWith('a@x.example, b@y.example')).reply_to).toBeNull();
+    // Angle-bracketed lists must be rejected WHOLE — extracting the first
+    // mailbox would silently drop the ticketing/audit recipient.
+    expect(parseMessage(msgWith('Customer <customer@x.example>, Ticketing <support@y.example>')).reply_to).toBeNull();
+  });
+
+  test('a quoted display-name comma is not a list separator', () => {
+    expect(parseMessage(msgWith('"Doe, Jane" <jane@customer.example>')).reply_to).toBe('jane@customer.example');
   });
 
   test('rejects non-mailbox junk and stays null when absent', () => {

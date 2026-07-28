@@ -599,12 +599,14 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // saying "not spam" — undo the quarantine (Gmail labels + sweep stamp).
     // cancelQuarantine propagates a failed Gmail restore, keeping the
     // quarantine intact for a retry rather than orphaning the message.
-    if (wasQuarantined && classification.category !== 'spam') {
-      // COMMIT phase — the verdict is valid and non-spam. Re-check the
-      // sender's spam_auto block UNCONDITIONALLY (not just for
-      // restored-from-trash rows): auto_action may have been overwritten by
-      // the new handler, but quarantined_at keeps retries flowing through
-      // here until the unblock actually succeeds. Unblock first (idempotent:
+    if (classification.category !== 'spam') {
+      // COMMIT phase — the sender-unblock check runs on EVERY non-spam
+      // verdict, NOT just quarantine-lane rows: crash recovery can wipe the
+      // origin evidence entirely (a restored-trash claim that died before
+      // its verdict persisted decays to ambiguous → quarantine_failed, with
+      // quarantined_at NULL), but an operator's non-spam verdict on a
+      // sender holding a spam_auto block always means that block is wrong
+      // and Gmail is still trash-routing them. Unblock first (idempotent:
       // the block row deletes only on success), then cancel the quarantine.
       {
         const blocked = await db('blocked_email_senders')
@@ -619,11 +621,13 @@ router.post('/message/:id/reclassify', async (req, res) => {
           }
         }
       }
-      const { cancelQuarantine } = require('../services/email/inbox-hygiene');
-      // marketing_newsletter's own handler already archived the message —
-      // restoring INBOX would undo the new category's intended state, so
-      // only the quarantine label + sweep stamp are cleared for it.
-      await cancelQuarantine(email, { restoreInbox: classification.category !== 'marketing_newsletter' });
+      if (wasQuarantined) {
+        const { cancelQuarantine } = require('../services/email/inbox-hygiene');
+        // marketing_newsletter's own handler already archived the message —
+        // restoring INBOX would undo the new category's intended state, so
+        // only the quarantine label + sweep stamp are cleared for it.
+        await cancelQuarantine(email, { restoreInbox: classification.category !== 'marketing_newsletter' });
+      }
     }
 
     logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);

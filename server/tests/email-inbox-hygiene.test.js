@@ -588,6 +588,54 @@ describe('rescueSpamFolder scan window', () => {
     expect(state.updates.find((u) => u.table === 'email_sync_state')).toBeDefined();
   });
 
+  test('a failed unverified-sender review bell counts as a per-message failure — watermark held', async () => {
+    const state = setupDb({
+      customers: [{ id: 'cust-1', email: 'jane@customer.example' }],
+      email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }],
+    });
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'notifications') {
+        b.insert = jest.fn(() => {
+          const p2 = Promise.reject(new Error('db down'));
+          return { returning: jest.fn(async () => { throw new Error('db down'); }), then: p2.then.bind(p2), catch: p2.catch.bind(p2) };
+        });
+      }
+      return b;
+    });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-a' }, { id: 'spam-b' }], truncated: false, nextPageToken: null });
+    gmailClient.getMessage
+      .mockResolvedValueOnce({ from_address: 'jane@customer.example', from_name: 'Jane', subject: 'urgent', authentication_results: 'mx.google.com; spf=fail smtp.mailfrom=attacker.example' })
+      .mockResolvedValueOnce({ from_address: 'junk@blaster.example' });
+    const counts = await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    // The bell is the ONLY surfaced outcome — its failure must hold the
+    // watermark so a later sweep retries the alert.
+    expect(counts.scanned).toBe(2);
+    expect(state.updates.find((u) => u.table === 'email_sync_state')).toBeUndefined();
+  });
+
+  test('a failed continuation persist FAILS the run instead of silently stalling', async () => {
+    setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'email_sync_state') {
+        b.update = jest.fn(async (patch) => {
+          if ('spam_scan_before_epoch' in patch) throw new Error('db down');
+          return 1;
+        });
+      }
+      return b;
+    });
+    for (let i = 0; i < 20; i += 1) {
+      gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: `s${i}` }], truncated: true, nextPageToken: `p${i}` });
+      gmailClient.getMessage.mockResolvedValueOnce({ from_address: 'junk@blaster.example', received_at: new Date('2026-07-28T00:00:00Z') });
+    }
+    await expect(rescueSpamFolder(new Date('2026-07-28T12:00:00Z')))
+      .rejects.toThrow(/continuation persist failed/);
+  });
+
   test('a capped run persists the continuation epoch instead of stalling', async () => {
     const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
     for (let i = 0; i < 20; i += 1) {

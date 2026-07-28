@@ -121,13 +121,24 @@ function parseMessage(msg) {
   const listUnsubscribePost = getHeader('List-Unsubscribe-Post');
   // Reply-To carries the actionable recipient for relayed mail (contact
   // forms, ticketing) whose From is a provider no-reply mailbox. It is
-  // attacker-typed — accept ONLY a single plain mailbox (the same shape
-  // createDraft enforces for recipients); anything else stays null and
-  // replies fall back to From.
+  // attacker-typed — accept ONLY a header holding exactly one plain mailbox
+  // (the same shape createDraft enforces for recipients); a multi-recipient
+  // list stays null ENTIRELY (extracting just the first address would
+  // silently drop the ticketing/audit recipient), as does any other junk —
+  // replies then fall back to From.
   const replyToRaw = getHeader('Reply-To');
-  const replyToMatch = replyToRaw ? replyToRaw.match(/<([^>]+)>/) : null;
-  const replyToAddr = (replyToMatch ? replyToMatch[1] : replyToRaw || '').trim();
-  const replyTo = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(replyToAddr) ? replyToAddr : null;
+  let replyTo = null;
+  if (replyToRaw) {
+    // Commas inside quoted display names ("Doe, Jane" <j@x>) are legal;
+    // any comma OUTSIDE quotes means more than one mailbox — reject the
+    // whole header before extracting anything.
+    const unquoted = replyToRaw.replace(/"[^"]*"/g, '');
+    if (!unquoted.includes(',')) {
+      const replyToMatch = replyToRaw.match(/<([^>]+)>/);
+      const replyToAddr = (replyToMatch ? replyToMatch[1] : replyToRaw).trim();
+      if (/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(replyToAddr)) replyTo = replyToAddr;
+    }
+  }
   // Authentication-Results is only trustworthy when GMAIL wrote it — a
   // sender can inject their own copy claiming dkim=pass. Take the first
   // instance whose authserv-id is Google's receiving MX.

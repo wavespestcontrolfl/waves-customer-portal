@@ -547,6 +547,10 @@ async function rescueSpamFolder(now = new Date()) {
             .first()
             .catch(() => null);
           if (already) continue;
+          // This bell is the ONLY surfaced outcome for an unverified
+          // known-looking sender (the message stays in Spam) — a failed
+          // insert PROPAGATES to the per-message failure count so the
+          // watermark holds and a later sweep retries the alert.
           await db('notifications').insert({
             recipient_type: 'admin',
             category: 'email_rescue_review',
@@ -556,7 +560,7 @@ async function rescueSpamFolder(now = new Date()) {
             link: '/admin/email',
             metadata: JSON.stringify({ gmail_message_id: m.id }),
             created_at: new Date(),
-          }).catch(() => {});
+          });
           continue;
         }
         await gmailClient.modifyLabels(m.id, ['INBOX', 'IMPORTANT'], ['SPAM']);
@@ -595,16 +599,27 @@ async function rescueSpamFolder(now = new Date()) {
     if (undrained && Number.isFinite(oldestReceivedMs)) {
       // Persist forward progress: the next run partitions on the oldest
       // epoch reached (+1s so a same-second sibling is re-scanned rather
-      // than skipped — rescue is idempotent).
-      await db('email_sync_state').where('id', syncState.id)
-        .update({ spam_scan_before_epoch: Math.floor(oldestReceivedMs / 1000) + 1 })
-        .catch((e) => logger.warn(`[inbox-hygiene] spam-scan continuation update failed: ${e.message}`));
+      // than skipped — rescue is idempotent). This marker is the ONLY path
+      // to the older remainder, so a failed write FAILS the run — recording
+      // success without it would strand everything past the cap while each
+      // day re-scans the same newest page.
+      try {
+        await db('email_sync_state').where('id', syncState.id)
+          .update({ spam_scan_before_epoch: Math.floor(oldestReceivedMs / 1000) + 1 });
+      } catch (e) {
+        throw new Error(`spam-scan continuation persist failed — run marked failed for retry: ${e.message}`);
+      }
     } else if (!undrained && beforeEpoch) {
       // Partition drained — clear the continuation; the next run does a
       // normal full-window pass (watermark still held until it completes).
-      await db('email_sync_state').where('id', syncState.id)
-        .update({ spam_scan_before_epoch: null })
-        .catch((e) => logger.warn(`[inbox-hygiene] spam-scan continuation clear failed: ${e.message}`));
+      // A failed clear also FAILS the run: a stuck marker re-partitions
+      // forever and permanently blocks the watermark.
+      try {
+        await db('email_sync_state').where('id', syncState.id)
+          .update({ spam_scan_before_epoch: null });
+      } catch (e) {
+        throw new Error(`spam-scan continuation clear failed — run marked failed for retry: ${e.message}`);
+      }
     } else if (perMessageFailures === 0 && !undrained && !beforeEpoch) {
       // Watermark advances ONLY on a fully clean, fully drained,
       // UNPARTITIONED pass — anything else keeps the next scan wide so

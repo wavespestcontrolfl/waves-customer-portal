@@ -43,6 +43,7 @@ async function fullSync(state) {
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
 
+    let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
@@ -50,8 +51,28 @@ async function fullSync(state) {
         if (inserted) newEmails++;
         if (parsed.historyId) lastHistoryId = parsed.historyId;
       } catch (err) {
+        // 404 = deleted mid-scan (benign). Anything else means this message
+        // is NOT stored, and it predates the pre-scan anchor — no future
+        // incremental run would ever see it again.
+        const gone = err.code === 404 || err.response?.status === 404;
+        if (!gone) failedMessages += 1;
         logger.warn(`[email-sync] Failed to fetch message ${msg.id}: ${err.message}`);
       }
+    }
+
+    if (failedMessages > 0) {
+      // Withhold the cursor so the next 2-minute run re-runs the full sync
+      // (upserts are idempotent) — anchoring past a missed message would
+      // drop it from the portal permanently.
+      await db('email_sync_state').where('id', state.id).update({
+        errors: `full sync incomplete: ${failedMessages} message(s) failed — retrying next run`,
+        last_sync_at: new Date(),
+      });
+      if (newEmails > 0) {
+        await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
+      }
+      logger.warn(`[email-sync] Full sync incomplete (${failedMessages} failure(s)) — cursor withheld for retry`);
+      return { newEmails, fullSync: true, retry: true };
     }
 
     await db('email_sync_state').where('id', state.id).update({
@@ -241,6 +262,24 @@ async function upsertEmail(parsed) {
       updated_at: new Date(),
     });
     return false; // not new
+  }
+
+  // Our own outbound — auto-drafts (GATE_EMAIL_AUTO_DRAFTS) and sent
+  // replies — lands in Gmail history like any other message. Store it
+  // archived so the thread record is complete, but NEVER classify it or
+  // run inbound automation: a generated draft must not appear in the admin
+  // inbox, burn a classifier call, or trigger handlers.
+  {
+    const outboundLabels = parsed.label_ids || [];
+    // SENT+INBOX = self-addressed (e.g. an owner control message sent from
+    // this mailbox to itself) — that IS inbound mail and stays classified.
+    if (outboundLabels.includes('DRAFT')
+      || (outboundLabels.includes('SENT') && !outboundLabels.includes('INBOX'))) {
+      emailData.is_archived = true;
+      emailData.auto_action = 'outbound_skipped';
+      const outboundInsert = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('id');
+      return outboundInsert.length > 0;
+    }
   }
 
   // Check blocklist before inserting — skip blocked senders
