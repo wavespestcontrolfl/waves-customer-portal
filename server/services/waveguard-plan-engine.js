@@ -1297,6 +1297,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
+  // One resolved city for BOTH the ordinance query and the property gate the
+  // panel displays — the restriction must be labeled with the city it was
+  // actually evaluated against (stamped visit address first).
+  const resolvedOrdinanceCity = String(
+    service.service_address_city || profile?.municipality || service.city || '',
+  ).trim() || null;
   const ordinances = await getApplicableOrdinances(knex, profile, {
     stampedCity: service.service_address_city,
     customerCity: service.city,
@@ -1555,7 +1561,7 @@ async function buildPlanForService(serviceId, options = {}) {
       month,
       visit: visit?.visit || null,
       lawnSqft: profile?.lawn_sqft || null,
-      municipality: profile?.municipality || service.city || null,
+      municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
       // Restriction windows ACTIVE on this service date, so the closeout can
