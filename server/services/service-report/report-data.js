@@ -1766,17 +1766,6 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function firstLawnAssessmentPhoto(knex, assessmentId) {
-  if (!assessmentId) return null;
-  return knex('lawn_assessment_photos')
-    .where({ assessment_id: assessmentId, customer_visible: true })
-    .orderBy('is_best_photo', 'desc')
-    .orderBy('quality_score', 'desc')
-    .orderBy('photo_order', 'asc')
-    .first()
-    .catch(() => null);
-}
-
 async function loadLinkedLawnAssessment(service, knex = db) {
   if (!service?.customer_id) return null;
 
@@ -1855,26 +1844,43 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   if (historyRows.length >= 2) {
     // The before/after slider claims "the same lawn, then vs now" — pairing the
     // best photo of each visit regardless of WHERE it was taken produced a bed
-    // photo next to a curb-strip photo (audit 2026-07-28). Anchor on the before
-    // photo's zone: prefer a current-visit photo from the SAME zone; when zones
-    // are recorded on both sides but never match, drop the photo pair (the
-    // score delta still reports) rather than show a false comparison.
-    const beforePhoto = await firstLawnAssessmentPhoto(knex, initialRow.id);
+    // photo next to a curb-strip photo (audit 2026-07-28). Pair by ZONE: pull
+    // both visits' visible photos (already rank-ordered), find the first shared
+    // zone, and take each side's best photo from it — anchoring on only the
+    // single best "before" photo missed valid pairs when a lower-ranked zone
+    // matched (pre-push audit P1). Photos without recorded zones (older rows)
+    // fall back to best-vs-best; when both sides record zones but none match,
+    // drop the photo pair (the score delta still reports) rather than show a
+    // false comparison.
+    const photosFor = (assessmentId) => knex('lawn_assessment_photos')
+      .where({ assessment_id: assessmentId, customer_visible: true })
+      .orderBy('is_best_photo', 'desc')
+      .orderBy('quality_score', 'desc')
+      .orderBy('photo_order', 'asc')
+      .catch(() => []);
+    const [beforeCandidates, afterCandidates] = await Promise.all([
+      photosFor(initialRow.id),
+      photosFor(assessment.id),
+    ]);
+    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
+    let beforePhoto = null;
     let afterPhoto = null;
-    if (beforePhoto?.zone) {
-      afterPhoto = await knex('lawn_assessment_photos')
-        .where({ assessment_id: assessment.id, customer_visible: true, zone: beforePhoto.zone })
-        .orderBy('is_best_photo', 'desc')
-        .orderBy('quality_score', 'desc')
-        .orderBy('photo_order', 'asc')
-        .first()
-        .catch(() => null);
+    for (const candidate of beforeCandidates) {
+      const zone = zoneKey(candidate);
+      if (!zone) continue;
+      const match = afterCandidates.find((p) => zoneKey(p) === zone);
+      if (match) {
+        beforePhoto = candidate;
+        afterPhoto = match;
+        break;
+      }
     }
-    if (!afterPhoto) {
-      const fallbackAfter = await firstLawnAssessmentPhoto(knex, assessment.id);
-      const zonesKnownAndDifferent = beforePhoto?.zone && fallbackAfter?.zone
-        && String(beforePhoto.zone) !== String(fallbackAfter.zone);
-      afterPhoto = zonesKnownAndDifferent ? null : fallbackAfter;
+    if (!beforePhoto) {
+      const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
+        && afterCandidates.some((p) => zoneKey(p));
+      beforePhoto = beforeCandidates[0] || null;
+      // Zones recorded on both sides but disjoint → no honest pair exists.
+      afterPhoto = bothSidesZoned ? null : (afterCandidates[0] || null);
     }
     beforeAfter = {
       before: {

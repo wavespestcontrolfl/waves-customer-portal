@@ -257,6 +257,10 @@ export default function TechTreatmentZoneModal({
       const blob = await exportMapPng(mapState.image, mapState.url);
       const form = new FormData();
       form.append('map', blob, 'map.png');
+      // Lawn mode asks the vision suggester for the TURF boundary — the
+      // default building-footprint suggestion would outline the house as the
+      // treated lawn area (pre-push audit P1 2026-07-28).
+      if (lawnMode) form.append('mode', 'lawn');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone/suggest`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
@@ -264,7 +268,9 @@ export default function TechTreatmentZoneModal({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.suggestion?.perimeter?.length) {
-        throw new Error(data.error || 'Could not detect the building outline — trace it manually.');
+        throw new Error(data.error || (lawnMode
+          ? 'Could not detect the lawn outline — trace it manually.'
+          : 'Could not detect the building outline — trace it manually.'));
       }
       setPoints(data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT })));
       setClosed(true);
