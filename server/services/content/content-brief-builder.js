@@ -27,6 +27,7 @@ const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
 const spokeSeeder = require('./spoke-seed-seeder');
+const categorySeeder = require('./category-seed-seeder');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -636,10 +637,16 @@ class ContentBriefBuilder {
     const spokeOverlay = spokeSeeder.isSpokeSeed(opportunity)
       ? spokeSeeder.buildSpokeOverlay({ opportunity, pageType, requiredSections, schemaTypes })
       : null;
-    const interceptOverlay = !spokeOverlay && interceptSeeder.isOperatorIntercept(opportunity)
+    // Curated category seeds (category-seed-seeder) also share the
+    // operator_intercept bucket but are plain informational HUB posts — they
+    // get their own overlay, never the competitor-comparison framing.
+    const categoryOverlay = !spokeOverlay && categorySeeder.isCategorySeed(opportunity)
+      ? categorySeeder.buildCategoryOverlay({ opportunity, pageType, requiredSections, schemaTypes })
+      : null;
+    const interceptOverlay = !spokeOverlay && !categoryOverlay && interceptSeeder.isOperatorIntercept(opportunity)
       ? interceptSeeder.buildOperatorOverlay({ opportunity, pageType, requiredSections, schemaTypes })
       : null;
-    const operatorOverlay = spokeOverlay || interceptOverlay;
+    const operatorOverlay = spokeOverlay || categoryOverlay || interceptOverlay;
 
     return {
       facts_pack: factsPack,
