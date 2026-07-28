@@ -366,10 +366,11 @@ const WORD_NUMBER_VALUES = {
 function normalizeWordNumbers(text) {
   return String(text || '')
     .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
-    // recombine hyphenated compounds the word pass split ("twenty-one" →
-    // "20-1" → 21) so they can't slip a smaller grounded digit past the
-    // count validators (codex P2 r3)
-    .replace(/\b(\d+)-(\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
+    // recombine compound word-numbers the word pass split — hyphenated
+    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
+    // — so they can't slip a smaller grounded digit past the count
+    // validators (codex P2 r3 + P1 r8)
+    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
       ? String(Number(tens) + Number(ones))
       : full));
 }
@@ -745,6 +746,21 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bsnakes?\b/i, corpus: /\bsnake/ },
   { kind: 'pest', out: /\biguanas?\b/i, corpus: /\biguana/ },
   { kind: 'pest', out: /\bcoyotes?\b/i, corpus: /\bcoyote/ },
+  // palm/plant specialty organisms and diseases (palm_injection typed
+  // schema — codex P1 #3007 r8): grounded like any pest, and their
+  // negative findings drive zero states
+  { kind: 'pest', out: /\bganoderma\b/i, corpus: /\bganoderma/ },
+  { kind: 'pest', out: /\bconks?\b/i, corpus: /\bconk/ },
+  { kind: 'pest', out: /\bweevils?\b/i, corpus: /\bweevil/ },
+  { kind: 'pest', out: /\bmites?\b/i, corpus: /\bmites?\b/ },
+  { kind: 'pest', out: /\bscale\s+insects?\b/i, corpus: /\bscale/ },
+  { kind: 'pest', out: /\bwhitefl(?:y|ies)\b/i, corpus: /\bwhitefl/ },
+  { kind: 'pest', out: /\baphids?\b/i, corpus: /\baphid/ },
+  { kind: 'pest', out: /\bmealybugs?\b/i, corpus: /\bmealybug/ },
+  { kind: 'pest', out: /\bthrips\b/i, corpus: /\bthrips/ },
+  { kind: 'pest', out: /\bfusarium\b/i, corpus: /\bfusarium/ },
+  { kind: 'pest', out: /\bbud\s+rot\b/i, corpus: /\bbud\s+rot/ },
+  { kind: 'pest', out: /\blethal\s+(?:bronzing|yellowing)\b/i, corpus: /\blethal\s+(?:bronzing|yellowing)/ },
   // treatment actions
   { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
   { kind: 'action', out: /\bbait(?:s|ed|ing)?\b/i, corpus: /\bbait/ },
@@ -834,7 +850,7 @@ function domainCorpus(facts) {
 // on a report whose ratified copy says none were. Any NEGATED ratified
 // sentence naming a pest term rejects model sentences that assert an
 // observation of that same pest positively.
-const OBSERVATION_RE = /\b(observed|noted|seen|found|documented|present|active)\b/i;
+const OBSERVATION_RE = /\b(observed|noted|seen|found|documented|present|active|visible|spotted|detected)\b/i;
 
 function contradictedZeroStates(text, facts) {
   const problems = [];
@@ -850,7 +866,20 @@ function contradictedZeroStates(text, facts) {
     .filter((sentence) => NEGATED_SENTENCE_RE.test(sentence))
     .concat(negativeFindings);
   if (!ratified.length) return problems;
-  const zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
+  let zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
+  // Generic zero states ("No active signs observed during today's
+  // service.") name no pest — the report's IDENTITY supplies it, so a
+  // zero-activity bed-bug report still rejects "live bed bugs were found"
+  // (codex P1 #3007 r8). Only a generic ACTIVITY negation triggers the
+  // inference; an unrelated negative finding ("Monitors placed: No") on a
+  // positive-activity report must not.
+  if (!zeroStatePests.length) {
+    const genericZeroState = ratified.some((sentence) => /\bno\b[^.!?]*\b(signs?|activity|evidence)\b/i.test(sentence));
+    if (genericZeroState) {
+      const identity = `${facts.serviceTypeDisplay || ''} ${facts.reportTypeLabel || ''}`;
+      zeroStatePests = pestTerms.filter((term) => term.out.test(identity));
+    }
+  }
   if (!zeroStatePests.length) return problems;
   // Clause scope (codex P1 #3007 r5): "No concerns were reported, but live
   // roaches were observed" carries the contradiction in its second clause —
@@ -987,10 +1016,17 @@ function unpairedActionLocations(text, facts) {
     if (!actions.length) continue;
     const locations = locationTerms.filter((term) => term.out.test(sentence));
     if (!locations.length) continue;
-    const everyLocationPaired = locations.every((location) => actions.some(
-      (action) => work.some((fact) => action.corpus.test(fact) && location.corpus.test(fact)),
+    // EVERY action×location pair asserted by the sentence must co-occur in
+    // one work fact (codex P1 #3007 r8): with "sprayed the kitchen" and
+    // "baited the bathroom" on record, the swapped "we sprayed the bathroom
+    // and baited the kitchen" must fail — per-location some-action matching
+    // let each location borrow the other clause's action. Fail-closed: a
+    // true compound sentence whose pairs weren't recorded together falls
+    // back to deterministic copy.
+    const everyPairGrounded = actions.every((action) => locations.every(
+      (location) => work.some((fact) => action.corpus.test(fact) && location.corpus.test(fact)),
     ));
-    if (!everyLocationPaired) problems.push('unpaired_action_location');
+    if (!everyPairGrounded) problems.push('unpaired_action_location');
   }
   return problems;
 }

@@ -119,9 +119,10 @@ test('typed count findings validate their own noun (codex r2: palms serviced)', 
   expect(ungroundedClaims('We serviced 1 palm today.', palmFacts)).toEqual([]);
   // 27 is grounded globally (August 27) but is NOT the palms-serviced count
   expect(ungroundedClaims('27 palms were serviced today.', palmFacts)).toContain('uncorroborated_count:27 palms');
-  // spelled-out counts beyond twenty and hyphenated compounds normalize too
+  // spelled-out counts beyond twenty and BOTH compound forms normalize too
   expect(ungroundedClaims('Thirty palms were serviced today.', palmFacts)).toContain('uncorroborated_count:30 palms');
   expect(ungroundedClaims('Twenty-one palms were serviced today.', palmFacts)).toContain('uncorroborated_count:21 palms');
+  expect(ungroundedClaims('Twenty one palms were serviced today.', palmFacts)).toContain('uncorroborated_count:21 palms');
 });
 
 test('action terms ground only on completed-work evidence, never the service label', () => {
@@ -169,6 +170,52 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   // ratified window is 10–14 days — "one day" contradicts it
   expect(ungroundedClaims('We recommend a follow-up in one day.', facts)).toContain('ungrounded_number:1');
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
+});
+
+test('generic zero states bind to the report identity pest (codex r8)', () => {
+  const facts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Bed Bug Treatment (Follow-up)',
+    reportTypeLabel: 'Bed Bug Treatment',
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: "No active signs observed during today's service.", body: 'We completed the scheduled follow-up service today.', nextStep: null },
+      findings: [],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Live bed bugs were found today.', facts)).toContain('contradicted_zero_state');
+});
+
+test('palm specialty organisms are grounded with polarity (codex r8)', () => {
+  const facts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Palm Injection Service',
+    reportTypeLabel: 'Palm Injection',
+    typedReport: {
+      reportTypeLabel: 'Palm Injection',
+      todaysResult: { headline: 'Palm service completed today.', body: 'We completed the scheduled palm treatment today.', nextStep: null },
+      findings: [{ fieldKey: 'ganoderma', customerLabel: 'Ganoderma conk', customerValueLabel: 'None observed today', value: 'None observed today' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  const problems = ungroundedClaims('A Ganoderma conk was visible today.', facts);
+  expect(problems.some((p) => p === 'contradicted_zero_state' || p.startsWith('ungrounded_pest'))).toBe(true);
+});
+
+test('action–location pairs cannot be swapped across a compound sentence (codex r8)', () => {
+  const facts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Cockroach Treatment',
+      todaysResult: { headline: 'Cockroach treatment completed today.', body: 'We sprayed the kitchen. We baited the bathroom.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'German cockroaches', value: 'german' }],
+    },
+  }));
+  expect(ungroundedClaims('We sprayed the kitchen.', facts)).toEqual([]);
+  expect(ungroundedClaims('We sprayed the bathroom and baited the kitchen.', facts))
+    .toContain('unpaired_action_location');
 });
 
 test('negative FINDINGS derive zero states too (codex r7)', () => {

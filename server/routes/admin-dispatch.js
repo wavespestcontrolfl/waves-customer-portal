@@ -4445,7 +4445,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
                 .first()));
-            } catch { /* table optional — scope falls back to chips/actions */ }
+            } catch (traceErr) {
+              // Only the EXPECTED missing-table case means "no trace". Any
+              // other failure (timeout, permissions) fails CLOSED by
+              // preserving the exterior timer: the persisted advisory is
+              // unrecoverable once zeroed, and showing dry-down guidance
+              // unnecessarily is safer than silently dropping it
+              // (codex P1 #3007 r8).
+              const missingTable = traceErr?.code === '42P01'
+                || /no such table|does not exist/i.test(String(traceErr?.message || ''));
+              if (!missingTable) {
+                tracedExteriorZone = true;
+                logger.warn('[completion] treatment-zone trace lookup failed; preserving exterior re-entry', {
+                  serviceId: svc.id,
+                  error: String(traceErr?.message || traceErr),
+                });
+              }
+            }
             const advisoryNormalized = buildCompletionAdvisory({
               advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
