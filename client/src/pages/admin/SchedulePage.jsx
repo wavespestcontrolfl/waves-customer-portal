@@ -636,18 +636,16 @@ function detectServiceCategory(serviceType) {
   )
     return "lawn";
   if (s.includes("mosquito")) return "mosquito";
-  // Termite-product aliases mirror the server normalizer: raw labels like
-  // "Bora-Care" / "Termidor" / "Advance Bait Station Check" are termite work
-  // even without the literal token ("advance" alone is too generic — only
-  // count it alongside bait/station).
+  // Termite-product aliases mirror the server normalizer, which maps EVERY
+  // /advance/ label to a termite type. Word-bounded \badvance\b never
+  // matches "Advanced Pest Control" (trailing d), so the bare alias is safe.
   if (
     s.includes("termite") ||
     s.includes("wdo") ||
     s.includes("bora") ||
     s.includes("trelona") ||
     s.includes("termidor") ||
-    (/\badvance\b/.test(s) &&
-      (s.includes("bait") || s.includes("station") || s.includes("install")))
+    /\badvance\b/.test(s)
   )
     return "termite";
   if (
