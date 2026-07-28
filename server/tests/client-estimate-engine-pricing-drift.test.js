@@ -517,11 +517,12 @@ describe('deprecated client estimator pricing drift guards', () => {
     }));
   });
 
-  test('one-time mosquito mirrors the server SW-FL reprice band, not the retired 2x band', () => {
+  test('one-time mosquito mirrors the server pest-aligned band, not a retired band', () => {
     // Server-authoritative band: server/services/pricing-engine/constants.js
-    // ONE_TIME.mosquito (repriced 2026-06). The deprecated client fallback must
-    // quote the same band + over-acre increment so the previewed price matches
-    // what the server will actually charge.
+    // ONE_TIME.mosquito (repriced 2026-07 to ~25% under the one-time pest
+    // band). The deprecated client fallback must quote the same anchors +
+    // over-acre increment so the previewed price matches what the server will
+    // actually charge.
     expect([
       ONE_TIME.mosquito.SMALL,
       ONE_TIME.mosquito.STANDARD,
@@ -529,19 +530,16 @@ describe('deprecated client estimator pricing drift guards', () => {
       ONE_TIME.mosquito.XL,
       ONE_TIME.mosquito.ESTATE,
       ONE_TIME.mosquito.ACRE_CLASS,
-    ]).toEqual([99, 129, 159, 199, 239, 269]);
+    ]).toEqual([149, 169, 189, 209, 239, 269]);
     expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(40);
 
-    // Buckets must mirror the server ladder (server/services/pricing-engine
-    // service-pricing.js getOneTimeMosquitoAreaBucket).
-    expect(source).toContain('let p = 99;');
-    expect(source).toContain('if (treatableSqFt > 43560) p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;');
-    expect(source).toContain('else if (treatableSqFt > 32000) p = 269;');
-    expect(source).toContain('else if (treatableSqFt > 24000) p = 239;');
-    expect(source).toContain('else if (treatableSqFt > 16000) p = 199;');
-    expect(source).toContain('else if (treatableSqFt > 11000) p = 159;');
-    expect(source).toContain('else if (treatableSqFt > 7500) p = 129;');
-    // Retired 2x-market band must be gone.
+    // Anchors + 500-sf interpolation must mirror the server curve
+    // (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
+    expect(source).toContain('const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];');
+    expect(source).toContain('p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;');
+    // Retired bands must be gone (2026-06 flat ladder and the 2x-market band).
+    expect(source).not.toContain('let p = 99;');
+    expect(source).not.toContain('let p = 149;');
     expect(source).not.toContain('let p = 225;');
     expect(source).not.toContain('p = 475');
     expect(source).not.toContain('p = 425');
