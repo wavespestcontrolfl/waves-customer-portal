@@ -266,7 +266,10 @@ function deadTextNearTitle(pageText, title) {
   // "not cancelled", "has not been canceled", "will proceed unless
   // cancelled", "never cancelled (rain or shine)" — negated/conditional
   // phrasing is REASSURANCE, not evidence.
-  const negatedBefore = /(?:\bnot\b|\bnever\b|\bunless\b|\bisn'?t\b|\bwon'?t\b|\bwithout\b|\bno\b)\s*(?:be(?:en)?\s+)?(?:get(?:ting)?\s+)?$/;
+  // Up to two intervening words are allowed after the negation marker —
+  // "not CURRENTLY cancelled", "not OFFICIALLY canceled", "not YET
+  // postponed", "never BE cancelled", "won't BE GETTING cancelled".
+  const negatedBefore = /(?:\bnot\b|\bnever\b|\bunless\b|\bisn'?t\b|\bwon'?t\b|\bwithout\b|\bno\b)(?:\s+[a-z']+){0,2}\s*$/;
   let match;
   while ((match = re.exec(text)) !== null) {
     if (negatedBefore.test(text.slice(Math.max(0, match.index - 40), match.index))) continue;

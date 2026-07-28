@@ -477,15 +477,22 @@ async function autoDraftFlagship() {
   let actualLineup = lineupFromDraft(generated);
   if (actualLineup.length !== safeEventIds.length) {
     logger.warn(`[newsletter-autopilot] draft covered ${actualLineup.length}/${safeEventIds.length} locked events — regenerating once`);
-    const retry = await createNewsletterDraft({
-      prompt,
-      eventIds: safeEventIds,
-      homeownerMinuteTopic,
-      topic,
-      newsletterType: NEWSLETTER_TYPE,
-      issueReference: defaultTargetSendAt(weekOf),
-      persist: false,
-    });
+    // The retry is best-effort: a transient generation failure must not
+    // discard a first draft that still passes the final preflight below.
+    let retry = null;
+    try {
+      retry = await createNewsletterDraft({
+        prompt,
+        eventIds: safeEventIds,
+        homeownerMinuteTopic,
+        topic,
+        newsletterType: NEWSLETTER_TYPE,
+        issueReference: defaultTargetSendAt(weekOf),
+        persist: false,
+      });
+    } catch (retryErr) {
+      logger.warn(`[newsletter-autopilot] coverage retry failed (${retryErr.message}) — keeping the first draft`);
+    }
     const retryLineup = lineupFromDraft(retry);
     // Prefer the retry on strictly better coverage — or on EQUAL coverage
     // when the retry's lineup passes the quality contract and the first

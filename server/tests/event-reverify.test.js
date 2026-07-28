@@ -193,3 +193,11 @@ describe('negated cancellation language (codex round 3)', () => {
     expect(deadTextNearTitle('The Racer Creator Expo has been cancelled.', EVENT.title)).toBe(true);
   });
 });
+
+describe('negation with intervening adverbs (pre-push round)', () => {
+  test('"not currently/officially/yet ..." are reassurance, not evidence', () => {
+    expect(deadTextNearTitle('Racer Creator Expo is not currently cancelled', EVENT.title)).toBe(false);
+    expect(deadTextNearTitle('Racer Creator Expo not officially canceled', EVENT.title)).toBe(false);
+    expect(deadTextNearTitle('Racer Creator Expo not yet postponed', EVENT.title)).toBe(false);
+  });
+});
