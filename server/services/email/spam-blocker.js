@@ -285,7 +285,7 @@ async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null }
     }
     // 2. Recover everything the filter buried. A failure here keeps the row
     //    even though the filter is gone (step 1 tolerates the resulting 404).
-    const { messages: buried } = await gmailClient.listAllMessages(
+    const { messages: buried, truncated } = await gmailClient.listAllMessages(
       `in:trash from:${normalizedAddress} newer_than:30d`, 100, { includeSpamTrash: true }
     );
     const ids = new Set((buried || []).map((m) => m.id));
@@ -299,6 +299,13 @@ async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null }
       }
     }
     if (recovered) logger.info(`[spam-blocker] recovered ${recovered} message(s) buried by the stale block`);
+    // A truncated search means more buried mail remains — keep the row so
+    // the next pass drains the rest (already-recovered messages no longer
+    // match in:trash, so successive passes page through naturally).
+    if (truncated) {
+      logger.warn('[spam-blocker] stale-block recovery truncated at 100 messages — row retained; next pass continues');
+      return { success: false };
+    }
     // 3. Fully unwound — only now does the retry token go away.
     await db('blocked_email_senders').where({ id: row.id }).del();
     logger.info(`[spam-blocker] removed stale auto-block for now-protected sender ${redactEmail(normalizedAddress)}`);
@@ -326,7 +333,7 @@ async function reconcileStaleAutoBlocks() {
     try {
       const domain = domainFromAddress(normalized);
       const identity = (domain && isOperationalDomain(domain))
-        || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first())
+        || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first())
         || !!(await db('leads')
           .whereRaw('LOWER(email) = ?', [normalized])
           .whereNull('deleted_at')
@@ -362,7 +369,9 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
     .first();
 
   const identity = isOperationalDomain(domain)
-    || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first())
+    // Live customers only — a soft-deleted customer is no longer a protected
+    // identity (mirrors isKnownSender), so their block stays enforced.
+    || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first())
     || !!(await db('leads')
       .whereRaw('LOWER(email) = ?', [normalized])
       .whereNull('deleted_at')

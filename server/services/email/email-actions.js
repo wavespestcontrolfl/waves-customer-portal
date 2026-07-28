@@ -949,10 +949,14 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
         inReplyTo = fresh?.message_id || null;
       } catch (e) { /* draft still lands, threading degrades */ }
     }
+    // Reply-To (validated to a single plain mailbox at parse time) beats
+    // From — relayed mail (contact forms, ticketing) carries the actionable
+    // recipient there while From is a provider-owned no-reply mailbox.
+    const replyAddress = email.reply_to || email.from_address;
     let draft;
     try {
       draft = await gmailClient.createDraft(
-        email.from_address,
+        replyAddress,
         /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`,
         htmlBody,
         email.gmail_thread_id,

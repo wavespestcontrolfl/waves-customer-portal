@@ -476,11 +476,20 @@ function hasAlignedAuth(authResults, fromDomain) {
  * Rescue REQUIRES aligned SPF/DKIM evidence; a known-looking sender without
  * it gets a review notification instead of a move (spoof containment).
  */
-async function rescueSpamFolder() {
+async function rescueSpamFolder(now = new Date()) {
+  // Scan window reaches back to the last SUCCESSFUL sweep (+1d overlap),
+  // capped at Gmail's ~30d spam retention — a fixed 2d query would age
+  // buried customer mail past rescue after two failed runs (OAuth or
+  // provider outage). No watermark yet = first run scans the full window.
+  const syncState = await db('email_sync_state').first().catch(() => null);
+  const lastScanAt = syncState?.last_spam_scan_at ? new Date(syncState.last_spam_scan_at).getTime() : 0;
+  const windowDays = lastScanAt
+    ? Math.min(30, Math.max(2, Math.ceil((now.getTime() - lastScanAt) / 86400000) + 1))
+    : 30;
   // Paginated: a junk burst must not push a buried customer email past a
-  // single-page cap. 500 ids over a 2-day window is far above observed spam
+  // single-page cap. 500 ids over the window is far above observed spam
   // volume; if it ever truncates, say so (no silent caps).
-  const { messages, truncated } = await gmailClient.listAllMessages('in:spam newer_than:2d', 500, { includeSpamTrash: true });
+  const { messages, truncated } = await gmailClient.listAllMessages(`in:spam newer_than:${windowDays}d`, 500, { includeSpamTrash: true });
   if (truncated) logger.warn('[inbox-hygiene] spam rescue hit the 500-message cap — oldest spam not scanned this pass');
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   let perMessageFailures = 0;
@@ -540,6 +549,13 @@ async function rescueSpamFolder() {
   // failure (quota/token/permission) and the run must not read as success.
   if (counts.scanned > 0 && perMessageFailures === counts.scanned) {
     throw new Error(`spam rescue failed on all ${counts.scanned} message(s) — systemic Gmail failure`);
+  }
+  // Watermark advances ONLY on a fully clean pass — any per-message failure
+  // keeps the window wide so the failed message is re-scanned next run.
+  if (syncState && perMessageFailures === 0) {
+    await db('email_sync_state').where('id', syncState.id)
+      .update({ last_spam_scan_at: now })
+      .catch((e) => logger.warn(`[inbox-hygiene] spam-scan watermark update failed: ${e.message}`));
   }
   return counts;
 }
@@ -626,7 +642,7 @@ async function reconcilePendingDrafts(now = new Date()) {
   const rows = await db('emails')
     .where('draft_gmail_id', 'pending')
     .where('draft_claimed_at', '<', staleCutoff)
-    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'received_at');
+    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'reply_to', 'received_at');
   const counts = { settled: 0, released: 0, redrafted: 0 };
   for (const row of rows) {
     try {

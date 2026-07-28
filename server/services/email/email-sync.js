@@ -194,6 +194,9 @@ async function upsertEmail(parsed) {
     list_unsubscribe_post: parsed.list_unsubscribe_post || null,
     // Message-ID threads reply drafts into the source conversation.
     message_id: parsed.message_id || null,
+    // Validated single-mailbox Reply-To — reply drafts prefer it over a
+    // relay's no-reply From address.
+    reply_to: parsed.reply_to || null,
     // Gmail's SPF/DKIM verdict — gates the spam-path unsubscribe and the
     // spam-folder rescue (spoof containment).
     authentication_results: parsed.authentication_results || null,
@@ -225,6 +228,7 @@ async function upsertEmail(parsed) {
       list_unsubscribe: parsed.list_unsubscribe || existing.list_unsubscribe || null,
       list_unsubscribe_post: parsed.list_unsubscribe_post || existing.list_unsubscribe_post || null,
       message_id: parsed.message_id || existing.message_id || null,
+      reply_to: parsed.reply_to || existing.reply_to || null,
       authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),
     });

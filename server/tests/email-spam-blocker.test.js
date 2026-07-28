@@ -67,7 +67,8 @@ describe('email spam blocker safety helpers', () => {
         };
       }
       if (table === 'customers') {
-        return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => null) })) };
+        const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
       }
       if (table === 'leads') {
         const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
@@ -86,7 +87,8 @@ describe('email spam blocker safety helpers', () => {
         return { where: jest.fn(() => ({ first: jest.fn(async () => null) })) };
       }
       if (table === 'customers') {
-        return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => null) })) };
+        const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
       }
       if (table === 'leads') {
         const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
@@ -117,7 +119,8 @@ describe('stale auto-block removal (sender became a customer)', () => {
         return chain;
       }
       if (table === 'customers') {
-        return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => ({ id: 'c1' })) })) };
+        const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => ({ id: 'c1' })) };
+        return { whereRaw: jest.fn(() => chain) };
       }
       if (table === 'leads') {
         const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
@@ -155,6 +158,52 @@ describe('stale auto-block removal (sender became a customer)', () => {
     expect(del).not.toHaveBeenCalled();
   });
 
+  test('a truncated Trash search recovers a page but KEEPS the row for the next pass', async () => {
+    const del = jest.fn(async () => 1);
+    mockTables({ del });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'm-1' }, { id: 'm-2' }], truncated: true });
+    gmailClient.getMessageLabels.mockResolvedValue(['TRASH']);
+
+    await expect(isBlocked('cust@x.example', { gmailId: 'm-trigger' })).resolves.toBe(false);
+    // This page was recovered…
+    expect(gmailClient.modifyLabels).toHaveBeenCalled();
+    // …but the retry token stays until a non-truncated pass drains Trash.
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  test('a soft-deleted customer is NOT a protected identity — the block stays enforced', async () => {
+    const del = jest.fn(async () => 1);
+    const increment = jest.fn(async () => {});
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn((arg) => {
+            if (arg && arg.id === 'b1') return { increment, del };
+            return chain;
+          }),
+          whereRaw: jest.fn(() => chain),
+          first: jest.fn(async () => ({ id: 'b1', reason: 'spam_auto', email_address: 'cust@x.example', gmail_filter_id: null })),
+          del,
+        };
+        return chain;
+      }
+      if (table === 'customers') {
+        // whereNull('deleted_at') filters the soft-deleted row out.
+        const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
+      }
+      if (table === 'leads') {
+        const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
+        return { whereRaw: jest.fn(() => chain) };
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    await expect(isBlocked('cust@x.example', { gmailId: 'm-x' })).resolves.toBe(true);
+    expect(del).not.toHaveBeenCalled();
+    expect(increment).toHaveBeenCalledWith('blocked_count', 1);
+  });
+
   test('reconcileStaleAutoBlocks unwinds blocks for now-protected senders without waiting for new mail', async () => {
     const { reconcileStaleAutoBlocks } = require('../services/email/spam-blocker');
     const del = jest.fn(async () => 1);
@@ -173,7 +222,10 @@ describe('stale auto-block removal (sender became a customer)', () => {
         return chain;
       }
       if (table === 'customers') {
-        return { whereRaw: jest.fn((sql, [addr]) => ({ first: jest.fn(async () => (addr === 'cust@x.example' ? { id: 'c1' } : null)) })) };
+        return { whereRaw: jest.fn((sql, [addr]) => {
+          const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => (addr === 'cust@x.example' ? { id: 'c1' } : null)) };
+          return chain;
+        }) };
       }
       if (table === 'leads') {
         const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };

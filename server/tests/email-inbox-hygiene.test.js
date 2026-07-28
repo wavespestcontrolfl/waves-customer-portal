@@ -502,3 +502,71 @@ describe('hasAlignedAuth organizational-domain alignment', () => {
     expect(hasAlignedAuth('mx.google.com; dkim=pass header.d=victim.github.io', 'victim.github.io')).toBe(true);
   });
 });
+
+describe('rescueSpamFolder scan window', () => {
+  const { rescueSpamFolder } = require('../services/email/inbox-hygiene');
+
+  test('no watermark = first run scans the full ~30d retention window', async () => {
+    setupDb();
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: false });
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:30d', 500, { includeSpamTrash: true });
+  });
+
+  test('window widens to cover the gap since the last successful sweep', async () => {
+    // Last clean sweep 8 days ago (outage) → 8d gap + 1d overlap = 9d window.
+    setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-20T12:00:00Z' }] });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: false });
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:9d', 500, { includeSpamTrash: true });
+  });
+
+  test('a clean pass stamps the watermark; a pass with per-message failures does not', async () => {
+    const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-1' }], truncated: false });
+    gmailClient.getMessage.mockResolvedValueOnce({ from_address: 'junk@blaster.example' });
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(state.updates.find((u) => u.table === 'email_sync_state').patch.last_spam_scan_at).toEqual(new Date('2026-07-28T12:00:00Z'));
+
+    const state2 = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-1' }, { id: 'spam-2' }], truncated: false });
+    gmailClient.getMessage
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ from_address: 'junk@blaster.example' });
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    // Failed message stays in the next window — watermark must NOT advance.
+    expect(state2.updates.find((u) => u.table === 'email_sync_state')).toBeUndefined();
+  });
+});
+
+describe('reply drafts honor Reply-To', () => {
+  const { draftReplyForEmail } = require('../services/email/email-actions');
+
+  test('a validated Reply-To beats a relay From when addressing the draft', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    gmailClient.getThread.mockResolvedValue({ messages: [] });
+    const result = await draftReplyForEmail({
+      id: 'e-relay',
+      gmail_id: 'g-relay',
+      gmail_thread_id: 't-relay',
+      from_address: 'no-reply@forms-relay.example',
+      from_name: 'Contact Form',
+      subject: 'New inquiry',
+      body_text: 'Need a quote for pest control.',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<relay-123@forms-relay.example>',
+      reply_to: 'real.customer@customer.example',
+      received_at: '2026-07-28T10:00:00Z',
+      draft_gmail_id: null,
+    });
+    expect(result).toBe('draft-1');
+    expect(gmailClient.createDraft).toHaveBeenCalledWith(
+      'real.customer@customer.example',
+      expect.any(String),
+      expect.any(String),
+      't-relay',
+      '<relay-123@forms-relay.example>'
+    );
+  });
+});

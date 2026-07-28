@@ -119,6 +119,15 @@ function parseMessage(msg) {
 
   const listUnsubscribe = getHeader('List-Unsubscribe');
   const listUnsubscribePost = getHeader('List-Unsubscribe-Post');
+  // Reply-To carries the actionable recipient for relayed mail (contact
+  // forms, ticketing) whose From is a provider no-reply mailbox. It is
+  // attacker-typed — accept ONLY a single plain mailbox (the same shape
+  // createDraft enforces for recipients); anything else stays null and
+  // replies fall back to From.
+  const replyToRaw = getHeader('Reply-To');
+  const replyToMatch = replyToRaw ? replyToRaw.match(/<([^>]+)>/) : null;
+  const replyToAddr = (replyToMatch ? replyToMatch[1] : replyToRaw || '').trim();
+  const replyTo = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(replyToAddr) ? replyToAddr : null;
   // Authentication-Results is only trustworthy when GMAIL wrote it — a
   // sender can inject their own copy claiming dkim=pass. Take the first
   // instance whose authserv-id is Google's receiving MX.
@@ -149,6 +158,7 @@ function parseMessage(msg) {
     // RFC Message-ID — required (with In-Reply-To/References) for a reply
     // draft to join the source thread.
     message_id: getHeader('Message-ID') || null,
+    reply_to: replyTo,
     // RFC 8058 one-click consent — POST is only allowed when the sender
     // explicitly declared it.
     list_unsubscribe_post: listUnsubscribePost || null,
@@ -439,4 +449,5 @@ module.exports = {
   trashMessage,
   getHistory,
   isConnected,
+  parseMessage,
 };
