@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-format');
-const { normalizeAdvisoryForTreatmentScope, parseJsonObject } = require('./report-data');
+const { normalizeAdvisoryForTreatmentScope, parseJsonObject, resolveTracedExteriorZone } = require('./report-data');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -86,23 +86,6 @@ function buildReentryContextFromRecord(record, now = new Date()) {
     irrigationReadyAt: buildIrrigationReadyAt(anchorDate, advisory.irrigation_hold_hr),
     customerSummary: buildReentrySummary(targets, now, displayTimezone),
   };
-}
-
-// Shared trace-evidence resolver (read paths + SMS delivery): a
-// technician-traced treatment zone is explicit exterior scope. Only the
-// expected missing-table error means "no trace" — a transient failure
-// preserves the exterior timer rather than suppressing customer safety
-// guidance (codex P1 #3007 r9).
-async function resolveTracedExteriorZone(record, knex = db) {
-  if (!record?.scheduled_service_id) return false;
-  try {
-    return !!(await knex('treatment_zone_maps')
-      .where({ scheduled_service_id: record.scheduled_service_id })
-      .first());
-  } catch (traceErr) {
-    return !(traceErr?.code === '42P01'
-      || /no such table|does not exist/i.test(String(traceErr?.message || '')));
-  }
 }
 
 async function buildReentryContext({ record, now = new Date(), knex = db } = {}) {

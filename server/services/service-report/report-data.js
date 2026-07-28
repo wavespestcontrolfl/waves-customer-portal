@@ -458,9 +458,12 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
   // still zeroes at write.
   if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
-    // Defer keys on LOCATION signals: target-only scope text is still
-    // unknown for interior/exterior purposes (codex P1 #3007 r13).
-    if (!(deferUnknownExteriorZeroing && !scope.hasLocationSignal)) {
+    // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
+    // Mapper trace can be saved AFTER completion even when the visit
+    // recorded interior locations, and a stored zero is unrecoverable.
+    // Every DISPLAY surface (report payload, re-entry card, SMS, email)
+    // normalizes at read time with trace evidence and zeroes there.
+    if (!deferUnknownExteriorZeroing) {
       normalized.exterior_reentry_min = 0;
     }
   }
@@ -473,6 +476,25 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // resolved here is what the customer sees — the report build can only zero it
 // further, never restore it. Kept as a pure helper so the scope wiring is
 // directly testable without the full /complete route harness.
+// Shared trace-evidence resolver (read paths + SMS/email delivery): a
+// technician-traced treatment zone is explicit exterior scope. Only the
+// expected missing-table error means "no trace" — a transient failure
+// preserves the exterior timer rather than suppressing customer safety
+// guidance (codex P1 #3007 r9/r17). Lives here (not reentry.js) so the
+// report payload's own advisory normalization can use it without a
+// require cycle.
+async function resolveTracedExteriorZone(record, knex = db) {
+  if (!record?.scheduled_service_id) return false;
+  try {
+    return !!(await knex('treatment_zone_maps')
+      .where({ scheduled_service_id: record.scheduled_service_id })
+      .first());
+  } catch (traceErr) {
+    return !(traceErr?.code === '42P01'
+      || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+  }
+}
+
 function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
   return normalizeAdvisoryForTreatmentScope(advisoryDefaults, {
     service: {
@@ -2500,11 +2522,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
+  const payloadTracedExteriorZone = await resolveTracedExteriorZone(service, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
-  }, { service, applications });
+  }, {
+    service,
+    applications,
+    zones: payloadTracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+  });
   const metrics = buildMetrics(config, {
     onSiteMin,
     treatedZoneIds,
@@ -3271,6 +3298,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
   calculateLawnOverallScore,

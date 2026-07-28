@@ -174,6 +174,19 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('round-17 guards: negated activity vs positive reading, permission care reversal', () => {
+  const facts = groundingFacts(roachInput()); // High activity reading; keep-undisturbed care copy
+  // a false absence claim contradicts the positive reading
+  expect(ungroundedClaims('No cockroach activity was observed today.', facts))
+    .toContain('contradicted_activity_negative');
+  // positive permission language reverses the keep-undisturbed instruction
+  expect(ungroundedClaims('You may disturb and clean the treated areas immediately.', facts))
+    .toContain('contradicted_care_copy');
+  // compliant restatement passes both
+  expect(ungroundedClaims('Please keep treated areas undisturbed so the treatment can work.', facts)
+    .filter((p) => p.startsWith('contradicted'))).toEqual([]);
+});
+
 test('round-16 guards: monitored verb, care-advisory work exclusion, dynamic pairing, activity wording, invented products', () => {
   const facts = groundingFacts(roachInput()); // High activity, no trend, no monitoring recorded
   // past-tense invented monitoring rejects

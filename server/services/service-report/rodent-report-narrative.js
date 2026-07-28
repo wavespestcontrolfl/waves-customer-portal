@@ -1226,10 +1226,20 @@ function contradictedActivityWording(text, facts) {
   const factsLevel = ACTIVITY_LEVEL_WORDS.find((word) => String(facts.activity.levelWord || '').toLowerCase().includes(word)) || null;
   const trendText = String(facts.activity.trendWord || '').toLowerCase();
   const factsTrend = TREND_DOWN_RE.test(trendText) ? 'down' : (TREND_UP_RE.test(trendText) ? 'up' : null);
-  const clauses = String(text)
+  const allActivityClauses = String(text)
     .split(/(?<=[.!?])\s+/)
     .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i))
-    .filter((clause) => /\bactivit/i.test(clause) && !NEGATED_SENTENCE_RE.test(clause));
+    .filter((clause) => /\bactivit/i.test(clause));
+  // A NEGATED activity claim ("no cockroach activity was observed")
+  // contradicts a POSITIVE grounded reading just as directly (codex P1
+  // r17) — the zero-state guard covers only the opposite direction.
+  const readingIsPositive = factsLevel !== null && !/\b(no|none|zero)\b/.test(String(facts.activity.levelWord || '').toLowerCase());
+  if (readingIsPositive) {
+    for (const clause of allActivityClauses) {
+      if (NEGATED_SENTENCE_RE.test(clause)) problems.push('contradicted_activity_negative');
+    }
+  }
+  const clauses = allActivityClauses.filter((clause) => !NEGATED_SENTENCE_RE.test(clause));
   for (const clause of clauses) {
     const lower = clause.toLowerCase();
     const claimedLevel = ACTIVITY_LEVEL_WORDS.find((word) => new RegExp(`\\b${word}\\b`).test(lower)) || null;
@@ -1270,25 +1280,49 @@ const CARE_COMMON_WORDS = new Set([
   'within', 'around', 'contact',
 ]);
 
+// Positive PERMISSION language reverses care copy without a negator
+// ("you may disturb the treated areas" vs "keep areas undisturbed" —
+// codex P1 r17), and prefixed care words hide their stems ("undisturbed"
+// vs "disturb"), so both clause families and de-prefixed stems are
+// checked.
+// Subject-bound forms only: "so the treatment can work" is care copy
+// itself, not a permission grant.
+const PERMISSION_RE = /\b(?:you\s+(?:may|can)|customers?\s+(?:may|can)|are\s+free\s+to|feel\s+free\s+to|it\s+is\s+(?:now\s+)?(?:fine|okay|ok)\s+to|no\s+need\s+to)\b/i;
+
+function careStems(sentence) {
+  const stems = new Set();
+  sentence.toLowerCase().split(/[^a-z-]+/)
+    .filter((word) => word.length >= 6 && !CARE_COMMON_WORDS.has(word))
+    .forEach((word) => {
+      stems.add(word);
+      const dePrefixed = word.replace(/^(?:un|non)/, '');
+      if (dePrefixed !== word && dePrefixed.length >= 5) {
+        stems.add(dePrefixed.replace(/(?:ed|ing)$/, ''));
+      }
+    });
+  return [...stems];
+}
+
 function contradictedCareCopy(text, facts) {
   const problems = [];
   const careSentences = mandatoryCareCopy(facts.todaysResult || {});
   if (!careSentences.length) return problems;
-  const clauses = String(text)
+  const allClauses = String(text)
     .split(/(?<=[.!?])\s+/)
-    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i))
-    .filter((clause) => NEGATED_SENTENCE_RE.test(clause));
-  if (!clauses.length) return problems;
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i));
+  const negatedClauses = allClauses.filter((clause) => NEGATED_SENTENCE_RE.test(clause));
+  const permissionClauses = allClauses.filter((clause) => !NEGATED_SENTENCE_RE.test(clause) && PERMISSION_RE.test(clause));
+  if (!negatedClauses.length && !permissionClauses.length) return problems;
   for (const sentence of careSentences) {
-    const distinctive = sentence.toLowerCase().split(/[^a-z-]+/)
-      .filter((word) => word.length >= 6 && !CARE_COMMON_WORDS.has(word));
-    if (!distinctive.length) continue;
-    for (const clause of clauses) {
+    const stems = careStems(sentence);
+    if (!stems.length) continue;
+    const hit = [...negatedClauses, ...permissionClauses].some((clause) => {
       const lower = clause.toLowerCase();
-      if (distinctive.some((word) => lower.includes(word))) {
-        problems.push('contradicted_care_copy');
-        break;
-      }
+      return stems.some((stem) => lower.includes(stem));
+    });
+    if (hit) {
+      problems.push('contradicted_care_copy');
+      break;
     }
   }
   return problems;
