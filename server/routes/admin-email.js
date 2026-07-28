@@ -470,29 +470,10 @@ router.post('/message/:id/reclassify', async (req, res) => {
         return res.status(409).json({ error: 'Message is in Gmail Trash — restore it there first, then reclassify' });
       }
       restoredFromTrash = true;
-      // The sweep's deferred sender block already fired for this row — an
-      // operator restoring + reclassifying the message is also vetoing that
-      // block, or every future email from this sender keeps going straight
-      // to Trash via the persistent filter.
-      try {
-        const blocked = await db('blocked_email_senders')
-          .whereRaw('LOWER(email_address) = ?', [String(email.from_address || '').toLowerCase()])
-          .where({ reason: 'spam_auto' })
-          .first();
-        if (blocked) {
-          const { unblockSender } = require('../services/email/spam-blocker');
-          const unblock = await unblockSender(blocked.id);
-          if (!unblock?.success) {
-            // Restoring the message while the sender filter still routes to
-            // Trash would look like a completed veto — surface a retryable
-            // error instead.
-            return res.status(502).json({ error: 'Sender is still trash-filtered (Gmail unblock failed) — retry reclassification' });
-          }
-        }
-      } catch (e) {
-        logger.warn(`[email] restored-from-trash unblock failed (email ${email.id}): ${e.message}`);
-        return res.status(502).json({ error: 'Sender unblock failed — retry reclassification' });
-      }
+      // The sweep's deferred sender block already fired for this row — the
+      // operator's restore+reclassify vetoes it too, but the unblock only
+      // COMMITS after a valid non-spam verdict (below); a failed
+      // classification must leave the sender block untouched.
     }
     // quarantined_at survives a handler overwriting auto_action (it only
     // clears on a SUCCESSFUL cancel), so a failed Gmail restore stays
@@ -501,13 +482,46 @@ router.post('/message/:id/reclassify', async (req, res) => {
       || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '')
       || !!email.quarantined_at;
 
+    // Atomically claim a plain-quarantined row for reclassification so the
+    // sweep (which compare-and-sets on 'spam_quarantined') can't trash it
+    // while the classifier runs. Losing the claim race → retry-soon 409.
+    let claimedForReclass = false;
+    if ((email.auto_action || '') === 'spam_quarantined') {
+      const claimed = await db('emails')
+        .where({ id: email.id, auto_action: 'spam_quarantined' })
+        .update({ auto_action: 'spam_reclassifying', updated_at: new Date() });
+      if (!claimed) {
+        return res.status(409).json({ error: 'Quarantine sweep is acting on this message — retry in a moment' });
+      }
+      claimedForReclass = true;
+      email.auto_action = 'spam_reclassifying';
+    }
+    const revertReclassClaim = async () => {
+      if (!claimedForReclass) return;
+      await db('emails').where({ id: email.id, auto_action: 'spam_reclassifying' })
+        .update({ auto_action: 'spam_quarantined', updated_at: new Date() })
+        .catch(() => {});
+    };
+
     // Classify FIRST — if the classifier is down (null result) or returns an
     // off-vocabulary category, the quarantine stays exactly as it was;
     // nothing is restored on an unrecognized verdict.
     const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
-    const classification = await classifyEmail(email);
+    let classification;
+    try {
+      classification = await classifyEmail(email);
+    } catch (classifyErr) {
+      await revertReclassClaim();
+      throw classifyErr;
+    }
     if (!classification || !EMAIL_CATEGORIES.includes(classification.category)) {
+      await revertReclassClaim();
       return res.status(502).json({ error: 'Classifier unavailable or off-vocabulary — quarantine state unchanged' });
+    }
+    if (classification.category === 'spam') {
+      // Still spam — hand the claim back so the normal quarantine flow
+      // (window + sweep) resumes untouched.
+      await revertReclassClaim();
     }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
@@ -522,6 +536,22 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // cancelQuarantine propagates a failed Gmail restore, keeping the
     // quarantine intact for a retry rather than orphaning the message.
     if (wasQuarantined && classification.category !== 'spam') {
+      // COMMIT phase — the verdict is valid and non-spam. Unblock first
+      // (idempotent: the block row deletes only on success, so a later
+      // retry re-finds or skips it), then cancel the quarantine.
+      if (restoredFromTrash) {
+        const blocked = await db('blocked_email_senders')
+          .whereRaw('LOWER(email_address) = ?', [String(email.from_address || '').toLowerCase()])
+          .where({ reason: 'spam_auto' })
+          .first();
+        if (blocked) {
+          const { unblockSender } = require('../services/email/spam-blocker');
+          const unblock = await unblockSender(blocked.id).catch((e) => ({ error: e.message }));
+          if (!unblock?.success) {
+            return res.status(502).json({ error: 'Reclassified, but the sender is still trash-filtered (Gmail unblock failed) — run reclassify again to finish the unblock' });
+          }
+        }
+      }
       const { cancelQuarantine } = require('../services/email/inbox-hygiene');
       // marketing_newsletter's own handler already archived the message —
       // restoring INBOX would undo the new category's intended state, so
