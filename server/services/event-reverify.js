@@ -143,7 +143,15 @@ function pinnedGet(urlObj, address, family, { timeoutMs = FETCH_TIMEOUT_MS, maxB
     const req = mod.request(urlObj, {
       method: 'GET',
       // Pin: whatever the URL hostname is, connect only to the vetted IP.
-      lookup: (host, opts, cb) => cb(null, address, family),
+      // Both lookup callback conventions are served: Node ≥20's
+      // autoSelectFamily path calls lookup with { all: true } and expects
+      // an ARRAY — answering in the legacy (err, address, family) style
+      // there errors the connection and would silently fail the recheck
+      // open on modern runtimes.
+      lookup: (host, lookupOpts, cb) => {
+        if (lookupOpts && lookupOpts.all) return cb(null, [{ address, family }]);
+        return cb(null, address, family);
+      },
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
         Accept: 'text/html,*/*',
