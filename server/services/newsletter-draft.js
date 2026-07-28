@@ -1046,6 +1046,26 @@ function locationCoversAddress(location, address) {
 // model split the name across emphasis tags, we simply don't link (the
 // metadata block still carries a labeled link). `url` must already be
 // safeUrl-validated by the caller.
+// GIF-shaped urls: path suffix, format-style query params, or a known
+// GIF-CDN host. Heuristic by design — image urls are rendered by the
+// recipient's mail client, never fetched server-side, and a content-type
+// probe of feed-controlled urls would reopen the SSRF surface the
+// live-reverify hardening closed (event-reverify.js). Fail toward
+// rendering: an unparseable url falls back to the plain suffix test.
+function isLikelyGifUrl(url) {
+  try {
+    const u = new URL(url);
+    if (/\.gif$/i.test(u.pathname)) return true;
+    if (/(^|\.)(giphy\.com|tenor\.com|gfycat\.com)$/i.test(u.hostname)) return true;
+    for (const v of u.searchParams.values()) {
+      if (/\.gif$/i.test(v) || /^gif$/i.test(v)) return true;
+    }
+    return false;
+  } catch {
+    return /\.gif($|[?#])/i.test(String(url));
+  }
+}
+
 function linkifyFirst(html, text, url) {
   const needle = escapeHtml(String(text).trim());
   if (!needle) return html;
@@ -1155,13 +1175,17 @@ async function assembleWavesNewsletter(draft) {
     // Per-event thumbnail (owner ask 2026-07-28 evening review): the
     // DB-locked event image renders above each card when the feed
     // supplied one — real event art, never generated, never a GIF.
-    // Reject animated GIF urls — the thumbnail contract is real event
-    // art, and safeUrl validates scheme only. Height rides an HTML attr
-    // as well as the style: Outlook's Word engine ignores max-height/
-    // object-fit and would render a portrait image at full natural size.
+    // Reject GIF urls — the thumbnail contract is real still event art,
+    // and safeUrl validates scheme only. Two-axis cap without upscaling
+    // for standards clients; Outlook's Word engine ignores max-* so the
+    // MSO branch gets a fixed width (height scales proportionally).
     const thumbUrl = safeUrl(ev.imageUrl);
-    if (thumbUrl && !/\.gif($|[?#])/i.test(thumbUrl)) {
-      card.push(`<div style="margin:0 0 8px 0;"><img src="${thumbUrl}" alt="${escapeHtml(ev.sourceTitle || '')}" height="220" style="height:220px;width:auto;max-width:100%;border-radius:8px;display:block;" /></div>`);
+    if (thumbUrl && !isLikelyGifUrl(thumbUrl)) {
+      const thumbAlt = escapeHtml(ev.sourceTitle || '');
+      card.push(`<div style="margin:0 0 8px 0;">
+<!--[if !mso]><!--><img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:220px;width:auto;height:auto;border-radius:8px;display:block;" /><!--<![endif]-->
+<!--[if mso]><img src="${thumbUrl}" alt="${thumbAlt}" width="280" /><![endif]-->
+</div>`);
     }
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);

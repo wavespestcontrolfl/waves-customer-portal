@@ -1,4 +1,4 @@
-# The Waves Newsletter Style Guide — the Beehiiv-Era Formula
+# Waves Newsletter Style Guide — the Beehiiv-Era Formula
 
 > **Identity update (owner directive 2026-07-28):** the public-facing
 > masthead is now **"Waves Newsletter"** — no "The", no subtitle,
