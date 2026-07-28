@@ -174,6 +174,46 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('round-15 guards: recommendation findings, next-visit name exclusion', () => {
+  // "Recommended service: Rodent exclusion" is future work — it cannot
+  // ground "we completed exclusion today"
+  const recFacts = groundingFacts(roachInput({
+    recap: 'Today we completed an inspection for your pest service.',
+    typedReport: {
+      reportTypeLabel: 'Rodent Assessment',
+      todaysResult: { headline: 'Inspection completed today.', body: 'We inspected the accessible areas today.', nextStep: null },
+      findings: [
+        { fieldKey: 'recommended_service', customerLabel: 'Recommended service', customerValueLabel: 'Rodent exclusion', value: 'Rodent exclusion' },
+      ],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We completed exclusion today.', recFacts))
+    .toContain('ungrounded_action:exclusion');
+
+  // the next appointment's service NAME never enters the facts — a
+  // cockroach-named follow-up can't ground roach claims on a bed-bug report
+  const bedBugFacts = groundingFacts(roachInput({
+    recap: 'Your bed bug treatment is complete for the scheduled areas.',
+    serviceTypeDisplay: 'Bed Bug Treatment',
+    reportTypeLabel: 'Bed Bug Treatment',
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: 'Bed bug treatment completed today.', body: 'We treated the bedroom today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'Bed bugs', value: 'bed_bug' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+    nextAppointment: { serviceType: 'Cockroach Control Service', scheduledDate: '2026-08-03', windowStart: '15:00' },
+  }));
+  expect(bedBugFacts.nextVisit).toEqual({ date: 'Monday, August 3', window: '3–5 PM' });
+  expect(ungroundedClaims('Cockroaches were observed today.', bedBugFacts)
+    .some((p) => p.startsWith('ungrounded_pest'))).toBe(true);
+});
+
 test('round-14 guards: free-text locations and care contradictions', () => {
   const bedroomFacts = groundingFacts(roachInput({
     typedReport: {
@@ -343,8 +383,12 @@ test('unit-bearing typed quantities bind numeral to unit (codex r10)', () => {
   // numerals cannot swap between unit-bearing fields
   expect(ungroundedClaims('We treated 27 linear feet today.', termiteFacts))
     .toContain('uncorroborated_count:27 linear');
+  // chemical application AMOUNTS never enter the facts at all (codex r15):
+  // the Gallons-applied finding is filtered, so any gallons-language in
+  // model copy rejects outright
+  expect(termiteFacts.findings.some((f) => /gallon/i.test(f.label))).toBe(false);
   expect(ungroundedClaims('We applied 120 gallons today.', termiteFacts))
-    .toContain('uncorroborated_count:120 gallons');
+    .toContain('ungrounded_action:gallons');
 });
 
 test('open-vocabulary pest swaps reject (codex r9: bees on a wasp report)', () => {

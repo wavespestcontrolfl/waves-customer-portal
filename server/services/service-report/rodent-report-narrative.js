@@ -114,7 +114,7 @@ function deviceFacts(applications = []) {
 // entered legacy product value wouldn't match the applications-based echo
 // guard (codex P2 #3007 r6). The typed card still renders these on the
 // report itself.
-const CHEMICAL_FINDING_LABEL_RE = /\b(products?|epa|registration|percent|solution|active\s+ingredients?|rates?|concentration|chemicals?)\b/i;
+const CHEMICAL_FINDING_LABEL_RE = /\b(products?|epa|registration|percent|solution|active\s+ingredients?|rates?|concentration|chemicals?|amounts?|gallons?)\b/i;
 
 function findingFacts(typedReport = {}) {
   return (Array.isArray(typedReport?.findings) ? typedReport.findings : [])
@@ -193,11 +193,15 @@ function groundingFacts({
   photos = [],
   nextAppointment = null,
 } = {}) {
+  // Date + window ONLY: the next appointment's service NAME can carry a
+  // different pest (broad same-line match — a bed-bug report may have a
+  // Cockroach Control follow-up) and would ground cross-pest claims if it
+  // entered the facts (codex P1 r15). The prompt copies date/window
+  // verbatim and never needs the name.
   const nextVisit = nextAppointment && nextAppointment.scheduledDate
     ? {
       date: formatNextVisitDate(nextAppointment.scheduledDate),
       window: formatArrivalWindow(nextAppointment.windowStart),
-      serviceType: cleanText(nextAppointment.serviceType) || null,
     }
     : null;
   return {
@@ -810,6 +814,9 @@ const DOMAIN_TERMS = [
   { kind: 'action', out: /\btreat(?:ed|ing|ments?)?\b/i, corpus: /\btreat/ },
   { kind: 'action', out: /\bappl(?:y|ied|ying|ications?)\b/i, corpus: /\bappl/ },
   { kind: 'action', out: /\binstall(?:ed|ing|ations?)?\b/i, corpus: /\binstall/ },
+  // chemical application quantities stay on the typed card — the filtered
+  // facts never ground them, so any mention rejects (codex P2 r15)
+  { kind: 'action', out: /\bgallons?\b|\bounces?\b|\bmillilit(?:er|re)s?\b|\blit(?:er|re)s?\b/i, corpus: /\bgallon|\bounce|\bmillilit|\blit(?:er|re)/ },
   // locations
   { kind: 'location', out: /\bkitchens?\b/i, corpus: /\bkitchen/ },
   { kind: 'location', out: /\bbath(?:room)?s?\b/i, corpus: /\bbath/ },
@@ -954,12 +961,20 @@ function completedWorkSentence(sentence, nextStep) {
   return true;
 }
 
+const RECOMMENDATION_FINDING_LABEL_RE = /\b(recommend(?:ed|ation)?s?|advis(?:ed|ory)?|suggest(?:ed|ion)?s?|next\s+steps?)\b/i;
+
 function actionCorpus(facts) {
   const workFacts = {
+    // recommendation-labeled findings ("Recommended service: Rodent
+    // exclusion") are FUTURE work, not completed work (codex P1 r15)
     findings: (facts.findings || []).filter(
-      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
+      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())
+        && !RECOMMENDATION_FINDING_LABEL_RE.test(String(finding.label)),
     ),
-    recap: affirmativeSentences(facts.recap),
+    recap: String(facts.recap || '')
+      .split(/(?<=[.!?])\s+/)
+      .filter((sentence) => completedWorkSentence(sentence, facts.todaysResult?.nextStep))
+      .join(' '),
     // nextStep is RECOMMENDATION copy, not completed work — "Exclusion
     // recommended" must not ground "we completed exclusion today" (codex
     // P1 r11). It stays in the general corpus and the mandatory-care path.
@@ -1138,7 +1153,8 @@ function completedWorkStrings(facts) {
       if (completedWorkSentence(sentence, facts.todaysResult?.nextStep)) strings.push(norm(sentence));
     }));
   (facts.findings || []).forEach((finding) => {
-    if (!NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())) {
+    if (!NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())
+      && !RECOMMENDATION_FINDING_LABEL_RE.test(String(finding.label))) {
       strings.push(norm(`${finding.label} ${finding.value}`));
     }
   });
