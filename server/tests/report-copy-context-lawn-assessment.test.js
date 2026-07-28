@@ -24,12 +24,14 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
     chain.modify = (fn) => { if (typeof fn === 'function') fn(chain); return chain; };
     chain.where = (...args) => {
       if (args[0] && typeof args[0] === 'object' && 'service_id' in args[0]) chain._byServiceId = true;
+      if (args[0] && typeof args[0] === 'object' && 'id' in args[0]) chain._byId = true;
       return chain;
     };
     const resolveRows = () => {
       if (table === 'customers') return customers;
       // The prior query aliases the table ('lawn_assessments as la').
       if (!String(table).startsWith('lawn_assessments')) return [];
+      if (chain._byId) return linked ? [linked] : [];
       if (chain._byServiceId) return linked ? [linked] : [];
       if (chain._priorHistory) return prior ? [prior] : [];
       return [];
@@ -132,6 +134,34 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
     });
     expect(contextText).not.toContain('gray leaf spot');
     expect(contextText).not.toContain('OBSERVATIONS');
+  });
+
+  test('explicit null lawnAssessmentId (retake pending) suppresses the today section', async () => {
+    const knex = makeKnexStub({ customers: [CUSTOMER], linked: TODAY_ROW, prior: PRIOR_ROW });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      lawnAssessmentId: null,
+      serviceType: 'Monthly Lawn Care Service',
+      serviceDate: '2026-07-28',
+      knex,
+    });
+    expect(contextText).not.toContain('photo-scored TODAY');
+    expect(contextText).toContain('LAST LAWN ASSESSMENT');
+  });
+
+  test('an explicit lawnAssessmentId grounds that confirmed row as today', async () => {
+    const knex = makeKnexStub({ customers: [CUSTOMER], linked: TODAY_ROW, prior: PRIOR_ROW });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      lawnAssessmentId: 'la-9',
+      serviceType: 'Monthly Lawn Care Service',
+      serviceDate: '2026-07-28',
+      knex,
+    });
+    expect(contextText).toContain('photo-scored TODAY');
+    expect(contextText).toContain('turf density 72/100');
   });
 
   test('non-lawn service lines never query lawn_assessments', async () => {

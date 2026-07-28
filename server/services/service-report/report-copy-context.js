@@ -133,15 +133,25 @@ async function loadCustomer(customerId, knex) {
 // query could grab an unrelated same-day row and mislabel it as this visit's
 // result. The prior row (strictly before the service date) is customer-scoped
 // history for trend framing.
-async function loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd, knex }) {
+async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex }) {
   if (!customerId || !serviceYmd) return { today: null, prior: null };
   try {
-    const today = scheduledServiceId
-      ? await loadLinkedLawnAssessment(
+    // The closeout's confirmation state is authoritative when provided: an
+    // id grounds exactly that row, explicit null means a retake is pending
+    // (the previously confirmed row is superseded and must NOT be labeled
+    // today's result). Only legacy callers (field absent) fall back to the
+    // visit-linked lookup.
+    let today = null;
+    if (lawnAssessmentId) {
+      today = await knex('lawn_assessments')
+        .where({ id: lawnAssessmentId, customer_id: customerId, confirmed_by_tech: true })
+        .first() || null;
+    } else if (lawnAssessmentId === undefined && scheduledServiceId) {
+      today = await loadLinkedLawnAssessment(
         { customer_id: customerId, service_id: scheduledServiceId },
         knex,
-      )
-      : null;
+      );
+    }
     // The prior row is bounded by the linked VISIT's scheduled_date, not the
     // assessment run date — lawn_assessments.service_date is when the photos
     // were scored, which lands out of schedule order on backfills (mirrors
@@ -166,6 +176,10 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd,
         }
       })
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+      // Retake-then-reconfirm can leave two confirmed rows on the same visit
+      // date — take the LATEST confirmation (mirrors loadLinkedLawnAssessment).
+      .orderBy('la.confirmed_at', 'desc')
+      .orderBy('la.created_at', 'desc')
       .first(
         'la.service_date', 'la.is_baseline',
         'la.turf_density', 'la.weed_suppression', 'la.color_health',
@@ -357,6 +371,7 @@ function conditionsLine(conditions) {
 async function buildReportCopyContext({
   customerId,
   scheduledServiceId = null,
+  lawnAssessmentId,
   serviceType,
   serviceLine,
   suppressPressureTrend = false,
@@ -403,7 +418,7 @@ async function buildReportCopyContext({
       : Promise.resolve(null),
     loadActiveConfig(knex).catch(() => null),
     line === 'lawn'
-      ? loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd, knex })
+      ? loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex })
       : Promise.resolve({ today: null, prior: null }),
   ]);
 

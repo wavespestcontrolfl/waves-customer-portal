@@ -7622,7 +7622,7 @@ router.post('/generate-report', async (req, res) => {
     const crypto = require('crypto');
     const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
     const {
-      scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
+      scheduledServiceId, lawnAssessmentId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
@@ -7915,6 +7915,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         // Only pass the visit linkage when the caller was authorized for
         // service grounding (groundingCustomerId is set on that same path).
         scheduledServiceId: groundingCustomerId ? scheduledServiceId : null,
+        // The closeout sends its CURRENT confirmation state: an id grounds
+        // exactly that row; explicit null means a retake is pending (the old
+        // confirmed row is superseded — no today section); absent (legacy
+        // caller) falls back to the visit-linked lookup.
+        lawnAssessmentId: groundingCustomerId ? lawnAssessmentId : undefined,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,

@@ -10064,6 +10064,10 @@ export function CompletionPanel({
     }
     const payload = {
       scheduledServiceId: service.id || null,
+      // The CURRENTLY confirmed assessment (null while a retake is pending) —
+      // the server grounds lawn scores from exactly this row, never a stale
+      // confirmed row left behind by Retake.
+      lawnAssessmentId: lawnAssessmentId || null,
       customerName: service.customerName,
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
