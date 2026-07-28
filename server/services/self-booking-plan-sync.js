@@ -564,6 +564,25 @@ function detectWaveGuardPlanKeys(row = {}) {
   const pestPlan = resolvePlan(resolvePestControlRecurringPlan);
   if (pestPlan) add(pestPlan.planKey || 'pest_control');
 
+  // Catalog FAMILY authority (Codex #3011 r12): when the catalog identity
+  // resolves to at least one family, stale service_type text must not
+  // contribute another — a 'Pest Control' service_type linked to
+  // lawn_care_monthly is one lawn service, never pest + lawn. Cadence still
+  // resolves through the logic above; this only prunes families the catalog
+  // does not corroborate. Rows with no catalog identity are untouched.
+  if (catalogText) {
+    const catalogFamilies = uniqueServiceFamilies([
+      resolveTermiteBaitRecurringPlan,
+      resolveMosquitoRecurringPlan,
+      resolveTreeShrubRecurringPlan,
+      resolveLawnCareRecurringPlan,
+      resolvePestControlRecurringPlan,
+    ].map((resolver) => resolver(catalogText)?.planKey).filter(Boolean));
+    if (catalogFamilies.length) {
+      return keys.filter((key) => catalogFamilies.includes(serviceFamilyKey(key)));
+    }
+  }
+
   return keys;
 }
 
@@ -1088,7 +1107,12 @@ function isAutoDerivedTierLabelRow(customer = {}) {
 async function tierLabelStatus(customerId, database = db) {
   if (!customerId) return 'not_label';
   try {
-    const customerColumns = await columnInfo(database, 'customers');
+    // Direct columnInfo — NOT the local swallowing helper (Codex #3011 r12
+    // P1): that helper catches lookup errors and returns {}, which would be
+    // indistinguishable from a genuinely missing column and resolve
+    // 'not_label' with the gate off. A schema-lookup failure must reach the
+    // catch below and stay 'unknown'.
+    const customerColumns = await database('customers').columnInfo();
     if (!customerColumns.waveguard_tier_source) {
       // Missing COLUMN is decidable by the gate: labels can only have been
       // stamped by gate-on code, which ships with (and deploys after) the

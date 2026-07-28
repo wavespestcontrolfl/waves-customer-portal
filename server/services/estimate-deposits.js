@@ -1010,13 +1010,29 @@ async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
 
     const { buildEstimateMembershipContext } = require('./estimate-membership-context');
     let membership = await buildEstimateMembershipContext(estimate);
-    if (!membership?.isExistingCustomer && estimate.customer_id) {
-      // Fail-closed live plan-customer check (see header comment): no catch —
-      // a lookup failure must skip the SMS, not default to "required".
-      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
-      if (Array.isArray(rows) && rows.length > 0) {
-        membership = { ...(membership || {}), isExistingCustomer: true };
+    if (estimate.customer_id) {
+      // Label provenance override, mirroring resolveDepositPolicyForEstimate
+      // (Codex #3011 r12): a label-only customer still owes the acceptance
+      // deposit, so this nudge must not be suppressed as
+      // existing_plan_customer off a frozen snapshot or the live rows.
+      // 'unknown' keeps this path's fail-closed philosophy: no text on
+      // uncertainty.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelStatus = await tierLabelStatus(estimate.customer_id);
+      if (labelStatus === 'unknown') {
+        return { eligible: false, reason: 'label_status_unverified' };
+      }
+      if (labelStatus === 'label' && membership?.isExistingCustomer) {
+        membership = { ...membership, isExistingCustomer: false };
+      }
+      if (!membership?.isExistingCustomer && labelStatus === 'not_label') {
+        // Fail-closed live plan-customer check (see header comment): no catch —
+        // a lookup failure must skip the SMS, not default to "required".
+        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+        const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+        if (Array.isArray(rows) && rows.length > 0) {
+          membership = { ...(membership || {}), isExistingCustomer: true };
+        }
       }
     }
     const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'

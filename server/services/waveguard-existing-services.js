@@ -221,37 +221,41 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
     if (!rowPassesGatedPricingEvidence(r, today)) continue;
     const joined = { ...r, ...(catalogById.get(r.id) || {}) };
     if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) continue;
-    // Qualify from the JOINED identity, not service_type alone (Codex #3011
-    // r10): a stale 'Tree & Shrub Care' service_type linked to the
-    // non-qualifying palm_injection catalog service must not count as a
-    // tree_shrub family in pricing when tier derivation rejects the same
-    // row. Underscored catalog keys are normalized so toQualifyingKeys'
-    // palm/token word boundaries match; the commercial/rodent classes were
-    // already removed per-field above, so concatenation here only feeds the
-    // keyword/palm logic, which is order-independent.
-    if (toQualifyingKeys(qualifyingRowText(joined)).length === 0) continue;
+    // Qualify from the same catalog-authoritative classifier the downstream
+    // reducer uses (Codex #3011 r10-r12): a stale 'Tree & Shrub Care'
+    // service_type linked to palm_injection resolves no family, and a
+    // 'Pest Control' service_type linked to lawn_care_monthly resolves only
+    // lawn_care.
+    if (qualifyingKeysForRow(joined).length === 0) continue;
     kept.push(joined);
   }
   return kept;
 }
 
-// Classification text for a qualifying row: rows enriched with catalog
-// identity (the gated loadExistingRecurringQualifyingRows path) classify on
-// the joined, underscore-normalized text; plain rows classify on
-// service_type alone — byte-identical to the legacy behavior (Codex #3011
-// r11: the reducer must see the same identity the gated filter qualified
-// on).
-function qualifyingRowText(row = {}) {
-  if (!row.service_key && !row.service_name) return row.service_type;
-  return [row.service_type, row.service_key, row.service_name]
+// Qualifying keys for a row, with CATALOG FAMILY AUTHORITY (Codex #3011
+// r12): when the catalog identity (service_key / catalog name) resolves to a
+// family, stale service_type text must not contribute ANOTHER — a
+// 'Pest Control' service_type linked to lawn_care_monthly is one lawn
+// service, never pest + lawn. When the catalog resolves no family
+// (palm/rodent/uninformative), classification falls to the joined text so
+// catalog exclusion tokens (palm) still veto service_type families while an
+// uninformative catalog leaves service_type classification intact. Plain
+// rows (no catalog fields) classify on service_type alone — byte-identical
+// to the legacy behavior.
+function qualifyingKeysForRow(row = {}) {
+  const catalogText = [row.service_key, row.service_name]
     .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  if (!catalogText) return toQualifyingKeys(row.service_type);
+  const catalogKeys = toQualifyingKeys(catalogText);
+  if (catalogKeys.length) return catalogKeys;
+  return toQualifyingKeys(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
 
 // Distinct qualifying service keys from a set of rows.
 function qualifyingKeysFromRows(rows = []) {
   const keys = new Set();
   for (const r of rows) {
-    toQualifyingKeys(qualifyingRowText(r)).forEach((key) => keys.add(key));
+    qualifyingKeysForRow(r).forEach((key) => keys.add(key));
   }
   return [...keys];
 }

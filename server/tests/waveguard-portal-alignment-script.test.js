@@ -92,6 +92,14 @@ describe('WaveGuard portal alignment script helpers', () => {
     })).toEqual(['lawn_care_6week']);
   });
 
+  test('catalog family authority: stale service_type cannot add a second family', () => {
+    expect(detectServiceKeys({
+      service_type: 'Pest Control',
+      service_key: 'lawn_care_monthly',
+      service_name: 'Monthly Lawn Care Program',
+    })).toEqual(['lawn_care_monthly']);
+  });
+
   test('does not treat one-time termite or rodent work as WaveGuard portal services', () => {
     expect(detectServiceKeys({ service_type: 'Termite Inspection' })).toEqual([]);
     expect(detectServiceKeys({ service_type: 'Rodent Exclusion' })).toEqual([]);

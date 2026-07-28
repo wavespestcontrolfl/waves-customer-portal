@@ -168,6 +168,22 @@ function detectServiceKeys(row = {}) {
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
 
+  // Catalog FAMILY authority (Codex #3011 r12, mirrors the runtime
+  // detectWaveGuardPlanKeys): when the catalog identity resolves to at least
+  // one family, stale service_type text must not contribute another.
+  if (catalogText) {
+    const catalogFamilies = uniqueServiceFamilies([
+      resolvePestControlRecurringPlan,
+      resolveLawnCareRecurringPlan,
+      resolveMosquitoRecurringPlan,
+      resolveTreeShrubRecurringPlan,
+      resolveTermiteBaitRecurringPlan,
+    ].map((resolver) => resolver(catalogText)?.planKey).filter(Boolean));
+    if (catalogFamilies.length) {
+      return keys.filter((key) => catalogFamilies.includes(serviceFamilyKey(key)));
+    }
+  }
+
   return keys;
 }
 

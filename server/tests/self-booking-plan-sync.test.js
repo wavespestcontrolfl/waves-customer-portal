@@ -469,6 +469,19 @@ describe('self-booking plan sync helpers', () => {
       .toEqual({});
   });
 
+  test('catalog family authority: stale service_type cannot add a second family', () => {
+    // One lawn service with a stale 'Pest Control' service_type is ONE
+    // family, never pest + lawn (Codex #3011 r12) — a single recurring
+    // service must not produce a Silver combined tier.
+    expect(detectWaveGuardPlanKeys({
+      service_type: 'Pest Control',
+      service_key: 'lawn_care_monthly',
+      service_name: 'Monthly Lawn Care Program',
+    })).toEqual(['lawn_care_monthly']);
+    // Rows with no catalog identity keep full multi-family text detection.
+    expect(detectWaveGuardPlanKeys({ service_type: 'Pest + Lawn + Mosquito Bundle' }).length).toBe(3);
+  });
+
   test('detects WaveGuard plan keys only from recurring service rows for sync', () => {
     expect(detectWaveGuardPlanKeys({ service_type: 'Monthly Pest Control' })).toEqual(['pest_control_monthly']);
     expect(detectWaveGuardPlanKeys({ service_type: 'Termite Active Bait Station Service Quarterly' })).toEqual(['termite_bait_quarterly']);
