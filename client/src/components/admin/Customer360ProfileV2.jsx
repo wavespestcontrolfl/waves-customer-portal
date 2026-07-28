@@ -2122,16 +2122,30 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
               <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
                 {" "}
                 <ShieldCheck size={14} strokeWidth={1.75} />{" "}
-                <span>Manager Approval</span>{" "}
+                {/* Advisory records (no approval ceremony — PR #3022) must
+                    never read as an approval in the audit history. */}
+                <span>
+                  {managerApproval.advisory
+                    ? "Protocol Exception (advisory)"
+                    : "Manager Approval"}
+                </span>{" "}
               </div>{" "}
               <div className="text-ink-secondary">
-                {approvalCodeLabel(managerApproval.reasonCode)}
-                {managerApproval.approvedByRole
-                  ? ` by ${managerApproval.approvedByRole}`
-                  : ""}
-                {managerApproval.approvedAt
-                  ? ` on ${fmtDate(managerApproval.approvedAt)}`
-                  : ""}
+                {managerApproval.advisory
+                  ? `Recorded without approval ceremony${
+                      managerApproval.recordedAt
+                        ? ` on ${fmtDate(managerApproval.recordedAt)}`
+                        : ""
+                    }`
+                  : `${approvalCodeLabel(managerApproval.reasonCode)}${
+                      managerApproval.approvedByRole
+                        ? ` by ${managerApproval.approvedByRole}`
+                        : ""
+                    }${
+                      managerApproval.approvedAt
+                        ? ` on ${fmtDate(managerApproval.approvedAt)}`
+                        : ""
+                    }`}
               </div>
               {managerApproval.note && (
                 <div className="text-zinc-900 mt-1">{managerApproval.note}</div>

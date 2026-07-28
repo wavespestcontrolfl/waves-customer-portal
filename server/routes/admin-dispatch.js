@@ -3781,11 +3781,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // that would trap the tech on the screen.
       const calibrationBypass = calibrationBlocks.length > 0;
       if (calibrationBypass) {
+        // Advisory record only — no acknowledgment claim. The closeout no
+        // longer displays a calibration confirm step, so stamping
+        // "acknowledged" here would assert the tech consciously accepted a
+        // warning that was never shown (Codex P2, PR #3022 round 1).
         waveguardCalibrationAdvisory = {
-          acknowledged: true,
-          acknowledgedByTechnicianId: req.technicianId,
-          acknowledgedByRole: req.techRole || null,
-          acknowledgedAt: new Date().toISOString(),
+          advisory: true,
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
           blocks: calibrationBlocks.map((block) => ({
             code: block.code,
             message: block.message,
@@ -3798,36 +3802,56 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ...await actualProductBlackoutBlocks(svc, products),
       ];
       // Advisory, not a lockout (owner directive 2026-07-29: approval
-      // ceremonies removed from the closeout — the condition is still
-      // recorded on the completion for the audit trail, with whatever
-      // approval detail the client chose to send).
+      // ceremonies removed from the closeout). With an explicit approval
+      // payload (legacy client) the record keeps approval semantics; without
+      // one it is an advisory record — never approved-by stamps, so the
+      // audit history can't present an unapproved closeout as approved.
       if (blackoutBlocks.length) {
-        waveguardBlackoutApproval = {
-          ...(normalizedOfficeApproval || { advisory: true }),
-          approvedByTechnicianId: req.technicianId,
-          approvedByRole: req.techRole || null,
-          approvedAt: new Date().toISOString(),
-          blocks: blackoutBlocks.map((block) => ({
-            code: block.code,
-            message: block.message,
-            source: block.source || null,
-          })),
-        };
+        const mappedBlackoutBlocks = blackoutBlocks.map((block) => ({
+          code: block.code,
+          message: block.message,
+          source: block.source || null,
+        }));
+        waveguardBlackoutApproval = normalizedOfficeApproval
+          ? {
+            ...normalizedOfficeApproval,
+            approvedByTechnicianId: req.technicianId,
+            approvedByRole: req.techRole || null,
+            approvedAt: new Date().toISOString(),
+            blocks: mappedBlackoutBlocks,
+          }
+          : {
+            advisory: true,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            blocks: mappedBlackoutBlocks,
+          };
       }
       const annualNBlocks = annualNLockoutBlocks(plan);
-      // Advisory, not a lockout (same owner directive as the blackout gate).
+      // Advisory, not a lockout (same rules as the blackout gate above).
       if (annualNBlocks.length) {
-        waveguardNLimitApproval = {
-          ...(normalizedNLimitApproval || { advisory: true }),
-          approvedByTechnicianId: req.technicianId,
-          approvedByRole: req.techRole || null,
-          approvedAt: new Date().toISOString(),
-          annualN: plan?.propertyGate?.annualN || null,
-          blocks: annualNBlocks.map((block) => ({
-            code: block.code,
-            message: block.message,
-          })),
-        };
+        const mappedNBlocks = annualNBlocks.map((block) => ({
+          code: block.code,
+          message: block.message,
+        }));
+        waveguardNLimitApproval = normalizedNLimitApproval
+          ? {
+            ...normalizedNLimitApproval,
+            approvedByTechnicianId: req.technicianId,
+            approvedByRole: req.techRole || null,
+            approvedAt: new Date().toISOString(),
+            annualN: plan?.propertyGate?.annualN || null,
+            blocks: mappedNBlocks,
+          }
+          : {
+            advisory: true,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            annualN: plan?.propertyGate?.annualN || null,
+            blocks: mappedNBlocks,
+          };
       }
       const inventoryBlocks = [
         ...inventoryPlanLockoutBlocks(plan),
@@ -3851,12 +3875,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceDate: serviceDateOnly(svc.scheduled_date),
       });
       const managerBlocks = managerApprovalCheck.blocks || [];
-      // Advisory, not a lockout (same owner directive as the blackout gate).
+      // Advisory, not a lockout (same rules as the blackout gate above):
+      // managerApprovalSummary stamps approval semantics, so it only runs
+      // when an explicit approval payload arrived; otherwise the exception
+      // is recorded as an advisory the audit UI must not present as approved.
       if (managerBlocks.length) {
-        waveguardManagerApproval = managerApprovalSummary(normalizedManagerApproval || { reasonCode: null, advisory: true }, managerBlocks, {
-          technicianId: req.technicianId,
-          role: req.techRole || null,
-        });
+        waveguardManagerApproval = normalizedManagerApproval
+          ? managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
+            technicianId: req.technicianId,
+            role: req.techRole || null,
+          })
+          : {
+            advisory: true,
+            reasonCode: null,
+            note: null,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            blocks: managerBlocks.map((block) => ({
+              code: block.code,
+              message: block.message,
+              productId: block.productId || null,
+              productName: block.productName || null,
+            })),
+          };
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
       // Only adopt the plan's calibration when it's valid (no bypass). On a
@@ -3866,19 +3908,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
-      // On a calibration bypass, record "none" rather than persisting equipment
-      // the tech could not have chosen. We clear the IDs when EITHER:
-      //   - no equipment was submitted (so any value present is only a stale
-      //     assigned_equipment_system_id/assigned_calibration_id backfill), OR
-      //   - the selected calibration is not field verified — those rows are
-      //     filtered out of the dropdown (SchedulePage.jsx:5670), so a non-empty
-      //     ID for one can only come from a stale draft / direct API, never a real
-      //     tech selection.
-      // A field-verified-but-expired calibration DOES appear in the dropdown and
-      // can be deliberately selected, so we keep it (the advisory still warns).
+      // On a calibration bypass, record "none" only when the RESOLVED
+      // calibration (request field from a legacy client, the service's
+      // assignment, or the plan's selection) is not field verified — an
+      // unverified row was never a legitimate choice, so persisting it would
+      // fabricate equipment usage. A field-verified-but-EXPIRED assignment is
+      // kept: it is a real assignment and the advisory records the expiry.
+      // (The closeout no longer submits equipmentSystemId at all, so keying
+      // this off the raw request field would clear every resolved assignment
+      // and null out scheduled_services' assignment downstream — Codex P1.)
       const selectedIsFieldVerified =
         selectedCalibration?.calibration_status === 'field_verified';
-      if (calibrationBypass && (!equipmentSystemId || !selectedIsFieldVerified)) {
+      if (calibrationBypass && !selectedIsFieldVerified) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;

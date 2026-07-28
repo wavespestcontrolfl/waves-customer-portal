@@ -291,6 +291,14 @@ const VISIT_OUTCOME_OPTIONS = [
   { value: "customer_concern", label: "Customer concern" },
   { value: "incomplete", label: "Incomplete" },
 ];
+// Rig-calibration states worth a closeout advisory line. Deliberately
+// excludes 'equipment_selection_required' — with no equipment step left in
+// the closeout, "select equipment" would be permanent noise.
+const CALIBRATION_ADVISORY_CODES = new Set([
+  "missing_calibration",
+  "expired_calibration",
+  "calibration_not_field_verified",
+]);
 const MANAGER_APPROVAL_CODES = new Set([
   "off_protocol_product",
   "high_rate_application",
@@ -8514,6 +8522,12 @@ export function CompletionPanel({
   const [nextVisitNote, setNextVisitNote] = useState("");
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
+  // Calibration state of the plan's auto-selected rig — advisory-only since
+  // the closeout no longer has an equipment step (missing/expired/unverified
+  // must still be VISIBLE, or the server would record an advisory the tech
+  // never saw).
+  const [treatmentPlanCalibrationBlocks, setTreatmentPlanCalibrationBlocks] =
+    useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanStructuredProtocol, setTreatmentPlanStructuredProtocol] =
     useState(null);
@@ -8967,17 +8981,63 @@ export function CompletionPanel({
     .map((block) => block.message)
     .filter(Boolean)
     .join(" ");
+  // Off-plan N/P check the plan can't see: the property-gate blocks cover
+  // PLANNED products only, so a tech-added fertilizer would otherwise reach
+  // completion without any blackout warning. Month-window heuristic (the
+  // SWFL summer blackout, Jun 1 – Sep 30) against the catalog's N/P
+  // analysis — advisory only; the server still evaluates the real
+  // ordinances and records the condition on the completion.
+  const blackoutWindowMonth = (() => {
+    const raw = String(
+      service.scheduledDate || service.scheduled_date || service.date || "",
+    ).split("T")[0];
+    const month = new Date(`${raw}T12:00:00`).getMonth() + 1;
+    return Number.isFinite(month) && month >= 6 && month <= 9;
+  })();
+  const npSelectedProductNames =
+    calibrationRequired &&
+    !isIncompleteVisit &&
+    blackoutWindowMonth &&
+    blackoutBlocks.length === 0
+      ? [
+          ...new Set(
+            selectedProducts
+              .map((sp) =>
+                (products || []).find(
+                  (p) => String(p.id) === String(sp.productId),
+                ),
+              )
+              .filter(
+                (row) =>
+                  Number(row?.analysis_n || 0) > 0 ||
+                  Number(row?.analysis_p || 0) > 0,
+              )
+              .map((row) => row.name)
+              .filter(Boolean),
+          ),
+        ]
+      : [];
   // Non-blocking closeout advisories (owner directive 2026-07-29): the old
   // office/N-budget/manager approval ceremonies are gone — each condition is
   // one quiet line the tech can read and move past. The server records the
   // same conditions on the completion for the audit trail.
   const closeoutAdvisories = [
     ...(blackoutApprovalRequired ? [blackoutHelpText] : []),
+    ...(npSelectedProductNames.length
+      ? [
+          `${npSelectedProductNames.join(", ")} contains N/P inside the Jun 1 – Sep 30 blackout window — completion records this; verify the local ordinance.`,
+        ]
+      : []),
     ...(nLimitApprovalRequired
       ? [[nLimitHelpText, nLimitSummaryText].filter(Boolean).join(" ")]
       : []),
     ...(managerApprovalRequired && managerApprovalHelpText
       ? [managerApprovalHelpText]
+      : []),
+    ...(calibrationRequired && !isIncompleteVisit
+      ? treatmentPlanCalibrationBlocks
+          .map((block) => block?.message)
+          .filter(Boolean)
       : []),
   ];
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
@@ -9142,6 +9202,12 @@ export function CompletionPanel({
           data?.plan?.protocol?.blocked ||
           [];
         setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
+        setTreatmentPlanCalibrationBlocks(
+          (Array.isArray(data?.plan?.equipmentCalibration?.blocks)
+            ? data.plan.equipmentCalibration.blocks
+            : []
+          ).filter((block) => CALIBRATION_ADVISORY_CODES.has(block?.code)),
+        );
         setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
         setTreatmentPlanStructuredProtocol(data?.plan?.protocol?.structured || null);
         setTreatmentPlanAppointmentAssignment(data?.plan?.appointmentAssignment || null);
@@ -10837,6 +10903,15 @@ export function CompletionPanel({
         selectedProducts.some((p) => p.productId === action.product.id))
     );
   }
+  // Lawn closeouts are product-backed-only: no generic pest fallback chips
+  // (a scout-only or unmatched-catalog visit must not surface "Cobweb sweep"),
+  // and an empty list hides the field instead of exposing the fallback.
+  const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
+  const hideProtocolActionsField =
+    isLawn &&
+    !protocolActionsLoading &&
+    !protocolActionError &&
+    protocolActions.length === 0;
   const protocolActionSelectOptions = protocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
@@ -11831,7 +11906,7 @@ export function CompletionPanel({
                 ))}
               </div>
             )}
-            {!isTypedFindings && (
+            {!isTypedFindings && !hideProtocolActionsField && (
               <Field label="Protocol actions">
                 {protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
@@ -11865,7 +11940,7 @@ export function CompletionPanel({
                               {opt.label}
                             </option>
                           ))
-                        : CHIP_ACTIONS.map((chip) => (
+                        : protocolActionFallbackChips.map((chip) => (
                             <option key={chip.label} value={chip.label}>
                               {chip.label}
                             </option>
@@ -13700,7 +13775,7 @@ export function CompletionPanel({
           )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
-            {!isTypedFindings && (
+            {!isTypedFindings && !hideProtocolActionsField && (
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
@@ -13740,7 +13815,7 @@ export function CompletionPanel({
                             {opt.label}
                           </option>
                         ))
-                      : CHIP_ACTIONS.map((chip) => (
+                      : protocolActionFallbackChips.map((chip) => (
                           <option key={chip.label} value={chip.label}>
                             {chip.label}
                           </option>
