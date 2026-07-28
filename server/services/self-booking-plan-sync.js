@@ -759,7 +759,13 @@ async function resolveServiceId(database, serviceKey) {
 
 async function scheduledServiceRowsForCustomer(database, customerId) {
   try {
-    return await database('scheduled_services as s')
+    // The fallible catalog join runs in a nested transaction of its own:
+    // inside a caller transaction a failed query marks the (savepoint)
+    // transaction aborted, and the plain-select fallback below must not run
+    // on an aborted handle or it dies with "current transaction is aborted"
+    // (Codex #3011 r2). On a plain pool connection this is just a short
+    // read-only transaction.
+    return await database.transaction(async (inner) => inner('scheduled_services as s')
       .leftJoin('services as svc', 's.service_id', 'svc.id')
       .where({ 's.customer_id': customerId })
       .whereNotIn('s.status', TERMINAL_STATUSES)
@@ -768,7 +774,7 @@ async function scheduledServiceRowsForCustomer(database, customerId) {
         's.*',
         'svc.service_key',
         'svc.name as service_name',
-      );
+      ));
   } catch (err) {
     logger.warn(`[self-booking-plan-sync] joined service row lookup failed for ${customerId}: ${err.message}`);
     return database('scheduled_services')
@@ -790,7 +796,15 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   if (!customerId) return { synced: false, reason: 'missing_customer_id' };
 
   const customerColumns = await columnInfo(database, 'customers');
-  const customer = await database('customers').where({ id: customerId }).first();
+  // Inside a transaction (seeder hook savepoint, reconcile per-candidate
+  // trx), take the customer row lock so concurrent syncs on the same
+  // customer serialize: whichever runs second re-reads AFTER the first
+  // commits and derives its decision from the settled tier + schedule
+  // (Codex #3011 r2 — evidence-vs-write races). On a plain pool connection
+  // forUpdate is a single-statement no-op, so this changes nothing there.
+  let customerQuery = database('customers').where({ id: customerId }).first();
+  if (database.isTransaction) customerQuery = customerQuery.forUpdate();
+  const customer = await customerQuery;
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
   // Non-members: owner policy through 2026-07-27 was members-only re-alignment
@@ -811,12 +825,20 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
 
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
   const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  // With the auto-tier gate on, the member branch uses the SAME upcoming-only
+  // evidence as enrollment and the nightly realignment — otherwise a stale
+  // past pending row from one family plus a newly seeded family upgrades a
+  // label beyond what upcoming coverage supports, and the bounded nightly
+  // sampling can leave that mispricing in place for days (Codex #3011 r2).
+  // Gate off keeps the legacy all-nonterminal evidence byte-identical.
+  const upcomingOnly = isEnabled('autoWaveguardTierEnroll');
   const detectedPlanKeys = [];
   let earliestServiceDate = null;
 
   for (const row of recurringRows) {
     const rowDate = normalizeDateString(row.scheduled_date);
     if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
+    if (upcomingOnly && (!rowDate || rowDate < today)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
@@ -914,9 +936,12 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
     return { synced: false, reason: 'concurrent_change', detectedPlanKeys };
   }
 
-  // Best-effort audit row on the real pool connection (NOT `database`, which
-  // may be a caller's transaction) — same rationale as the alignment path.
-  void db('activity_log').insert({
+  // Audit row on the SAME handle as the tier write, inside its own savepoint:
+  // atomic with the caller's transaction (an accept that rolls back cannot
+  // leave a durable audit row for an enrollment that never happened — Codex
+  // #3011 r2), while an audit failure rolls back only the savepoint and never
+  // poisons the tier write or the caller.
+  await writeTierAuditRow(database, log, {
     customer_id: customerId,
     action: 'waveguard_tier_auto_enrolled',
     description: `Auto-enrolled WaveGuard ${enrollment.inferredTier} from upcoming recurring services`,
@@ -925,7 +950,7 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
       detected_family_keys: enrollment.detectedFamilyKeys,
       updates: enrollment.updates,
     },
-  }).catch((err) => log.warn(`[self-booking-plan-sync] tier auto-enroll activity_log insert failed: ${err.message}`));
+  });
 
   return {
     synced: true,
@@ -936,6 +961,20 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
     inferredTier: enrollment.inferredTier,
     updates: enrollment.updates,
   };
+}
+
+// Tier audit rows ride the same handle as the tier write they describe, in a
+// nested savepoint: they commit and roll back WITH the caller's transaction
+// (no durable audit for an enrollment a failed accept rolled back), and an
+// insert failure rolls back only the savepoint — never the tier write.
+async function writeTierAuditRow(database, log, row) {
+  try {
+    await database.transaction(async (inner) => {
+      await inner('activity_log').insert(row);
+    });
+  } catch (err) {
+    log.warn(`[self-booking-plan-sync] ${row.action} activity_log insert failed: ${err.message}`);
+  }
 }
 
 // Compare-and-swap WHERE clauses for label-only tier writes (Codex #3011
@@ -962,54 +1001,64 @@ function applyLabelOnlySnapshotGuards(query, customer, customerColumns) {
 }
 
 // Realignment executor: move a label-only customer's tier to exactly what
-// their upcoming coverage supports (up, down, or cleared). Same no-comms
-// guarantee as enrollment — a direct customers UPDATE; the membership
-// started/canceled emails live only in the admin PATCH route and the
-// offboarding flow.
-async function realignLabelOnlyTierCustomer({ database, log, customer, customerId, customerColumns, today }) {
-  const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(database, customerId, today);
-  const realignment = buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, customerColumns);
-  if (!Object.keys(realignment.updates).length) {
-    return { realigned: false, detectedPlanKeys };
-  }
+// their upcoming coverage supports (up, down, or cleared). Runs in its own
+// transaction holding the customer row lock (FOR UPDATE) across a FRESH
+// customer read AND a fresh schedule-evidence read (Codex #3011 r2): a
+// concurrent booking's sync takes the same lock, so whichever runs second
+// re-derives from the settled state instead of clearing a tier whose new
+// coverage it never saw. The CAS guards on the UPDATE stay as a second belt.
+// Same no-comms guarantee as enrollment — a direct customers UPDATE; the
+// membership started/canceled emails live only in the admin PATCH route and
+// the offboarding flow.
+async function realignLabelOnlyTierCustomer({ database, log, customerId, customerColumns, today }) {
+  return database.transaction(async (trx) => {
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
+    if (!customer) return { realigned: false, reason: 'customer_missing' };
 
-  const updatedCount = await applyLabelOnlySnapshotGuards(
-    database('customers').where({ id: customerId }),
-    customer,
-    customerColumns,
-  ).update(realignment.updates);
-  if (!updatedCount) {
-    log.info(`[self-booking-plan-sync] tier realignment skipped for ${customerId} — customer changed since candidate read`);
-    return { realigned: false, reason: 'concurrent_change', detectedPlanKeys };
-  }
+    const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(trx, customerId, today);
+    const realignment = buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, customerColumns);
+    if (!Object.keys(realignment.updates).length) {
+      return { realigned: false, detectedPlanKeys };
+    }
 
-  const currentRank = activeTierRank(normalizeTierName(customer?.waveguard_tier));
-  const inferredRank = realignment.inferredTier ? activeTierRank(realignment.inferredTier) : -1;
-  const raised = inferredRank > currentRank;
-  void db('activity_log').insert({
-    customer_id: customerId,
-    action: raised ? 'waveguard_tier_auto_aligned' : 'waveguard_tier_auto_lapsed',
-    description: raised
-      ? `Raised WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage grew`
-      : (realignment.inferredTier
-        ? `Lowered WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage shrank`
-        : 'Cleared WaveGuard tier — no upcoming recurring services remain'),
-    metadata: {
-      previous_tier: customer?.waveguard_tier || null,
-      detected_plan_keys: detectedPlanKeys,
-      detected_family_keys: realignment.detectedFamilyKeys,
+    const updatedCount = await applyLabelOnlySnapshotGuards(
+      trx('customers').where({ id: customerId }),
+      customer,
+      customerColumns,
+    ).update(realignment.updates);
+    if (!updatedCount) {
+      log.info(`[self-booking-plan-sync] tier realignment skipped for ${customerId} — customer changed since read`);
+      return { realigned: false, reason: 'concurrent_change', detectedPlanKeys };
+    }
+
+    const currentRank = activeTierRank(normalizeTierName(customer.waveguard_tier));
+    const inferredRank = realignment.inferredTier ? activeTierRank(realignment.inferredTier) : -1;
+    const raised = inferredRank > currentRank;
+    await writeTierAuditRow(trx, log, {
+      customer_id: customerId,
+      action: raised ? 'waveguard_tier_auto_aligned' : 'waveguard_tier_auto_lapsed',
+      description: raised
+        ? `Raised WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage grew`
+        : (realignment.inferredTier
+          ? `Lowered WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage shrank`
+          : 'Cleared WaveGuard tier — no upcoming recurring services remain'),
+      metadata: {
+        previous_tier: customer.waveguard_tier || null,
+        detected_plan_keys: detectedPlanKeys,
+        detected_family_keys: realignment.detectedFamilyKeys,
+        updates: realignment.updates,
+      },
+    });
+
+    return {
+      realigned: true,
+      raised,
+      detectedPlanKeys,
+      detectedFamilyKeys: realignment.detectedFamilyKeys,
+      inferredTier: realignment.inferredTier,
       updates: realignment.updates,
-    },
-  }).catch((err) => log.warn(`[self-booking-plan-sync] tier realignment activity_log insert failed: ${err.message}`));
-
-  return {
-    realigned: true,
-    raised,
-    detectedPlanKeys,
-    detectedFamilyKeys: realignment.detectedFamilyKeys,
-    inferredTier: realignment.inferredTier,
-    updates: realignment.updates,
-  };
+    };
+  });
 }
 
 // Nightly reconcile for the auto-tier directive, BOTH directions:
@@ -1048,6 +1097,13 @@ async function reconcileRecurringTiers(options = {}) {
   };
 
   // Pass 1 — enrollment: not enrolled + at least one upcoming recurring row.
+  // The EXISTS pre-screen mirrors the authoritative per-row predicate as far
+  // as SQL can (recurring, non-terminal, upcoming, not a callback, not a
+  // one-time booking source) so persistent false positives don't occupy the
+  // page; the residual class — rows with no detectable WaveGuard family —
+  // can't be expressed in SQL, so candidates are ALSO sampled in random
+  // order rather than a fixed created_at page that those rows would pin
+  // forever (Codex #3011 r2).
   let enrollQuery = database('customers as c')
     .where(function notEnrolled() {
       this.where(function noRecognizedTier() {
@@ -1066,8 +1122,18 @@ async function reconcileRecurringTiers(options = {}) {
         .whereNotIn('s.status', TERMINAL_STATUSES)
         .where('s.scheduled_date', '>=', today);
       if (hasIsRecurring) this.where('s.is_recurring', true);
+      if (scheduledColumns.is_callback) {
+        this.where(function notCallback() {
+          this.whereNull('s.is_callback').orWhere('s.is_callback', false);
+        });
+      }
+      if (scheduledColumns.source) {
+        this.where(function notOneTimeSource() {
+          this.whereNull('s.source').orWhereNotIn('s.source', ONE_TIME_BOOKING_SOURCE_VALUES);
+        });
+      }
     })
-    .orderBy('c.created_at', 'asc')
+    .orderByRaw('random()')
     .limit(Math.max(1, limit))
     .select('c.id');
   enrollQuery = applyCommonFilters(enrollQuery);
@@ -1077,12 +1143,15 @@ async function reconcileRecurringTiers(options = {}) {
   let failed = 0;
   for (const candidate of enrollCandidates) {
     try {
-      const result = await syncCustomerWaveGuardPlanFromScheduledServices({
-        database,
+      // Per-candidate transaction so the sync's customer read takes the row
+      // lock (forUpdate engages only inside a transaction) and serializes
+      // with any concurrent booking-time sync on the same customer.
+      const result = await database.transaction(async (trx) => syncCustomerWaveGuardPlanFromScheduledServices({
+        database: trx,
         log,
         customerId: candidate.id,
         today,
-      });
+      }));
       if (result?.enrolled) enrolled += 1;
     } catch (err) {
       failed += 1;
@@ -1110,12 +1179,9 @@ async function reconcileRecurringTiers(options = {}) {
     })
     .orderByRaw('random()')
     .limit(Math.max(1, limit))
-    .select(
-      'c.id',
-      'c.waveguard_tier',
-      'c.monthly_rate',
-      ...(customerColumns.billing_mode ? ['c.billing_mode'] : []),
-    );
+    // Only ids: the executor re-reads the customer fresh under its row lock,
+    // so a snapshot here would only invite staleness.
+    .select('c.id');
   if (customerColumns.billing_mode) {
     realignQuery = realignQuery.where(function labelOnlyLane() {
       this.whereNull('c.billing_mode').orWhereIn('c.billing_mode', LABEL_ONLY_REALIGN_LANES);
@@ -1131,7 +1197,6 @@ async function reconcileRecurringTiers(options = {}) {
       const result = await realignLabelOnlyTierCustomer({
         database,
         log,
-        customer: candidate,
         customerId: candidate.id,
         customerColumns,
         today,

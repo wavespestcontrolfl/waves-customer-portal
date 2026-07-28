@@ -451,14 +451,42 @@ async function analyzeCustomer(customer, customerColumns, today) {
 
 async function applyCustomerRepair(repair) {
   if (!Object.keys(repair.customerUpdates).length) return;
-  await db('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
+
+  const isEnrollment = repair.customer.candidate_reason === 'no_plan_upcoming_recurring';
+  let updateQuery = db('customers').where({ id: repair.customer.id });
+  if (isEnrollment) {
+    // Compare-and-swap on the read snapshot, mirroring the runtime enrollment
+    // path (Codex #3011 r2 P1): candidates were read earlier in main(), so a
+    // customer converted to a paid membership mid-run must match zero rows
+    // here — never have the conversion's tier overwritten by a stale label.
+    if (repair.customer.waveguard_tier == null) {
+      updateQuery = updateQuery.whereNull('waveguard_tier');
+    } else {
+      updateQuery = updateQuery.where('waveguard_tier', repair.customer.waveguard_tier);
+    }
+    updateQuery = updateQuery.where(function notPayingRate() {
+      this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+    });
+    if ('billing_mode' in repair.customer) {
+      if (repair.customer.billing_mode == null) {
+        updateQuery = updateQuery.whereNull('billing_mode');
+      } else {
+        updateQuery = updateQuery.where('billing_mode', repair.customer.billing_mode);
+      }
+    }
+  }
+  const updatedCount = await updateQuery.update(repair.customerUpdates);
+  if (isEnrollment && !updatedCount) {
+    console.error(`enrollment skipped for customer ${repair.customer.id} — customer changed since candidate read`);
+    return;
+  }
 
   // Mirror the runtime enrollment path's audit trail (Codex #3011 P2): a bulk
   // --enroll-no-plan --apply can change hundreds of membership labels, and
   // each one must leave the same waveguard_tier_auto_enrolled activity row
   // the booking-time sync writes. Best-effort — a missing table or failed
   // insert never aborts the backfill.
-  if (repair.customer.candidate_reason !== 'no_plan_upcoming_recurring') return;
+  if (!isEnrollment) return;
   try {
     if (!(await db.schema.hasTable('activity_log'))) return;
     await db('activity_log').insert({
