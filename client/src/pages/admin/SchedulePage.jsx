@@ -582,6 +582,16 @@ function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
 
+// Token per category that /admin/protocols/photos/relevant classifies to the
+// same line the panel renders (its filter matches literal tokens only).
+const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
+  lawn: "lawn",
+  tree_shrub: "tree shrub",
+  pest: "pest",
+  mosquito: "mosquito",
+  termite: "termite",
+};
+
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
   // Precedence mirrors the server's detectServiceLine: explicit lawn-SURFACE
@@ -618,7 +628,8 @@ function detectServiceCategory(serviceType) {
     s.includes("bora") ||
     s.includes("trelona") ||
     s.includes("termidor") ||
-    (/\badvance\b/.test(s) && (s.includes("bait") || s.includes("station")))
+    (/\badvance\b/.test(s) &&
+      (s.includes("bait") || s.includes("station") || s.includes("install")))
   )
     return "termite";
   if (
@@ -3460,16 +3471,16 @@ export function ProtocolPanel({ service, onClose }) {
 
       const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(
-          // The photos endpoint filters lawn by literal lawn/turf tokens; a
-          // raw lawn-classified label without them ("Aeration") would drop
-          // the filter entirely, so fall back to the normalized label (which
-          // carries the "Lawn" prefix) for that case only. Every other line
-          // passes the raw type so the lookup matches the panel's line.
+          // The photos endpoint derives its line from literal tokens
+          // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
+          // panel's CLASSIFIED category as that token so the lookup always
+          // matches the panel's line, even for raw aliases ("Bora-Care",
+          // "Aeration") carrying none of the tokens. Categories the endpoint
+          // has no token for (e.g. rodent) fall back to the normalized label,
+          // preserving its existing behavior.
           `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(
-            serviceCategory === "lawn" &&
-              !/(lawn|turf)/.test(panelServiceType.toLowerCase())
-              ? service.serviceType
-              : panelServiceType,
+            PHOTO_LOOKUP_TYPE_BY_CATEGORY[serviceCategory] ||
+              service.serviceType,
           )}&month=${month}`,
         ),
         adminFetch(
