@@ -1319,11 +1319,16 @@ function draftScanTexts(draft, body) {
  * strictness. Names the operator did NOT write stay hard-blocked; mined
  * briefs pass no text, so nothing changes for them.
  */
-function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
+function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEnabled = false } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  const nameScanText = stripQuotesForNames(scanText);
+  // URLs are BLANKED for all text scans — a citation destination is not a
+  // prose mention (r2), and synthetic names would poison the bare
+  // proximity checks (r6). Link→competitor association happens through
+  // linkedCompetitorMentions below. Deliberately NOT applied to
+  // operatorBriefText — a URL there is a legitimate operator signal.
+  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
   // Authorized names come from running the SAME mention detector over the
   // operator's brief text — both sides canonicalize identically, so a brief
   // that says "Massey" authorizes a draft that writes the canonical "Massey
@@ -1544,6 +1549,39 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   }
 
   let requiresHumanReview = false;
+  // Links targeting a competitor via their DESTINATION (Codex r4): tone
+  // checks read the anchor + preceding clause; an allowlisted linked
+  // competitor still routes to named-competitor review even though the
+  // blanked URL is not a prose mention.
+  const linkedDisabledNames = new Set();
+  for (const lk of linkedCompetitorMentions(scanText)) {
+    if (lk.inAllowlist) {
+      // Link-only allowlisted competitor: named-competitor usage. With the
+      // feature gate off this must surface, not silently pass (Codex r6 —
+      // parity with the table path's DISABLED finding).
+      if (!namedCompetitorEnabled) linkedDisabledNames.add(lk.name);
+      else requiresHumanReview = true;
+    } else if (operatorAuthorized(lk.name)) {
+      requiresHumanReview = true;
+    } else {
+      findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
+        `A link targets "${lk.name}" via its URL — a recognized competitor not on the curated competitor-facts allowlist. Remove the link or add "${lk.name}" to competitor-facts.js with sourced, dated facts.`));
+    }
+    if (DISPARAGEMENT_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in a sourced comparison table.`));
+    } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in a sourced comparison table.`));
+    }
+  }
+  if (linkedDisabledNames.size) {
+    findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
+      `Links target a competitor (${[...linkedDisabledNames].join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Remove the links, or enable the flag.`));
+  }
   for (const nm of unknown) {
     if (operatorAuthorized(nm)) {
       // The operator named this competitor in the intercept brief — route
@@ -1565,6 +1603,96 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   return { pass, findings, requiresHumanReview };
+}
+
+// URL boundary shared by every URL-aware name-scan transform. The class
+// stops at whitespace, markdown/HTML delimiters, AND the prose punctuation
+// that can sit flush against a URL (, ; | { } `) — otherwise
+// "https://…/plans,TruGreen offers" would mask the brand name and the gate
+// would fail OPEN (Codex r3). A comma/semicolon inside a real URL truncates
+// the mask early, which errs fail-CLOSED (the visible tail can only ADD a
+// prose mention and route to review, never hide one).
+const NAME_SCAN_URL_RE_SRC = 'https?:\\/\\/[^\\s)"\'<>\\],;`|{}]+';
+
+// Length-preserving URL blanking for competitor-NAME detection inputs
+// (indices keep aligning with the original text): every URL becomes spaces —
+// a link destination is not a PROSE MENTION (its host is validated by the
+// external-link guardrail), so operator-required citations don't self-block
+// (Codex r2). Link→competitor ASSOCIATION happens exclusively through
+// linkedCompetitorMentions below (Codex r6: substituting synthetic names
+// into the scan text fed the bare proximity checks and turned "DIY sprays
+// are unreliable. Consult [the plan](trugreen…)" into phantom findings).
+function stripLinkDestinationsForNames(s) {
+  return String(s).replace(new RegExp(NAME_SCAN_URL_RE_SRC, 'gi'), (u) => ' '.repeat(u.length));
+}
+
+// hostname → curated competitor record, built from the attribute `source`
+// URLs in competitor-facts (Codex r6: most official hosts concatenate the
+// brand — masseyservices.com, trulynolen.com — so token-splitting a URL
+// never resolves them; the curated sources are the authoritative host list).
+let COMPETITOR_HOST_INDEX = null;
+function competitorHostIndex() {
+  if (COMPETITOR_HOST_INDEX) return COMPETITOR_HOST_INDEX;
+  COMPETITOR_HOST_INDEX = new Map();
+  for (const c of (Array.isArray(competitorFacts.COMPETITORS) ? competitorFacts.COMPETITORS : [])) {
+    for (const attr of Object.values(c?.attributes || {})) {
+      const src = attr?.source;
+      if (!src) continue;
+      try {
+        const host = new URL(src).hostname.toLowerCase().replace(/^www\./, '');
+        COMPETITOR_HOST_INDEX.set(host, c);
+      } catch { /* not a URL */ }
+    }
+  }
+  return COMPETITOR_HOST_INDEX;
+}
+
+// Evaluative negatives for link-anchored tone checks — the combined
+// directed-disparagement vocabulary (DISPARAGEMENT_RE plus the NEG_ADJ
+// evaluatives), since "[the worst company](url)" identifies its target only
+// through the URL and the noun-directed grammars can't see it (Codex r5).
+const LINKED_NEG_ADJ_RE = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'i');
+
+// Every URL — inline-markdown, bare/autolink, or HTML href — whose
+// DESTINATION resolves to a recognized competitor. The destination is
+// deliberately NOT a prose mention, but the link still TARGETS that
+// competitor — so tone checks read the anchor (when present) plus the
+// same-sentence clauses BEFORE and AFTER the link ("…](url) is dishonest"
+// accuses after the destination — Codex r5), and a linked allowlisted
+// competitor still routes to named-competitor review.
+function linkedCompetitorMentions(text) {
+  const s = String(text);
+  const out = [];
+  const re = new RegExp(`(?:\\[([^\\]]*)\\]\\(\\s*<?)?(${NAME_SCAN_URL_RE_SRC})`, 'gi');
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const anchor = m[1] || '';
+    const url = m[2] || '';
+    // Resolve EVERY competitor a URL identifies (Codex r6): the curated
+    // host index catches concatenated official domains; the token scan
+    // catches brands named in the path ("/orkin-vs-hawx") — all hits are
+    // kept, deduped by name, so an uncurated brand can't hide behind a
+    // curated one in the same URL.
+    const hits = new Map();
+    try {
+      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      const idx = competitorHostIndex();
+      for (const [h, c] of idx) {
+        if (host === h || host.endsWith(`.${h}`)) { hits.set(c.name, { name: c.name, inAllowlist: true }); break; }
+      }
+    } catch { /* unparseable URL — token scan below still runs */ }
+    for (const hit of competitorFacts.findBusinessMentions(url.replace(/[^a-z0-9]+/gi, ' '))) {
+      if (!hits.has(hit.name)) hits.set(hit.name, { name: hit.name, inAllowlist: hit.inAllowlist });
+    }
+    if (hits.size === 0) continue;
+    const before = s.slice(Math.max(0, m.index - 80), m.index);
+    const pre = before.split(/[.!?\n]/).pop() || '';
+    const afterStart = m.index + m[0].length;
+    const post = (s.slice(afterStart, afterStart + 80).split(/[.!?\n]/)[0] || '').replace(/^[)>]*/, '');
+    const context = `${pre} ${anchor} ${post}`.trim();
+    for (const hit of hits.values()) out.push({ ...hit, anchor, context });
+  }
+  return out;
 }
 
 // Escape a detected business name for use inside a regex, tolerating the
@@ -1590,7 +1718,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // still carry a disparaging title/meta (draftScanTexts covers both the
   // top-level and frontmatter shapes).
   if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
-  if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText });
+  if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText, namedCompetitorEnabled });
 
   // Same collector as draftScanTexts: the prose-only competitor check below
   // appends metaText to proseText, so a frontmatter-only rebuild here would
@@ -1606,7 +1734,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // nameScanText share character indices) but can leave multiple spaces between
   // words — name lookups must stay whitespace-tolerant.
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
-  const nameScanText = stripQuotesForNames(scanText);
+  // URLs are BLANKED for all text scans — a citation destination is not a
+  // prose mention (r2), and synthetic names would poison the bare proximity
+  // checks (r6). Link→competitor association (tone, gate, review, unknown
+  // fail-close) happens through linkedCompetitorMentions further down.
+  // Disparagement/ranking scans keep the original scanText.
+  const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
 
   const known = new Set();
   const unknown = new Set();
@@ -1642,7 +1775,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   let proseText = body;
   for (const b of blocks) proseText = proseText.split(b).join(' ');
   if (metaText) proseText = `${proseText}\n${metaText}`;
-  const proseNameText = stripQuotesForNames(proseText); // length-preserving; indices align
+  // Length-preserving; indices align. Link destinations blanked for the same
+  // reason as nameScanText above — a citation URL is not a prose mention.
+  const proseNameText = stripQuotesForNames(stripLinkDestinationsForNames(proseText));
 
   // A detected business name within PROVIDER_NEGATIVE_PROXIMITY of a prose
   // match — same window idiom as the competitor scans below.
@@ -2123,8 +2258,41 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     }
   }
 
+  // Links targeting a competitor via their DESTINATION: not prose mentions,
+  // but tone checks read the anchor + preceding clause, and an allowlisted
+  // linked competitor still routes to named-competitor review (Codex r4 —
+  // "[this dishonest company](https://competitor.com/…)" must not pass).
+  const linkedKnown = new Set();
+  for (const lk of linkedCompetitorMentions(scanText)) {
+    if (lk.inAllowlist) {
+      // Feeds `known` so the feature-gate branch and review routing below
+      // treat a link-only competitor as named-competitor usage (r5/r6);
+      // linkedKnown keeps it OUT of the unsourced-caption fill (r2).
+      if (!known.has(lk.name)) linkedKnown.add(lk.name);
+      known.add(lk.name);
+    } else {
+      // Recognized but uncurated target — the same fail-closed
+      // unknown-competitor handling as a prose naming (r5).
+      unknown.add(lk.name);
+    }
+    if (DISPARAGEMENT_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in the sourced comparison table.`));
+    } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in the sourced comparison table.`));
+    }
+  }
+
   // Known competitors named only in prose (never in a table) have no caption → unsourced.
-  for (const n of known) if (!blockNamedKnown.has(n)) unsourcedKnown.add(n);
+  // Known ONLY through a link destination (never named in the text or a
+  // table block): no caption requirement — the r2 citation contract — but
+  // still counted in `known`, so the feature gate and review routing below
+  // see it (Codex r5).
+  for (const n of known) if (!blockNamedKnown.has(n) && !linkedKnown.has(n)) unsourcedKnown.add(n);
 
   // A competitor may be named ONLY inside the comparison table, where every cell
   // is validated against curated facts. A mention in the surrounding prose /
@@ -2139,6 +2307,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   for (const m of competitorFacts.findBusinessMentions(proseNameText)) {
     if (m.inAllowlist) competitorInProse.add(m.name);
   }
+
 
   // Reconcile overlaps.
   for (const nm of known) unknown.delete(nm);
@@ -2178,7 +2347,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   // A clean, enabled named-competitor draft still must NOT auto-publish: the
   // runner routes requiresHumanReview drafts to the approvable review queue.
-  const requiresHumanReview = pass && namedCompetitorEnabled && known.size > 0;
+  const requiresHumanReview = pass && namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0);
   return { pass, findings, requiresHumanReview };
 }
 

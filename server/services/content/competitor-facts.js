@@ -193,6 +193,23 @@ const COMPETITORS = [
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.hughes-exterminators.com', asOf: '2026-06-22' },
     },
   },
+  {
+    // Promoted from COMPETITOR_BRAND_SIGNALS 2026-07-28 (owner GO on the
+    // named-competitor lawn lane): the two TruGreen intercepts (B2/D1) died
+    // on gates precisely because TruGreen had no curated record — no
+    // sourced facts to compare with and trugreen.com absent from the
+    // curated citation hosts.
+    id: 'trugreen',
+    name: 'TruGreen',
+    aliases: ['trugreen lawn care', 'tru green'],
+    attributes: {
+      // Deliberately neutral — no market-share/"#1" language: the comparison
+      // gate rejects ranking tokens even when they quote a curated value.
+      reach: { value: 'National (US)', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
+      residential_recurring: { value: 'Yes — annual residential lawn plans (TruPro / TruCore / TruBasic tiers)', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
+      guarantee: { value: 'Healthy Lawn Guarantee — "we\'ll gladly visit your property as often as needed between scheduled visits to make any necessary adjustments and to ensure your satisfaction"; site footnote: "Guarantee applies to full program customers only"', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
+    },
+  },
 ];
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear
