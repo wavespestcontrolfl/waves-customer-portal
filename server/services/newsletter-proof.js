@@ -311,6 +311,15 @@ async function renderSendPreview(send, toEmail) {
   // (neutralized to inert chips below — no per-recipient token here).
   const { ensureFeedbackToken } = require('./newsletter-feedback');
   const ensured = ensureFeedbackToken({ html: send.html_body || '', text: send.text_body });
+  // Event click-tracking tokens resolve to the DIRECT event URLs in
+  // proofs/tests — the reader clicks straight through, untracked.
+  const { resolveEvclickDirect, eventUrlMapForSend } = require('./newsletter-event-clicks');
+  let evUrlById = new Map();
+  try {
+    evUrlById = await eventUrlMapForSend(send);
+  } catch { /* fail-open: tokens resolve to the homepage fallback */ }
+  ensured.html = resolveEvclickDirect(ensured.html, evUrlById);
+  if (ensured.text) ensured.text = resolveEvclickDirect(ensured.text, evUrlById);
   let html = wrapNewsletter({
     body: ensured.html,
     unsubscribeUrl: demoUrl,

@@ -358,7 +358,10 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
   posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
-  feedback/:token/:reaction — rate-limited, read-only for posts/rss,
+  feedback/:token/:reaction, e/:token/:eventId (event click-through:
+  records one deduped analytics row then 302s to the DB-locked event
+  URL; unknown token = untracked redirect, never blocks the reader)
+  — rate-limited, read-only for posts/rss,
   double-opt-in for subscribe; the quiz and feedback tokens are the same
   per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
   renders a confirm page only and the delivery-row write happens on a
