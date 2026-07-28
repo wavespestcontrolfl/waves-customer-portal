@@ -85,13 +85,14 @@ describe('propagateCustomerNameChange', () => {
     expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'whereRaw'
       && c.arg.sql.includes('preparedFor') && c.arg.bindings[0] === 'Kathy Nunez')).toBe(true);
 
-    // In-flight ('sending') rows get a COLUMN-ONLY sync — never an
-    // estimate_data write under an active send claim.
+    // The trailing catch-up (in-flight 'sending' rows + rows that raced past
+    // the per-row pass) is COLUMN-ONLY — never an estimate_data write under
+    // an active send claim.
     const sendingSync = conn.__updates('estimates')[1].arg;
     expect(sendingSync.customer_name).toBe('Cathy Nunes Furao');
     expect(sendingSync.estimate_data).toBeUndefined();
-    expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'where'
-      && c.arg && c.arg.status === 'sending')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'whereIn'
+      && c.arg.vals.includes('sending'))).toBe(true);
 
     expect(conn.__updates('automation_enrollments')[0].arg.first_name).toBe('Cathy');
     expect(conn.__updates('newsletter_subscribers')[0].arg.first_name).toBe('Cathy');

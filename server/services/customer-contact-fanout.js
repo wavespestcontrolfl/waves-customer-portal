@@ -214,11 +214,19 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     }
   }
 
-  // In-flight ('sending') rows sync COLUMN-ONLY — the active send claim owns
-  // estimate_data (see the email fan-out's verification against the send
-  // path); diff-gating means a skipped row could never heal later.
+  // COLUMN-ONLY catch-up over every open + in-flight state: 'sending' rows
+  // sync here because the active send claim owns estimate_data (see the email
+  // fan-out's verification against the send path), and rows that RACED
+  // through the per-row pass — claimed into 'sending' after the select, or
+  // settled back to sent/send_failed before this query — still key-match the
+  // old name and heal here. Diff-gating means a stranded row could never heal
+  // later, so this pass must not depend on the status observed at select
+  // time. Residual: a raced row's preparedFor copy keeps the old spelling
+  // (its estimate_data was owned by the concurrent send); the next proposal
+  // re-author refreshes it.
   counts.estimates += await conn('estimates')
-    .where({ customer_id: customerId, status: 'sending' })
+    .where({ customer_id: customerId })
+    .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
     .whereNull('archived_at')
     .whereRaw(`${NAME_KEY_SQL('customer_name')} = ?`, [oldFullKey])
     .whereRaw('customer_name IS DISTINCT FROM ?', [newFull.slice(0, 100)])
