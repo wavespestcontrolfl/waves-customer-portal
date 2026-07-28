@@ -1172,11 +1172,34 @@ router.get('/reschedule-link', async (req, res) => {
       }
       customerIds = [customer.id];
     } else {
-      const rows = await db('customers')
+      const matches = await db('customers')
         .whereNull('deleted_at')
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id', 'account_id');
+      if (!matches.length) {
+        return res.status(404).json({ error: 'No customer found for that number' });
+      }
+      // Genuine multi-property customers share one customer_accounts row;
+      // the same digits on rows under DIFFERENT accounts (number reuse,
+      // duplicate CRM entry) is ambiguous and fails closed — the operator
+      // picks the person from the dropdown, which takes the customerId path
+      // above. Effective account key is account_id || id: self-adoption sets
+      // account_id = id, but rows created by webhook/call paths can carry
+      // NULL until the lazy login-time adoption (backfill 20260721000000),
+      // and two account-less rows can't be assumed to be the same person.
+      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+      if (accountKeys.length > 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
+        });
+      }
+      // Expand to the whole account so the soonest visit is chosen across
+      // every property profile, including ones whose contact number differs.
+      const accountRows = await db('customers')
+        .whereNull('deleted_at')
+        .where((qb) => qb.where({ account_id: accountKeys[0] }).orWhere({ id: accountKeys[0] }))
         .select('id');
-      customerIds = rows.map((r) => r.id);
+      customerIds = accountRows.map((r) => r.id);
     }
     if (!customerIds.length) {
       return res.status(404).json({ error: 'No customer found for that number' });
@@ -1202,6 +1225,10 @@ router.get('/reschedule-link', async (req, res) => {
       .orderBy([
         { column: 'scheduled_date', order: 'asc' },
         { column: 'window_start', order: 'asc' },
+        // Stable tie-breaker: two properties' visits can share a date and
+        // window, and without a unique key the "soonest" pick would be
+        // whichever row Postgres returns first that day.
+        { column: 'id', order: 'asc' },
       ])
       .limit(25)
       .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');

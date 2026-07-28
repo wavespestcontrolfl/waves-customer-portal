@@ -621,6 +621,10 @@ function SmsTab() {
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
   const [insertingResched, setInsertingResched] = useState(false);
+  // The last inserted reschedule link and the recipient it was minted for:
+  // { url, recipientKey, customerId }. The bearer link must not outlive its
+  // recipient — the effect below strips it from the body if To changes.
+  const [insertedResched, setInsertedResched] = useState(null);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1221,6 +1225,11 @@ function SmsTab() {
       setMsgBody((b) =>
         b.trim() ? `${b.replace(/\s+$/, "")}\n\n${clause}` : clause,
       );
+      setInsertedResched({
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: requestCustomerId,
+      });
       // Noon anchor keeps the Y-M-D string on its own calendar day in every
       // US zone (same idiom as the server's reschedule confirmation copy).
       const day = new Date(
@@ -1244,6 +1253,41 @@ function SmsTab() {
       setInsertingResched(false);
     }
   };
+
+  // An inserted reschedule link is a bearer credential for ONE customer's
+  // visit — it must not survive a recipient change. If To (or the selected
+  // customer) no longer matches what the link was minted for, strip the
+  // link's line from the body and say so. Also forgets the tracked link once
+  // the operator deletes it (or the body clears on send).
+  useEffect(() => {
+    if (!insertedResched) return;
+    if (!msgBody.includes(insertedResched.url)) {
+      setInsertedResched(null);
+      return;
+    }
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient
+      ? smsThreadKey(currentRecipient)
+      : "";
+    if (
+      currentRecipientKey !== insertedResched.recipientKey ||
+      (selectedCustomerId || null) !== insertedResched.customerId
+    ) {
+      setMsgBody((b) =>
+        b
+          .split("\n")
+          .filter((l) => !l.includes(insertedResched.url))
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
+      );
+      setInsertedResched(null);
+      setSendResult({
+        ok: true,
+        text: "Reschedule link removed — the recipient changed.",
+      });
+    }
+  }, [insertedResched, msgBody, toNumber, selectedCustomerId]);
 
   const handleRewriteSms = async () => {
     const cleanBody = msgBody.trim();
@@ -2020,6 +2064,10 @@ function SmsTab() {
               sending ||
               uploading ||
               rewritingSms ||
+              // Mid-lookup send would go out WITHOUT the link the operator
+              // just asked for (and clearing the recipient on send discards
+              // the response) — wait out the reschedule-link fetch.
+              insertingResched ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
             }

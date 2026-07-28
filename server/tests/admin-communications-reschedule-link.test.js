@@ -2,11 +2,12 @@
  * GET /admin/communications/reschedule-link — the SMS composer's
  * "Reschedule Link" helper. The reschedule token is a bearer credential, so
  * these tests pin the fail-closed resolution rules (full 10-digit phone,
- * exact last-10 match, customerId↔phone cross-check, multi-property
- * determinism), the candidate gates (status set, ET day frame,
- * dispatch-owned pending exclusion, elapsed same-day placeholder skip), and
- * the response shape. Link building itself is covered by
- * reschedule-public.test.js — buildRescheduleLink is mocked here.
+ * exact last-10 match, customerId↔phone cross-check, account-scoped
+ * multi-property expansion, cross-account rejection), the candidate gates
+ * (status set, ET day frame, dispatch-owned pending exclusion, elapsed
+ * same-day placeholder skip, stable ordering), and the response shape. Link
+ * building itself is covered by reschedule-public.test.js —
+ * buildRescheduleLink is mocked here.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -76,17 +77,27 @@ const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { buildRescheduleLink } = require('../services/reschedule-link');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
-const { etDateString } = require('../utils/datetime-et');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
-function makeCustomersBuilder({ firstRow = null, rows = [] } = {}) {
-  const b = { calls: { where: [], whereRaw: [], whereNull: [] } };
-  b.where = jest.fn((...a) => { b.calls.where.push(a); return b; });
+// The phone path issues up to two customers queries (exact-match rows, then
+// the account expansion) — selectResults is consumed in call order.
+function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
+  const queue = [...selectResults];
+  const inner = {
+    where: jest.fn(() => inner),
+    orWhere: jest.fn(() => inner),
+  };
+  const b = { inner, calls: { where: [], whereRaw: [], whereNull: [] } };
+  b.where = jest.fn((...a) => {
+    if (typeof a[0] === 'function') a[0](inner);
+    else b.calls.where.push(a);
+    return b;
+  });
   b.whereNull = jest.fn((...a) => { b.calls.whereNull.push(a); return b; });
   b.whereRaw = jest.fn((...a) => { b.calls.whereRaw.push(a); return b; });
   b.first = jest.fn(() => Promise.resolve(firstRow));
-  b.select = jest.fn(() => Promise.resolve(rows));
+  b.select = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : []));
   return b;
 }
 
@@ -97,14 +108,14 @@ function makeServicesBuilder(rows = []) {
     orWhereNot: jest.fn(() => inner),
     orWhere: jest.fn(() => inner),
   };
-  const b = { inner, calls: { where: [], whereIn: [] } };
+  const b = { inner, calls: { where: [], whereIn: [], orderBy: [] } };
   b.whereIn = jest.fn((...a) => { b.calls.whereIn.push(a); return b; });
   b.where = jest.fn((...a) => {
     if (typeof a[0] === 'function') a[0](inner);
     else b.calls.where.push(a);
     return b;
   });
-  b.orderBy = jest.fn(() => b);
+  b.orderBy = jest.fn((...a) => { b.calls.orderBy.push(a); return b; });
   b.limit = jest.fn(() => b);
   b.select = jest.fn(() => Promise.resolve(rows));
   return b;
@@ -146,6 +157,14 @@ const GOOD_LINK = {
   line: 'Need a different time? Reschedule online: https://wvs.example/r/abc123\n\n',
 };
 
+// A single-account, single-profile customer: exact-match row + account
+// expansion resolving back to the same id (self-adopted account_id = id).
+function soloCustomer(id = CUSTOMER_UUID) {
+  return makeCustomersBuilder({
+    selectResults: [[{ id, account_id: id }], [{ id }]],
+  });
+}
+
 describe('GET /admin/communications/reschedule-link', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -164,7 +183,7 @@ describe('GET /admin/communications/reschedule-link', () => {
   });
 
   test('404 when no live customer matches the exact last-10 digits', async () => {
-    const customers = makeCustomersBuilder({ rows: [] });
+    const customers = makeCustomersBuilder({ selectResults: [[]] });
     wireDb({ customers, services: makeServicesBuilder([]) });
     await withServer(async (baseUrl) => {
       const res = await get(baseUrl, '?phone=%2B15551234567');
@@ -182,7 +201,7 @@ describe('GET /admin/communications/reschedule-link', () => {
   });
 
   test('11-digit numbers with a leading 1 normalize to the last 10', async () => {
-    const customers = makeCustomersBuilder({ rows: [] });
+    const customers = makeCustomersBuilder({ selectResults: [[]] });
     wireDb({ customers, services: makeServicesBuilder([]) });
     await withServer(async (baseUrl) => {
       await get(baseUrl, '?phone=19415551234');
@@ -200,7 +219,7 @@ describe('GET /admin/communications/reschedule-link', () => {
     await withServer(async (baseUrl) => {
       const res = await get(baseUrl, `?phone=9415551234&customerId=${CUSTOMER_UUID}`);
       expect(res.status).toBe(404); // no visit — resolution path is what's under test
-      expect(customers.where).toHaveBeenCalledWith({ id: CUSTOMER_UUID });
+      expect(customers.calls.where).toContainEqual([{ id: CUSTOMER_UUID }]);
       expect(customers.whereNull).toHaveBeenCalledWith('deleted_at');
       expect(customers.whereRaw).not.toHaveBeenCalled();
       expect(services.calls.whereIn).toContainEqual(['customer_id', [CUSTOMER_UUID]]);
@@ -220,21 +239,26 @@ describe('GET /admin/communications/reschedule-link', () => {
   });
 
   test('a malformed customerId falls back to the exact phone match instead of reaching the uuid column', async () => {
-    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const customers = soloCustomer();
     const services = makeServicesBuilder([]);
     wireDb({ customers, services });
     await withServer(async (baseUrl) => {
       await get(baseUrl, '?phone=9415551234&customerId=not-a-uuid');
-      expect(customers.where).not.toHaveBeenCalledWith({ id: 'not-a-uuid' });
+      expect(customers.calls.where).not.toContainEqual([{ id: 'not-a-uuid' }]);
       expect(customers.whereRaw).toHaveBeenCalled();
     });
   });
 
-  test('a phone shared by multiple property rows resolves across the whole matched account', async () => {
-    const customers = makeCustomersBuilder({ rows: [{ id: 'cust-a' }, { id: 'cust-b' }] });
+  test('multi-property rows under ONE account expand to the whole account', async () => {
+    const customers = makeCustomersBuilder({
+      selectResults: [
+        [{ id: 'cust-a', account_id: 'acct-1' }, { id: 'cust-b', account_id: 'acct-1' }],
+        [{ id: 'cust-a' }, { id: 'cust-b' }, { id: 'cust-c' }],
+      ],
+    });
     const services = makeServicesBuilder([{
-      id: 'svc-b1',
-      customer_id: 'cust-b',
+      id: 'svc-c1',
+      customer_id: 'cust-c',
       scheduled_date: '2099-01-05',
       window_start: '08:00:00',
       window_end: '10:00:00',
@@ -246,14 +270,59 @@ describe('GET /admin/communications/reschedule-link', () => {
     await withServer(async (baseUrl) => {
       const res = await get(baseUrl, '?phone=9415551234');
       expect(res.status).toBe(200);
-      expect(services.calls.whereIn).toContainEqual(['customer_id', ['cust-a', 'cust-b']]);
+      // Expansion is by account membership, not just the phone-matched rows —
+      // a property profile with a different contact number still counts.
+      expect(customers.inner.where).toHaveBeenCalledWith({ account_id: 'acct-1' });
+      expect(customers.inner.orWhere).toHaveBeenCalledWith({ id: 'acct-1' });
+      expect(services.calls.whereIn).toContainEqual(['customer_id', ['cust-a', 'cust-b', 'cust-c']]);
       // The link is minted for the row that owns the picked visit.
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-b1', { customerId: 'cust-b' });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-c1', { customerId: 'cust-c' });
     });
   });
 
-  test('candidate query applies the status gate, ET day frame, and the dispatch-owned pending exclusion', async () => {
-    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+  test('409 when the phone matches rows under DIFFERENT accounts (number reuse fails closed)', async () => {
+    const customers = makeCustomersBuilder({
+      selectResults: [
+        [{ id: 'cust-a', account_id: 'acct-1' }, { id: 'cust-x', account_id: 'acct-2' }],
+      ],
+    });
+    const services = makeServicesBuilder([]);
+    wireDb({ customers, services });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, '?phone=9415551234');
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer account/);
+      expect(db).not.toHaveBeenCalledWith('scheduled_services');
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rows with NULL account_id are their own account: one is fine, two fail closed', async () => {
+    // Two account-less rows can't be assumed to be the same person.
+    const ambiguous = makeCustomersBuilder({
+      selectResults: [[{ id: 'cust-a', account_id: null }, { id: 'cust-b', account_id: null }]],
+    });
+    wireDb({ customers: ambiguous, services: makeServicesBuilder([]) });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, '?phone=9415551234');
+      expect(res.status).toBe(409);
+    });
+
+    // A single account-less row self-anchors on its own id.
+    const solo = makeCustomersBuilder({
+      selectResults: [[{ id: 'cust-a', account_id: null }], [{ id: 'cust-a' }]],
+    });
+    wireDb({ customers: solo, services: makeServicesBuilder([]) });
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl, '?phone=9415551234');
+      expect(res.status).toBe(404); // proceeds to the (empty) visit lookup
+      expect(solo.inner.where).toHaveBeenCalledWith({ account_id: 'cust-a' });
+      expect(solo.inner.orWhere).toHaveBeenCalledWith({ id: 'cust-a' });
+    });
+  });
+
+  test('candidate query applies the status gate, ET day frame, dispatch-owned exclusion, and stable ordering', async () => {
+    const customers = soloCustomer();
     const services = makeServicesBuilder([]);
     wireDb({ customers, services });
     await withServer(async (baseUrl) => {
@@ -272,12 +341,18 @@ describe('GET /admin/communications/reschedule-link', () => {
       expect(services.inner.orWhereNotIn).toHaveBeenCalledWith('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
       expect(services.inner.orWhereNot).toHaveBeenCalledWith('status', 'pending');
       expect(services.inner.orWhere).toHaveBeenCalledWith('customer_confirmed', true);
+      // Deterministic pick: unique id tie-breaker after date + window.
+      expect(services.calls.orderBy).toContainEqual([[
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+        { column: 'id', order: 'asc' },
+      ]]);
       expect(buildRescheduleLink).not.toHaveBeenCalled();
     });
   });
 
   test('200 returns the link, the SMS clause, and the visit the link points to', async () => {
-    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const customers = soloCustomer();
     const services = makeServicesBuilder([{
       id: 'svc-1',
       customer_id: CUSTOMER_UUID,
@@ -314,7 +389,7 @@ describe('GET /admin/communications/reschedule-link', () => {
     // and fetch stay real.
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
     try {
-      const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+      const customers = soloCustomer();
       const services = makeServicesBuilder([
         {
           id: 'svc-placeholder',
@@ -350,7 +425,7 @@ describe('GET /admin/communications/reschedule-link', () => {
   });
 
   test('404 when the visit has no usable link (legacy tokenless row)', async () => {
-    const customers = makeCustomersBuilder({ rows: [{ id: CUSTOMER_UUID }] });
+    const customers = soloCustomer();
     const services = makeServicesBuilder([{
       id: 'svc-legacy',
       customer_id: CUSTOMER_UUID,
