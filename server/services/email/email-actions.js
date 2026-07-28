@@ -324,9 +324,16 @@ async function handleNewsletter(email) {
   // re-asserts the claim. This claim is also what makes the unsubscribe
   // request effectively once-per-email — autoUnsubscribe is only reachable
   // by the claim winner.
+  const staleClaimCutoff = new Date(Date.now() - 3600000);
   const claimed = await db('emails')
     .where({ id: email.id })
-    .where((q) => q.whereNull('auto_action').orWhereRaw("auto_action NOT LIKE 'newsletter_%'"))
+    .where((q) => q
+      .whereNull('auto_action')
+      .orWhereRaw("auto_action NOT LIKE 'newsletter_%'")
+      // Stale-claim takeover: a crash mid-action leaves 'newsletter_processing'
+      // forever; an hour-old claim is recoverable (the unsubscribe attempt
+      // log keeps the live request once-per-email regardless).
+      .orWhere((qq) => qq.where('auto_action', 'newsletter_processing').where('updated_at', '<', staleClaimCutoff)))
     .update({ auto_action: 'newsletter_processing', updated_at: new Date() });
   if (!claimed) return;
 

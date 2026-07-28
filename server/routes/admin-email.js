@@ -428,16 +428,15 @@ router.post('/message/:id/reclassify', async (req, res) => {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
 
-    // A quarantined/claimed row being reclassified is the operator saying
-    // "not spam" — undo the quarantine (Gmail labels + sweep stamp) BEFORE
-    // the new classification acts, or the sweep would trash it anyway.
-    if (/^spam_(quarantined|quarantine_ambiguous|trashing)/.test(email.auto_action || '')) {
-      const { cancelQuarantine } = require('../services/email/inbox-hygiene');
-      await cancelQuarantine(email);
-      email.auto_action = 'quarantine_cancelled_reclassified';
-    }
+    const wasQuarantined = /^spam_(quarantined|quarantine_ambiguous|trashing)/.test(email.auto_action || '');
 
+    // Classify FIRST — if the classifier is down (null result) the
+    // quarantine stays exactly as it was; nothing is restored on a failed
+    // reclassification.
     const classification = await classifyEmail(email);
+    if (!classification || !classification.category) {
+      return res.status(502).json({ error: 'Classifier unavailable — quarantine state unchanged' });
+    }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
       extracted_data: JSON.stringify(classification),
@@ -445,6 +444,15 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // NOTE: classifyEmail already executed the auto-action for the new
     // category — running executeAutoAction again here was the double-action
     // path (duplicate drafts/unsubscribes flagged in review).
+
+    // A successful NON-spam verdict on a quarantined row is the operator
+    // saying "not spam" — undo the quarantine (Gmail labels + sweep stamp).
+    // cancelQuarantine propagates a failed Gmail restore, keeping the
+    // quarantine intact for a retry rather than orphaning the message.
+    if (wasQuarantined && classification.category !== 'spam') {
+      const { cancelQuarantine } = require('../services/email/inbox-hygiene');
+      await cancelQuarantine(email);
+    }
 
     logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);
     res.json({ classification });

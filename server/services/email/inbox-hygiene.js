@@ -109,17 +109,22 @@ async function quarantineMessage(email) {
  */
 async function cancelQuarantine(email) {
   const labelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
-  try {
-    await gmailClient.modifyLabels(email.gmail_id, ['INBOX'], [labelId]);
-  } catch (e) {
-    logger.warn(`[inbox-hygiene] cancelQuarantine label restore failed (email ${email.id}): ${e.message}`);
-  }
+  // The Gmail restore comes FIRST and failure PROPAGATES — clearing the DB
+  // state while the message still sits under the Quarantine label would
+  // orphan it outside the inbox with nothing guarding it. The caller (the
+  // reclassify route) surfaces the error and the quarantine stays intact
+  // for a retry.
+  await gmailClient.modifyLabels(email.gmail_id, ['INBOX'], [labelId]);
   await db('emails').where({ id: email.id }).update({
     quarantined_at: null,
     is_archived: false,
-    auto_action: 'quarantine_cancelled_reclassified',
     updated_at: new Date(),
   });
+  // The cancellation marker only lands when no new handler already recorded
+  // its own outcome for the fresh classification.
+  await db('emails').where({ id: email.id })
+    .whereRaw("auto_action LIKE 'spam_%'")
+    .update({ auto_action: 'quarantine_cancelled_reclassified', updated_at: new Date() });
 }
 
 /**
@@ -199,9 +204,26 @@ async function sweepQuarantine(now = new Date()) {
   const rows = await db('emails')
     .where('auto_action', 'spam_quarantined')
     .where('quarantined_at', '<', cutoff)
-    .select('id', 'gmail_id', 'from_address');
+    .select('id', 'gmail_id', 'from_address', 'authentication_results');
   for (const row of rows) {
     try {
+      // The sender may have BECOME a customer/live lead during the undo
+      // window (or a resync backfilled their auth header) — re-run the
+      // authenticated known-sender check before anything destructive and
+      // restore instead of trash.
+      const verdict = await isKnownSender(row.from_address);
+      if (verdict.known && hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address))) {
+        try {
+          await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], [quarantineLabelId]);
+        } catch (e) {
+          logger.warn(`[inbox-hygiene] known-sender restore label failed (email ${row.id}): ${e.message}`);
+        }
+        restored += await db('emails')
+          .where({ id: row.id, auto_action: 'spam_quarantined' })
+          .update({ auto_action: 'quarantine_restored_known_sender', quarantined_at: null, is_archived: false, updated_at: new Date() });
+        continue;
+      }
+
       // Live-label veto check: back in INBOX or off the Quarantine label
       // means the operator rescued it — clear the quarantine state.
       const labels = await gmailClient.getMessageLabels(row.gmail_id);
@@ -366,24 +388,35 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
   // the nudge age bound applies AFTER, to that latest row — otherwise a
   // thread whose customer wrote again yesterday would be represented by an
   // older message and nudged prematurely.
+  // Inner pick = the thread's latest INBOUND message of any classification;
+  // eligibility (category/archive/age) applies OUTSIDE to that latest row.
+  // A thread whose newest inbound was classified 'other' or archived is
+  // therefore represented by that message (and correctly skipped) instead
+  // of resurrecting an older eligible one. LIMIT 100 (not 40): answered
+  // threads consume candidate slots before the Gmail sent-check, so the
+  // window must comfortably exceed the 5-nudge target.
   const res = await db.raw(
     `SELECT * FROM (
        SELECT DISTINCT ON (gmail_thread_id)
-         id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at
+         id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at,
+         classification, is_archived
        FROM emails
-       WHERE classification = ANY(?)
-         AND is_archived = false
-         AND received_at >= ?
+       WHERE received_at >= ?
          AND NOT (label_ids \\? 'SENT')
          AND NOT (label_ids \\? 'DRAFT')
          AND LOWER(from_address) <> ?
        ORDER BY gmail_thread_id, received_at DESC
      ) latest_per_thread
-     WHERE received_at <= ?
+     WHERE classification = ANY(?)
+       AND is_archived = false
+       AND received_at <= ?
      ORDER BY received_at ASC
-     LIMIT 40`,
-    [NUDGE_CATEGORIES, oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), newest]
+     LIMIT 100`,
+    [oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), NUDGE_CATEGORIES, newest]
   );
+  if ((res?.rows || []).length === 100) {
+    logger.warn('[inbox-hygiene] nudge candidate window hit the 100-thread cap — oldest unanswered threads may be deferred');
+  }
   const deduped = res?.rows || [];
 
   const nudges = [];
@@ -458,6 +491,23 @@ async function reconcilePendingDrafts(now = new Date()) {
       logger.warn(`[inbox-hygiene] pending-draft reconcile failed (email ${row.id}): ${e.message}`);
     }
   }
+  // Newsletter claims stranded by a crash: hand them back through
+  // handleNewsletter, whose claim predicate accepts hour-old 'processing'
+  // rows (the unsubscribe attempt log keeps live requests once-per-email).
+  const staleNewsletters = await db('emails')
+    .where('auto_action', 'newsletter_processing')
+    .where('updated_at', '<', new Date(now.getTime() - 3600000))
+    .select('id', 'gmail_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'snippet', 'list_unsubscribe', 'list_unsubscribe_post', 'authentication_results', 'auto_action');
+  for (const row of staleNewsletters) {
+    try {
+      const { executeAutoAction } = require('./email-actions');
+      await executeAutoAction(row, { category: 'marketing_newsletter' });
+      counts.newslettersRecovered = (counts.newslettersRecovered || 0) + 1;
+    } catch (e) {
+      logger.warn(`[inbox-hygiene] stale newsletter claim recovery failed (email ${row.id}): ${e.message}`);
+    }
+  }
+
   if (counts.settled || counts.released) {
     logger.info(`[inbox-hygiene] draft reconcile: ${counts.settled} settled, ${counts.released} released`);
   }
