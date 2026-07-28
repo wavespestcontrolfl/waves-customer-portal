@@ -99,10 +99,18 @@ async function buildReentryContext({ record, now = new Date(), knex = db } = {})
   }
   let tracedExteriorZone = record.tracedExteriorZone;
   if (tracedExteriorZone === undefined && record.scheduled_service_id) {
-    tracedExteriorZone = !!(await knex('treatment_zone_maps')
-      .where({ scheduled_service_id: record.scheduled_service_id })
-      .first()
-      .catch(() => null));
+    try {
+      tracedExteriorZone = !!(await knex('treatment_zone_maps')
+        .where({ scheduled_service_id: record.scheduled_service_id })
+        .first());
+    } catch (traceErr) {
+      // Mirror of the completion path (codex P1 #3007 r9): only the
+      // expected missing-table error means "no trace" — a transient
+      // failure preserves the exterior timer rather than suppressing
+      // customer safety guidance for this view.
+      tracedExteriorZone = !(traceErr?.code === '42P01'
+        || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+    }
   }
   return buildReentryContextFromRecord({ ...record, applications, tracedExteriorZone }, now);
 }

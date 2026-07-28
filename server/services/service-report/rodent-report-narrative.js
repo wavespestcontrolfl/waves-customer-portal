@@ -721,6 +721,11 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bcrickets?\b/i, corpus: /\bcricket/ },
   { kind: 'pest', out: /\bbeetles?\b/i, corpus: /\bbeetle/ },
   { kind: 'pest', out: /\bscorpions?\b/i, corpus: /\bscorpion/ },
+  { kind: 'pest', out: /\bbees?\b/i, corpus: /\bbees?\b/ },
+  { kind: 'pest', out: /\bhornets?\b/i, corpus: /\bhornet/ },
+  { kind: 'pest', out: /\byellow\s*jackets?\b/i, corpus: /\byellow\s*jacket/ },
+  { kind: 'pest', out: /\bsnails?\b|\bslugs?\b/i, corpus: /\bsnail|\bslug/ },
+  { kind: 'pest', out: /\bnests?\b/i, corpus: /\bnest/ },
   // species QUALIFIERS (codex P1 #3007 r3): the family term alone must not
   // ground a different species — German cockroaches recorded, "American
   // cockroaches" claimed, must reject. Each qualifier grounds only itself.

@@ -172,6 +172,25 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('open-vocabulary pest swaps reject (codex r9: bees on a wasp report)', () => {
+  const waspFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'One-Time Pest Treatment',
+    reportTypeLabel: 'One-Time Pest Treatment',
+    typedReport: {
+      reportTypeLabel: 'One-Time Pest Treatment',
+      todaysResult: { headline: 'Wasp treatment completed today.', body: 'We treated the wasp activity at the eaves today.', nextStep: null },
+      findings: [{ fieldKey: 'target_pest', customerLabel: 'Target pest', customerValueLabel: 'Wasps', value: 'wasps' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Bees were removed from the attic.', waspFacts))
+    .toContain('ungrounded_pest:bees');
+  expect(ungroundedClaims('A nest was removed during the visit.', waspFacts))
+    .toContain('ungrounded_pest:nest');
+});
+
 test('generic zero states bind to the report identity pest (codex r8)', () => {
   const facts = groundingFacts(roachInput({
     serviceTypeDisplay: 'Bed Bug Treatment (Follow-up)',
