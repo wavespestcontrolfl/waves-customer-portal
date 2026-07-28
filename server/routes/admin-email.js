@@ -556,10 +556,13 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // cancelQuarantine propagates a failed Gmail restore, keeping the
     // quarantine intact for a retry rather than orphaning the message.
     if (wasQuarantined && classification.category !== 'spam') {
-      // COMMIT phase — the verdict is valid and non-spam. Unblock first
-      // (idempotent: the block row deletes only on success, so a later
-      // retry re-finds or skips it), then cancel the quarantine.
-      if (restoredFromTrash) {
+      // COMMIT phase — the verdict is valid and non-spam. Re-check the
+      // sender's spam_auto block UNCONDITIONALLY (not just for
+      // restored-from-trash rows): auto_action may have been overwritten by
+      // the new handler, but quarantined_at keeps retries flowing through
+      // here until the unblock actually succeeds. Unblock first (idempotent:
+      // the block row deletes only on success), then cancel the quarantine.
+      {
         const blocked = await db('blocked_email_senders')
           .whereRaw('LOWER(email_address) = ?', [String(email.from_address || '').toLowerCase()])
           .where({ reason: 'spam_auto' })
@@ -710,7 +713,12 @@ router.post('/block', async (req, res) => {
 // DELETE /blocked/:id — unblock a sender
 router.delete('/blocked/:id', async (req, res) => {
   try {
-    await unblockSender(req.params.id);
+    const result = await unblockSender(req.params.id);
+    if (!result?.success) {
+      // The block record was retained (e.g. Gmail filter removal failed) —
+      // the sender is STILL trash-routed; never report success.
+      return res.status(502).json({ error: result?.error || 'Unblock failed — sender is still blocked; retry' });
+    }
     res.json({ unblocked: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

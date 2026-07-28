@@ -200,10 +200,12 @@ async function sweepQuarantine(now = new Date()) {
     const strandedCancels = await db('emails')
       .whereNotNull('quarantined_at')
       .whereNotIn('auto_action', ['spam_quarantined', 'spam_quarantine_ambiguous', 'spam_trashing', 'spam_reclassifying'])
-      .select('id', 'gmail_id');
+      .select('id', 'gmail_id', 'classification');
     for (const row of strandedCancels) {
       try {
-        await cancelQuarantine(row);
+        // Same category rule as the live cancellation path: a newsletter's
+        // handler archived it on purpose — recovery must not resurface it.
+        await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
       } catch (e) {
         logger.warn(`[inbox-hygiene] stranded-cancel completion failed (email ${row.id}): ${e.message}`);
       }
