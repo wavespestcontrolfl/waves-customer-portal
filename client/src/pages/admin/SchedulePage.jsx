@@ -6150,13 +6150,16 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
+      onReady?.(true);
     } catch (err) {
       setError(err.message || "Confirm failed");
+      // Ambiguous failure: the write may have COMMITTED with the response
+      // lost, so the parent's null id can't be trusted as "unconfirmed".
+      // Report failed — the payload omits the field and the server grounds
+      // from its own visit-linked lookup, which sees the true DB state.
+      onReady?.("failed");
     } finally {
       setConfirming(false);
-      // Settled either way: on failure the row is still unconfirmed, so the
-      // parent's null id is the true state.
-      onReady?.(true);
     }
   }
 

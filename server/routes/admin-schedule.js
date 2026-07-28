@@ -7648,10 +7648,19 @@ router.post('/generate-report', async (req, res) => {
     // authorized visit). A stale/crafted id must not open the gate for an
     // otherwise-empty request the grounding would later reject fail-soft.
     let hasValidLawnAssessment = false;
-    if (lawnAssessmentId && scheduledServiceId) {
+    if (scheduledServiceId && lawnAssessmentId !== null) {
       try {
+        // Explicit id → validate that exact row. Absent field (failed client
+        // lookup / legacy caller / scores-only visit) → validate the same
+        // visit-linked row the grounding fallback will use, so the documented
+        // fallback stays reachable. Explicit null (retake pending) counts as
+        // no assessment.
         hasValidLawnAssessment = !!(await db('lawn_assessments')
-          .where({ id: lawnAssessmentId, service_id: scheduledServiceId, confirmed_by_tech: true })
+          .where({
+            ...(lawnAssessmentId ? { id: lawnAssessmentId } : {}),
+            service_id: scheduledServiceId,
+            confirmed_by_tech: true,
+          })
           .first('id'));
       } catch { /* fail toward not-substantive */ }
     }
