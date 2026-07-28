@@ -2436,7 +2436,8 @@ function initScheduledJobs() {
       const hygiene = require('./email/inbox-hygiene');
       const swept = await hygiene.sweepQuarantine();
       const rescued = await hygiene.rescueSpamFolder();
-      logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed, ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer)`);
+      const drafts = await hygiene.reconcilePendingDrafts();
+      logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed (${swept.restored} restored), ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer, ${rescued.unauthenticated} unverified), draft claims: ${drafts.settled} settled/${drafts.released} released`);
     } catch (err) {
       logger.error(`[inbox-hygiene] Cron failed: ${err.message}`);
     }

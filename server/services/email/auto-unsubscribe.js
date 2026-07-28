@@ -61,12 +61,15 @@ function requestPinned(urlString, { method = 'GET', headers = {}, body = null } 
       timeout: 10000,
       lookup: (host, opts, cb) => cb(null, pinnedAddress, pinnedFamily),
     }, (res) => {
-      res.resume(); // drain — body content is never used
       resolve({
         ok: res.statusCode >= 200 && res.statusCode < 300,
         status: res.statusCode,
         headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
       });
+      // Status + headers are all we ever use — tear the socket down NOW so
+      // an attacker endpoint can't stream forever (the request timeout is
+      // inactivity-based and would never fire on an active stream).
+      res.destroy();
     });
     req.on('timeout', () => req.destroy(new Error('unsubscribe request timeout')));
     req.on('error', reject);

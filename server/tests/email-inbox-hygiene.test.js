@@ -132,10 +132,21 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
   });
 
-  test('spam WITH a List-Unsubscribe header gets unsubscribed before quarantine', async () => {
+  test('AUTHENTICATED bulk spam with List-Unsubscribe gets unsubscribed before quarantine', async () => {
+    setupDb();
+    await handleSpam({
+      ...EMAIL,
+      list_unsubscribe: '<https://esp.example/unsub>',
+      authentication_results: 'mx.google.com; dkim=pass header.d=seo-blaster.example',
+    });
+    expect(autoUnsubscribe).toHaveBeenCalled();
+    expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
+  });
+
+  test('an UNAUTHENTICATED List-Unsubscribe header is never followed (live-address harvesting)', async () => {
     setupDb();
     await handleSpam({ ...EMAIL, list_unsubscribe: '<https://esp.example/unsub>' });
-    expect(autoUnsubscribe).toHaveBeenCalled();
+    expect(autoUnsubscribe).not.toHaveBeenCalled();
     expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
   });
 
@@ -143,6 +154,17 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     setupDb();
     await handleSpam({ ...EMAIL });
     expect(autoUnsubscribe).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous Gmail label-swap failure is NON-destructive (no trash, no block)', async () => {
+    const state = setupDb();
+    gmailClient.modifyLabels.mockRejectedValueOnce(new Error('label swap timeout'));
+    await handleSpam({ ...EMAIL });
+    expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
+    // sweep can never trash it: the quarantine stamp was withdrawn
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
+    expect(patches[patches.length - 1]).toBe('spam_quarantine_failed');
   });
 
   test('falls back to trash + immediate block when the quarantine label API fails', async () => {
@@ -264,6 +286,26 @@ describe('collectUnansweredNudges', () => {
       : { messages: [{ labelIds: ['INBOX'], internalDate: String(new Date('2026-07-24T12:00:00Z').getTime()) }] }));
     const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
     expect(nudges.map((n) => n.id)).toEqual(['e-b']);
+  });
+});
+
+describe('reconcilePendingDrafts', () => {
+  const { reconcilePendingDrafts } = require('../services/email/inbox-hygiene');
+
+  test('settles stale claims whose thread already has a draft; releases the rest', async () => {
+    const state = setupDb({}, {
+      emails: [[
+        { id: 'e-has', gmail_thread_id: 't-has' },
+        { id: 'e-none', gmail_thread_id: 't-none' },
+      ]],
+    });
+    gmailClient.getThread.mockImplementation(async (threadId) => (threadId === 't-has'
+      ? { messages: [{ labelIds: ['DRAFT'] }] }
+      : { messages: [{ labelIds: ['INBOX'] }] }));
+    const counts = await reconcilePendingDrafts(new Date('2026-07-28T12:00:00Z'));
+    expect(counts).toEqual({ settled: 1, released: 1 });
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(patches).toEqual(['reconciled_existing_draft', null]);
   });
 });
 

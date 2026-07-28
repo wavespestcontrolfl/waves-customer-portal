@@ -247,11 +247,16 @@ async function handleSpam(email) {
     return;
   }
 
-  // 1. Legit bulk senders get an unsubscribe BEFORE quarantine: a real
-  // List-Unsubscribe header is an ESP-compliance signal, and unsubscribing
-  // stops the stream at the source. Nameless cold spam gets no unsubscribe —
-  // replying to true spammers confirms the address is live.
-  if (email.list_unsubscribe) {
+  // 1. Legit bulk senders get an unsubscribe BEFORE quarantine — but a
+  // List-Unsubscribe header alone is attacker-typed text (any spammer can
+  // add one to harvest live-mailbox confirmations). The unsubscribe only
+  // fires when Gmail's Authentication-Results show the mail actually
+  // authenticated as the domain it claims (same aligned-auth bar as the
+  // spam-folder rescue). Everything else quarantines silently.
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const { domainFromAddress } = require('./spam-blocker');
+  if (email.list_unsubscribe
+    && hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
     try {
       const { autoUnsubscribe } = require('./auto-unsubscribe');
       await autoUnsubscribe(email);
@@ -270,9 +275,17 @@ async function handleSpam(email) {
     await quarantineMessage(email);
     logger.info(`[email-actions] Spam quarantined (email ${email.id}); sender block deferred to sweep`);
   } catch (e) {
-    // Quarantine needs the Gmail label API; if it fails, fall back to the
-    // pre-quarantine behavior rather than leaving spam in the inbox.
-    logger.warn(`[email-actions] quarantine failed, falling back to trash (email ${email.id}): ${e.message}`);
+    // The staged quarantine tags where it failed. An AMBIGUOUS Gmail label
+    // swap (stage 'gmail' — the mutation may have applied) must NEVER fall
+    // back to trash: quarantineMessage already withdrew the sweep stamp, so
+    // nothing destructive can happen to this message. Only provably-clean
+    // failures (label ensure / DB stamp — Gmail untouched) take the
+    // pre-quarantine trash fallback.
+    if (e.quarantineStage === 'gmail') {
+      logger.warn(`[email-actions] quarantine label swap ambiguous (email ${email.id}) — left non-destructive: ${e.message}`);
+      return;
+    }
+    logger.warn(`[email-actions] quarantine failed cleanly at ${e.quarantineStage || 'unknown'}, falling back to trash (email ${email.id}): ${e.message}`);
     try { await gmailClient.trashMessage(email.gmail_id); } catch (e2) { /* non-critical */ }
     const { blockSpamSender } = require('./spam-blocker');
     await blockSpamSender(email);
@@ -766,17 +779,19 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   let claimed = await db('emails')
     .where({ id: email.id })
     .whereNull('draft_gmail_id')
-    .update({ draft_gmail_id: 'pending', updated_at: new Date() });
+    .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
   if (!claimed) {
     // Stale-claim recovery: a crash mid-attempt leaves 'pending' forever.
-    // Take over only hour-old claims, and FIRST reconcile against the live
-    // thread — if the crashed attempt already created a Gmail draft, settle
-    // the claim as reconciled instead of minting a duplicate.
+    // Age is judged by the DEDICATED draft_claimed_at stamp — updated_at is
+    // refreshed by ordinary label/read syncs and would keep a dead claim
+    // young forever. Take over only hour-old claims, and FIRST reconcile
+    // against the live thread — if the crashed attempt already created a
+    // Gmail draft, settle as reconciled instead of minting a duplicate.
     const staleCutoff = new Date(Date.now() - 3600000);
     claimed = await db('emails')
       .where({ id: email.id, draft_gmail_id: 'pending' })
-      .where('updated_at', '<', staleCutoff)
-      .update({ draft_gmail_id: 'pending', updated_at: new Date() });
+      .where('draft_claimed_at', '<', staleCutoff)
+      .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
     if (!claimed) return null;
     try {
       const thread = await gmailClient.getThread(email.gmail_thread_id);

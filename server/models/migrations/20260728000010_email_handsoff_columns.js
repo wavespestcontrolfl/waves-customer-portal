@@ -28,10 +28,22 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasColumn('emails', 'message_id'))) {
     await knex.schema.alterTable('emails', (t) => t.text('message_id'));
   }
+  if (!(await knex.schema.hasColumn('emails', 'authentication_results'))) {
+    await knex.schema.alterTable('emails', (t) => t.text('authentication_results'));
+  }
+  if (!(await knex.schema.hasColumn('emails', 'draft_claimed_at'))) {
+    await knex.schema.alterTable('emails', (t) => t.timestamp('draft_claimed_at', { useTz: true }));
+  }
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('emails'))) return;
+  if (await knex.schema.hasColumn('emails', 'draft_claimed_at')) {
+    await knex.schema.alterTable('emails', (t) => t.dropColumn('draft_claimed_at'));
+  }
+  if (await knex.schema.hasColumn('emails', 'authentication_results')) {
+    await knex.schema.alterTable('emails', (t) => t.dropColumn('authentication_results'));
+  }
   if (await knex.schema.hasColumn('emails', 'message_id')) {
     await knex.schema.alterTable('emails', (t) => t.dropColumn('message_id'));
   }

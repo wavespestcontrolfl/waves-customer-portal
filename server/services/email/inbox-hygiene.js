@@ -53,16 +53,43 @@ async function isKnownSender(fromAddress) {
   return { known: false };
 }
 
-/** Park a message in quarantine: label swap in Gmail + stamp in the DB. */
+/**
+ * Park a message in quarantine — STAGED so the caller can tell a clean
+ * failure (Gmail untouched → destructive fallback is safe) from an
+ * AMBIGUOUS one (the label swap may have applied → never fall back to
+ * trash). Order: label ensure (no mutation) → DB stamp (revertable) →
+ * Gmail label swap (the ambiguous step, e.quarantineStage = 'gmail').
+ */
 async function quarantineMessage(email) {
-  const labelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
-  await gmailClient.modifyLabels(email.gmail_id, [labelId], ['INBOX']);
-  await db('emails').where({ id: email.id }).update({
-    is_archived: true,
-    quarantined_at: new Date(),
-    auto_action: 'spam_quarantined',
-    updated_at: new Date(),
-  });
+  let labelId;
+  try {
+    labelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
+  } catch (e) {
+    e.quarantineStage = 'label-ensure'; // nothing mutated
+    throw e;
+  }
+  try {
+    await db('emails').where({ id: email.id }).update({
+      is_archived: true,
+      quarantined_at: new Date(),
+      auto_action: 'spam_quarantined',
+      updated_at: new Date(),
+    });
+  } catch (e) {
+    e.quarantineStage = 'db'; // Gmail untouched
+    throw e;
+  }
+  try {
+    await gmailClient.modifyLabels(email.gmail_id, [labelId], ['INBOX']);
+  } catch (e) {
+    e.quarantineStage = 'gmail'; // AMBIGUOUS — swap may have applied
+    // De-stamp so the sweep never trashes a row whose Gmail state is
+    // unknown; the message stays wherever Gmail left it (non-destructive).
+    await db('emails').where({ id: email.id, auto_action: 'spam_quarantined' })
+      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, updated_at: new Date() })
+      .catch(() => {});
+    throw e;
+  }
 }
 
 /**
@@ -221,7 +248,9 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
     .where('is_archived', false)
     .whereBetween('received_at', [oldest, newest])
     .orderBy('received_at', 'asc')
-    .limit(25)
+    // Wide pre-dedupe window: the cap must land AFTER thread grouping or one
+    // chatty thread's messages would consume every candidate slot.
+    .limit(100)
     .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'received_at');
 
   // One nudge per Gmail thread (its LATEST inbound message) — several
@@ -256,6 +285,39 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
   return nudges;
 }
 
+/**
+ * Scheduled recovery for draft claims orphaned by a crash: 'pending' rows
+ * with an hour-old draft_claimed_at either settle against an existing
+ * thread draft or release back to NULL for a clean retry.
+ */
+async function reconcilePendingDrafts(now = new Date()) {
+  const staleCutoff = new Date(now.getTime() - 3600000);
+  const rows = await db('emails')
+    .where('draft_gmail_id', 'pending')
+    .where('draft_claimed_at', '<', staleCutoff)
+    .select('id', 'gmail_thread_id');
+  const counts = { settled: 0, released: 0 };
+  for (const row of rows) {
+    try {
+      const thread = await gmailClient.getThread(row.gmail_thread_id);
+      const hasDraft = (thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'));
+      const patch = hasDraft
+        ? { draft_gmail_id: 'reconciled_existing_draft' }
+        : { draft_gmail_id: null, draft_claimed_at: null };
+      const n = await db('emails')
+        .where({ id: row.id, draft_gmail_id: 'pending' })
+        .update({ ...patch, updated_at: new Date() });
+      if (n) counts[hasDraft ? 'settled' : 'released'] += 1;
+    } catch (e) {
+      logger.warn(`[inbox-hygiene] pending-draft reconcile failed (email ${row.id}): ${e.message}`);
+    }
+  }
+  if (counts.settled || counts.released) {
+    logger.info(`[inbox-hygiene] draft reconcile: ${counts.settled} settled, ${counts.released} released`);
+  }
+  return counts;
+}
+
 module.exports = {
   QUARANTINE_LABEL,
   QUARANTINE_HOURS,
@@ -265,4 +327,5 @@ module.exports = {
   sweepQuarantine,
   rescueSpamFolder,
   collectUnansweredNudges,
+  reconcilePendingDrafts,
 };
