@@ -131,9 +131,15 @@ async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
       const location = res.headers.get('location');
       if (!location) return res;
       current = new URL(location, current).toString();
-      // Redirect hops downgrade to GET (mirrors browser semantics for 301/302
-      // POSTs) and never re-send the one-click body to a new host.
-      options = { headers: options.headers, method: 'GET' };
+      // 307/308 preserve method AND body by definition — an RFC 8058
+      // one-click POST must stay a POST through them, or a redirected
+      // endpoint never receives the unsubscribe and a trailing GET 2xx
+      // would be reported as confirmed. 301/302/303 downgrade to GET
+      // (browser semantics) and drop the body. Every hop still passes the
+      // same public-address validation above.
+      if (res.status !== 307 && res.status !== 308) {
+        options = { headers: options.headers, method: 'GET' };
+      }
       continue;
     }
     return res;
