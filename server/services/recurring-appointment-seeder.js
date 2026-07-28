@@ -702,26 +702,49 @@ async function acquireSeriesCreateLocks(conn, units = []) {
 // nightly by reconcileNoPlanRecurringTiers, so a sync failure must never
 // fail the booking that seeded the series. Lazy requires keep this module
 // dependency-light and cycle-free.
-async function syncCustomerTierAfterSeeding(conn, customerId) {
-  if (!customerId) return;
+// Run the tier sync on the shared pool in a fresh transaction — used both
+// directly (pool callers) and as the post-commit continuation below.
+async function runTierSyncOnPool(customerId) {
   try {
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('autoWaveguardTierEnroll')) return;
+    const db = require('../models/db');
     const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
-    // Run inside a nested transaction: when conn is a caller's transaction
-    // this becomes a SAVEPOINT, so a SQL error in the sync rolls back only
-    // the savepoint instead of poisoning the whole booking transaction — a
-    // caught JS exception does NOT un-abort a Postgres transaction, and the
-    // sync's joined-query fallback retries a query after a failure, which
-    // would otherwise hit "current transaction is aborted" and sink the
-    // booking at commit (Codex #3011 P1). On a plain pool connection this is
-    // just a short standalone transaction.
-    await conn.transaction(async (inner) => {
+    await db.transaction(async (inner) => {
       await syncCustomerWaveGuardPlanFromScheduledServices({ database: inner, customerId });
     });
   } catch (err) {
     try {
       require('./logger').warn(`[recurring-seeder] WaveGuard tier sync failed for customer ${customerId}: ${err.message}`);
+    } catch { /* never let logging fail anything */ }
+  }
+}
+
+async function syncCustomerTierAfterSeeding(conn, customerId) {
+  if (!customerId) return;
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('autoWaveguardTierEnroll')) return;
+    // Inside a caller transaction, DEFER the sync until that transaction
+    // settles (Codex #3011 r5 P1): seeding callers may already hold the
+    // recurring-series-create advisory lock (booking.js takes advisory ->
+    // then this would take the customers row lock), while estimate-converter
+    // updates the customer FIRST and then waits on the same advisory lock —
+    // opposite acquisition order, a deadlock; a victim savepoint in the
+    // converter's fail-open advisory guard could even seed a duplicate
+    // series. Post-commit the caller's locks are released, so the pool sync
+    // acquires the customer row lock without holding anything else — no
+    // cycle. On ROLLBACK there is no series, so there is nothing to sync;
+    // any miss is healed by the nightly reconcile.
+    if (conn.isTransaction && conn.executionPromise) {
+      conn.executionPromise.then(
+        () => runTierSyncOnPool(customerId),
+        () => { /* rolled back — no series landed, nothing to sync */ },
+      );
+      return;
+    }
+    await runTierSyncOnPool(customerId);
+  } catch (err) {
+    try {
+      require('./logger').warn(`[recurring-seeder] WaveGuard tier sync scheduling failed for customer ${customerId}: ${err.message}`);
     } catch { /* never let logging fail the seeding */ }
   }
 }

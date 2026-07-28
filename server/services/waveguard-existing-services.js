@@ -170,6 +170,26 @@ function rowPassesGatedPricingEvidence(row, today) {
   return true;
 }
 
+// Gated: the commercial predicate must see the same JOINED text as the
+// tier-evidence path (Codex #3011 r5 P1) — an imported row can carry a
+// generic service_type ("Lawn Care") while its catalog name is "Commercial
+// Turf Treatment Program"; classifying service_type alone would count it as
+// a qualifying family here after tier derivation rejected it, and price a
+// Bronze-stamped customer at Silver. Best-effort: where the catalog is
+// absent (older environments) the filter degrades to service_type-only,
+// exactly the legacy behavior.
+async function loadCatalogFieldsByRowId(database, customerId) {
+  try {
+    const catalogRows = await database('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      .select('s.id', 'svc.service_key', 'svc.name as service_name');
+    return new Map(catalogRows.map((row) => [row.id, row]));
+  } catch {
+    return new Map();
+  }
+}
+
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
@@ -181,9 +201,15 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
     return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
   }
   const { etDateString } = require('../utils/datetime-et');
+  // Lazy require — self-booking-plan-sync requires this module at load time.
+  const { isCommercialServiceRow } = require('./self-booking-plan-sync');
+  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
   const today = etDateString();
-  return rows.filter((r) => rowPassesGatedPricingEvidence(r, today)
-    && toQualifyingKeys(r.service_type).length > 0);
+  return rows.filter((r) => {
+    if (!rowPassesGatedPricingEvidence(r, today)) return false;
+    if (isCommercialServiceRow({ ...r, ...(catalogById.get(r.id) || {}) })) return false;
+    return toQualifyingKeys(r.service_type).length > 0;
+  });
 }
 
 // Distinct qualifying service keys from a set of rows.
