@@ -973,9 +973,13 @@ function deriveEventLabels(row) {
   // Any nonzero dollar amount — integer OR fractional ("$0.50") — is a
   // paid tier that disqualifies the unqualified Free chip.
   const hasPaidTier = /\$\s*(?:\d*[1-9]\d*(?:\.\d+)?|\d+\.\d*[1-9]\d*)/.test(priceText);
-  const unambiguouslyFree = !hasPaidTier
-    && (/\bfree\b/i.test(priceText) || /^\s*\$?\s*0+(?:\.0+)?\s*$/.test(priceText));
-  if (row.is_free === true || tagSet.has('free') || unambiguouslyFree) labels.push('Free');
+  const unambiguouslyFree = /\bfree\b/i.test(priceText) || /^\s*\$?\s*0+(?:\.0+)?\s*$/.test(priceText);
+  // Explicit paid pricing SUPPRESSES the chip even when a stale is_free
+  // flag or curated tag survives a later price correction — the corrected
+  // price text is the freshest signal.
+  if (!hasPaidTier && (row.is_free === true || tagSet.has('free') || unambiguouslyFree)) {
+    labels.push('Free');
+  }
   if (tagSet.has('worth_the_drive')) labels.push('Worth the drive');
   return labels;
 }

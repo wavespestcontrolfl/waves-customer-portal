@@ -47,7 +47,10 @@ const { getFlagshipType } = require('../config/newsletter-types');
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 
 // ── Listwise comparative re-rank (owner spec 2026-07-28, Stage 4) ────
-const LISTWISE_POOL = 18;
+// Deep enough that the admission cutoff sits far below where a ±3 nudge
+// could influence an 8-slot portfolio — no sampling, no parity, no
+// permanently or temporarily shadowed boundary positions.
+const LISTWISE_POOL = 24;
 
 function listwiseRerankEnabled() {
   return process.env.NEWSLETTER_LISTWISE_RERANK !== 'false';
@@ -109,15 +112,7 @@ async function applyListwiseRerank(scored) {
   const byScoreDesc = scored
     .filter((ev) => Number.isFinite(Number(ev.editorial_score)) && Number(ev.editorial_score) >= floor)
     .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score));
-  const head = byScoreDesc.slice(0, LISTWISE_POOL - 6);
-  // Parity rotates per ISSUE (from the issue Tuesday's day-of-month), so
-  // positions excluded this week are sampled next week — a fixed parity
-  // would permanently shadow half the boundary band.
-  const parity = parseInt(String(getActiveNewsletterTuesday()).slice(-2), 10) % 2;
-  const boundary = byScoreDesc.slice(LISTWISE_POOL - 6, LISTWISE_POOL + 6)
-    .filter((_, i) => i % 2 === parity)
-    .slice(0, 6);
-  const pool = [...head, ...boundary];
+  const pool = byScoreDesc.slice(0, LISTWISE_POOL);
   if (pool.length < 4) return scored;
   try {
     // Cross-provider per repo policy: generated structured output goes
