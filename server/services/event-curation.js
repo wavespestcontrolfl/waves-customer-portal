@@ -51,6 +51,7 @@ const {
   REJECTION_CODES,
   assessEvent,
   featureScoreFloor,
+  isMalformedAssessment,
 } = require('./event-scoring');
 
 let Anthropic;
@@ -238,13 +239,26 @@ function missingAssessmentFallbacks(batch, assessments) {
  * Inbox read it.
  */
 async function applyDecision(event, rawAssessment, reference = new Date()) {
-  if (rawAssessment.__missing) {
+  // Missing AND structurally malformed assessments take the same
+  // fail-closed path: examined, pending, and — critically — the
+  // structured assessment columns cleared, so a revived occurrence can
+  // never keep a prior occurrence's score/codes/evidence attached to a
+  // fresh examination (Codex P1/P2 on this PR).
+  if (rawAssessment.__missing || isMalformedAssessment(rawAssessment)) {
     await db('events_raw')
       .where({ id: event.id })
       .whereNull('curated_at')
       .update({
+        editorial_score: null,
+        score_breakdown: null,
+        rejection_codes: null,
+        audience_tags: null,
+        novelty_type: null,
+        editorial_evidence: null,
         curated_at: db.fn.now(),
-        curation_note: 'No assessment returned by model',
+        curation_note: rawAssessment.__missing
+          ? 'No assessment returned by model'
+          : 'Malformed assessment returned by model',
         updated_at: db.fn.now(),
       });
     return 'left_pending';

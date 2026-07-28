@@ -3,6 +3,7 @@ const {
   isFlagshipSend,
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadRoutineIdentityPool,
 } = require('../services/newsletter-event-selection');
 
 describe('star and debut carve-outs in the identity filters', () => {
@@ -291,5 +292,31 @@ describe('series-debut first-occurrence rule (owner spec 2026-07-28)', () => {
       [first, laterSibling],
     );
     expect(result.valid).toBe(true);
+  });
+
+  test('identity pool reaches curation\'s own horizon on late-week runs (reference + 90d)', async () => {
+    // Sunday run: the active issue Tuesday is 5 days back. Anchored only to
+    // the Tuesday, the pool would stop 5 days short of curation's
+    // reference + 90d candidate horizon and hide a debut's tail siblings.
+    const sundayReference = new Date('2026-08-02T12:00:00Z');
+    const bounds = [];
+    const query = {
+      select: jest.fn(),
+      whereNull: jest.fn(),
+      where: jest.fn(),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    query.select.mockReturnValue(query);
+    query.whereNull.mockReturnValue(query);
+    query.where.mockImplementation((col, op, value) => {
+      if (col === 'start_at' && op === '<=') bounds.push(value);
+      return query;
+    });
+    const knex = jest.fn(() => query);
+
+    await loadRoutineIdentityPool(knex, sundayReference);
+    expect(bounds).toHaveLength(1);
+    const minimumEnd = new Date(sundayReference.getTime() + 90 * 24 * 3600 * 1000);
+    expect(bounds[0].getTime()).toBeGreaterThanOrEqual(minimumEnd.getTime() - 24 * 3600 * 1000);
   });
 });

@@ -94,9 +94,18 @@ async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
   const horizonStart = parseETDateTime(
     `${etDateString(addETDays(issueStart, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
   );
-  const horizonEnd = parseETDateTime(
+  // The pool must reach at least as far as curation's own candidate
+  // horizon (reference + 90 days). Anchored only to the issue Tuesday it
+  // ends 1–5 days short on Wed–Sun runs, and a daily/custom debut series
+  // whose siblings all sit in that uncovered tail would make EVERY row
+  // look like the first occurrence (Codex P2, 2026-07-28).
+  const issueEnd = parseETDateTime(
     `${etDateString(addETDays(issueStart, ROUTINE_IDENTITY_HORIZON_DAYS))}T23:59:59`,
   );
+  const referenceEnd = parseETDateTime(
+    `${etDateString(addETDays(reference, ROUTINE_IDENTITY_HORIZON_DAYS))}T23:59:59`,
+  );
+  const horizonEnd = referenceEnd > issueEnd ? referenceEnd : issueEnd;
   return knex('events_raw')
     .select('id', 'title', 'start_at')
     .whereNull('merged_into')

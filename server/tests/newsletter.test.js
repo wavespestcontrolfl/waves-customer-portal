@@ -495,12 +495,22 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     // in the upsert (the normalizer recomputes it instead). It signals revival
     // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
     // the normalizer consumes), plus the curation re-open pair (curated_at /
-    // curation_note) — all safe to set in the ON CONFLICT update.
-    expect(Object.keys(f).sort()).toEqual(['curated_at', 'curation_note', 'freshness_revival_pending', 'normalized_at']);
+    // curation_note) AND the six structured-assessment columns (2026-07-28
+    // rubric) — a revived occurrence starts clean, so a later missing or
+    // malformed reassessment can never leave a prior occurrence's score
+    // attached. All nullable, all safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual([
+      'audience_tags', 'curated_at', 'curation_note', 'editorial_evidence',
+      'editorial_score', 'freshness_revival_pending', 'normalized_at',
+      'novelty_type', 'rejection_codes', 'score_breakdown',
+    ]);
   });
 
-  test('revival re-opens auto-curation: curated_at/curation_note clear on the SAME past→future gate', () => {
-    for (const col of ['curated_at', 'curation_note']) {
+  test('revival re-opens auto-curation: assessment columns clear on the SAME past→future gate', () => {
+    for (const col of [
+      'curated_at', 'curation_note', 'editorial_score', 'score_breakdown',
+      'rejection_codes', 'audience_tags', 'novelty_type', 'editorial_evidence',
+    ]) {
       const { sql } = revivalResetFields()[col].toSQL();
       const lower = sql.toLowerCase();
       expect(lower).toMatch(/case when/);

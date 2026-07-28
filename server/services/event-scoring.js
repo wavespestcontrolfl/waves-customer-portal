@@ -90,6 +90,20 @@ function clampFactor(name, value) {
 }
 
 /**
+ * A structurally malformed assessment must never reach the approval
+ * math — a response that omits `rejection_codes` (or emits a scalar)
+ * would otherwise normalize to [] and auto-approve a high-scoring event
+ * without any policy screening (fail-open). Callers route malformed
+ * assessments through the same pending fallback as a missing one.
+ */
+function isMalformedAssessment(raw) {
+  if (!raw || typeof raw !== 'object') return true;
+  if (!Array.isArray(raw.rejection_codes)) return true;
+  if (!raw.scores || typeof raw.scores !== 'object' || Array.isArray(raw.scores)) return true;
+  return false;
+}
+
+/**
  * Normalize a raw model assessment into clamped factors, known penalty
  * flags, and known rejection codes. Unknown flags/codes are dropped
  * (fail-closed: a hallucinated code can't invent a new policy).
@@ -148,7 +162,11 @@ function computeEditorialScore(normalized, derivedFlags = []) {
 }
 
 function envThreshold(name, fallback) {
-  const n = Number(process.env[name]);
+  // A blank optional var must mean "unset" — Number('') coerces to 0,
+  // which would silently drop the editorial floor to zero.
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : fallback;
 }
 
@@ -183,6 +201,10 @@ function assessEvent(event, rawAssessment, reference = new Date()) {
       derived_penalty_flags: derivedFlags,
       final: score,
       tier,
+      // Persisted here so the assessment is auditable and the proof
+      // diagnostics / portfolio selector can consume it — family_status
+      // has no dedicated column.
+      family_status: normalized.familyStatus,
     },
     rejectionCodes: normalized.rejectionCodes,
     audienceTags: normalized.audienceTags,
@@ -199,6 +221,7 @@ module.exports = {
   DERIVED_PENALTY_VALUES,
   REJECTION_CODES,
   NOVELTY_TYPES,
+  isMalformedAssessment,
   normalizeAssessment,
   derivedPenalties,
   computeEditorialScore,

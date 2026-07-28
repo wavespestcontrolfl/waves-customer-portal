@@ -82,6 +82,16 @@ function revivalResetFields() {
     // admin_status='pending', so clearing the marker can't re-judge them.
     curated_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
     curation_note: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
+    // The structured editorial assessment (2026-07-28 rubric) belongs to
+    // the occurrence that was examined — a revived occurrence must start
+    // clean, or a later missing/malformed reassessment would leave the
+    // prior occurrence's score, codes, and evidence permanently attached.
+    editorial_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
+    score_breakdown: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
+    rejection_codes: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
+    audience_tags: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
+    novelty_type: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
+    editorial_evidence: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
   };
 }
 

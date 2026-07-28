@@ -8,6 +8,7 @@ const {
   PENALTY_VALUES,
   DERIVED_PENALTY_VALUES,
   REJECTION_CODES,
+  isMalformedAssessment,
   normalizeAssessment,
   derivedPenalties,
   computeEditorialScore,
@@ -132,6 +133,32 @@ describe('thresholds', () => {
     expect(featureScoreFloor()).toBe(80);
     expect(heroScoreFloor()).toBe(88);
   });
+
+  test('a blank env var means unset, never a zero floor (Number("") === 0 trap)', () => {
+    process.env.NEWSLETTER_MIN_FEATURE_SCORE = '';
+    process.env.NEWSLETTER_MIN_HERO_SCORE = '   ';
+    expect(featureScoreFloor()).toBe(75);
+    expect(heroScoreFloor()).toBe(88);
+  });
+});
+
+describe('isMalformedAssessment (fail-closed structure gate)', () => {
+  test('missing or scalar rejection_codes is malformed — never policy-clean', () => {
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES })).toBe(true);
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: 'none' })).toBe(true);
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: null })).toBe(true);
+  });
+
+  test('missing or non-object scores is malformed', () => {
+    expect(isMalformedAssessment({ rejection_codes: [] })).toBe(true);
+    expect(isMalformedAssessment({ rejection_codes: [], scores: [1, 2] })).toBe(true);
+    expect(isMalformedAssessment(null)).toBe(true);
+  });
+
+  test('a well-formed assessment passes', () => {
+    expect(isMalformedAssessment({ scores: PERFECT_SCORES, rejection_codes: [] })).toBe(false);
+    expect(isMalformedAssessment({ scores: {}, rejection_codes: ['webinar_virtual'] })).toBe(false);
+  });
 });
 
 describe('assessEvent decision', () => {
@@ -140,6 +167,9 @@ describe('assessEvent decision', () => {
     expect(decision).toMatchObject({ approve: true, tier: 'hero', score: 100 });
     expect(decision.breakdown.factors.specialness).toBe(25);
     expect(decision.evidence).toHaveLength(1);
+    // family_status has no dedicated column — the breakdown jsonb is
+    // where the audit trail and the portfolio selector read it from.
+    expect(decision.breakdown.family_status).toBe('unknown');
   });
 
   test('feature-floor boundary: 75 approves, 74 stays pending', () => {
