@@ -224,6 +224,57 @@ describe('executeDecision / finishExecution — recoverable claim state machine'
     expect(TRANSIENT_ERROR_RE.test('engine lock held')).toBe(true);
     expect(TRANSIENT_ERROR_RE.test('Request timed out')).toBe(true);
     expect(TRANSIENT_ERROR_RE.test('deadlock detected')).toBe(true);
+    // The publisher's ACTUAL lock-contention message (Codex r2).
+    expect(TRANSIENT_ERROR_RE.test('Autonomous publisher is busy; retry in a moment')).toBe(true);
     expect(TRANSIENT_ERROR_RE.test('draft failed the comparison gate')).toBe(false);
+  });
+
+  test('crash recovery reconciles an already-committed decision instead of reporting failure (Codex r2)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    const err = new Error('Opportunity is no longer pending_review');
+    reviewQueue.decideReviewItem.mockRejectedValue(err);
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(table === 'opportunity_queue' ? { status: 'done' } : null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const result = await approvals._internals.finishExecution(ROW, 'approved', 'owner@example.com', { recovery: true });
+    expect(result).toEqual({ executed: 'reconciled' });
+    expect(updates.at(-1)).toMatchObject({ status: 'approved' });
+  });
+
+  test('crash recovery with an in-flight publish stays executing (Codex r2)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockRejectedValue(new Error('Opportunity is no longer pending_review'));
+    const db = require('../models/db');
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockResolvedValue(1),
+        first: jest.fn().mockResolvedValue(table === 'opportunity_queue' ? { status: 'claimed' } : null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const result = await approvals._internals.finishExecution(ROW, 'approved', 'owner@example.com', { recovery: true });
+    expect(result).toEqual({ skipped: 'in_flight' });
+  });
+});
+
+describe('gate + full-draft rules (Codex r2)', () => {
+  test('the feature gate requires explicit opt-in in EVERY environment', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../config/feature-gates.js'), 'utf8');
+    const line = src.split('\n').find((l) => l.includes('contentEmailApprovals:'));
+    expect(line).toContain("process.env.GATE_CONTENT_EMAIL_APPROVALS === 'true'");
+    expect(line).not.toContain('isProd ?'); // no dev auto-on with real creds
+  });
+
+  test('draftPreview returns the COMPLETE body — approving publishes everything shown', () => {
+    const body = 'x'.repeat(5000);
+    const { body: shown, truncated } = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body }) });
+    expect(shown).toHaveLength(5000); // no 1,200-char excerpt
+    expect(truncated).toBe(false);
   });
 });

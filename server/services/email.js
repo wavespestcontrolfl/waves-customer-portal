@@ -44,7 +44,7 @@ function wrapHtml({ heading, body, ctaUrl, ctaLabel }) {
   });
 }
 
-async function send({ to, subject, heading, body, ctaUrl, ctaLabel }) {
+async function send({ to, subject, heading, body, ctaUrl, ctaLabel, replyTo }) {
   if (!to) return { ok: false, error: 'No email address' };
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured (GOOGLE_SMTP_PASSWORD missing)' };
@@ -53,6 +53,9 @@ async function send({ to, subject, heading, body, ctaUrl, ctaLabel }) {
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to,
       subject,
+      // Optional: reply-processing flows (email approvals) point replies at
+      // the mailbox their poller actually reads.
+      ...(replyTo ? { replyTo } : {}),
       html: wrapHtml({ heading, body, ctaUrl, ctaLabel }),
     });
     return { ok: true };

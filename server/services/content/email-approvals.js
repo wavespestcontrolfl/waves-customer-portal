@@ -42,7 +42,7 @@ const SWEEP_WINDOW_DAYS = 14;
 const EXECUTING_RECOVERY_MINUTES = 15;
 // Transient execution failures (engine advisory lock contention, timeouts,
 // connection blips) release the claim so the inbox reply retries next poll.
-const TRANSIENT_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|timeout|timed out|ECONN|EAI_AGAIN|deadlock|too many connections|temporar/i;
+const TRANSIENT_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|publisher is busy|retry in a moment|timeout|timed out|ECONN|EAI_AGAIN|deadlock|too many connections|temporar/i;
 
 function emailApprovalsEnabled() {
   const { isEnabled } = require('../../config/feature-gates');
@@ -167,12 +167,18 @@ function extractReplyText(source, depth = 0) {
   return body.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
 }
 
+// The COMPLETE draft body — a named-competitor approval publishes the whole
+// stored draft, so the owner must be able to read every claim before
+// replying "approved" (legal/brand surface). Bounded only by a generous
+// safety cap far above any real post.
+const DRAFT_EMAIL_MAX_CHARS = 120_000;
 function draftPreview(run) {
   let payload = run.draft_payload;
   if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
   const title = payload?.title || payload?.frontmatter?.title || '(untitled draft)';
-  const body = String(payload?.body || payload?.content || '').slice(0, 1200);
-  return { title, excerpt: body };
+  const full = String(payload?.body || payload?.content || '');
+  const truncated = full.length > DRAFT_EMAIL_MAX_CHARS;
+  return { title, body: full.slice(0, DRAFT_EMAIL_MAX_CHARS), truncated };
 }
 
 /**
@@ -199,8 +205,18 @@ async function sendApprovalRequest(run, opportunity = null) {
   }
   if (!row || row.email_sent_at) return { row, skipped: row ? 'already_sent' : 'insert_failed' };
 
+  // Atomic SEND CLAIM: the runner's setImmediate hook and the ten-minute
+  // sweep can race on the same unsent row — whoever flips email_sent_at
+  // first sends; the loser sees 0 rows and backs off. A failed SMTP send
+  // releases the claim so the next cycle retries.
+  const sendClaimed = await db('content_email_approvals')
+    .where({ id: row.id })
+    .whereNull('email_sent_at')
+    .update({ email_sent_at: new Date(), updated_at: new Date() });
+  if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
+
   const email = require('../email');
-  const { title, excerpt } = draftPreview(run);
+  const { title, body: draftBody, truncated } = draftPreview(run);
   const isCompetitor = row.kind === 'named_competitor_review';
   const senders = allowedSenders();
   const subject = `[${row.token}] Approve? ${title}`;
@@ -210,7 +226,10 @@ async function sendApprovalRequest(run, opportunity = null) {
     `<strong>Target:</strong> ${escapeHtml(opportunity?.query || run.action_type || '')}<br/>`,
     `<strong>Parked as:</strong> ${escapeHtml(row.kind)}</p>`,
     run.reviewer_notes ? `<p><strong>Reviewer notes:</strong> ${escapeHtml(String(run.reviewer_notes).slice(0, 600))}</p>` : '',
-    excerpt ? `<p><strong>Draft opening:</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;">${escapeHtml(excerpt)}…</blockquote>` : '',
+    // The COMPLETE draft — approving publishes everything below, so
+    // everything below must be in front of the owner.
+    draftBody ? `<p><strong>Full draft (this exact content publishes on approval):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
+    truncated ? '<p style="color:#b00;"><strong>Draft exceeds the email size cap — review it in /admin/seo before approving.</strong></p>' : '',
     '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>',
     '<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
     isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is dismissed and the topic is closed.</p>'
@@ -220,12 +239,21 @@ async function sendApprovalRequest(run, opportunity = null) {
       : '<p style="color:#b00;font-size:13px;">No approver addresses are configured (APPROVAL_ALLOWED_SENDERS) — replies cannot be processed until one is set.</p>',
   ].join('\n');
 
-  const result = await email.send({ to: approvalRecipient(), subject, heading: 'Content approval needed', body: bodyHtml });
+  const result = await email.send({
+    to: approvalRecipient(),
+    subject,
+    heading: 'Content approval needed',
+    body: bodyHtml,
+    // Replies must land in the mailbox the poller actually reads —
+    // email.js sends FROM the fixed contact@ account, so without this an
+    // APPROVAL_IMAP_USER override would poll a mailbox replies never reach.
+    replyTo: imapMailbox().user,
+  });
   if (result?.ok === false) {
-    await db('content_email_approvals').where({ id: row.id }).update({ last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
+    await db('content_email_approvals').where({ id: row.id }).update({ email_sent_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
     return { row, sent: false, error: result.error };
   }
-  await db('content_email_approvals').where({ id: row.id }).update({ email_sent_at: new Date(), last_error: null, updated_at: new Date() });
+  await db('content_email_approvals').where({ id: row.id }).update({ last_error: null, updated_at: new Date() });
   logger.info(`[email-approvals] sent ${row.token} (${row.kind}) for run ${run.id}`);
   return { row, sent: true };
 }
@@ -287,7 +315,7 @@ async function executeDecision(row, decision, sender) {
   return finishExecution({ ...row, decision, decided_by: `email:${sender}` }, decision, sender);
 }
 
-async function finishExecution(row, decision, sender) {
+async function finishExecution(row, decision, sender, { recovery = false } = {}) {
   // Delegate to the SAME decision engine the admin review queue uses —
   // approve/dismiss semantics, opportunity transitions (trust-build →
   // done/trust_build_approved; dismiss → skipped), and the stale-run
@@ -310,6 +338,28 @@ async function finishExecution(row, decision, sender) {
     return { executed: reviewDecision };
   } catch (err) {
     const message = String(err.message || '').slice(0, 500);
+    // Crash recovery replaying a decision that ALREADY committed before the
+    // process died: decideReviewItem now rejects because the opportunity
+    // left pending_review. Reconcile from the opportunity's terminal state
+    // instead of reporting a false failure to the owner.
+    if (recovery && row.opportunity_id) {
+      const opp = await db('opportunity_queue').where({ id: row.opportunity_id }).first();
+      const st = opp?.status;
+      if (st === 'claimed' && decision === 'approved') {
+        // Publish in flight (the runner's own janitor owns this transient
+        // state) — stay 'executing' and let a later sweep re-check.
+        return { skipped: 'in_flight' };
+      }
+      if (st && st !== 'pending_review') {
+        const matches = decision === 'approved' ? st === 'done' : st === 'skipped';
+        await db('content_email_approvals').where({ id: row.id }).update({
+          status: matches ? decision : 'superseded',
+          last_error: `reconciled after crash: opportunity ${st}`,
+          updated_at: new Date(),
+        });
+        return matches ? { executed: 'reconciled' } : { skipped: 'superseded' };
+      }
+    }
     const stale = err.statusCode === 409 && /changed since|newer run/i.test(message);
     if (stale) {
       // The emailed draft was replaced — never apply the reply to a draft
@@ -358,7 +408,7 @@ async function recoverExecutingRows() {
       continue;
     }
     logger.info(`[email-approvals] recovering executing row ${row.token}`);
-    await finishExecution(row, row.decision, sender).catch((err) => {
+    await finishExecution(row, row.decision, sender, { recovery: true }).catch((err) => {
       if (!err.transient) logger.warn(`[email-approvals] recovery of ${row.token} failed: ${err.message}`);
     });
   }
