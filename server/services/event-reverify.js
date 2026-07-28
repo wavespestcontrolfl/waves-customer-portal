@@ -174,26 +174,57 @@ function pinnedGet(urlObj, address, family, { timeoutMs = FETCH_TIMEOUT_MS, maxB
     }, (res) => {
       const chunks = [];
       let total = 0;
+      let capped = false;
+      let settled = false;
+      const finishOnce = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve({
+          status: res.statusCode,
+          location: res.headers.location || null,
+          text: Buffer.concat(chunks).slice(0, maxBytes).toString('utf8'),
+        });
+      };
+      const rejectOnce = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        reject(err);
+      };
       res.on('data', (chunk) => {
         total += chunk.length;
         if (total <= maxBytes) chunks.push(chunk);
-        if (total >= maxBytes) req.destroy();
+        if (total >= maxBytes && !capped) {
+          capped = true;
+          req.destroy();
+        }
       });
-      const finish = () => resolve({
-        status: res.statusCode,
-        location: res.headers.location || null,
-        text: Buffer.concat(chunks).slice(0, maxBytes).toString('utf8'),
-      });
-      const finishOnce = () => { clearTimeout(deadline); finish(); };
+      // Resolve ONLY on a completed body or our own intentional size-cap
+      // abort. A premature close/abort/reset after headers must REJECT
+      // (→ the caller's documented fail-open 'unreachable' path), never
+      // resolve with silently-truncated text a cancellation check would
+      // then run against.
       res.on('end', finishOnce);
-      res.on('close', finishOnce);
+      res.on('close', () => {
+        if (capped) finishOnce();
+        else rejectOnce(new Error('connection closed before the response completed'));
+      });
+      res.on('aborted', () => {
+        if (capped) finishOnce();
+        else rejectOnce(new Error('response aborted'));
+      });
+      res.on('error', (err) => {
+        if (capped) finishOnce();
+        else rejectOnce(err);
+      });
     });
     const abort = () => req.destroy(Object.assign(new Error('timeout'), { name: 'AbortError' }));
     deadline = setTimeout(abort, timeoutMs);
     req.on('timeout', abort);
     req.on('error', (err) => {
-      // A capped-body destroy surfaces as ECONNRESET after we already
-      // resolved via 'close'; real pre-response errors reject.
+      // Post-cap destroy errors surface after we resolved (guarded by the
+      // response's settled flag); pre-response errors reject here.
       clearTimeout(deadline);
       reject(err);
     });

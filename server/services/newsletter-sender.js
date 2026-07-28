@@ -1026,6 +1026,28 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
         continue;
       }
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+        // sendCampaign's own pre-claim gates re-run the lineup checks and
+        // can newly fail even though the tick's gate just passed (the
+        // recheck fetches live pages). A generic 'failed' flip would
+        // strand the week uneditable — take the same
+        // revert-to-editable-draft exit as the tick's gate.
+        logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
+        try {
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+            status: 'draft',
+            scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
+            updated_at: new Date(),
+          });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+        } catch { /* swallow */ }
+        continue;
+      }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
       try {
         const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
