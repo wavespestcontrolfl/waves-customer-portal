@@ -245,6 +245,30 @@ describe('comparison-table-gate', () => {
     expect(rGate.pass).toBe(false);
   });
 
+  test('host index, multi-hit URLs, sentence-bounded tone, and table-less gate parity (Codex r6)', () => {
+    // r6.4: concatenated official domains resolve via the curated host index.
+    const massey = 'They are [the worst company](https://www.masseyservices.com) around.';
+    const rMassey = gate.evaluate({ body: `# Guide\n\n${massey}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rMassey.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r6.3: every competitor in a URL is kept — uncurated Hawx can't hide
+    // behind allowlisted Orkin in the same path.
+    const multi = 'See [this comparison](https://example.gov/orkin-vs-hawx) for details.';
+    const rMulti = gate.evaluate({ body: `# Guide\n\n${multi}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rMulti.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && /Hawx/i.test(f.message))).toBe(true);
+    // r6.2: negativity in a PRIOR sentence about something else must not
+    // attach to a citation link — D1's failure-mechanism prose is legal.
+    const legit = 'DIY fertilizer can be unreliable. Consult [the published plan](https://www.trugreen.com/plans).';
+    const rLegit = gate.evaluate({ body: `# Guide\n\n${legit}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rLegit.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(rLegit.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+    expect(rLegit.pass).toBe(true);
+    expect(rLegit.requiresHumanReview).toBe(true);
+    // r6.1: gate parity on the table-less path.
+    const rNoTableGate = gate.evaluate({ body: '# Guide\n\nSee [the plan](https://www.trugreen.com/plans).\n\nNo table.' }, { namedCompetitorEnabled: false });
+    expect(rNoTableGate.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+    expect(rNoTableGate.pass).toBe(false);
+  });
+
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
     for (const body of [
       'Why Ants Bug Out After Rain. Palmetto bugs scatter when the barrier is fresh. No table.',
