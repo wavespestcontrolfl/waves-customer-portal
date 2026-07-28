@@ -22,7 +22,11 @@ async function loadLastServices(db, customerId, serviceType) {
   for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
     const rows = await db('service_records')
       .where({ customer_id: customerId, status: 'completed' })
+      // id tiebreaker keeps the page boundaries deterministic — same-date
+      // rows (routine for multi-service customers) may otherwise reorder
+      // between OFFSET queries and skip a same-line visit.
       .orderBy('service_date', 'desc')
+      .orderBy('id', 'desc')
       .offset(offset)
       .limit(PAGE_SIZE)
       .select('service_type', 'service_date', 'technician_notes');

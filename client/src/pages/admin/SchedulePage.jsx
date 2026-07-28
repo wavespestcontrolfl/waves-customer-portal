@@ -3390,9 +3390,8 @@ export function ProtocolPanel({ service, onClose }) {
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
   // classified from the raw value — the panel must agree with them.
-  const serviceCategory = detectServiceCategory(
-    service.serviceTypeRaw || service.serviceType,
-  );
+  const panelServiceType = service.serviceTypeRaw || service.serviceType;
+  const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
   const [activeSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
@@ -3449,7 +3448,9 @@ export function ProtocolPanel({ service, onClose }) {
 
       const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(
-          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`,
+          // Same raw-first type as the panel's classification — a normalized
+          // display name must not resolve photos/protocols for the wrong line.
+          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(panelServiceType)}&month=${month}`,
         ),
         adminFetch(
           `/admin/protocols/seasonal-index?month=${month}&service_line=${line}`,
@@ -3466,7 +3467,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(service.serviceType)}`,
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
             )
           : Promise.resolve(null),
       ]);
