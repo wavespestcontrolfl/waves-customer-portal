@@ -112,6 +112,13 @@ export function ConfirmEvidence({ payload }) {
       value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
         + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
     },
+    // caller_phone_not_on_file: the mismatching caller number IS the card —
+    // the header prefers the linked customer's on-file phone, so without
+    // these rows the office sees the on-file identity but never the number
+    // it's being asked to verify (or save to the account).
+    p.caller_phone && { label: "Caller dialed from", value: p.caller_phone },
+    p.caller_phone && p.matched_customer_name && { label: "Linked to", value: p.matched_customer_name },
+    p.caller_phone && { label: "On file", value: p.on_file_phone || "no primary phone" },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
