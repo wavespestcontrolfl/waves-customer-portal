@@ -321,6 +321,11 @@ async function autoDraftFlagship() {
   //    type config so they tune in one place.
   const reqs = getFlagshipType()?.sourceRequirements || {};
   const preflight = preflightDigest(lineupEvents, reqs);
+  // The selector's own shortfalls reach the OPERATOR, not just the server
+  // log — they ride the preflight warnings onto the draft notification.
+  if (portfolio.unmet.length) {
+    preflight.warnings.push(...portfolio.unmet.map((l) => `Portfolio shortfall: ${l}`));
+  }
   // Skip-week routine, shared by the pre-generation preflight and the
   // post-generation lineup-coverage recheck. Persists a durable 'skipped'
   // marker (the catch-up gate only re-runs missing/'planned' weeks) and
@@ -334,10 +339,14 @@ async function autoDraftFlagship() {
       // model generation, outside the advisory lock — an unconditional
       // merge could overwrite the 'drafted' row a concurrent runner just
       // created and linked, killing its proof retries.
+      // Unlinked 'drafted' rows flip too — autoDraftFlagship deliberately
+      // falls through to re-draft on those, so leaving one 'drafted' would
+      // make every catch-up repeat the work, the notification, and the
+      // paid generation. Linked rows (send_id set) stay protected.
       const flipped = await db('newsletter_calendar')
         .where({ week_of: weekOf })
         .whereNull('send_id')
-        .whereIn('status', ['planned', 'skipped'])
+        .whereIn('status', ['planned', 'skipped', 'drafted'])
         .update({ status: 'skipped', updated_at: db.fn.now() });
       if (!flipped) {
         await db('newsletter_calendar')
@@ -646,7 +655,7 @@ async function autoDraftFlagship() {
     });
   }
 
-  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${safeEventIds.length}`);
+  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${actualLineup.length}`);
 
   // 10. Notify admin that a draft is ready
   try {
@@ -654,7 +663,7 @@ async function autoDraftFlagship() {
     await triggerNotification('newsletter_autopilot_draft', {
       sendId: send.id,
       subject: send.subject,
-      eventCount: safeEventIds.length,
+      eventCount: actualLineup.length,
       calendarWeek: weekOf,
       hadCalendarEntry: !!calendarEntry,
       preflightWarnings: preflight.warnings,
@@ -673,7 +682,7 @@ async function autoDraftFlagship() {
     logger.warn(`[newsletter-autopilot] proof send failed: ${e.message}`);
   }
 
-  return { skipped: false, sendId: send.id, eventCount: safeEventIds.length };
+  return { skipped: false, sendId: send.id, eventCount: actualLineup.length };
 }
 
 module.exports = { autoDraftFlagship, buildDigestPlan, preflightDigest, formatPreflightReport };

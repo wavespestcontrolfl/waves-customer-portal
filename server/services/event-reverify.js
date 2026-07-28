@@ -263,8 +263,13 @@ function deadTextNearTitle(pageText, title) {
   if (!words.length) return false;
   const required = Math.min(words.length, 2);
   const re = new RegExp(DEAD_TEXT.source, 'gi');
+  // "not cancelled", "has not been canceled", "will proceed unless
+  // cancelled", "never cancelled (rain or shine)" — negated/conditional
+  // phrasing is REASSURANCE, not evidence.
+  const negatedBefore = /(?:\bnot\b|\bnever\b|\bunless\b|\bisn'?t\b|\bwon'?t\b|\bwithout\b|\bno\b)\s*(?:be(?:en)?\s+)?(?:get(?:ting)?\s+)?$/;
   let match;
   while ((match = re.exec(text)) !== null) {
+    if (negatedBefore.test(text.slice(Math.max(0, match.index - 40), match.index))) continue;
     const from = Math.max(0, match.index - PROXIMITY);
     const to = Math.min(text.length, match.index + PROXIMITY);
     // WHOLE-token matching — a substring hit ('race' inside 'bracelet')

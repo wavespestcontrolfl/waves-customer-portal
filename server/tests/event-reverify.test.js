@@ -182,3 +182,14 @@ describe('reverifyEvent verdicts (gate on, DNS + transport stubbed)', () => {
     expect(result.failures).toHaveLength(2);
   });
 });
+
+describe('negated cancellation language (codex round 3)', () => {
+  test('reassurance is not evidence: "not cancelled", "has not been canceled", "unless cancelled"', () => {
+    expect(deadTextNearTitle('Racer Creator Expo is not cancelled — see you Saturday!', EVENT.title)).toBe(false);
+    expect(deadTextNearTitle('The Racer Creator Expo has not been canceled.', EVENT.title)).toBe(false);
+    expect(deadTextNearTitle('Racer Creator Expo runs rain or shine unless cancelled by the county.', EVENT.title)).toBe(false);
+    expect(deadTextNearTitle('Racer Creator Expo will never be cancelled', EVENT.title)).toBe(false);
+    // Plain cancellation is still evidence.
+    expect(deadTextNearTitle('The Racer Creator Expo has been cancelled.', EVENT.title)).toBe(true);
+  });
+});

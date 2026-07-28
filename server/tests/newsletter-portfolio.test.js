@@ -283,3 +283,30 @@ describe('codex round-1 repairs', () => {
     expect(isFamily(confirmedOnly)).toBe(true);
   });
 });
+
+describe('codex round-3 fixes', () => {
+  const { selectPortfolio: sp4, isFreeish: freeish } = require('../services/newsletter-portfolio');
+
+  test('cardinality backtracking: saturated caps no longer strand a feasible fuller lineup', () => {
+    // Top scorers saturate venue+source caps such that plain greedy stalls
+    // below target; trading one blocker must unlock a net gain.
+    const blockers = [
+      ev({ venue_name: 'Hall', source_id: 'S', editorial_score: 99, region_zone: 'z1' }),
+      ev({ venue_name: 'Hall', source_id: 'S', editorial_score: 98, region_zone: 'z2' }),
+    ];
+    const blocked = [1, 2, 3, 4, 5, 6].map((i) => ev({
+      venue_name: 'Hall', source_id: 'S', editorial_score: 90 - i, region_zone: `z-${i}`,
+    }));
+    const open = [1, 2, 3].map((i) => ev({
+      venue_name: `V${i}`, source_id: `s${i}`, editorial_score: 80 - i, region_zone: `y-${i}`,
+    }));
+    const result = sp4([...blockers, ...blocked, ...open], { targetCount: 5, minCount: 5 });
+    expect(result.selected.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('$0 price forms count as free-ish', () => {
+    expect(freeish(ev({ is_free: null, audience_tags: [], price_text: '$0' }))).toBe(true);
+    expect(freeish(ev({ is_free: null, audience_tags: [], price_text: '$0.00 admission' }))).toBe(true);
+    expect(freeish(ev({ is_free: null, audience_tags: [], price_text: '$10' }))).toBe(false);
+  });
+});

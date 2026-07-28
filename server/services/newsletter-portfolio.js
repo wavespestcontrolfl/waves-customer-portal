@@ -89,10 +89,12 @@ const isFamily = (event) => event?.family_friendly === true
   || breakdown(event).family_status === 'confirmed';
 const isParents = (event) => tags(event).has('parents_night')
   || breakdown(event).family_status === 'adults_lean';
-// The curated 'free' audience tag counts too — ingestion flags can be
-// incomplete and price_text may read "$0" rather than the word "free".
+// The curated 'free' audience tag and explicit zero-dollar price forms
+// count too — ingestion flags can be incomplete and price_text may read
+// "$0" / "$0.00" rather than the word "free".
 const isFreeish = (event) => event?.is_free === true
   || /\bfree\b/i.test(String(event?.price_text || ''))
+  || /\$\s*0+(?:\.0+)?(?!\d)/.test(String(event?.price_text || ''))
   || tags(event).has('free');
 const isNovel = (event) => NOVELTY_SET.has(String(event?.novelty_type || ''));
 const isGenericClass = (event) => (breakdown(event).penalty_flags || []).includes('generic_class');
@@ -241,6 +243,44 @@ function selectPortfolio(candidates, {
   for (const c of qualified) {
     if (picked.length >= Math.max(targetCount, seededRows.length)) break;
     if (capsAllow(picked, c)) picked.push(c);
+  }
+
+  // Cardinality repair: early high scorers can jointly saturate caps so
+  // that EVERY remaining candidate fails capsAllow while a fuller
+  // cap-compliant lineup exists. Bounded backtracking: trade one
+  // non-seeded, non-load-bearing pick for a blocked candidate ONLY when
+  // the swap yields a NET gain (at least one more candidate can then
+  // join) — a plain swap would just shuffle at the same size.
+  let cardinalityProgress = true;
+  while (cardinalityProgress && picked.length < targetCount) {
+    cardinalityProgress = false;
+    const remaining = qualified.filter((c) => !picked.includes(c));
+    for (const c of remaining) {
+      if (picked.length >= targetCount) break;
+      if (capsAllow(picked, c)) {
+        picked.push(c);
+        cardinalityProgress = true;
+      }
+    }
+    if (cardinalityProgress || picked.length >= targetCount) continue;
+    outer:
+    for (const c of remaining) {
+      const tradeable = [...picked]
+        .sort((a, b) => effectiveScore(a) - effectiveScore(b))
+        .filter((p) => !seededIds.has(String(p.id)) && !isLoadBearing(p, picked));
+      for (const p of tradeable) {
+        const trial = picked.filter((x) => x !== p);
+        if (!capsAllow(trial, c)) continue;
+        const trialWith = [...trial, c];
+        const extra = remaining.find((c2) => c2 !== c && c2 !== p
+          && !trialWith.includes(c2) && capsAllow(trialWith, c2));
+        if (!extra) continue;
+        picked.length = 0;
+        picked.push(...trialWith, extra);
+        cardinalityProgress = true;
+        break outer;
+      }
+    }
   }
 
   // Repair passes: satisfy each unmet minimum with the best remaining
