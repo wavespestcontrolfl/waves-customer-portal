@@ -167,3 +167,16 @@ describe('owner v2 polish (2026-07-28 evening)', () => {
     expect(withoutThumb).not.toContain('img.example/broadway');
   });
 });
+
+describe('thumbnail hardening (codex on #3030)', () => {
+  test('GIF urls are rejected as thumbnails; the height attr rides for Outlook', async () => {
+    const gif = await assembleWavesNewsletter(draftFixture({
+      events: [HERO, { ...CARD, imageUrl: 'https://img.example/loop.gif' }],
+    }));
+    expect(gif).not.toContain('loop.gif');
+    const jpg = await assembleWavesNewsletter(draftFixture({
+      events: [HERO, { ...CARD, imageUrl: 'https://img.example/broadway.jpg' }],
+    }));
+    expect(jpg).toMatch(/<img src="https:\/\/img\.example\/broadway\.jpg"[^>]*height="220"/);
+  });
+});

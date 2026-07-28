@@ -1155,9 +1155,13 @@ async function assembleWavesNewsletter(draft) {
     // Per-event thumbnail (owner ask 2026-07-28 evening review): the
     // DB-locked event image renders above each card when the feed
     // supplied one — real event art, never generated, never a GIF.
+    // Reject animated GIF urls — the thumbnail contract is real event
+    // art, and safeUrl validates scheme only. Height rides an HTML attr
+    // as well as the style: Outlook's Word engine ignores max-height/
+    // object-fit and would render a portrait image at full natural size.
     const thumbUrl = safeUrl(ev.imageUrl);
-    if (thumbUrl) {
-      card.push(`<div style="margin:0 0 8px 0;"><img src="${thumbUrl}" alt="${escapeHtml(ev.sourceTitle || '')}" style="max-width:100%;height:auto;max-height:220px;object-fit:cover;border-radius:8px;display:block;" /></div>`);
+    if (thumbUrl && !/\.gif($|[?#])/i.test(thumbUrl)) {
+      card.push(`<div style="margin:0 0 8px 0;"><img src="${thumbUrl}" alt="${escapeHtml(ev.sourceTitle || '')}" height="220" style="height:220px;width:auto;max-width:100%;border-radius:8px;display:block;" /></div>`);
     }
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);
