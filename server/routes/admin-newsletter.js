@@ -1200,8 +1200,16 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // unranked would promote an arbitrary fresh event.
         const { selectPortfolio } = require('../services/newsletter-portfolio');
         const portfolio = selectPortfolio(plan.scored);
-        resolvedEventIds = (portfolio.selected.length ? portfolio.selected : plan.scored.slice(0, 12))
-          .map((ev) => ev.id);
+        if (!portfolio.selected.length) {
+          // No candidate clears the editorial floor — falling back to the
+          // raw freshness order would draft exactly the sub-floor lineup
+          // the rubric exists to prevent. Fail actionably instead.
+          return res.status(400).json({
+            error: 'No approved events clear the editorial floor for this issue week',
+            detail: 'Approve or star floor-passing events in the Event Inbox, or pick events explicitly, then draft again.',
+          });
+        }
+        resolvedEventIds = portfolio.selected.map((ev) => ev.id);
       }
 
       if (resolvedEventIds.length === 0) {

@@ -88,7 +88,10 @@ function applyListwiseNudges(scored, ranking) {
     if (pos === undefined) return ev;
     const s = Number(ev.editorial_score);
     if (!Number.isFinite(s) || s < floor || ev.admin_status === 'featured') return ev;
-    const nudge = Math.max(-3, Math.min(3, Math.round((scoreRank.get(String(ev.id)) - pos) / 2)));
+    // Symmetric away-from-zero rounding — Math.round(-0.5) is -0, so a
+    // simple round promotes without demoting on adjacent swaps.
+    const delta = (scoreRank.get(String(ev.id)) - pos) / 2;
+    const nudge = Math.max(-3, Math.min(3, Math.sign(delta) * Math.round(Math.abs(delta))));
     if (!nudge) return ev;
     return { ...ev, editorial_score: Math.max(floor, Math.min(100, s + nudge)), listwiseNudge: nudge };
   });
@@ -107,8 +110,12 @@ async function applyListwiseRerank(scored) {
     .filter((ev) => Number.isFinite(Number(ev.editorial_score)) && Number(ev.editorial_score) >= floor)
     .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score));
   const head = byScoreDesc.slice(0, LISTWISE_POOL - 6);
+  // Parity rotates per ISSUE (from the issue Tuesday's day-of-month), so
+  // positions excluded this week are sampled next week — a fixed parity
+  // would permanently shadow half the boundary band.
+  const parity = parseInt(String(getActiveNewsletterTuesday()).slice(-2), 10) % 2;
   const boundary = byScoreDesc.slice(LISTWISE_POOL - 6, LISTWISE_POOL + 6)
-    .filter((_, i) => i % 2 === 0)
+    .filter((_, i) => i % 2 === parity)
     .slice(0, 6);
   const pool = [...head, ...boundary];
   if (pool.length < 4) return scored;

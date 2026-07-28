@@ -970,7 +970,9 @@ function deriveEventLabels(row) {
   // curated tag, or price text that says free / $0 WITHOUT any nonzero
   // dollar tier ("Kids $0, adults $25" gets no chip).
   const priceText = String(row.price_text || '');
-  const hasPaidTier = /\$\s*\d*[1-9]/.test(priceText);
+  // Any nonzero dollar amount — integer OR fractional ("$0.50") — is a
+  // paid tier that disqualifies the unqualified Free chip.
+  const hasPaidTier = /\$\s*(?:\d*[1-9]\d*(?:\.\d+)?|\d+\.\d*[1-9]\d*)/.test(priceText);
   const unambiguouslyFree = !hasPaidTier
     && (/\bfree\b/i.test(priceText) || /^\s*\$?\s*0+(?:\.0+)?\s*$/.test(priceText));
   if (row.is_free === true || tagSet.has('free') || unambiguouslyFree) labels.push('Free');

@@ -104,6 +104,7 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
 
     return `<div style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
 <div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
+<div style="margin-bottom:6px;">Scores shown are the STORED rubric scores; the lineup order already reflects any listwise nudge (±3, in-memory at selection time).</div>
 Selected: ${ordered.length} &nbsp;·&nbsp; Qualified pool (≥${featureScoreFloor()}): ${qualifiedPool} of ${pool.length} approved &nbsp;·&nbsp; Weekend events: ${weekendCount} &nbsp;·&nbsp; Zones: ${zones.length} (${esc(zones.join(', ') || '—')})<br/>
 Lowest selected: ${scores.length ? Math.min(...scores) : '—'} &nbsp;·&nbsp; Top: ${scores.length ? Math.max(...scores) : '—'} &nbsp;·&nbsp; Unmet: ${unmet.length ? esc(unmet.join('; ')) : 'none'}<br/>
 Alternates: ${altLine}
