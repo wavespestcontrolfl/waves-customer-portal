@@ -1222,9 +1222,25 @@ function SmsTab() {
       );
       if (rescheduleContextChanged()) return;
       const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
-      setMsgBody((b) =>
-        b.trim() ? `${b.replace(/\s+$/, "")}\n\n${clause}` : clause,
-      );
+      // Replace-don't-stack: every lookup mints a FRESH short code, and the
+      // strip-on-recipient-change effect only knows the one tracked URL — a
+      // second click stacking a second clause would leave the first link
+      // unstrippable. Drop any line carrying the previously tracked URL
+      // before appending. (Inserts are serialized by the insertingResched
+      // guard, so the click-time snapshot of insertedResched is current; if
+      // the operator already deleted that line, the filter is a no-op.)
+      const prevUrl = insertedResched?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+      });
       setInsertedResched({
         url: d.url,
         recipientKey: requestRecipientKey,
