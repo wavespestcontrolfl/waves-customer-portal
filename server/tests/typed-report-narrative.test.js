@@ -172,6 +172,48 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('free-text pest qualifiers ground as full phrases (codex r10: fire vs ghost ants)', () => {
+  const antFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'One-Time Pest Treatment',
+    reportTypeLabel: 'One-Time Pest Treatment',
+    typedReport: {
+      reportTypeLabel: 'One-Time Pest Treatment',
+      todaysResult: { headline: 'Ant treatment completed today.', body: 'We treated the ghost ant activity today.', nextStep: null },
+      findings: [{ fieldKey: 'target_pest', customerLabel: 'Target pest', customerValueLabel: 'Ghost ants', value: 'ghost ants' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Ghost ants were treated today.', antFacts)).toEqual([]);
+  expect(ungroundedClaims('Fire ants were treated today.', antFacts))
+    .toContain('ungrounded_pest_qualifier:fire ants');
+});
+
+test('unit-bearing typed quantities bind numeral to unit (codex r10)', () => {
+  const termiteFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Termite Treatment',
+    reportTypeLabel: 'Termite Treatment',
+    typedReport: {
+      reportTypeLabel: 'Termite Treatment',
+      todaysResult: { headline: 'Termite treatment completed today.', body: 'We completed the scheduled treatment today.', nextStep: null },
+      findings: [
+        { fieldKey: 'linear_feet_treated', customerLabel: 'Linear feet treated', customerValueLabel: '120 linear feet', value: '120 linear feet' },
+        { fieldKey: 'gallons_applied', customerLabel: 'Gallons applied', customerValueLabel: '27 gallons', value: '27 gallons' },
+      ],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We treated 120 linear feet today.', termiteFacts)).toEqual([]);
+  // numerals cannot swap between unit-bearing fields
+  expect(ungroundedClaims('We treated 27 linear feet today.', termiteFacts))
+    .toContain('uncorroborated_count:27 linear');
+  expect(ungroundedClaims('We applied 120 gallons today.', termiteFacts))
+    .toContain('uncorroborated_count:120 gallons');
+});
+
 test('open-vocabulary pest swaps reject (codex r9: bees on a wasp report)', () => {
   const waspFacts = groundingFacts(roachInput({
     serviceTypeDisplay: 'One-Time Pest Treatment',

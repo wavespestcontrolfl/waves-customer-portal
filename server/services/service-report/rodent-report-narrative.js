@@ -931,6 +931,34 @@ function actionCorpus(facts) {
   return ` ${JSON.stringify(workFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
 }
 
+// Dynamic pest QUALIFIERS (codex P2 #3007 r10): the free-text target_pest
+// field supports species the static list can't enumerate (ghost/fire/
+// carpenter ants…). Any non-stopword adjective directly before a pest
+// family word must appear WITH that family in the facts — "fire ants" on a
+// ghost-ant report rejects even though "ants" alone is grounded.
+const QUALIFIED_PEST_FAMILY_RE = /\b([a-z-]{3,})\s+((?:cock)?roach(?:es)?|ants?|termites?|rats?|spiders?|wasps?|bees?|hornets?|crickets?|beetles?|moths?|scorpions?|weevils?|mites?)\b/gi;
+const PEST_QUALIFIER_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'any', 'some', 'all', 'these', 'those', 'other',
+  'more', 'most', 'few', 'several', 'many', 'target', 'live', 'dead', 'active',
+  'adult', 'young', 'visible', 'new', 'newly', 'existing', 'remaining',
+  'additional', 'possible', 'potential', 'recorded', 'documented', 'observed',
+  'no', 'not', 'none', 'nearby', 'occasional', 'invading', 'household',
+]);
+
+function ungroundedPestQualifiers(text, corpus) {
+  const problems = [];
+  for (const match of String(text).matchAll(new RegExp(QUALIFIED_PEST_FAMILY_RE.source, 'gi'))) {
+    const qualifier = match[1].toLowerCase();
+    if (PEST_QUALIFIER_STOPWORDS.has(qualifier)) continue;
+    const familyStem = match[2].toLowerCase().replace(/(?:es|s)$/, '');
+    const phraseRe = new RegExp(`\\b${qualifier.replace(/[-\s]+/g, '\\s*')}\\s+${familyStem}`, 'i');
+    if (!phraseRe.test(corpus)) {
+      problems.push(`ungrounded_pest_qualifier:${match[0].toLowerCase()}`);
+    }
+  }
+  return problems;
+}
+
 function ungroundedDomainTerms(text, facts) {
   const problems = [];
   const corpus = domainCorpus(facts);
@@ -941,6 +969,7 @@ function ungroundedDomainTerms(text, facts) {
       problems.push(`ungrounded_${term.kind}:${match[0].toLowerCase()}`);
     }
   }
+  problems.push(...ungroundedPestQualifiers(text, corpus));
   return problems;
 }
 
@@ -954,17 +983,33 @@ const ROLE_VALIDATED_NOUN_STEMS = new Set(['trap', 'station', 'device', 'capture
 
 function typedCountRoles(facts) {
   const map = new Map(); // noun stem -> Set of grounded values
-  (facts.findings || []).forEach((finding) => {
-    const n = Number(String(finding.value).trim());
-    if (!Number.isFinite(n)) return;
-    String(finding.label).toLowerCase().split(/[^a-z]+/)
-      .filter((word) => word.length >= 4)
+  const COUNT_STEM_STOPWORDS = new Set(['with', 'and', 'per', 'for', 'the', 'from', 'this', 'that', 'today']);
+  const register = (value, words) => {
+    words
+      .filter((word) => word.length >= 3 && !COUNT_STEM_STOPWORDS.has(word))
       .forEach((word) => {
         const stem = word.replace(/s$/, '');
         if (ROLE_VALIDATED_NOUN_STEMS.has(stem)) return;
         if (!map.has(stem)) map.set(stem, new Set());
-        map.get(stem).add(n);
+        map.get(stem).add(value);
       });
+  };
+  (facts.findings || []).forEach((finding) => {
+    const raw = String(finding.value).trim();
+    const labelWords = String(finding.label).toLowerCase().split(/[^a-z]+/);
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      register(n, labelWords);
+      return;
+    }
+    // Unit-bearing quantities ("120 linear feet", "27 gallons" — codex P2
+    // r10): the numeral binds to its UNIT words as well as the label, so a
+    // swap ("27 linear feet") can't reuse a numeral grounded by another
+    // field.
+    const unitMatch = /^(\d+(?:\.\d+)?)\s+([a-z][a-z\s-]*)$/i.exec(raw);
+    if (unitMatch) {
+      register(Number(unitMatch[1]), [...labelWords, ...unitMatch[2].toLowerCase().split(/[^a-z]+/)]);
+    }
   });
   return map;
 }
