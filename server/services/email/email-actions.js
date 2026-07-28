@@ -991,7 +991,9 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
 }
 
 async function handleCustomerRequest(email, classification) {
-  let customer = await db('customers').where('email', email.from_address).first();
+  let customer = await db('customers')
+    .whereRaw('LOWER(email) = ?', [normalizeAddress(email.from_address)])
+    .first();
   const matchedByAddress = !!customer;
 
   if (!customer && email.from_name) {
@@ -1026,7 +1028,9 @@ async function handleCustomerRequest(email, classification) {
 
 async function handleComplaint(email, classification) {
   // Match customer
-  let customer = await db('customers').where('email', email.from_address).first();
+  let customer = await db('customers')
+    .whereRaw('LOWER(email) = ?', [normalizeAddress(email.from_address)])
+    .first();
   const matchedByAddress = !!customer;
   if (!customer && email.from_name) {
     const parts = email.from_name.split(' ');

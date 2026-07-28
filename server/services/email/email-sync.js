@@ -232,7 +232,7 @@ async function upsertEmail(parsed) {
   }
 
   // Check blocklist before inserting — skip blocked senders
-  if (await isBlocked(parsed.from_address)) {
+  if (await isBlocked(parsed.from_address, { gmailId: parsed.gmail_id })) {
     // Auto-trash without wasting a Sonnet call
     try { await gmailClient.trashMessage(parsed.gmail_id); } catch (e) { /* non-critical */ }
     emailData.is_archived = true;

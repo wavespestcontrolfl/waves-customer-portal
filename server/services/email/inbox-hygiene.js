@@ -203,6 +203,16 @@ async function sweepQuarantine(now = new Date()) {
               continue;
             }
           }
+          // The crashed request may have died between persisting the verdict
+          // and running its auto-action — replay it (handlers carry their
+          // own claims/idempotency, so a completed action no-ops).
+          try {
+            const fullRow = await db('emails').where({ id: row.id }).first();
+            const { executeAutoAction } = require('./email-actions');
+            await executeAutoAction(fullRow || row, { category: row.classification });
+          } catch (e) {
+            logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}): ${e.message}`);
+          }
           await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
         } catch (e) {
           logger.warn(`[inbox-hygiene] stale-reclass cancel completion failed (email ${row.id}): ${e.message}`);
@@ -435,7 +445,15 @@ function hasAlignedAuth(authResults, fromDomain) {
   const auth = String(authResults || '').toLowerCase();
   const domain = String(fromDomain || '').toLowerCase();
   if (!auth || !domain) return false;
-  const aligned = (value) => value === domain || value.endsWith(`.${domain}`) || domain.endsWith(`.${value}`);
+  // Relaxed (organizational-domain) alignment, mirroring DMARC: sibling
+  // subdomains of one org domain align (news.example.com vs
+  // mailer.example.com). Naive eTLD+1 (last two labels) — fine for the
+  // .com/.net space this inbox lives in.
+  const orgDomain = (d) => String(d || '').split('.').slice(-2).join('.');
+  const aligned = (value) => value === domain
+    || value.endsWith(`.${domain}`)
+    || domain.endsWith(`.${value}`)
+    || (orgDomain(value) && orgDomain(value) === orgDomain(domain));
   const dkim = auth.match(/dkim=pass[^;]*/g) || [];
   for (const clause of dkim) {
     // header.i may carry a full identity (user@domain); align on the domain.
@@ -545,29 +563,37 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
   // of resurrecting an older eligible one. LIMIT 100 (not 40): answered
   // threads consume candidate slots before the Gmail sent-check, so the
   // window must comfortably exceed the 5-nudge target.
-  const res = await db.raw(
-    `SELECT * FROM (
-       SELECT DISTINCT ON (gmail_thread_id)
-         id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at,
-         classification, is_archived
-       FROM emails
-       WHERE received_at >= ?
-         AND NOT (label_ids \\? 'SENT')
-         AND NOT (label_ids \\? 'DRAFT')
-         AND LOWER(from_address) <> ?
-       ORDER BY gmail_thread_id, received_at DESC
-     ) latest_per_thread
-     WHERE classification = ANY(?)
-       AND is_archived = false
-       AND received_at <= ?
-     ORDER BY received_at ASC
-     LIMIT 100`,
-    [oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), NUDGE_CATEGORIES, newest]
-  );
-  if ((res?.rows || []).length === 100) {
-    logger.warn('[inbox-hygiene] nudge candidate window hit the 100-thread cap — oldest unanswered threads may be deferred');
+  // Paged: answered threads still satisfy the DB predicates and are only
+  // filtered by the live Gmail check below, so one page of answered history
+  // must not starve the digest — keep paging until the target is met or
+  // candidates run out (bounded to 3 pages of 100 to cap Gmail calls).
+  const pageSize = 100;
+  const deduped = [];
+  for (let page = 0; page < 3; page += 1) {
+    const res = await db.raw(
+      `SELECT * FROM (
+         SELECT DISTINCT ON (gmail_thread_id)
+           id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at,
+           classification, is_archived
+         FROM emails
+         WHERE received_at >= ?
+           AND NOT (label_ids \\? 'SENT')
+           AND NOT (label_ids \\? 'DRAFT')
+           AND LOWER(from_address) <> ?
+         ORDER BY gmail_thread_id, received_at DESC
+       ) latest_per_thread
+       WHERE classification = ANY(?)
+         AND is_archived = false
+         AND received_at <= ?
+       ORDER BY received_at ASC
+       LIMIT ${pageSize} OFFSET ${page * pageSize}`,
+      [oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), NUDGE_CATEGORIES, newest]
+    );
+    const rows = res?.rows || [];
+    deduped.push(...rows);
+    if (rows.length < pageSize) break;
+    if (page === 2) logger.warn('[inbox-hygiene] nudge candidates hit the 300-thread page cap — oldest unanswered threads may be deferred');
   }
-  const deduped = res?.rows || [];
 
   const nudges = [];
   for (const email of deduped) {

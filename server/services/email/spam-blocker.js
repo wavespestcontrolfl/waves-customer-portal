@@ -250,7 +250,7 @@ async function unblockSender(id) {
  * since become an identity we protect. Best-effort: unblockSender keeps the
  * row when the Gmail filter can't be deleted, so the next message retries.
  */
-async function removeStaleAutoBlock(normalizedAddress) {
+async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null } = {}) {
   try {
     const row = await db('blocked_email_senders')
       .whereRaw('LOWER(email_address) = ?', [normalizedAddress])
@@ -260,13 +260,27 @@ async function removeStaleAutoBlock(normalizedAddress) {
     const result = await unblockSender(row.id);
     if (result?.success) {
       logger.info(`[spam-blocker] removed stale auto-block for now-protected sender ${redactEmail(normalizedAddress)}`);
+      // The stale filter may have routed the TRIGGERING message to Trash
+      // before sync ever saw it — pull it back out.
+      if (untrashGmailId) {
+        try {
+          const gmailClient = require('./gmail-client');
+          const labels = await gmailClient.getMessageLabels(untrashGmailId);
+          if (labels.includes('TRASH')) {
+            await gmailClient.modifyLabels(untrashGmailId, ['INBOX'], ['TRASH']);
+            logger.info(`[spam-blocker] untrashed message filtered by the removed stale block`);
+          }
+        } catch (e) {
+          logger.warn(`[spam-blocker] untrash after stale-block removal failed: ${e.message}`);
+        }
+      }
     }
   } catch (e) {
     logger.warn(`[spam-blocker] stale auto-block removal failed for ${redactEmail(normalizedAddress)}: ${e.message}`);
   }
 }
 
-async function isBlocked(fromAddress) {
+async function isBlocked(fromAddress, { gmailId = null } = {}) {
   if (!fromAddress) return false;
   const normalized = normalizeAddress(fromAddress);
   const domain = domainFromAddress(normalized);
@@ -298,7 +312,7 @@ async function isBlocked(fromAddress) {
       await db('blocked_email_senders').where({ id: exactBlocked.id }).increment('blocked_count', 1);
       return true;
     }
-    if (exactBlocked) await removeStaleAutoBlock(normalized);
+    if (exactBlocked) await removeStaleAutoBlock(normalized, { untrashGmailId: gmailId });
     return false;
   }
 
