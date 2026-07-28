@@ -254,7 +254,17 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
     updates.member_since = customer.earliest_service_date || dateKey(customer.created_at) || today;
   }
 
-  if (columnPresent(columns, 'monthly_rate') && existingRate <= 0 && detectedKeys.length) {
+  // Backfill a zero/missing monthly_rate ONLY for an explicit
+  // monthly_membership billing lane. Since the 2026-07-28 auto-tier directive,
+  // holding a tier no longer implies monthly billing — inventing a rate for a
+  // NULL/per-visit lane customer would put them into billing-cron's
+  // monthly-charge pool. Mirrors buildCustomerWaveGuardAlignmentUpdates.
+  if (
+    columnPresent(columns, 'monthly_rate')
+    && customer.billing_mode === 'monthly_membership'
+    && existingRate <= 0
+    && detectedKeys.length
+  ) {
     updates.monthly_rate = representativePlanKeys(detectedKeys)
       .reduce((sum, key) => sum + moneyNumber(SERVICE_PLANS[key]?.monthlyRate), 0);
   }
@@ -287,7 +297,7 @@ function applyCustomerFilters(query, customerColumns) {
   return query;
 }
 
-function customerSelect(query) {
+function customerSelect(query, customerColumns = {}) {
   return query.select(
     'c.id',
     'c.first_name',
@@ -298,6 +308,10 @@ function customerSelect(query) {
     'c.pipeline_stage',
     'c.active',
     'c.created_at',
+    // billing_mode ships in migration 20260709000010 — select it only where
+    // it exists so the script still runs on older environments (its absence
+    // simply keeps the monthly_rate backfill guard closed).
+    ...(columnPresent(customerColumns, 'billing_mode') ? ['c.billing_mode'] : []),
   );
 }
 
@@ -317,7 +331,7 @@ async function candidateCustomers(customerColumns) {
     .orderBy('c.created_at', 'asc');
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
-  query = customerSelect(applyCustomerFilters(query, customerColumns));
+  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
   if (LIMIT) query = query.limit(LIMIT);
 
   return (await query).map((customer) => ({
@@ -364,7 +378,7 @@ async function noPlanCandidateCustomers(customerColumns, today) {
     .orderBy('c.created_at', 'asc');
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
-  query = customerSelect(applyCustomerFilters(query, customerColumns));
+  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
   if (LIMIT) query = query.limit(LIMIT);
 
   return (await query).map((customer) => ({

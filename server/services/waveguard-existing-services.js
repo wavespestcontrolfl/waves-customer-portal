@@ -29,9 +29,13 @@ function membershipTierKey(value) {
 
 // A customer is an actual WaveGuard plan member only when their record carries
 // a membership tier (Bronze/Silver/Gold/Platinum) — NOT merely because they
-// have a scheduled visit. A lead / one-time buyer whose initial service
-// auto-scheduled a recurring follow-up is still "No Plan" and must be treated
-// as a new customer for the WaveGuard setup fee + annual-prepay decisions.
+// have a scheduled visit. Note (owner directive 2026-07-28): customers with
+// UPCOMING recurring qualifying services now get a tier stamped automatically
+// (self-booking-plan-sync enrollment path + nightly reconcile, behind
+// GATE_AUTO_WAVEGUARD_TIER), so "recurring but tierless" is a transient state
+// rather than a policy. Until that stamp lands, such a customer is still
+// "No Plan" here and is treated as a new customer for the WaveGuard setup fee
+// + annual-prepay decisions.
 function isMembershipCustomerRow(customer = {}) {
   const tierKey = membershipTierKey(customer.waveguard_tier ?? customer.tier);
   if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return false;

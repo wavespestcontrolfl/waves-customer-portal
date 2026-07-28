@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
 const {
   addETDays,
   addETMonthsByWeekday,
@@ -595,6 +596,32 @@ function inferTierFromServiceCount(serviceCount) {
   return null;
 }
 
+// Mirrors membershipTierKey in waveguard-existing-services.js (not exported
+// there) — used to recognize the commercial sentinel, which must never be
+// converted into a WaveGuard tier (commercial plans are flat, outside tiers).
+function tierSentinelKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+// Tier-only enrollment updates for a customer who is NOT yet a WaveGuard
+// member (owner directive 2026-07-28: upcoming recurring qualifying services
+// mean the customer belongs on a tier — 1 family = Bronze, 2 = Silver,
+// 3 = Gold, 4+ = Platinum). Deliberately writes waveguard_tier ONLY: never
+// monthly_rate (billing-cron monthly-charges any active customer with
+// monthly_rate > 0 — a per-visit customer must stay per-visit), never
+// member_since / pipeline_stage / active. Fail-closed on existing members
+// (the alignment path owns them) and on the commercial sentinel.
+function buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerColumns = {}) {
+  const updates = {};
+  const detectedFamilyKeys = uniqueServiceFamilies(detectedPlanKeys);
+  const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
+  if (isMembershipCustomerRow(customer || {})) return { updates, detectedFamilyKeys, inferredTier: null };
+  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') return { updates, detectedFamilyKeys, inferredTier: null };
+  if (!inferredTier || !customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
+  updates.waveguard_tier = inferredTier;
+  return { updates, detectedFamilyKeys, inferredTier };
+}
+
 function serviceRowCountsTowardWaveGuard(row = {}) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (TERMINAL_STATUSES.includes(String(row.status || '').toLowerCase())) return false;
@@ -643,7 +670,19 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
 
   const monthlyRateEstimate = representativePlanKeys(detectedPlanKeys)
     .reduce((sum, key) => sum + Number(SELF_BOOKING_RECURRING_PLANS[key]?.monthlyRate || 0), 0);
-  if (customerColumns.monthly_rate && (!Number.isFinite(existingRate) || existingRate <= 0) && monthlyRateEstimate > 0) {
+  // Backfill a zero/missing monthly_rate ONLY for an explicit
+  // monthly_membership billing lane. Since the 2026-07-28 auto-tier
+  // directive, holding a tier no longer implies monthly billing — inventing a
+  // rate for a NULL/per-visit lane customer would put them into billing-cron's
+  // monthly-charge pool (it selects active customers with monthly_rate > 0).
+  // Nothing currently billed changes: every monthly-billed member already has
+  // a positive rate and never reaches this branch.
+  if (
+    customerColumns.monthly_rate
+    && customer?.billing_mode === 'monthly_membership'
+    && (!Number.isFinite(existingRate) || existingRate <= 0)
+    && monthlyRateEstimate > 0
+  ) {
     updates.monthly_rate = Math.round(monthlyRateEstimate * 100) / 100;
   }
 
@@ -715,13 +754,20 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
-  // Owner policy: this sync RE-ALIGNS already-enrolled WaveGuard members only — it must
-  // never enroll a customer from recurring services alone. The repo has per-visit
-  // recurring customers; auto-enrolling them would wrongly make them monthly/autopay
-  // billable. Use the shared membership predicate, which rejects explicit non-member
-  // tier sentinels (none/onetime/na/...) before the legacy monthly_rate fallback.
+  // Non-members: owner policy through 2026-07-27 was members-only re-alignment
+  // (auto-enrolling would wrongly make per-visit customers monthly/autopay
+  // billable). Owner directive 2026-07-28 supersedes the LABEL half: a
+  // customer with upcoming recurring qualifying services is stamped a tier
+  // automatically — but tier ONLY (buildNoPlanTierEnrollmentUpdates), so the
+  // billing concern that motivated the old policy still holds. Gated behind
+  // GATE_AUTO_WAVEGUARD_TIER; while off, the old members-only behavior is
+  // byte-identical. The membership predicate rejects explicit non-member
+  // sentinels (none/onetime/na/...) before the legacy monthly_rate fallback.
   if (!isMembershipCustomerRow(customer)) {
-    return { synced: false, reason: 'not_waveguard_enrolled' };
+    if (!isEnabled('autoWaveguardTierEnroll')) {
+      return { synced: false, reason: 'not_waveguard_enrolled' };
+    }
+    return enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today });
   }
 
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
@@ -776,6 +822,126 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   };
 }
 
+// Enrollment executor for the auto-tier directive. Evidence is UPCOMING
+// coverage only (scheduled_date >= today) so a lapsed series never enrolls
+// anyone — mirrors the --enroll-no-plan pass of
+// scripts/align-waveguard-portal-records.js. The direct customers UPDATE
+// fires zero customer communications: the membership.started email lives only
+// in the admin PATCH route and the customers table has no DB triggers.
+async function enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today }) {
+  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
+    return { synced: false, reason: 'commercial_customer' };
+  }
+
+  const rows = await scheduledServiceRowsForCustomer(database, customerId);
+  const detectedPlanKeys = [];
+  for (const row of rows) {
+    if (!serviceRowCountsTowardWaveGuard(row)) continue;
+    const rowDate = normalizeDateString(row.scheduled_date);
+    if (!rowDate || rowDate < today) continue;
+    for (const key of detectWaveGuardPlanKeys(row)) {
+      if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
+    }
+  }
+
+  const enrollment = buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerColumns);
+  if (!enrollment.inferredTier || !Object.keys(enrollment.updates).length) {
+    return { synced: false, reason: 'no_upcoming_recurring_evidence', detectedPlanKeys };
+  }
+
+  await database('customers').where({ id: customerId }).update(enrollment.updates);
+
+  // Best-effort audit row on the real pool connection (NOT `database`, which
+  // may be a caller's transaction) — same rationale as the alignment path.
+  void db('activity_log').insert({
+    customer_id: customerId,
+    action: 'waveguard_tier_auto_enrolled',
+    description: `Auto-enrolled WaveGuard ${enrollment.inferredTier} from upcoming recurring services`,
+    metadata: {
+      detected_plan_keys: detectedPlanKeys,
+      detected_family_keys: enrollment.detectedFamilyKeys,
+      updates: enrollment.updates,
+    },
+  }).catch((err) => log.warn(`[self-booking-plan-sync] tier auto-enroll activity_log insert failed: ${err.message}`));
+
+  return {
+    synced: true,
+    enrolled: true,
+    customerUpdated: true,
+    detectedPlanKeys,
+    detectedFamilyKeys: enrollment.detectedFamilyKeys,
+    inferredTier: enrollment.inferredTier,
+    updates: enrollment.updates,
+  };
+}
+
+// Nightly backstop for the auto-tier directive: heals any No-Plan customer
+// holding upcoming recurring rows that arrived by a path outside the seeding
+// hook (direct row edits, imports, legacy flows). No-op while
+// GATE_AUTO_WAVEGUARD_TIER is off. Bounded per run; each candidate goes
+// through the same gated sync as the booking-time hook, so the write rules
+// (tier only, no comms) live in exactly one place.
+async function reconcileNoPlanRecurringTiers(options = {}) {
+  const {
+    database = db,
+    log = logger,
+    limit = 500,
+    today = etDateString(),
+  } = options;
+
+  if (!isEnabled('autoWaveguardTierEnroll')) return { ok: true, skipped: 'gate_off' };
+
+  const tiersLower = TIER_ORDER.map((tier) => tier.toLowerCase());
+  const customerColumns = await columnInfo(database, 'customers');
+  const scheduledColumns = await columnInfo(database, 'scheduled_services');
+  const hasIsRecurring = !!scheduledColumns.is_recurring;
+
+  let query = database('customers as c')
+    .where(function notEnrolled() {
+      this.where(function noRecognizedTier() {
+        this.whereNull('c.waveguard_tier').orWhereRaw(
+          `LOWER(c.waveguard_tier) NOT IN (${tiersLower.map(() => '?').join(', ')})`,
+          tiersLower,
+        );
+      }).andWhere(function noLegacyRate() {
+        this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
+      });
+    })
+    .whereExists(function upcomingRecurring() {
+      this.select(database.raw('1'))
+        .from('scheduled_services as s')
+        .whereRaw('s.customer_id = c.id')
+        .whereNotIn('s.status', TERMINAL_STATUSES)
+        .where('s.scheduled_date', '>=', today);
+      if (hasIsRecurring) this.where('s.is_recurring', true);
+    })
+    .orderBy('c.created_at', 'asc')
+    .limit(Math.max(1, limit))
+    .select('c.id');
+  if (customerColumns.active) query = query.where('c.active', true);
+  if (customerColumns.deleted_at) query = query.whereNull('c.deleted_at');
+
+  const candidates = await query;
+  let enrolled = 0;
+  let failed = 0;
+  for (const candidate of candidates) {
+    try {
+      const result = await syncCustomerWaveGuardPlanFromScheduledServices({
+        database,
+        log,
+        customerId: candidate.id,
+        today,
+      });
+      if (result?.enrolled) enrolled += 1;
+    } catch (err) {
+      failed += 1;
+      log.warn(`[self-booking-plan-sync] nightly tier reconcile failed for ${candidate.id}: ${err.message}`);
+    }
+  }
+
+  return { ok: true, checked: candidates.length, enrolled, failed, limit };
+}
+
 module.exports = {
   LAWN_CARE_RECURRING_PLANS,
   MOSQUITO_RECURRING_PLANS,
@@ -785,11 +951,13 @@ module.exports = {
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
+  buildNoPlanTierEnrollmentUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
   normalizeTierName,
+  reconcileNoPlanRecurringTiers,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,

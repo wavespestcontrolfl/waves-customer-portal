@@ -693,6 +693,29 @@ async function acquireSeriesCreateLocks(conn, units = []) {
   return keys;
 }
 
+// Auto tier alignment after a recurring series lands (owner directive
+// 2026-07-28) — every flow that seeds a series (estimate accepts, public
+// booking, pay-at-visit, prepay renewals, admin scheduling) gets the
+// customer's WaveGuard tier stamped/upgraded in the same call, with the
+// write rules (tier only for non-members, no comms) enforced inside the
+// gated sync. Best-effort by design: the tier is derived state healed
+// nightly by reconcileNoPlanRecurringTiers, so a sync failure must never
+// fail the booking that seeded the series. Lazy requires keep this module
+// dependency-light and cycle-free.
+async function syncCustomerTierAfterSeeding(conn, customerId) {
+  if (!customerId) return;
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('autoWaveguardTierEnroll')) return;
+    const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
+    await syncCustomerWaveGuardPlanFromScheduledServices({ database: conn, customerId });
+  } catch (err) {
+    try {
+      require('./logger').warn(`[recurring-seeder] WaveGuard tier sync failed for customer ${customerId}: ${err.message}`);
+    } catch { /* never let logging fail the seeding */ }
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -725,6 +748,9 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   }).map((row) => filterByColumns(row, columns));
 
   if (!rows.length) {
+    // Even with no NEW follow-up rows (series dates already exist), the parent
+    // was just marked recurring — that alone is tier evidence.
+    await syncCustomerTierAfterSeeding(conn, parent.customer_id);
     return {
       pattern,
       plannedCount: plannedVisitCountForPattern(pattern, opts),
@@ -735,6 +761,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 
   const inserted = await conn('scheduled_services').insert(rows).returning('*');
   const insertedRows = Array.isArray(inserted) ? inserted : [];
+  await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   return {
     pattern,
     plannedCount: plannedVisitCountForPattern(pattern, opts),

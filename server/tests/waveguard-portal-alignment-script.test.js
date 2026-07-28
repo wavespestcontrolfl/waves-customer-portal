@@ -107,13 +107,16 @@ describe('WaveGuard portal alignment script helpers', () => {
   });
 
   test('re-aligns enrolled members and fills missing fields without overwriting positive rates', () => {
-    // Enrolled member (has a tier) missing portal fields -> filled.
+    // Enrolled member (has a tier) missing portal fields -> filled. The
+    // monthly_rate backfill additionally requires the explicit
+    // monthly_membership billing lane (see the auto-tier directive guard).
     expect(buildCustomerUpdates(
       {
         active: false,
         pipeline_stage: 'new_lead',
         waveguard_tier: 'Bronze',
         monthly_rate: 0,
+        billing_mode: 'monthly_membership',
         member_since: null,
         earliest_service_date: '2026-06-19',
       },
@@ -127,6 +130,23 @@ describe('WaveGuard portal alignment script helpers', () => {
       monthly_rate: 45,
       member_since: '2026-06-19',
     }));
+
+    // No explicit monthly_membership lane -> a tier no longer implies monthly
+    // billing, so the rate must NOT be invented (billing-cron charges any
+    // active customer with monthly_rate > 0).
+    expect(buildCustomerUpdates(
+      {
+        active: true,
+        pipeline_stage: 'active_customer',
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      ['mosquito'],
+      customerColumns,
+      '2026-06-20',
+    )).not.toHaveProperty('monthly_rate');
 
     const existingRateUpdates = buildCustomerUpdates(
       {

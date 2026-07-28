@@ -6,6 +6,7 @@ const {
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
+  buildNoPlanTierEnrollmentUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -200,6 +201,7 @@ describe('self-booking plan sync helpers', () => {
       {
         waveguard_tier: 'Bronze',
         monthly_rate: 0,
+        billing_mode: 'monthly_membership',
         member_since: null,
         earliest_service_date: '2026-06-19',
       },
@@ -218,6 +220,35 @@ describe('self-booking plan sync helpers', () => {
       }),
     }));
 
+    // Since the 2026-07-28 auto-tier directive, a tier no longer implies
+    // monthly billing: without an explicit monthly_membership lane the
+    // alignment must never invent a monthly_rate (billing-cron charges any
+    // active customer with monthly_rate > 0).
+    const nullLane = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(nullLane.updates).not.toHaveProperty('monthly_rate');
+    const perVisitLane = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: 'per_visit',
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(perVisitLane.updates).not.toHaveProperty('monthly_rate');
+
     const existingGold = buildCustomerWaveGuardAlignmentUpdates(
       { waveguard_tier: 'Gold', monthly_rate: 149, member_since: '2025-01-01' },
       ['pest_control_quarterly', 'lawn_care_monthly'],
@@ -226,6 +257,60 @@ describe('self-booking plan sync helpers', () => {
     );
     expect(existingGold.updates).not.toHaveProperty('waveguard_tier');
     expect(existingGold.updates).not.toHaveProperty('monthly_rate');
+  });
+
+  test('auto-enrolls a No-Plan customer as tier ONLY, scaled by family count', () => {
+    const customerColumns = {
+      active: {},
+      pipeline_stage: {},
+      waveguard_tier: {},
+      monthly_rate: {},
+      member_since: {},
+    };
+    const noPlan = { waveguard_tier: null, monthly_rate: null, active: true, pipeline_stage: 'won' };
+
+    // Exactly { waveguard_tier } — never monthly_rate / member_since /
+    // pipeline_stage / active: the label must not create billing state.
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly'], customerColumns))
+      .toEqual(expect.objectContaining({ updates: { waveguard_tier: 'Bronze' }, inferredTier: 'Bronze' }));
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver' });
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Gold' });
+    expect(buildNoPlanTierEnrollmentUpdates(
+      noPlan,
+      ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly', 'termite_bait_quarterly'],
+      customerColumns,
+    ).updates).toEqual({ waveguard_tier: 'Platinum' });
+
+    // Cadence variants of one family never overcount the tier.
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['lawn_care_monthly', 'lawn_care_6week'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze' });
+
+    // Explicit non-member sentinels still enroll — the directive keys on
+    // upcoming recurring coverage, not the old label.
+    expect(buildNoPlanTierEnrollmentUpdates({ ...noPlan, waveguard_tier: 'none' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze' });
+  });
+
+  test('tier auto-enrollment fail-closes on members, commercial, and no evidence', () => {
+    const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
+
+    // Existing members belong to the alignment path, never enrollment.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({});
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: 89 }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+
+    // Commercial sentinel never converts to a WaveGuard tier.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: 'Commercial', monthly_rate: null }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+
+    // No detected qualifying plan keys, or no tier column -> no mutation.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, ['pest_control_quarterly'], { monthly_rate: {} }).updates)
+      .toEqual({});
   });
 
   test('detects WaveGuard plan keys only from recurring service rows for sync', () => {
