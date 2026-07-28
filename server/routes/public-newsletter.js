@@ -299,6 +299,7 @@ router.get('/e/:token/:eventId', async (req, res) => {
       ({ redirectUrl } = await recordEventClick({
         engagementToken: String(req.params.token).slice(0, 64),
         eventId: req.params.eventId,
+        userAgent: req.get('user-agent'),
       }));
     }
     // Only http(s) destinations — event_url is validated at ingestion,

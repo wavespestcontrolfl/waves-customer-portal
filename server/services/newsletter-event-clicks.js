@@ -111,11 +111,26 @@ async function eventUrlMapForSend(send, knex = db) {
   return new Map(rows.map((r) => [String(r.id).toLowerCase(), r.event_url || null]));
 }
 
+// Mail-security scanners and generic bots prefetch every link at
+// delivery time. With per-recipient dedupe, a scanner row would become
+// the SOLE allowed row and the later human click would be discarded —
+// so bot-classified hits record as kind='prefetch' (kept for
+// observability, EXCLUDED from rollups and learning) while the human
+// 'details' slot stays open. UA sniffing is imperfect; it removes the
+// dominant known-scanner signal rather than claiming perfection.
+const BOT_UA_RE = /(bot|crawler|spider|preview|prefetch|scan|proofpoint|barracuda|mimecast|symantec|trendmicro|forcepoint|fireeye|googleimageproxy|urldefense|safelinks|python-requests|python-urllib|curl\/|wget\/|libwww|okhttp|go-http-client|headless)/i;
+
+function classifyClickAgent(userAgent) {
+  const ua = String(userAgent || '').trim();
+  if (!ua) return 'prefetch';
+  return BOT_UA_RE.test(ua) ? 'prefetch' : 'details';
+}
+
 /**
  * Record one click (deduped). Returns the redirect URL — always a URL,
  * even when nothing was recorded (unknown token = untracked redirect).
  */
-async function recordEventClick({ engagementToken, eventId }, knex = db) {
+async function recordEventClick({ engagementToken, eventId, userAgent }, knex = db) {
   const event = await knex('events_raw').where({ id: eventId }).first('id', 'event_url');
   const fallback = 'https://www.wavespestcontrol.com/';
   const destination = event?.event_url || fallback;
@@ -141,7 +156,7 @@ async function recordEventClick({ engagementToken, eventId }, knex = db) {
         event_id: eventId,
         engagement_token: engagementToken,
         position,
-        kind: 'details',
+        kind: classifyClickAgent(userAgent),
       })
       .onConflict(['send_id', 'event_id', 'engagement_token', 'kind'])
       .ignore();
@@ -197,11 +212,13 @@ async function computeLearnedAdjustments(knex = db) {
       // event_ids while click rows are unique per (send,event), so [A,A]
       // would depress A's rate with an appearance its recipients can
       // never match. The same event in a DIFFERENT send counts again.
+      let position = 0;
       for (const eventId of new Set(parseLockedEventIds(s.event_ids).map((id) => String(id).toLowerCase()))) {
-        appearances.push({ sendId: String(s.id), eventId });
+        appearances.push({ sendId: String(s.id), eventId, position });
+        position += 1;
       }
     }
-    if (!appearances.length) return { categoryAdj: new Map(), zoneAdj: new Map() };
+    if (!appearances.length) return { categoryAdj: new Map(), zoneAdj: new Map(), thinCategories: new Set() };
 
     const eventMeta = new Map(
       (await knex('events_raw')
@@ -212,23 +229,48 @@ async function computeLearnedAdjustments(knex = db) {
     const clickCounts = new Map(
       (await knex('newsletter_event_clicks')
         .where('clicked_at', '>=', since)
+        // Human clicks only — scanner prefetches record as kind='prefetch'
+        // and must not drive the learning signal.
+        .where({ kind: 'details' })
         .select('send_id', 'event_id')
         .count('* as n')
         .groupBy('send_id', 'event_id'))
         .map((r) => [`${r.send_id}:${String(r.event_id).toLowerCase()}`, Number(r.n)]),
     );
 
-    const events = appearances.map((a) => {
+    // Position normalization: hero/early cards click more because of
+    // VISIBILITY, not merit — without this, whatever was placed
+    // prominently gets promoted again. Each appearance's clicks divide
+    // by its lineup position's relative rate (floored so a cold position
+    // can't mint runaway multipliers; thin-support positions use 1).
+    const positioned = appearances.map((a) => ({
+      ...a,
+      clicks: clickCounts.get(`${a.sendId}:${a.eventId}`) || 0,
+    }));
+    const rawTotal = positioned.reduce((s, a) => s + a.clicks, 0);
+    if (rawTotal < MIN_TOTAL_CLICKS) return { categoryAdj: new Map(), zoneAdj: new Map(), thinCategories: new Set() };
+    const rawOverallRate = rawTotal / positioned.length;
+    const posStats = new Map();
+    for (const a of positioned) {
+      if (!posStats.has(a.position)) posStats.set(a.position, { clicks: 0, n: 0 });
+      posStats.get(a.position).clicks += a.clicks;
+      posStats.get(a.position).n += 1;
+    }
+    const posFactor = (p) => {
+      const s = posStats.get(p);
+      if (!s || s.n < 5 || !rawOverallRate) return 1;
+      return Math.max(0.25, (s.clicks / s.n) / rawOverallRate);
+    };
+
+    const events = positioned.map((a) => {
       const meta = eventMeta.get(a.eventId) || {};
       return {
-        clicks: clickCounts.get(`${a.sendId}:${a.eventId}`) || 0,
+        clicks: a.clicks / posFactor(a.position),
         category: meta.novelty_type || 'unknown',
         zone: meta.region_zone || 'unknown',
       };
     });
-    const totalClicks = events.reduce((a, e) => a + e.clicks, 0);
-    if (totalClicks < MIN_TOTAL_CLICKS) return { categoryAdj: new Map(), zoneAdj: new Map() };
-    const overallRate = totalClicks / events.length;
+    const overallRate = events.reduce((s, e) => s + e.clicks, 0) / events.length;
 
     const groupBy = (field) => {
       const g = new Map();
@@ -300,5 +342,6 @@ module.exports = {
   applyLearnedAdjustments,
   applyLearnedAdjustmentsFromHistory,
   clickLearningEnabled,
+  classifyClickAgent,
   trackingUrl,
 };

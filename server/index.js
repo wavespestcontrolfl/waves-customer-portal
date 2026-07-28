@@ -228,7 +228,12 @@ const limiter = rateLimit({
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
   keyGenerator: rateLimitKey,
-  skip: () => process.env.NODE_ENV !== 'production',
+  // Newsletter event click-throughs are carved out: their contract is
+  // "never block the reader" (a shared scanner/NAT hitting the global
+  // window must not turn email links into 429 JSON). The route enforces
+  // its own soft ATTRIBUTION budget and always redirects.
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || (req.method === 'GET' && String(req.originalUrl || '').startsWith('/api/public/newsletter/e/')),
 });
 // The disabled payer-statement-pay surface must ALWAYS look like Not Found —
 // even ahead of the global /api/ limiter — so an IP that already exhausted the

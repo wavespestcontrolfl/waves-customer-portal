@@ -513,7 +513,8 @@ router.get('/sends/:id', async (req, res, next) => {
       const tracked = String(send.html_body || '').includes('{{evclick:');
       if (lockedIds.length && tracked) {
         const clickRows = await db('newsletter_event_clicks')
-          .where({ send_id: req.params.id })
+          // Human clicks only — scanner prefetches record as 'prefetch'.
+          .where({ send_id: req.params.id, kind: 'details' })
           .select('event_id')
           .count('* as clicks')
           .groupBy('event_id');

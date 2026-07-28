@@ -42,8 +42,10 @@ function looksLikeJwt(value) {
 const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // 'feedback' — newsletter reaction links (/api/public/newsletter/
 // feedback/:token/:reaction) use the same randomUUID bearer class as the
-// quiz tokens (AGENTS.md public-newsletter block).
-const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback']);
+// quiz tokens (AGENTS.md public-newsletter block). 'e' — event
+// click-through links (/api/public/newsletter/e/:token/:eventId) carry
+// the SAME engagement_token, which also authorizes quiz/feedback writes.
+const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback', 'e']);
 
 // Legacy estimate slug tokens (nameSlug-8hex, the pre-estimate-versions admin
 // share-link format — estimate-public and estimate-slots-public TOKEN_REs

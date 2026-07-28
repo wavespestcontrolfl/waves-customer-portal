@@ -118,3 +118,14 @@ describe('codex round-1 refinements', () => {
     expect(unseen[0].editorial_score).toBe(80);
   });
 });
+
+describe('scanner classification (codex round 2)', () => {
+  const { classifyClickAgent } = require('../services/newsletter-event-clicks');
+  test('known scanners, generic bots, and empty UAs record as prefetch; browsers as details', () => {
+    expect(classifyClickAgent('Mozilla/5.0 ProofPoint URL Defense')).toBe('prefetch');
+    expect(classifyClickAgent('BarracudaCentral link-scan')).toBe('prefetch');
+    expect(classifyClickAgent('python-requests/2.31')).toBe('prefetch');
+    expect(classifyClickAgent('')).toBe('prefetch');
+    expect(classifyClickAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1')).toBe('details');
+  });
+});
