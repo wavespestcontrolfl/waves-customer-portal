@@ -231,3 +231,65 @@ describe('flagship final event-selection gate', () => {
     expect(result.errors).toContain('Flagship draft contains duplicate event identities.');
   });
 });
+
+describe('series-debut first-occurrence rule (owner spec 2026-07-28)', () => {
+  const debutOccurrence = (id, start) => event(id, {
+    title: 'Downtown Night Market',
+    description: 'Grand opening of the new weekly market.',
+    event_type: 'recurring_series',
+    recurrence_type: 'weekly',
+    freshness_status: 'fresh_series_launch',
+    start_at: start,
+  });
+
+  test('pre-draft filter keeps only the EARLIEST occurrence of a debut series', async () => {
+    const first = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const second = debutOccurrence(ID_2, '2026-08-01T22:00:00Z');
+    const rows = await filterRepeatedDateIdentities([first, second], {
+      reference: REFERENCE,
+      identityPool: [first, second],
+    });
+    expect(rows).toEqual([first]);
+  });
+
+  test('a debut row that cannot prove a start date loses the carve-out (fail closed)', async () => {
+    // Two dated siblings make the title a repeated identity; the dateless
+    // debut row can't prove it is first, so the carve-out is denied and the
+    // repeated-title exclusion applies to it like any routine row.
+    const dateless = debutOccurrence(ID_1, null);
+    const sibling1 = debutOccurrence(ID_2, '2026-07-25T22:00:00Z');
+    const sibling2 = debutOccurrence('33333333-3333-4333-8333-333333333333', '2026-08-01T22:00:00Z');
+    const rows = await filterRepeatedDateIdentities([dateless], {
+      reference: REFERENCE,
+      identityPool: [dateless, sibling1, sibling2],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  test('final gate rejects a locked debut occurrence with an earlier sibling in the pool', () => {
+    const secondOccurrence = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const earlierSibling = debutOccurrence(ID_2, '2026-07-18T22:00:00Z');
+    const result = assessFlagshipEventSelection(
+      send(),
+      [secondOccurrence],
+      REFERENCE,
+      [],
+      [secondOccurrence, earlierSibling],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(' ')).toContain('Downtown Night Market');
+  });
+
+  test('final gate still accepts the true first occurrence over its later siblings', () => {
+    const first = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const laterSibling = debutOccurrence(ID_2, '2026-08-01T22:00:00Z');
+    const result = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, laterSibling],
+    );
+    expect(result.valid).toBe(true);
+  });
+});

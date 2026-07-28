@@ -105,6 +105,29 @@ async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
 }
 
 /**
+ * A series DEBUT is the FIRST occurrence — nothing else. When ingestion
+ * fans a recurring series into many occurrence rows and each inherits
+ * the debut text (so freshness_status = fresh_series_launch on all of
+ * them), only the earliest-starting row in the ±90-day identity pool may
+ * use the debut carve-out; occurrences 2..n of "weekly trivia (grand
+ * opening!)" are routine again (owner spec 2026-07-28 — the carve-out
+ * was letting every sibling through). Missing dates fail closed: a row
+ * that can't prove it is first isn't a debut.
+ */
+function isFirstOccurrenceInPool(event, pool) {
+  const title = normalizeDigestTitle(event?.title);
+  if (!title) return true;
+  const start = event?.start_at ? new Date(event.start_at).getTime() : NaN;
+  if (Number.isNaN(start)) return false;
+  return !(Array.isArray(pool) ? pool : []).some((sibling) => {
+    if (String(sibling?.id) === String(event?.id)) return false;
+    if (normalizeDigestTitle(sibling?.title) !== title) return false;
+    const siblingStart = sibling?.start_at ? new Date(sibling.start_at).getTime() : NaN;
+    return !Number.isNaN(siblingStart) && siblingStart < start;
+  });
+}
+
+/**
  * DB-backed routine-identity gate shared by planning and final validation.
  * The bounded ±90-day horizon catches next week's sibling and a prior-only
  * sibling (including a rejected row, which is still recurrence evidence)
@@ -123,10 +146,13 @@ async function filterRepeatedDateIdentities(
     // (deliberate editorial override, consumed on ship) and the single-use
     // series DEBUT — whose own later occurrences share its normalized title
     // in the ±90-day pool, which is exactly what this filter keys on; an
-    // inaugural weekly market would otherwise never reach the digest. Both
-    // remain subject to every row-level gate (isEligibleForFreshDigest).
+    // inaugural weekly market would otherwise never reach the digest. The
+    // debut carve-out applies ONLY to the series' first occurrence in the
+    // pool. Both remain subject to every row-level gate
+    // (isEligibleForFreshDigest).
     if (event?.admin_status === 'featured') return true;
-    if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true;
+    if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
+        && isFirstOccurrenceInPool(event, pool)) return true;
     return !repeatedTitles.has(normalizeDigestTitle(event?.title));
   });
 }
@@ -171,7 +197,8 @@ function assessFlagshipEventSelection(
     // the repeated-title and identity-history checks; a series DEBUT
     // bypasses repeated-title only (prior shipped history disproves debut).
     const starred = event.admin_status === 'featured';
-    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
+      && isFirstOccurrenceInPool(event, issueIdentityPool);
     if (!approved || !inIssueWindow
         || (!starred && !debut && repeatedTitles.has(normalizeDigestTitle(event.title)))
         || !isEligibleForFreshDigest(event, reference)
@@ -228,6 +255,7 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
 
 module.exports = {
   parseLockedEventIds,
+  isFirstOccurrenceInPool,
   isPreviouslyFeaturedIdentity,
   loadFeaturedIdentityHistory,
   filterPreviouslyFeaturedIdentities,
