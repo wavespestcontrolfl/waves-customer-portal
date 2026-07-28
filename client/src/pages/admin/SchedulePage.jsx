@@ -619,11 +619,16 @@ function detectServiceCategory(serviceType) {
     !hasLawnSurface &&
     // Mosquito/termite/WDO tokens outrank tree tokens ("Tree Line Mosquito
     // Treatment" is mosquito work) — mirrors the server normalizer's
-    // tree/shrub exclusions exactly.
+    // tree/shrub exclusions exactly. Ornamental/Arborjet are the server's
+    // tree/shrub aliases (service-line-configs.js).
     !s.includes("mosquito") &&
     !s.includes("termite") &&
     !s.includes("wdo") &&
-    (s.includes("tree") || s.includes("shrub") || /\bpalm(s)?\b/.test(s))
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
   )
     return "tree_shrub";
   if (

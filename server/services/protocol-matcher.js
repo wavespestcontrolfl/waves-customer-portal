@@ -306,7 +306,7 @@ function programKeyForService(serviceType) {
     normalized.includes('liquid perimeter') ||
     normalized.includes('trench')
   ) return 'termite';
-  if (normalized.includes('tree') || normalized.includes('shrub') || normalized.includes('palm') || normalized.includes('ornamental')) return 'tree_shrub';
+  if (normalized.includes('tree') || normalized.includes('shrub') || normalized.includes('palm') || normalized.includes('ornamental') || normalized.includes('arborjet')) return 'tree_shrub';
   return 'pest';
 }
 
