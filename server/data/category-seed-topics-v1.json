@@ -2,24 +2,32 @@
   "version": 1,
   "set": "category-seed-v1",
   "owner": "adam",
-  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — link the calculator instead; (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year).",
+  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree-shrub have no calculator flow); (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year).",
   "cta_codes": {
     "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
-    "CALC": "estimate calculator /pest-control-calculator/ (relative on-site link)"
+    "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
   },
   "briefs": [
     {
       "id": "L01",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/tropical-sod-webworms-sarasota-fl/",
+      "city": "Sarasota",
       "working_title": "Tropical Sod Webworms Are Chewing Sarasota Lawns Right Now — Here's How to Tell",
       "primary_kw": "sod webworms sarasota",
-      "secondary_kws": ["tropical sod webworm damage", "st augustine grass moths"],
+      "secondary_kws": [
+        "tropical sod webworm damage",
+        "st augustine grass moths"
+      ],
       "intent": "informational",
       "window": "2026-08-03",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The small brown patches and chewed blade tips showing up in shaded, damp Sarasota turf in late summer are usually tropical sod webworm — lower urgency than chinch bugs, but easy to misdiagnose, and the fix differs.",
       "outline": [
         "What homeowners are seeing in August: ragged blade tips, thinning patches, small tan moths flushing when you mow",
@@ -36,7 +44,10 @@
         "Pull the current UF/IFAS EDIS publication on tropical sod webworm (Herpetogramma phaeopteralis) and verify life-cycle and damage claims against it; snapshot at draft.",
         "facts-bank: services/lawn-care.md service_lawn_care_sod_webworm_01 (verified) — cosmetic damage on shaded/damp turf, lower urgency than chinch bugs."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-sarasota-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-sarasota-fl/"
+      ],
       "verify_notes": [
         "Verify moth/caterpillar identification details against the current UF/IFAS publication before stating them."
       ]
@@ -47,12 +58,21 @@
       "slug": "/lawn-care/signs-your-lawn-needs-professional-help/",
       "working_title": "7 Signs Your Southwest Florida Lawn Needs Professional Help",
       "primary_kw": "signs lawn needs professional help",
-      "secondary_kws": ["when to hire lawn care", "lawn problems florida"],
+      "secondary_kws": [
+        "when to hire lawn care",
+        "lawn problems florida"
+      ],
       "intent": "informational listicle",
       "window": "2026-08-06",
       "byline": "adam-augusta",
-      "cta": ["QUOTE", "CALC"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE",
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "Most SWFL lawn failures announce themselves early — seven specific, checkable signs separate a lawn that needs a pro from one that needs a hose adjustment.",
       "outline": [
         "Title carries the count (7); open with a ~60-word quick answer that names all seven signs in one scannable paragraph",
@@ -72,7 +92,10 @@
         "https://edis.ifas.ufl.edu/",
         "facts-bank: services/lawn-care.md — chinch bug, sod webworm, mole cricket entries (verified)."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/"
+      ],
       "verify_notes": [
         "Each of the seven signs must trace to the facts bank or a UF/IFAS source — drop any sign that can't be grounded."
       ]
@@ -81,14 +104,22 @@
       "id": "L03",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/gray-leaf-spot-bradenton-fl/",
+      "city": "Bradenton",
       "working_title": "Gray Leaf Spot: Why Bradenton St. Augustine Lawns Melt Out in the Summer Rains",
       "primary_kw": "gray leaf spot st augustine",
-      "secondary_kws": ["st augustine grass fungus summer", "lawn fungus bradenton"],
+      "secondary_kws": [
+        "st augustine grass fungus summer",
+        "lawn fungus bradenton"
+      ],
       "intent": "informational",
       "window": "2026-08-10",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Daily summer rain plus warm nights is exactly the recipe for gray leaf spot on St. Augustine — and the standard homeowner responses (more water, quick nitrogen) make it worse.",
       "outline": [
         "The August pattern: olive-gray lesions on blades, thinning that looks like drought during the wettest month of the year",
@@ -103,7 +134,10 @@
         "Pull the current UF/IFAS EDIS publication on gray leaf spot (Pyricularia grisea) in St. Augustinegrass; verify lesion description, conditions, and cultural guidance; snapshot at draft.",
         "Manatee County fertilizer ordinance (June 1 – Sept 30 N/P restricted season) — verify against the county's current published page."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-bradenton-fl/"
+      ],
       "verify_notes": [
         "Verify the restricted-season dates against Manatee County's current ordinance page before stating them."
       ]
@@ -112,14 +146,22 @@
       "id": "T01",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/ficus-whitefly-venice-fl/",
+      "city": "Venice",
       "working_title": "Ficus Whitefly in Venice: Why Your Hedge Dropped Its Leaves Overnight",
       "primary_kw": "ficus whitefly treatment",
-      "secondary_kws": ["ficus hedge losing leaves", "whitefly florida"],
+      "secondary_kws": [
+        "ficus hedge losing leaves",
+        "whitefly florida"
+      ],
       "intent": "informational",
       "window": "2026-08-13",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Sudden, dramatic leaf drop on a ficus hedge in Venice is the signature of ficus whitefly — a pest UF/IFAS has tracked across South Florida — and hedges can recover if the infestation is caught and managed early.",
       "outline": [
         "The signature: a green hedge goes bare in weeks; tiny white insects flush when disturbed",
@@ -133,7 +175,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS publication on ficus whitefly (Singhiella simplex); verify identification, host range, and management claims; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/lawn-care-venice-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/lawn-care-venice-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — make no claims about our service's products, timing, or scope; describe the problem from UF/IFAS and hand off generically."
       ]
@@ -142,14 +187,22 @@
       "id": "L04",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/fall-armyworms-parrish-fl/",
+      "city": "Parrish",
       "working_title": "Fall Armyworms Can Strip a Parrish Lawn in a Weekend — What to Watch For",
       "primary_kw": "armyworms in lawn florida",
-      "secondary_kws": ["fall armyworm damage grass", "caterpillars eating lawn"],
+      "secondary_kws": [
+        "fall armyworm damage grass",
+        "caterpillars eating lawn"
+      ],
       "intent": "informational",
       "window": "2026-08-17",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Unlike most lawn pests that damage turf over weeks, fall armyworm outbreaks move fast — new-construction neighborhoods like Parrish's, with young sod and irrigated turf, are exactly where they show up.",
       "outline": [
         "The speed problem: browned areas that visibly expand day over day, birds working the lawn",
@@ -163,7 +216,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS EDIS publication on fall armyworm (Spodoptera frugiperda) in turf; verify ID marks, behavior, and the soap-flush method; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-parrish-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-parrish-fl/"
+      ],
       "verify_notes": [
         "Do not state specific product names or rates — describe treatment classes and timing only."
       ]
@@ -172,14 +228,22 @@
       "id": "L05",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/doveweed-lakewood-ranch-fl/",
+      "city": "Lakewood Ranch",
       "working_title": "Doveweed: The Late-Summer Invader Lakewood Ranch Lawns Mistake for Grass",
       "primary_kw": "doveweed in st augustine",
-      "secondary_kws": ["doveweed control florida", "weed that looks like grass"],
+      "secondary_kws": [
+        "doveweed control florida",
+        "weed that looks like grass"
+      ],
       "intent": "informational",
       "window": "2026-08-20",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Doveweed hides in plain sight because it looks like St. Augustine until it has taken over — it germinates late, thrives in the summer wet season, and is one of the toughest broadleaf weeds in SWFL turf.",
       "outline": [
         "Why you didn't notice it until August: late germination and a grass-like look (per UF/IFAS)",
@@ -193,7 +257,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS EDIS publication on doveweed (Murdannia nudiflora) biology and management in turf; verify ID and control-timing claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-lakewood-ranch-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-lakewood-ranch-fl/"
+      ],
       "verify_notes": [
         "Pre-emergent timing claims must match the UF/IFAS germination guidance — verify before stating months."
       ]
@@ -202,14 +269,23 @@
       "id": "L06",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/st-augustine-mowing-mistakes/",
+      "city": "Venice",
       "working_title": "7 St. Augustine Mowing Mistakes That Are Quietly Wrecking Venice Lawns",
       "primary_kw": "st augustine mowing height",
-      "secondary_kws": ["how short to cut st augustine", "mowing mistakes florida"],
+      "secondary_kws": [
+        "how short to cut st augustine",
+        "mowing mistakes florida"
+      ],
       "intent": "informational listicle",
       "window": "2026-08-24",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "Half the chronic lawn problems we see start at the mower — height, frequency, and blade condition drive St. Augustine health more than any product does.",
       "outline": [
         "Title carries the count (7); ~60-word quick answer naming all seven mistakes up front",
@@ -228,7 +304,10 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull UF/IFAS's current St. Augustinegrass mowing-height recommendation and cite the exact range — do not state a range from memory."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-venice-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-venice-fl/"
+      ],
       "verify_notes": [
         "The mowing-height range MUST be the current UF/IFAS figure, verified at draft — this is the load-bearing claim of the post."
       ]
@@ -237,14 +316,22 @@
       "id": "T02",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/scale-insects-sooty-mold-bradenton-fl/",
+      "city": "Bradenton",
       "working_title": "Black Sticky Leaves? Scale Insects and Sooty Mold on Bradenton Shrubs, Explained",
       "primary_kw": "sooty mold on shrubs",
-      "secondary_kws": ["scale insects florida", "black mold on plant leaves"],
+      "secondary_kws": [
+        "scale insects florida",
+        "black mold on plant leaves"
+      ],
       "intent": "informational",
       "window": "2026-08-27",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The black film on your gardenias and the sticky mist under your oaks are the same story: sap-feeding insects excreting honeydew that sooty mold grows on — treat the insect, and the mold resolves.",
       "outline": [
         "What homeowners see: black coating on leaves, sticky film on cars and patios under trees",
@@ -258,7 +345,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS publications on sooty mold and scale insect management on ornamentals; verify the honeydew mechanism and management claims; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/lawn-care-bradenton-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/lawn-care-bradenton-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no claims about our service's scope or products; horticultural claims from UF/IFAS only."
       ]
@@ -267,14 +357,22 @@
       "id": "L07",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/mole-crickets-bahia-sarasota-fl/",
+      "city": "Sarasota",
       "working_title": "Mole Crickets in East Sarasota: Why Bahia Lawns Feel Spongy Underfoot",
       "primary_kw": "mole crickets florida lawn",
-      "secondary_kws": ["bahia grass pests", "spongy lawn tunnels"],
+      "secondary_kws": [
+        "bahia grass pests",
+        "spongy lawn tunnels"
+      ],
       "intent": "informational",
       "window": "2026-08-31",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "On the bahia lawns and acreage east of I-75, the raised tunneling and spongy turf that shows up in late summer is mole cricket work — and the treatment window is tied to the nymph stage, not to when damage looks worst.",
       "outline": [
         "The east-county pattern: bahia and bahia-mix lawns on larger lots, raised tunnels you can trace by foot",
@@ -289,7 +387,10 @@
         "Pull the current UF/IFAS EDIS mole cricket publication; verify species, nymph-timing, and soap-flush claims; snapshot at draft.",
         "facts-bank: services/lawn-care.md service_lawn_care_mole_cricket_01 (partially verified — verify the seasonal-timing detail against UF/IFAS before stating it)."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-sarasota-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-sarasota-fl/"
+      ],
       "verify_notes": [
         "The facts-bank mole-cricket entry is only partially verified — every timing claim must be re-verified against UF/IFAS at draft."
       ]
@@ -298,14 +399,22 @@
       "id": "L08",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/take-all-root-rot-bradenton-fl/",
+      "city": "Bradenton",
       "working_title": "Take-All Root Rot: The Bradenton Lawn Disease That Looks Like Everything Else",
       "primary_kw": "take all root rot st augustine",
-      "secondary_kws": ["st augustine roots rotting", "lawn dying in patches florida"],
+      "secondary_kws": [
+        "st augustine roots rotting",
+        "lawn dying in patches florida"
+      ],
       "intent": "informational",
       "window": "2026-09-03",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Take-all root rot is the diagnosis nobody wants because by the time the yellow patches show, the roots have been failing for weeks — stressed, over-watered summer lawns are its favorite target.",
       "outline": [
         "Why it's called the great imitator: yellowing that mimics chinch bugs, drought, and deficiency",
@@ -319,7 +428,11 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS EDIS publication on take-all root rot (Gaeumannomyces) in St. Augustinegrass; verify symptom, pH, and cultural-management claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/", "/lawn-care/sarasota-lawn-yellowing-micronutrient-deficiency/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/",
+        "/lawn-care/sarasota-lawn-yellowing-micronutrient-deficiency/"
+      ],
       "verify_notes": [
         "Verify the internal blog links resolve on the live sitemap before finalizing."
       ]
@@ -328,14 +441,22 @@
       "id": "L09",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/dollarweed-control-venice-fl/",
+      "city": "Venice",
       "working_title": "Dollarweed Is Telling You Something About Your Venice Lawn's Water",
       "primary_kw": "dollarweed control florida",
-      "secondary_kws": ["pennywort in lawn", "round leaf weed grass"],
+      "secondary_kws": [
+        "pennywort in lawn",
+        "round leaf weed grass"
+      ],
       "intent": "informational",
       "window": "2026-09-07",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Dollarweed is a moisture indicator first and a weed second — UF/IFAS calls it out as a sign of excess water, so lasting control in Venice's flat, poorly-drained lots starts with irrigation, not herbicide.",
       "outline": [
         "ID: the lily-pad leaf with the stem in the center (vs pennywort look-alikes)",
@@ -350,7 +471,11 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull the current UF/IFAS dollarweed (Hydrocotyle spp.) publication; verify the moisture-indicator claim and management guidance; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-venice-fl/", "/lawn-care/lawn-watering-tips/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-venice-fl/",
+        "/lawn-care/lawn-watering-tips/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/lawn-watering-tips/ resolves on the live sitemap before including it."
       ]
@@ -361,12 +486,20 @@
       "slug": "/lawn-care/national-chain-vs-local-lawn-care-vs-diy/",
       "working_title": "National Chain vs. Local Company vs. DIY: An Honest Guide to Lawn Care in Southwest Florida",
       "primary_kw": "lawn care company vs diy",
-      "secondary_kws": ["national lawn care chains florida", "is professional lawn care worth it"],
+      "secondary_kws": [
+        "national lawn care chains florida",
+        "is professional lawn care worth it"
+      ],
       "intent": "category comparison (names NO business)",
       "window": "2026-09-10",
       "byline": "adam-augusta",
-      "cta": ["QUOTE", "CALC"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE",
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The right answer depends on what your lawn actually needs: DIY works for maintenance on a healthy lawn, national chains standardize a program, and local companies calibrate to SWFL's soils, restricted fertilizer season, and pest calendar — an honest comparison of provider CATEGORIES with no businesses named.",
       "outline": [
         "Frame the three categories honestly: national chain / local SWFL company / DIY — what each is genuinely good at",
@@ -381,7 +514,10 @@
         "Manatee and Sarasota County fertilizer ordinance pages — verify restricted-season claims.",
         "Category-level claims only: nothing in this post may reference, imply, or be traceable to a specific named company."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/lawn-care-companies-lakewood-ranch-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/lawn-care-companies-lakewood-ranch-fl/"
+      ],
       "verify_notes": [
         "The comparison-table gate blocks named competitors and disparagement — keep every row strictly category-level.",
         "Verify /lawn-care/lawn-care-companies-lakewood-ranch-fl/ resolves on the live sitemap before including it."
@@ -391,14 +527,22 @@
       "id": "L11",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/torpedograss-palmetto-fl/",
+      "city": "Palmetto",
       "working_title": "Torpedograss: The Waterfront Weed Taking Over Palmetto Lawns",
       "primary_kw": "torpedograss in st augustine",
-      "secondary_kws": ["get rid of torpedograss", "invasive grass florida lawn"],
+      "secondary_kws": [
+        "get rid of torpedograss",
+        "invasive grass florida lawn"
+      ],
       "intent": "informational",
       "window": "2026-09-14",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Torpedograss spreads from rhizomes that can run deep and re-sprout from fragments — UF/IFAS ranks it among Florida's worst invasive grasses, and on Palmetto's canal and riverfront lots it moves from shoreline into turf.",
       "outline": [
         "ID: the sharp 'torpedo' rhizome tip and stiff blue-green blades standing above St. Augustine",
@@ -412,7 +556,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS publication on torpedograss (Panicum repens) biology and management; verify spread and control claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-palmetto-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-palmetto-fl/"
+      ],
       "verify_notes": [
         "If /lawn-care-palmetto-fl/ does not resolve on the live sitemap, substitute /lawn-care-bradenton-fl/."
       ]
@@ -421,14 +568,22 @@
       "id": "T03",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/palm-nutrient-deficiencies-sarasota-fl/",
+      "city": "Sarasota",
       "working_title": "Why Sarasota Palms Turn Yellow: Reading Nutrient Deficiencies Before They're Fatal",
       "primary_kw": "palm tree yellow fronds florida",
-      "secondary_kws": ["palm nutrient deficiency", "magnesium deficiency palm"],
+      "secondary_kws": [
+        "palm nutrient deficiency",
+        "magnesium deficiency palm"
+      ],
       "intent": "informational",
       "window": "2026-09-17",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Palm yellowing follows readable patterns — which fronds, which part of the frond — and UF/IFAS's deficiency guides make the common ones (potassium, magnesium, manganese) identifiable before the damage becomes irreversible.",
       "outline": [
         "Old fronds vs new fronds: the first diagnostic split (per UF/IFAS palm nutrition guidance)",
@@ -443,7 +598,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS palm nutrient-deficiency publications (K, Mg, Mn) and verify each visual-symptom claim against them; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/lawn-care-sarasota-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/lawn-care-sarasota-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no claims about our service scope, products, or application timing.",
         "Every deficiency-symptom description must match the UF/IFAS publication — these are precise diagnostic claims."
@@ -453,14 +611,22 @@
       "id": "L12",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/white-grubs-bradenton-fl/",
+      "city": "Bradenton",
       "working_title": "White Grubs Under Bradenton Turf: When Digging Animals Are the First Clue",
       "primary_kw": "white grubs in lawn florida",
-      "secondary_kws": ["grub damage st augustine", "animals digging up lawn at night"],
+      "secondary_kws": [
+        "grub damage st augustine",
+        "animals digging up lawn at night"
+      ],
       "intent": "informational",
       "window": "2026-09-21",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Armadillos and raccoons tearing up turf at night are usually hunting white grubs — the C-shaped beetle larvae feeding on roots below — and the animal damage often outpaces the grub damage itself.",
       "outline": [
         "The tell: turf that lifts like loose carpet, plus nighttime digging damage",
@@ -474,7 +640,11 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS white grub publication for Florida turf; verify species, thresholds, and timing claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-bradenton-fl/", "/lawn-care/plugging-st-augustine-grass-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-bradenton-fl/",
+        "/lawn-care/plugging-st-augustine-grass-bradenton-fl/"
+      ],
       "verify_notes": [
         "The grubs-per-square-foot threshold must come from the current UF/IFAS figure, not memory.",
         "Verify the plugging post link resolves on the live sitemap."
@@ -484,14 +654,22 @@
       "id": "L13",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/nutsedge-control-parrish-fl/",
+      "city": "Parrish",
       "working_title": "Nutsedge: Why the 'Grass' Growing Twice as Fast in Parrish Lawns Isn't Grass",
       "primary_kw": "nutsedge control florida",
-      "secondary_kws": ["yellow nutsedge lawn", "sedge grass killer"],
+      "secondary_kws": [
+        "yellow nutsedge lawn",
+        "sedge grass killer"
+      ],
       "intent": "informational",
       "window": "2026-09-24",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Nutsedge outgrows turf visibly within days of mowing, shrugs off broadleaf weed killers because it isn't a broadleaf, and persists through underground tubers — which is why the usual weed-and-feed approach never touches it.",
       "outline": [
         "ID in ten seconds: the triangular stem roll test, V-shaped glossy blades, faster vertical growth than turf",
@@ -505,7 +683,11 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS nutsedge biology and management publication for Florida turf; verify species, tuber, and control claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-parrish-fl/", "/lawn-care/soil-test-parrish-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-parrish-fl/",
+        "/lawn-care/soil-test-parrish-fl/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/soil-test-parrish-fl/ resolves on the live sitemap before including it."
       ]
@@ -516,12 +698,19 @@
       "slug": "/lawn-care/lawn-burweed-stickers-prevention/",
       "working_title": "Stop Lawn Burweed Now or Pull Stickers Out of Bare Feet in February",
       "primary_kw": "lawn burweed florida",
-      "secondary_kws": ["stickers in grass", "sticker weeds prevention"],
+      "secondary_kws": [
+        "stickers in grass",
+        "sticker weeds prevention"
+      ],
       "intent": "informational",
       "window": "2026-09-28",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The painful stickers in spring lawns come from burweed that germinated quietly the previous fall — the only good control window is a fall pre-emergent, before you ever see the plant.",
       "outline": [
         "Working backward from February stickers to fall germination (per UF/IFAS)",
@@ -535,7 +724,11 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS lawn burweed (Soliva sessilis) publication; verify germination timing and control-window claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/pre-emergent-weed-control-lakewood-ranch-fl/", "/lawn-care/winter-weed-control-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/pre-emergent-weed-control-lakewood-ranch-fl/",
+        "/lawn-care/winter-weed-control-bradenton-fl/"
+      ],
       "verify_notes": [
         "Verify both internal blog links resolve on the live sitemap before finalizing."
       ]
@@ -544,14 +737,24 @@
       "id": "L15",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/october-lawn-fertilization-sarasota-fl/",
+      "city": "Sarasota",
       "working_title": "October 1st in Sarasota: The Fertilizer Window Is Open — Here's What Your Lawn Actually Needs",
       "primary_kw": "when to fertilize lawn sarasota",
-      "secondary_kws": ["fall fertilizer florida", "fertilizer ban over october"],
+      "secondary_kws": [
+        "fall fertilizer florida",
+        "fertilizer ban over october"
+      ],
       "intent": "informational",
       "window": "2026-10-01",
       "byline": "adam-augusta",
-      "cta": ["QUOTE", "CALC"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE",
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "When Sarasota County's summer fertilizer restrictions end September 30, the instinct is to dump everything on at once — but October feeding done right is about recovery and root reserves, not maximum green.",
       "outline": [
         "The restricted season just ended: what the Sarasota County ordinance restricted June 1 – Sept 30 (verified against the county page)",
@@ -567,7 +770,11 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull UF/IFAS's Florida-Friendly fertilization guidance for fall timing claims."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-sarasota-fl/", "/lawn-care/fertilizer-blackout-sarasota-county/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-sarasota-fl/",
+        "/lawn-care/fertilizer-blackout-sarasota-county/"
+      ],
       "verify_notes": [
         "Every ordinance claim must be verified against Sarasota County's current published ordinance page at draft — dates, nutrient limits, buffer zones.",
         "Verify /lawn-care/fertilizer-blackout-sarasota-county/ resolves on the live hub sitemap (it may be spoke-canonical — if so, link /lawn-care/fertilizer-blackout-manatee-county/ instead)."
@@ -577,14 +784,23 @@
       "id": "L16",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/fall-lawn-recovery-bradenton-fl/",
+      "city": "Bradenton",
       "working_title": "Fall Is Bradenton's Real Lawn Season: The 8-Week Recovery Plan",
       "primary_kw": "fall lawn care florida",
-      "secondary_kws": ["lawn recovery after summer", "best time to fix lawn florida"],
+      "secondary_kws": [
+        "lawn recovery after summer",
+        "best time to fix lawn florida"
+      ],
       "intent": "informational",
       "window": "2026-10-05",
       "byline": "adam-augusta",
-      "cta": ["QUOTE", "CALC"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE",
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "October and November are when SWFL lawns can actually be rebuilt — summer's pest, fungus, and rain stress is over, the fertilizer window is open, and warm soil keeps St. Augustine growing while the weather stops fighting you.",
       "outline": [
         "Why fall beats spring in SWFL: warm soil, lower disease pressure, open fertilizer window, gentler sun",
@@ -598,7 +814,11 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Verify seasonal growth and establishment claims against UF/IFAS St. Augustinegrass guidance; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-bradenton-fl/", "/lawn-care/october-lawn-care-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-bradenton-fl/",
+        "/lawn-care/october-lawn-care-bradenton-fl/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/october-lawn-care-bradenton-fl/ resolves on the live sitemap; this post must complement, not duplicate, it — cross-check its content for overlap before writing."
       ]
@@ -607,14 +827,22 @@
       "id": "T04",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/ganoderma-butt-rot-palms-lakewood-ranch-fl/",
+      "city": "Lakewood Ranch",
       "working_title": "The Shelf Fungus at the Base of Your Palm Is a Verdict: Ganoderma Butt Rot in Lakewood Ranch",
       "primary_kw": "ganoderma butt rot palm",
-      "secondary_kws": ["conk on palm trunk", "palm tree fungus base"],
+      "secondary_kws": [
+        "conk on palm trunk",
+        "palm tree fungus base"
+      ],
       "intent": "informational",
       "window": "2026-10-08",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "A hard shelf 'conk' at the base of a palm trunk means Ganoderma — a decay fungus UF/IFAS states has no cure and no preventive treatment — so the honest conversation is about safe removal, what the fungus leaves in the soil, and what to replant.",
       "outline": [
         "What the conk looks like and where it forms (per UF/IFAS)",
@@ -628,7 +856,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS Ganoderma zonatum publication; verify the no-cure, removal, and replant claims EXACTLY — do not soften or overstate them; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/lawn-care-lakewood-ranch-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/lawn-care-lakewood-ranch-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no claims about our service scope. Removal handoff stays generic ('a qualified professional').",
         "The no-cure claim is load-bearing and must quote UF/IFAS's current position verbatim-close."
@@ -638,14 +869,22 @@
       "id": "L17",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/large-patch-fungus-lakewood-ranch-fl/",
+      "city": "Lakewood Ranch",
       "working_title": "Large Patch Season Starts Now: The Ring Disease Coming for Lakewood Ranch Lawns",
       "primary_kw": "large patch fungus st augustine",
-      "secondary_kws": ["brown patch florida lawn", "circles of dead grass fall"],
+      "secondary_kws": [
+        "brown patch florida lawn",
+        "circles of dead grass fall"
+      ],
       "intent": "informational",
       "window": "2026-10-12",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Large patch shows up when soil temps drop into its window — fall through spring in SWFL — and the difference between a small ring and a lawn-wide outbreak is usually irrigation timing and how early treatment starts.",
       "outline": [
         "The signature: expanding circular patches, yellow-orange edge, blades that pull free at the rotted base (per UF/IFAS)",
@@ -659,7 +898,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS large patch (Rhizoctonia solani) publication for warm-season turf; verify the soil-temperature window and symptom claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-lakewood-ranch-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-lakewood-ranch-fl/"
+      ],
       "verify_notes": [
         "The soil-temperature trigger figure must come from the current UF/IFAS publication, verified at draft."
       ]
@@ -668,14 +910,22 @@
       "id": "L18",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/bermudagrass-invading-st-augustine-palmetto-fl/",
+      "city": "Palmetto",
       "working_title": "That Fine, Wiry Grass Creeping Into Your Palmetto Lawn Is Bermuda — and It Plays Dirty",
       "primary_kw": "bermuda grass in st augustine lawn",
-      "secondary_kws": ["get rid of bermuda grass", "wiry grass taking over lawn"],
+      "secondary_kws": [
+        "get rid of bermuda grass",
+        "wiry grass taking over lawn"
+      ],
       "intent": "informational",
       "window": "2026-10-15",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Common bermudagrass invades St. Augustine through runners and seed, thrives on the same conditions, and can't be selectively sprayed out — making it one of the most frustrating turf conflicts in SWFL, managed mostly through competition.",
       "outline": [
         "ID: fine texture, gray-green color, aggressive runners visibly crossing sidewalks and beds",
@@ -689,7 +939,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull current UF/IFAS guidance on bermudagrass control in St. Augustinegrass; verify the no-selective-option claim as currently stated; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/types-of-grass-sarasota-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/types-of-grass-sarasota-fl/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/types-of-grass-sarasota-fl/ resolves on the live sitemap before including it."
       ]
@@ -698,14 +951,23 @@
       "id": "L19",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/st-augustine-shade-under-oaks-venice-fl/",
+      "city": "Venice",
       "working_title": "Grass Under Venice Oaks: What St. Augustine Can and Can't Do in Shade",
       "primary_kw": "st augustine grass in shade",
-      "secondary_kws": ["grass under oak trees florida", "shade tolerant grass florida"],
+      "secondary_kws": [
+        "grass under oak trees florida",
+        "shade tolerant grass florida"
+      ],
       "intent": "informational",
       "window": "2026-10-19",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "St. Augustine is the most shade-tolerant of Florida's warm-season grasses, but there's a floor — UF/IFAS puts minimum light needs on it — and under mature Venice oaks the winning move is often adjusting expectations, variety, and mowing rather than replanting the same sod again.",
       "outline": [
         "The cycle homeowners know: resod under the oak, watch it thin, repeat every two years",
@@ -720,7 +982,11 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull current UF/IFAS shade-tolerance guidance for St. Augustinegrass cultivars; verify hour figures and cultivar claims; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-venice-fl/", "/lawn-care/new-sod-care/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-venice-fl/",
+        "/lawn-care/new-sod-care/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/new-sod-care/ resolves on the live sitemap before including it.",
         "Canopy-pruning advice must stay generic — we are not arborists; hand tree work off explicitly."
@@ -730,14 +996,22 @@
       "id": "T05",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/croton-scale-hibiscus-mealybug-palmetto-fl/",
+      "city": "Palmetto",
       "working_title": "Why Palmetto's Crotons and Hibiscus Look Sick This Fall: Scale and Mealybugs, Decoded",
       "primary_kw": "hibiscus mealybug treatment",
-      "secondary_kws": ["croton pests florida", "white fuzz on hibiscus"],
+      "secondary_kws": [
+        "croton pests florida",
+        "white fuzz on hibiscus"
+      ],
       "intent": "informational",
       "window": "2026-10-22",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The white fuzz on hibiscus stems and the bumpy deposits on croton leaves are sap-feeders — mealybugs and scale — and the tropical ornamentals SWFL yards are built on are exactly their preferred hosts.",
       "outline": [
         "The two culprits side by side: mealybug's white cottony masses vs scale's fixed bumps (per UF/IFAS)",
@@ -751,7 +1025,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull current UF/IFAS publications on mealybugs and scale on ornamentals; verify host and management claims; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/tree-shrub/scale-insects-sooty-mold-bradenton-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/tree-shrub/scale-insects-sooty-mold-bradenton-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no service-scope claims.",
         "The sooty-mold internal link targets the T02 post from this same manifest — verify it has published and resolves before including; drop the link if T02 is not yet live."
@@ -761,14 +1038,24 @@
       "id": "L20",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/zoysia-vs-st-augustine-lakewood-ranch-fl/",
+      "city": "Lakewood Ranch",
       "working_title": "Zoysia vs. St. Augustine in Lakewood Ranch: The Honest Trade-Offs",
       "primary_kw": "zoysia vs st augustine florida",
-      "secondary_kws": ["best grass for lakewood ranch", "zoysia lawn pros and cons"],
+      "secondary_kws": [
+        "best grass for lakewood ranch",
+        "zoysia lawn pros and cons"
+      ],
       "intent": "informational comparison (grass types, not companies)",
       "window": "2026-10-26",
       "byline": "adam-augusta",
-      "cta": ["QUOTE", "CALC"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE",
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "Zoysia's finer texture and density are real advantages, but so are its slower recovery, thatch tendency, and its own pest list — the right choice in LWR depends on irrigation, shade, and how the lawn gets used, not on which grass is trendy.",
       "outline": [
         "Why the question comes up: new builds and resods offering zoysia as the premium option",
@@ -783,7 +1070,11 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull current UF/IFAS comparative guidance on zoysiagrass and St. Augustinegrass for Florida lawns; verify every table attribute; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-lakewood-ranch-fl/", "/lawn-care/types-of-grass-sarasota-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-lakewood-ranch-fl/",
+        "/lawn-care/types-of-grass-sarasota-fl/"
+      ],
       "verify_notes": [
         "This comparison is between GRASS TYPES — the comparison-table gate still applies; no company names anywhere.",
         "Verify /lawn-care/types-of-grass-sarasota-fl/ resolves on the live sitemap."
@@ -795,12 +1086,20 @@
       "slug": "/lawn-care/fall-lawn-mistakes-southwest-florida/",
       "working_title": "5 Fall Lawn Mistakes Southwest Florida Homeowners Make Every Year",
       "primary_kw": "fall lawn care mistakes",
-      "secondary_kws": ["fall lawn care florida", "lawn mistakes october"],
+      "secondary_kws": [
+        "fall lawn care florida",
+        "lawn mistakes october"
+      ],
       "intent": "informational listicle",
       "window": "2026-10-29",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
       "thesis": "Fall is SWFL's best lawn season and also its most squandered — five recurring mistakes, from northern-habit overseeding to post-blackout over-fertilizing, undo lawns that summer didn't manage to kill.",
       "outline": [
         "Title carries the count (5); ~60-word quick answer naming all five mistakes up front",
@@ -817,7 +1116,12 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Verify the ryegrass-overseeding position and seasonal irrigation guidance against current UF/IFAS pages; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/october-lawn-fertilization-sarasota-fl/", "/lawn-care/large-patch-fungus-lakewood-ranch-fl/", "/lawn-care/lawn-burweed-stickers-prevention/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/october-lawn-fertilization-sarasota-fl/",
+        "/lawn-care/large-patch-fungus-lakewood-ranch-fl/",
+        "/lawn-care/lawn-burweed-stickers-prevention/"
+      ],
       "verify_notes": [
         "Three internal links target earlier posts from this manifest (L15, L17, L14) — verify each has published and resolves before including; drop any that are not yet live."
       ]
@@ -826,14 +1130,22 @@
       "id": "L22",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/winter-ryegrass-overseeding-north-port-fl/",
+      "city": "North Port",
       "working_title": "Please Don't Overseed Your North Port Lawn With Winter Rye — Here's Why",
       "primary_kw": "overseeding st augustine winter",
-      "secondary_kws": ["winter rye grass florida", "green lawn winter florida"],
+      "secondary_kws": [
+        "winter rye grass florida",
+        "green lawn winter florida"
+      ],
       "intent": "informational",
       "window": "2026-11-02",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Winter ryegrass overseeding is a northern transplant habit that UF/IFAS specifically cautions against on St. Augustine — the rye competes with the permanent lawn exactly when it's most vulnerable, and the spring transition costs more than the winter color was worth.",
       "outline": [
         "Where the habit comes from: it genuinely works on northern and even central-Florida bermuda — St. Augustine is different",
@@ -847,7 +1159,10 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull UF/IFAS's current overseeding guidance for Florida home lawns; verify the St. Augustine-specific caution; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/dormant-lawn-venice-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/dormant-lawn-venice-fl/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/dormant-lawn-venice-fl/ resolves on the live sitemap.",
         "State UF/IFAS's position accurately — do not overstate a caution into a prohibition."
@@ -859,12 +1174,19 @@
       "slug": "/tree-shrub/signs-shrubs-have-pest-problem/",
       "working_title": "6 Signs Your Shrubs Have a Pest Problem (Not a Watering Problem)",
       "primary_kw": "shrub pest damage signs",
-      "secondary_kws": ["why are my shrubs dying", "bush leaves turning yellow"],
+      "secondary_kws": [
+        "why are my shrubs dying",
+        "bush leaves turning yellow"
+      ],
       "intent": "informational listicle",
       "window": "2026-11-05",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article", "FAQPage"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Most 'dying shrub' calls start with a watering theory and end with an insect — six checkable signs separate pest pressure from irrigation stress before you drown a bug problem.",
       "outline": [
         "Title carries the count (6); ~60-word quick answer naming all six signs up front",
@@ -876,15 +1198,18 @@
         "6. Chewed notches and holes with a pattern (beetles/caterpillars vs random tatter)",
         "The watering-stress contrast: what drought and overwatering actually look like, so the reader can rule them out",
         "How we chose these six: sourced note citing UF/IFAS ornamental-pest diagnostics, plain text",
-        "Visible 'Last updated: <current month + year>' line",
-        "FAQ: 3 short questions (can a shrub recover, do I prune damage, when to call someone)"
+        "Visible 'Last updated: <current month + year>' line"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Verify each sign's pest attribution against current UF/IFAS ornamental pest publications; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/tree-shrub/ficus-whitefly-venice-fl/", "/tree-shrub/scale-insects-sooty-mold-bradenton-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/tree-shrub/ficus-whitefly-venice-fl/",
+        "/tree-shrub/scale-insects-sooty-mold-bradenton-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no service-scope claims.",
         "Two internal links target earlier posts from this manifest (T01, T02) — verify each has published and resolves; drop any that are not yet live."
@@ -894,14 +1219,22 @@
       "id": "L23",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/salt-tolerant-grass-coastal-venice-fl/",
+      "city": "Venice",
       "working_title": "Salt, Reclaimed Water, and Coastal Venice Lawns: Which Grasses Actually Cope",
       "primary_kw": "salt tolerant grass florida",
-      "secondary_kws": ["reclaimed water lawn problems", "grass for coastal florida"],
+      "secondary_kws": [
+        "reclaimed water lawn problems",
+        "grass for coastal florida"
+      ],
       "intent": "informational",
       "window": "2026-11-09",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Between salt air, brackish intrusion, and reclaimed irrigation water, coastal Venice lawns run saltier than inland ones — and grass species differ sharply in how much of that they tolerate, per UF/IFAS salinity guidance.",
       "outline": [
         "Where the salt comes from: coastal air and spray, well/brackish intrusion, reclaimed irrigation water",
@@ -916,7 +1249,11 @@
         "Pull current UF/IFAS turfgrass salinity-tolerance guidance; verify the species ranking before stating it; snapshot at draft.",
         "Sarasota County reclaimed-water program page — verify any reclaimed-water quality claims."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care-venice-fl/", "/lawn-care/types-of-grass-sarasota-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care-venice-fl/",
+        "/lawn-care/types-of-grass-sarasota-fl/"
+      ],
       "verify_notes": [
         "The species salinity ranking must come from current UF/IFAS material — do not rank from memory."
       ]
@@ -925,14 +1262,22 @@
       "id": "L24",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/rust-fungus-lawn-north-port-fl/",
+      "city": "North Port",
       "working_title": "Orange Dust on Your Shoes? Rust Fungus and the Slow-Growth Lawns of North Port",
       "primary_kw": "rust fungus on grass",
-      "secondary_kws": ["orange powder on lawn", "grass turning orange florida"],
+      "secondary_kws": [
+        "orange powder on lawn",
+        "grass turning orange florida"
+      ],
       "intent": "informational",
       "window": "2026-11-12",
       "byline": "adam-augusta",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "The orange powder that rubs off on shoes and mowers in late fall is rust fungus — a disease of slow-growing, under-fed turf, which is why it shows up exactly when growth stalls and why the fix is usually vigor, not fungicide.",
       "outline": [
         "The tell: orange pustules on blades, dust transfer to shoes, mowers, and pets",
@@ -946,7 +1291,10 @@
         "https://edis.ifas.ufl.edu/",
         "Pull the current UF/IFAS turf rust publication; verify the low-vigor association and management guidance; snapshot at draft."
       ],
-      "internal_links": ["/lawn-care/", "/lawn-care/december-lawn-care-bradenton-fl/"],
+      "internal_links": [
+        "/lawn-care/",
+        "/lawn-care/december-lawn-care-bradenton-fl/"
+      ],
       "verify_notes": [
         "Verify /lawn-care/december-lawn-care-bradenton-fl/ resolves on the live sitemap.",
         "Any November feeding advice must respect year-round ordinance content rules — no advice that conflicts with local fertilizer ordinances."
@@ -956,14 +1304,22 @@
       "id": "T07",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/crape-myrtle-powdery-mildew-parrish-fl/",
+      "city": "Parrish",
       "working_title": "White Film on Crape Myrtles: Powdery Mildew in Parrish Landscapes",
       "primary_kw": "crape myrtle powdery mildew",
-      "secondary_kws": ["white coating on leaves", "crape myrtle problems florida"],
+      "secondary_kws": [
+        "white coating on leaves",
+        "crape myrtle problems florida"
+      ],
       "intent": "informational",
       "window": "2026-11-16",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "Powdery mildew on crape myrtles is common, visible, and rarely fatal — but it distorts blooms and new growth, and UF/IFAS's guidance centers on variety choice, air flow, and siting more than on spraying.",
       "outline": [
         "ID: the white powder film on new growth and buds — and the one thing it ISN'T (mold from rain)",
@@ -978,7 +1334,10 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Pull current UF/IFAS crape myrtle publications; verify mildew-resistance cultivar claims and the pruning guidance; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/lawn-care-parrish-fl/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/lawn-care-parrish-fl/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no service-scope claims.",
         "Cultivar-resistance claims must name only cultivars the current UF/IFAS material names."
@@ -988,14 +1347,22 @@
       "id": "T08",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/florida-friendly-drought-tolerant-shrubs-north-port-fl/",
+      "city": "North Port",
       "working_title": "Shrubs That Shrug Off a North Port Dry Season: A Florida-Friendly Shortlist",
       "primary_kw": "drought tolerant shrubs florida",
-      "secondary_kws": ["florida friendly landscaping shrubs", "low water plants southwest florida"],
+      "secondary_kws": [
+        "florida friendly landscaping shrubs",
+        "low water plants southwest florida"
+      ],
       "intent": "informational",
       "window": "2026-11-19",
       "byline": "adam",
-      "cta": ["QUOTE"],
-      "schema_types": ["Article"],
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article"
+      ],
       "thesis": "North Port's sandy soils and dry winters punish thirsty ornamentals — the Florida-Friendly Landscaping program's plant guidance points to shrubs that establish once and then largely fend for themselves.",
       "outline": [
         "The North Port context: sandy soil, dry-season irrigation limits, well-water lots",
@@ -1010,7 +1377,10 @@
         "https://gardeningsolutions.ifas.ufl.edu/",
         "Every shrub named must appear in current FFL/UF/IFAS plant guidance for this region — verify each; snapshot at draft."
       ],
-      "internal_links": ["/tree-shrub-care/", "/tree-shrub/signs-shrubs-have-pest-problem/"],
+      "internal_links": [
+        "/tree-shrub-care/",
+        "/tree-shrub/signs-shrubs-have-pest-problem/"
+      ],
       "verify_notes": [
         "Tree-shrub facts bank is unverified — no service-scope claims; this is a plant-selection guide, not a service pitch.",
         "The internal link targets T06 from this manifest — verify it has published and resolves; drop if not yet live.",

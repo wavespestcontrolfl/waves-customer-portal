@@ -28,6 +28,7 @@ const VALID_BRIEF = {
   id: 'X1',
   action: 'new_supporting_blog',
   slug: '/lawn-care/test-topic-sarasota-fl/',
+  city: 'Sarasota',
   working_title: 'Test Topic',
   primary_kw: 'test topic sarasota',
   window: '2026-08-03',
@@ -98,6 +99,27 @@ describe('category-seed-seeder: manifest validation', () => {
     expect(() => seeder.loadManifest(writeManifest([drifted])))
       .toThrow(/FAQ-policy-blocked/);
   });
+
+  test('rejects an FAQ request on the tree-shrub SERVICE (FAQ_BLOCKED_SERVICES)', () => {
+    const tsFaq = {
+      ...VALID_BRIEF,
+      slug: '/tree-shrub/some-shrub-topic/',
+      schema_types: ['Article', 'FAQPage'],
+    };
+    expect(() => seeder.loadManifest(writeManifest([tsFaq])))
+      .toThrow(/FAQ-policy-blocked/);
+  });
+
+  test('rejects a city-suffixed slug whose manifest city is missing or mismatched', () => {
+    const noCity = { ...VALID_BRIEF }; // slug ends -sarasota-fl/ …
+    delete noCity.city; // …but no city field
+    expect(() => seeder.loadManifest(writeManifest([noCity])))
+      .toThrow(/set city to match/);
+    const wrongCity = { ...VALID_BRIEF, city: 'Bradenton' };
+    expect(() => seeder.loadManifest(writeManifest([wrongCity])))
+      .toThrow(/set city to match/);
+    expect(() => seeder.loadManifest(writeManifest([VALID_BRIEF]))).not.toThrow();
+  });
 });
 
 describe('category-seed-seeder: rows', () => {
@@ -127,6 +149,17 @@ describe('category-seed-seeder: rows', () => {
     expect(row.available_at.getTime()).toBeGreaterThan(now.getTime());
     expect(row.expires_at.getTime() - row.available_at.getTime()).toBe(45 * 86400_000);
     expect(row.status).toBe('pending');
+  });
+
+  test('seeding after a window has elapsed anchors expiry on NOW, not the past window', () => {
+    // Otherwise a late first-seed / re-seed creates a pending row that
+    // expireStale() sweeps away immediately.
+    const m = seeder.loadManifest();
+    const brief = m.briefs.find((b) => b.window === '2026-08-03');
+    const lateNow = new Date('2026-12-01T12:00:00Z');
+    const row = seeder._internals.rowForBrief(brief, m, { now: lateNow });
+    expect(row.available_at.getTime()).toBeLessThan(lateNow.getTime()); // window already open
+    expect(row.expires_at.getTime()).toBe(lateNow.getTime() + 45 * 86400_000);
   });
 
   test('a spoke-seed row is NOT a category seed and vice versa', () => {
@@ -164,7 +197,48 @@ describe('category-seed-seeder: overlay', () => {
     expect(joined).toMatch(/no near-me or transactional phrasing/i);
     expect(joined).toMatch(/VERIFY BEFORE WRITING/);
     expect(joined).toMatch(/RELATIVE on-site path/);
-    expect(joined).toMatch(/pest-control-calculator/);
+    // Lawn/tree-shrub have no calculator flow — pricing questions route to
+    // /contact/, never /pest-control-calculator/.
+    expect(joined).toMatch(/direct readers to \/contact\//);
+    expect(joined).not.toMatch(/link to \/pest-control-calculator/);
+  });
+
+  test('a city-specific brief threads its city into operator_brief.city and the locality instruction', () => {
+    const m = seeder.loadManifest();
+    const cityBrief = m.briefs.find((b) => b.city === 'Sarasota');
+    const overlay = overlayFor(cityBrief);
+    expect(overlay.operator_brief.city).toBe('Sarasota');
+    const joined = overlay.operator_brief.binding_instructions.join('\n');
+    expect(joined).toMatch(/this is a Sarasota post/);
+    expect(joined).toMatch(/mention Sarasota by name at least twice/);
+    const regional = m.briefs.find((b) => !b.city);
+    const regionalOverlay = overlayFor(regional);
+    expect(regionalOverlay.operator_brief.city).toBeNull();
+    expect(regionalOverlay.operator_brief.binding_instructions.join('\n')).toMatch(/at least two of our SWFL cities/);
+  });
+
+  test('a blocked-service payload (tree-shrub) can never emerge with an FAQ, even from an unvalidated row', () => {
+    // Guards rows seeded from an older/edited manifest that loadManifest
+    // never saw: the overlay itself must strip the FAQ and pin
+    // faq_required=false so the operator-intercept FAQ exemption can't fire.
+    const payload = {
+      ...VALID_BRIEF,
+      id: 'TX',
+      slug: '/tree-shrub/some-topic/',
+      schema_types: ['Article', 'FAQPage'],
+      outline: ['Section one', 'FAQ: common questions'],
+    };
+    const opportunity = {
+      bucket: 'operator_intercept',
+      service: 'tree-shrub',
+      signal_metadata: { operator_pinned: true, category_seed: true, category_brief: payload, cta_codes: {} },
+    };
+    const overlay = seeder.buildCategoryOverlay({ opportunity, pageType: 'supporting-blog', requiredSections: ['faq section'], schemaTypes: [] });
+    expect(overlay.operator_brief.faq_required).toBe(false);
+    expect(overlay.schema_types).not.toContain('FAQPage');
+    expect(overlay.operator_brief.schema_types).not.toContain('FAQPage');
+    expect(overlay.required_sections.join(' ')).not.toMatch(/faq section/);
+    expect(overlay.operator_brief.binding_instructions.join('\n')).toMatch(/FAQ-policy-blocked/);
   });
 
   test('sources split: URLs become required_sources, directives become source_notes', () => {
@@ -204,6 +278,17 @@ describe('content-brief-builder: overlay precedence', () => {
 });
 
 describe('shipped-manifest content rules', () => {
+  test('no shipped brief uses a calculator CTA (lawn/tree-shrub have no calculator flow) and none requests an FAQ on tree-shrub', () => {
+    const m = seeder.loadManifest();
+    for (const b of m.briefs) {
+      expect(b.cta).not.toContain('CALC');
+      if (seeder._internals.serviceForBrief(b) === 'tree-shrub') {
+        expect(seeder._internals.briefRequestsFaq(b)).toBe(false);
+      }
+    }
+    expect(Object.keys(m.cta_codes).sort()).toEqual(['CONTACT', 'QUOTE']);
+  });
+
   test('tree-shrub briefs all carry the no-service-scope-claims verify note', () => {
     const m = seeder.loadManifest();
     const ts = m.briefs.filter((b) => seeder._internals.serviceForBrief(b) === 'tree-shrub');

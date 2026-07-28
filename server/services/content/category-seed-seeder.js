@@ -61,6 +61,10 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 // resets exhausted counts against this exact number, never a private copy.
 const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
+// Single source of truth for the FAQ-section policy: 'tree-shrub' (among
+// others) is FAQ-blocked, and category seeds must NEVER ride the narrow
+// operator-intercept FAQ exemption — a blocked service simply gets no FAQ.
+const { isFaqBlockedService } = require('./content-guardrails');
 
 const OPERATOR_INTERCEPT_BUCKET = interceptSeeder.OPERATOR_INTERCEPT_BUCKET;
 const { BYLINE_AUTHORS, splitBriefSources } = interceptSeeder._internals;
@@ -184,9 +188,23 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
     if (brief.byline && !BYLINE_AUTHORS[brief.byline]) {
       throw new Error(`category seed ${brief.id}: unknown byline "${brief.byline}"`);
     }
-    // Guard future manifest drift onto FAQ-blocked pest topics.
-    if (blockedTopicIdFor(brief) && briefRequestsFaq(brief)) {
-      throw new Error(`category seed ${brief.id}: topic is FAQ-policy-blocked but requests an FAQ (FAQPage schema / outline FAQ) — remove the FAQ for this topic`);
+    // FAQ policy, fail-closed at seed time: a brief whose SERVICE is
+    // FAQ-blocked ('tree-shrub' is), or whose topic text names a blocked
+    // pest topic, may not request an FAQ. Category seeds never carry the
+    // operator-intercept FAQ exemption.
+    if ((isFaqBlockedService(serviceForBrief(brief)) || blockedTopicIdFor(brief)) && briefRequestsFaq(brief)) {
+      throw new Error(`category seed ${brief.id}: service/topic is FAQ-policy-blocked but requests an FAQ (FAQPage schema / outline FAQ) — remove the FAQ`);
+    }
+    // The quality gate's localization check reads operator_brief.city — a
+    // city-suffixed slug without a matching manifest city would let a
+    // Sarasota post pass on Bradenton+Venice mentions alone.
+    const citySuffix = String(brief.slug).match(/-(bradenton|sarasota|venice|parrish|palmetto|north-port|lakewood-ranch|port-charlotte)-fl\/$/);
+    if (citySuffix) {
+      const expected = citySuffix[1].replace(/-/g, ' ');
+      const got = String(brief.city || '').trim().toLowerCase();
+      if (got !== expected) {
+        throw new Error(`category seed ${brief.id}: slug targets "${expected}" but city is "${brief.city || ''}" — set city to match`);
+      }
     }
     availableAtFor(brief); // throws on a malformed window
   }
@@ -195,7 +213,10 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
 
 function rowForBrief(brief, manifest, { now = new Date() } = {}) {
   const availableAt = availableAtFor(brief);
-  const expiresBase = availableAt || now;
+  // Expiry anchors on the LATER of activation and seed time: seeding (or
+  // re-seeding) after a window has elapsed must still yield a claimable row,
+  // not one expireStale() sweeps away immediately.
+  const expiresBase = availableAt && availableAt.getTime() > now.getTime() ? availableAt : now;
   const expiresAt = new Date(expiresBase.getTime() + EXPIRES_DAYS_AFTER_AVAILABLE * 86400_000);
   return {
     bucket: OPERATOR_INTERCEPT_BUCKET,
@@ -314,14 +335,26 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
 
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
   const { urls: requiredSources, notes: sourceNotes } = splitBriefSources(payload);
-  const outlineHasFaq = outline.some((s) => FAQ_SECTION_RE.test(String(s || '')));
+  // FAQ policy, fail-closed at compose time too: a blocked service
+  // ('tree-shrub') gets NO FAQ, period — category seeds never carry the
+  // operator-intercept FAQ exemption, so faq_required must never be true
+  // for a blocked service (loadManifest already rejects such briefs; this
+  // guards rows seeded from an older/edited manifest).
+  const service = serviceForBrief(payload);
+  const faqBlocked = isFaqBlockedService(service) || !!blockedTopicIdFor(payload);
+  const outlineHasFaq = !faqBlocked && outline.some((s) => FAQ_SECTION_RE.test(String(s || '')));
   const structural = requiredSections.filter((s) => {
-    if (outlineHasFaq && FAQ_SECTION_RE.test(String(s || ''))) return false; // curated FAQ spec wins
+    if (FAQ_SECTION_RE.test(String(s || ''))) {
+      if (faqBlocked) return false; // blocked service never gains a default FAQ section
+      if (outlineHasFaq) return false; // curated FAQ spec wins
+    }
     return !outline.includes(s);
   });
 
+  const payloadSchema = (Array.isArray(payload.schema_types) ? payload.schema_types : [])
+    .filter((t) => !(faqBlocked && t === 'FAQPage'));
   const schema = Array.from(new Set([
-    ...(Array.isArray(payload.schema_types) ? payload.schema_types : []),
+    ...payloadSchema,
     ...(pageType === 'supporting-blog' ? ['Article', 'BreadcrumbList'] : []),
     ...schemaTypes,
   ]));
@@ -336,6 +369,11 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     id: payload.id,
     set: meta.manifest_set || null,
     category_seed: true,
+    // The quality gate's localization check reads operator_brief.city and
+    // requires the TARGET city twice — carried for city-specific briefs,
+    // null for the genuinely SWFL-regional ones (which fall back to the
+    // any-two-cities check).
+    city: payload.city || null,
     working_title: payload.working_title || null,
     intent: payload.intent || null,
     slug: payload.slug || null,
@@ -347,8 +385,8 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     source_notes: sourceNotes,
     verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
     internal_links_required: internalLinks,
-    schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
-    faq_required: (Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage')) || outlineHasFaq,
+    schema_types: payloadSchema,
+    faq_required: !faqBlocked && (payloadSchema.includes('FAQPage') || outlineHasFaq),
     // The specific FAQ-blocked service id if a future manifest edit drifts a
     // brief onto a blocked pest topic (else null) — the runtime FAQ guards
     // read this so an FAQ the writer adds anyway is rejected.
@@ -361,7 +399,7 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
       emphasis: byline.emphasis,
     },
     global_rules: meta.manifest_notes || null,
-    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules: meta.manifest_notes }),
+    binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules: meta.manifest_notes, faqBlocked, payloadSchema }),
   };
 
   return {
@@ -372,7 +410,8 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
   };
 }
 
-function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules }) {
+function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules, faqBlocked, payloadSchema = [] }) {
+  const city = String(payload.city || '').trim();
   const lines = [
     'This is a CURATED category-seed blog post for the hub (wavespestcontrol.com). Everything below is BINDING — do not re-derive the topic, angle, or slug.',
     payload.working_title ? `TITLE DIRECTION: "${payload.working_title}" — refine for length/SEO but keep the meaning intact.` : null,
@@ -380,7 +419,9 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSour
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
     'INFORMATIONAL LANE (hard rule): no near-me or transactional phrasing anywhere in the post — this is the blog, not a service page.',
-    'LOCALITY: where the title or slug names a city, ground the post in that city genuinely (neighborhoods, soils, housing stock, local conditions the outline calls for) — never write a city-swappable template article.',
+    city
+      ? `LOCAL SPECIFICITY (mandatory): this is a ${city} post — ground it in ${city} genuinely (neighborhoods, soils, housing stock, local conditions the outline calls for) and mention ${city} by name at least twice in the body. Never write a city-swappable template article.`
+      : 'LOCALITY: this is a Southwest-Florida-regional post — ground it in the region\'s real conditions and name at least two of our SWFL cities naturally in the body.',
     requiredSources.length
       ? `REQUIRED SOURCES (cite in-post with explicit attribution): ${requiredSources.join(', ')}.`
       : null,
@@ -389,10 +430,12 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSour
     `AUTHOR (exact frontmatter author block): ${JSON.stringify(byline.frontmatter)}.`,
     byline.emphasis || null,
     ctaDirectives.length ? `CTAs (link each with its RELATIVE on-site path, e.g. [request a quote](/pest-control-quote/) — never an absolute URL; the conversion-CTA gate only recognizes relative hrefs): ${ctaDirectives.join(' || ')}` : null,
-    Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage')
-      ? 'SCHEMA: emit FAQPage structured data with a matching VISIBLE FAQ section (questions as ### headings).'
-      : null,
-    'Never hardcode Waves pricing or dollar amounts — link to /pest-control-calculator/ instead.',
+    faqBlocked
+      ? 'FAQ (hard rule): this topic/service is FAQ-policy-blocked — do NOT add an FAQ section or FAQPage schema, even if it seems helpful.'
+      : (payloadSchema.includes('FAQPage')
+        ? 'SCHEMA: emit FAQPage structured data with a matching VISIBLE FAQ section (questions as ### headings).'
+        : null),
+    'Never hardcode Waves pricing or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree & shrub have no calculator flow).',
     globalRules ? `GLOBAL RULES: ${globalRules}` : null,
   ];
   return lines.filter(Boolean);
