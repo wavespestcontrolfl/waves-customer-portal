@@ -429,10 +429,27 @@ router.post('/message/:id/reclassify', async (req, res) => {
     if (!email) return res.status(404).json({ error: 'Not found' });
 
     // An in-flight trash claim cannot be cancelled — the sweep may already
-    // be inside trashMessage, and a label restore neither untrashes nor
-    // reliably races it. The claim resolves in seconds; retry then.
+    // be inside trashMessage. A FRESH claim (seconds old) gets a retry-soon
+    // 409; a STALE one (sweep died mid-trash; next recovery is the daily
+    // cron) is reconciled inline against live Gmail state so the operator
+    // isn't blocked for a day.
     if ((email.auto_action || '') === 'spam_trashing') {
-      return res.status(409).json({ error: 'Message is mid-trash (quarantine sweep) — retry in a moment' });
+      const claimAgeMs = Date.now() - new Date(email.updated_at || 0).getTime();
+      if (claimAgeMs < 10 * 60000) {
+        return res.status(409).json({ error: 'Message is mid-trash (quarantine sweep) — retry in a moment' });
+      }
+      const gmailClient = require('../services/email/gmail-client');
+      const labels = await gmailClient.getMessageLabels(email.gmail_id);
+      if (labels.includes('TRASH')) {
+        await db('emails').where({ id: email.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+        return res.status(409).json({ error: 'Message was already trashed by the sweep — restore it from Gmail Trash first, then reclassify' });
+      }
+      // Never trashed — hand the row back to the quarantined state and let
+      // this reclassification proceed normally.
+      await db('emails').where({ id: email.id, auto_action: 'spam_trashing' })
+        .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+      email.auto_action = 'spam_quarantined';
     }
     const wasQuarantined = /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '');
 

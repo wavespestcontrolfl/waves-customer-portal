@@ -235,6 +235,17 @@ async function sweepQuarantine(now = new Date()) {
       const labels = await gmailClient.getMessageLabels(row.gmail_id);
       const rescuedByOperator = labels.includes('INBOX') || !labels.includes(quarantineLabelId);
       if (rescuedByOperator) {
+        // A label-only removal (operator clicked the label's ✕ without
+        // moving the message) leaves it archived in All Mail — finish the
+        // restore by putting it back in INBOX before settling.
+        if (!labels.includes('INBOX')) {
+          try {
+            await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], []);
+          } catch (e) {
+            logger.warn(`[inbox-hygiene] veto INBOX restore failed (email ${row.id}) — quarantine state retained for retry: ${e.message}`);
+            continue;
+          }
+        }
         restored += await db('emails')
           .where({ id: row.id, auto_action: 'spam_quarantined' })
           .update({ auto_action: 'quarantine_restored', quarantined_at: null, is_archived: false, updated_at: new Date() });

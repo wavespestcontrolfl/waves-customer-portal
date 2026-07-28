@@ -2498,6 +2498,11 @@ function initScheduledJobs() {
           : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
       }
       if (spam > 0) parts.push(`${spam} spam quarantined`);
+      // Exception surface: quarantine attempts that FAILED left classified
+      // spam sitting in the inbox — that's exactly what the digest exists
+      // to flag.
+      const quarantineIssues = emails.filter(e => ['spam_quarantine_failed', 'spam_quarantine_ambiguous'].includes(e.auto_action)).length;
+      if (quarantineIssues > 0) parts.push(`⚠️ ${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
       const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
       if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
       // Real Gmail draft ids only — 'pending' claims and reconciliation
@@ -2529,7 +2534,7 @@ function initScheduledJobs() {
         body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
         icon: '\uD83D\uDCE7',
         link: '/admin/email',
-        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines) ? 'high' : 'low' }),
+        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' }),
         created_at: new Date(),
       }).catch(() => {});
 
