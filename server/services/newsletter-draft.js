@@ -1791,6 +1791,7 @@ module.exports = {
   sanitizeProseFields,
   assembleBeehiivNewsletter,
   assembleWavesNewsletter,
+  isLikelyGifUrl,
   deriveEventLabels,
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
