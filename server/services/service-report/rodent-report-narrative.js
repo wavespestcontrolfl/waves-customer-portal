@@ -808,7 +808,7 @@ const DOMAIN_TERMS = [
   { kind: 'action', out: /\bgranular\b/i, corpus: /\bgranular/ },
   { kind: 'action', out: /\bbarrier\b/i, corpus: /\bbarrier/ },
   { kind: 'action', out: /\btraps?\b|\btrapped\b|\btrapping\b/i, corpus: /\btrap/ },
-  { kind: 'action', out: /\bmonitors?\b|\bmonitoring\b/i, corpus: /\bmonitor/ },
+  { kind: 'action', out: /\bmonitor(?:s|ed|ing)?\b/i, corpus: /\bmonitor/ },
   // generic completion verbs (codex P1 r11): 'we treated the kitchen' on an
   // inspection-only report must find completed-work evidence
   { kind: 'action', out: /\btreat(?:ed|ing|ments?)?\b/i, corpus: /\btreat/ },
@@ -957,6 +957,9 @@ function completedWorkSentence(sentence, nextStep) {
   if (!trimmed) return false;
   if (NEGATED_SENTENCE_RE.test(trimmed)) return false;
   if (RECOMMENDATION_SENTENCE_RE.test(trimmed)) return false;
+  // imperative care/expectation copy ("Continue monitoring and contact
+  // us…") is customer guidance, not completed work (codex P2 r16)
+  if (CARE_SENTENCE_RE.test(trimmed)) return false;
   if (nextStep && String(nextStep).includes(trimmed)) return false;
   return true;
 }
@@ -1035,6 +1038,9 @@ const GENERIC_PLACE_WORDS = new Set([
   'visit', 'visits', 'service', 'treated', 'accessible', 'monitored',
   'documented', 'active', 'affected', 'targeted', 'appropriate', 'key',
   'listed', 'recorded', 'noted', 'interior', 'exterior', 'inside', 'outside',
+  // schedule words — 'at the next visit' is time, not place
+  'next', 'upcoming', 'scheduled', 'following', 'future', 'current',
+  'previous', 'last', 'first', 'same',
 ]);
 
 function ungroundedLocationPhrases(text, corpus) {
@@ -1173,6 +1179,23 @@ function unpairedActionLocations(text, facts) {
     const actions = actionTerms.filter((term) => term.out.test(sentence));
     if (!actions.length) continue;
     const locations = locationTerms.filter((term) => term.out.test(sentence));
+    // free-text locative phrases pair too ("we sprayed in the primary
+    // suite" — codex P2 r16), and so do DIRECT OBJECTS of treatment verbs
+    // ("we treated the primary suite"): each distinctive word acts as a
+    // location that must pair with the sentence's actions in a work fact
+    const objectRe = /\b(?:treat(?:ed)?|spray(?:ed)?|dust(?:ed)?|servic(?:ed)?|bait(?:ed)?|steam(?:ed)?|vacuum(?:ed)?|monitor(?:ed)?)\s+(?:the|your|their|our)\s+([a-z][a-z\s-]{2,30}?)(?=[.,;:!?]|\s+(?:and|with|so|to|for|today|during|this)\b|$)/gi;
+    const phraseMatches = [
+      ...String(sentence).matchAll(new RegExp(LOCATIVE_PHRASE_RE.source, 'gi')),
+      ...String(sentence).matchAll(objectRe),
+    ];
+    for (const phrase of phraseMatches) {
+      if (/\b(?:day|days|week|weeks|month|months|hour|hours|minute|minutes)\b/i.test(phrase[1])) continue;
+      phrase[1].toLowerCase().split(/[^a-z]+/)
+        .filter((word) => word.length >= 4)
+        .map((word) => word.replace(/s$/, ''))
+        .filter((word) => !GENERIC_PLACE_WORDS.has(word) && !GENERIC_PLACE_WORDS.has(`${word}s`))
+        .forEach((word) => locations.push({ corpus: new RegExp(`\\b${word}`) }));
+    }
     if (!locations.length) continue;
     // EVERY action×location pair asserted by the sentence must co-occur in
     // one work fact (codex P1 #3007 r8): with "sprayed the kitchen" and
@@ -1187,6 +1210,52 @@ function unpairedActionLocations(text, facts) {
     if (!everyPairGrounded) problems.push('unpaired_action_location');
   }
   return problems;
+}
+
+// Qualitative activity wording must match the grounded reading (codex P2
+// r16): a report grounded "High activity" cannot narrate "activity was
+// low", and a baseline visit (no trend recorded) cannot claim improvement
+// or worsening.
+const ACTIVITY_LEVEL_WORDS = ['severe', 'heavy', 'high', 'elevated', 'moderate', 'medium', 'light', 'low', 'minimal'];
+const TREND_DOWN_RE = /\b(improv\w*|decreas\w*|declin\w*|eas(?:ed|ing)|down|lower|dropp?\w*)\b/i;
+const TREND_UP_RE = /\b(worsen\w*|increas\w*|ris(?:e|en|ing)|rose|higher|escalat\w*)\b/i;
+
+function contradictedActivityWording(text, facts) {
+  const problems = [];
+  if (!facts.activity) return problems;
+  const factsLevel = ACTIVITY_LEVEL_WORDS.find((word) => String(facts.activity.levelWord || '').toLowerCase().includes(word)) || null;
+  const trendText = String(facts.activity.trendWord || '').toLowerCase();
+  const factsTrend = TREND_DOWN_RE.test(trendText) ? 'down' : (TREND_UP_RE.test(trendText) ? 'up' : null);
+  const clauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet)\b/i))
+    .filter((clause) => /\bactivit/i.test(clause) && !NEGATED_SENTENCE_RE.test(clause));
+  for (const clause of clauses) {
+    const lower = clause.toLowerCase();
+    const claimedLevel = ACTIVITY_LEVEL_WORDS.find((word) => new RegExp(`\\b${word}\\b`).test(lower)) || null;
+    if (claimedLevel && claimedLevel !== factsLevel) problems.push('contradicted_activity_level');
+    const claimsDown = TREND_DOWN_RE.test(lower);
+    const claimsUp = TREND_UP_RE.test(lower);
+    if ((claimsDown && factsTrend !== 'down') || (claimsUp && factsTrend !== 'up')) {
+      problems.push('contradicted_activity_trend');
+    }
+  }
+  return problems;
+}
+
+// Invented product/chemical identifiers reject independently of the
+// recorded applications (codex P2 r16): the echo guard only knows the
+// visit's own products, so an unrecorded brand or active ingredient
+// ("Termidor", "fipronil") needs its own lexicon ban.
+const PRODUCT_LEXICON_RE = /\b(termidor|taurus|alpine|gentrol|talstar|temprid|advion|maxforce|vendetta|contrac|ditrac|essentria|cyzmic|onslaught|tekko|nyguard|precor|altosid|premise|termador|bora-?care|timbor|suspend\s+(?:sc|polyzone)|demand\s+cs|fipronil|bifenthrin|imidacloprid|deltamethrin|cyfluthrin|permethrin|cypermethrin|lambda-?cyhalothrin|hydramethylnon|indoxacarb|abamectin|dinotefuran|hydroprene|pyriproxyfen|novaluron|noviflumuron|hexaflumuron|chlorfenapyr|thiamethoxam)\b/i;
+
+function inventedProductIdentifiers(text, facts) {
+  const match = String(text).match(new RegExp(PRODUCT_LEXICON_RE.source, 'i'));
+  if (!match) return [];
+  // nameable device names are the only allowed product words
+  const nameable = (facts.devices || []).filter((d) => d.nameable && d.name).map((d) => d.name.toLowerCase());
+  if (nameable.some((name) => name.includes(match[0].toLowerCase()))) return [];
+  return [`invented_product:${match[0].toLowerCase()}`];
 }
 
 // A NEGATED model clause that names a distinctive word of a mandatory
@@ -1258,6 +1327,8 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contradictedZeroStates(text, facts));
   problems.push(...unpairedActionLocations(text, facts));
   problems.push(...contradictedCareCopy(text, facts));
+  problems.push(...contradictedActivityWording(text, facts));
+  problems.push(...inventedProductIdentifiers(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the
   // facts no longer carry them, and grounded numerals like a day-of-month

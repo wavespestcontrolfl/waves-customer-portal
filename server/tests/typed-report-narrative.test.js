@@ -174,6 +174,51 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('round-16 guards: monitored verb, care-advisory work exclusion, dynamic pairing, activity wording, invented products', () => {
+  const facts = groundingFacts(roachInput()); // High activity, no trend, no monitoring recorded
+  // past-tense invented monitoring rejects
+  expect(ungroundedClaims('We monitored the property today.', facts))
+    .toContain('ungrounded_action:monitored');
+  // care copy can't ground completed monitoring
+  const careFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: 'Bed bug service completed today.', body: 'Continue monitoring and contact us if activity returns.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'Bed bugs', value: 'bed_bug' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Monitoring was completed today.', careFacts))
+    .toContain('ungrounded_action:monitoring');
+  // free-text locations pair with actions ("primary suite" recorded only as observation)
+  const suiteFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: 'Bed bug treatment completed today.', body: 'We treated the master bedroom today. Activity was noted in the primary suite.', nextStep: null },
+      findings: [{ fieldKey: 'rooms', customerLabel: 'Rooms treated', customerValueLabel: 'Master bedroom', value: 'Master bedroom' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We treated the primary suite today.', suiteFacts))
+    .toContain('unpaired_action_location');
+  // qualitative wording matches the grounded reading
+  expect(ungroundedClaims('Cockroach activity was low today.', facts))
+    .toContain('contradicted_activity_level');
+  expect(ungroundedClaims('Cockroach activity has decreased since the last visit.', facts))
+    .toContain('contradicted_activity_trend');
+  expect(ungroundedClaims('Cockroach activity was high today.', facts)
+    .filter((p) => p.startsWith('contradicted_activity'))).toEqual([]);
+  // invented brands/chemicals reject regardless of recorded applications
+  expect(ungroundedClaims('We applied Termidor around the foundation.', facts)
+    .some((p) => p.startsWith('invented_product'))).toBe(true);
+  expect(ungroundedClaims('The treatment included fipronil.', facts)
+    .some((p) => p.startsWith('invented_product'))).toBe(true);
+});
+
 test('round-15 guards: recommendation findings, next-visit name exclusion', () => {
   // "Recommended service: Rodent exclusion" is future work — it cannot
   // ground "we completed exclusion today"
