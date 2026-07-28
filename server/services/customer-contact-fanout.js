@@ -231,20 +231,25 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .update({ customer_name: newFull.slice(0, 100), updated_at: now });
 
   // Guarded preparedFor repair — keyed on the PROPOSAL'S OWN copy, not the
-  // column, so it reaches rows the per-row pass could not touch: a send that
-  // settled back to an open state after racing past both passes above, or a
-  // copy left half-synced by an earlier race. Proposal rendering PREFERS
-  // preparedFor over the column, so leaving it would keep the old name on
-  // the public estimate indefinitely. Same concurrency guard as the per-row
-  // pass; rows still inside a 'sending' claim stay untouched (their
-  // estimate_data is owned by the send) — that residual is a row in flight
-  // for this whole fan-out, and its send already rendered the old name.
+  // column, so it reaches rows the per-row pass could not touch: a row inside
+  // (or racing through) a 'sending' claim, or a copy left half-synced by an
+  // earlier race. Proposal rendering PREFERS preparedFor over the column, so
+  // leaving it would keep the old name on the public estimate indefinitely
+  // (this service is diff-gated — a later resave cannot heal it). Patching
+  // preparedFor UNDER a 'sending' claim is safe: the send rendered its PDF
+  // into memory before the claim, and the settle write merges only its OWN
+  // top-level keys (sendSnapshot/deliveryState/proposalDelivery via jsonb ||,
+  // explicitly preserving a concurrent `proposal`, see sendEstimateNow in
+  // routes/admin-estimates.js). proposalDelivery drops only for NON-sending
+  // rows — an in-flight send is about to stamp it for the send it actually
+  // made; that marker refers to a PDF with the old spelling, the same
+  // bounded one-send residual the email fan-out accepts.
   const repairRows = await conn('estimates')
     .where({ customer_id: customerId })
-    .whereIn('status', OPEN_ESTIMATE_STATUSES)
+    .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
     .whereNull('archived_at')
     .whereRaw(`${NAME_KEY_SQL("(estimate_data #>> '{proposal,preparedFor}')")} = ?`, [oldFullKey])
-    .select('id', 'estimate_data');
+    .select('id', 'status', 'estimate_data');
   for (const row of repairRows) {
     const data = typeof row.estimate_data === 'string'
       ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
@@ -252,14 +257,17 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     const preparedFor = data?.proposal?.preparedFor;
     const targetName = newFull.slice(0, 100);
     if (!preparedFor || nameKey(preparedFor) !== oldFullKey || preparedFor === targetName) continue;
+    const inFlight = String(row.status || '') === 'sending';
     counts.estimates += await conn('estimates')
       .where({ id: row.id, customer_id: customerId })
-      .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
       .whereNull('archived_at')
       .whereRaw("estimate_data #>> '{proposal,preparedFor}' IS NOT DISTINCT FROM ?", [preparedFor])
       .update({
         estimate_data: conn.raw(
-          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'",
+          inFlight
+            ? "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text))"
+            : "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'",
           [targetName]
         ),
         updated_at: now,
