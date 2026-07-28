@@ -115,6 +115,16 @@ test('typed count findings validate their own noun (codex r2: palms serviced)', 
   expect(ungroundedClaims('We serviced 1 palm today.', palmFacts)).toEqual([]);
   // 27 is grounded globally (August 27) but is NOT the palms-serviced count
   expect(ungroundedClaims('27 palms were serviced today.', palmFacts)).toContain('uncorroborated_count:27 palms');
+  // spelled-out counts beyond twenty and hyphenated compounds normalize too
+  expect(ungroundedClaims('Thirty palms were serviced today.', palmFacts)).toContain('uncorroborated_count:30 palms');
+  expect(ungroundedClaims('Twenty-one palms were serviced today.', palmFacts)).toContain('uncorroborated_count:21 palms');
+});
+
+test('species qualifiers ground individually — the family term cannot launder a swap', () => {
+  const facts = groundingFacts(roachInput()); // records German cockroaches
+  expect(ungroundedClaims('German cockroaches were noted in the kitchen.', facts)).toEqual([]);
+  expect(ungroundedClaims('American cockroaches were noted in the kitchen.', facts))
+    .toContain('ungrounded_species:american');
 });
 
 test('wildlife species are grounded like any other pest term', () => {
@@ -181,9 +191,12 @@ test('clean model copy is accepted; a withheld pesticide echo falls back', async
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
   });
   // care-instruction preservation is ENFORCED: the narrative paraphrased
-  // the follow-up, so the ratified next-step sentence is appended verbatim
+  // the follow-up, so the ratified next-step sentence is appended verbatim,
+  // and mandatory care sentences embedded in the ratified BODY (the
+  // "keep treated areas undisturbed" obligation) append too (codex r2+r3)
   expect(accepted).toContain(clean);
   expect(accepted).toContain('A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity.');
+  expect(accepted).toContain('Please keep treated areas undisturbed so the treatment can work.');
 
   const echoed = await applyTypedReportNarrative(roachInput(), {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: 'We applied Gentrol IGR to the cracks and crevices throughout the kitchen and completed a full flush-out treatment of the affected areas today.' } }),

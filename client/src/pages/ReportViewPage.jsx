@@ -2371,7 +2371,12 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
   let body = bodyOverride || result.body;
   if (bodyOverride) {
     const headline = String(result.headline).replace(/\.$/, '');
-    if (body.startsWith(headline)) {
+    // Strip only a TRUE duplicate — headline followed by sentence-ending
+    // punctuation (the deterministic fallback's "Headline. Body…" shape).
+    // A headline flowing into a longer sentence ("…was high today, with
+    // German cockroaches noted…") keeps the full sentence; slicing at a
+    // comma would publish a paragraph starting ", with …" (codex P2 r3).
+    if (body.startsWith(headline) && /^[.!?]/.test(body.slice(headline.length))) {
       body = body.slice(headline.length).replace(/^[.!?]\s*/, '').trim() || result.body;
     }
   }

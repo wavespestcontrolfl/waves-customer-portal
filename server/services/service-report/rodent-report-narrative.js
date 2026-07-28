@@ -338,16 +338,24 @@ function numberTokens(text) {
 // traps" can't route around the numeral checks (codex round-2 P1). "one" is
 // included deliberately — the partitive filter below keeps "one of the
 // traps" from tripping the count check.
-const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/gi;
+const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/gi;
 const WORD_NUMBER_VALUES = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
   eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
   fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
-  nineteen: 19, twenty: 20,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
 };
 
 function normalizeWordNumbers(text) {
-  return String(text || '').replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]));
+  return String(text || '')
+    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
+    // recombine hyphenated compounds the word pass split ("twenty-one" →
+    // "20-1" → 21) so they can't slip a smaller grounded digit past the
+    // count validators (codex P2 r3)
+    .replace(/\b(\d+)-(\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
+      ? String(Number(tens) + Number(ones))
+      : full));
 }
 
 function collectNumbers(set, value) {
@@ -688,6 +696,20 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bcrickets?\b/i, corpus: /\bcricket/ },
   { kind: 'pest', out: /\bbeetles?\b/i, corpus: /\bbeetle/ },
   { kind: 'pest', out: /\bscorpions?\b/i, corpus: /\bscorpion/ },
+  // species QUALIFIERS (codex P1 #3007 r3): the family term alone must not
+  // ground a different species — German cockroaches recorded, "American
+  // cockroaches" claimed, must reject. Each qualifier grounds only itself.
+  { kind: 'species', out: /\bgerman\b/i, corpus: /\bgerman/ },
+  { kind: 'species', out: /\bamerican\b/i, corpus: /\bamerican/ },
+  { kind: 'species', out: /\bsmoky[-\s]?brown\b/i, corpus: /\bsmoky\s?brown/ },
+  { kind: 'species', out: /\boriental\b/i, corpus: /\boriental/ },
+  { kind: 'species', out: /\bbrown[-\s]?banded\b/i, corpus: /\bbrown\s?banded/ },
+  { kind: 'species', out: /\broof\s+rats?\b/i, corpus: /\broof\s+rat/ },
+  { kind: 'species', out: /\bnorway\b/i, corpus: /\bnorway/ },
+  { kind: 'species', out: /\bsubterranean\b/i, corpus: /\bsubterranean/ },
+  { kind: 'species', out: /\bdrywood\b/i, corpus: /\bdrywood/ },
+  { kind: 'species', out: /\bdampwood\b/i, corpus: /\bdampwood/ },
+  { kind: 'species', out: /\bformosan\b/i, corpus: /\bformosan/ },
   // wildlife species (wildlife_trapping typed schema — codex P1 #3007 r2):
   // the narrative must never swap the recorded animal
   { kind: 'pest', out: /\braccoons?\b/i, corpus: /\braccoon/ },
@@ -880,6 +902,23 @@ function echoesWithheldName(text, applications = []) {
     });
 }
 
+// Sentences the ratified copy marks as customer OBLIGATIONS — imperative
+// care markers in the typed body — plus every next-step sentence. These are
+// the pieces an accepted narrative must carry verbatim (appended when it
+// doesn't); dedup by exact string so body-embedded next-step copy appends
+// once.
+const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off|leave|allow)\b/i;
+
+function mandatoryCareCopy(todaysResult) {
+  const sentences = [];
+  const split = (block) => String(block || '').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  split(todaysResult?.body).forEach((sentence) => {
+    if (CARE_SENTENCE_RE.test(sentence)) sentences.push(sentence);
+  });
+  sentences.push(...split(todaysResult?.nextStep));
+  return [...new Set(sentences)];
+}
+
 /**
  * Returns the detailed Visit Summary string for a typed specialty report
  * (rodent, cockroach, bed bug, termite bait, WDO…), or the deterministic
@@ -928,14 +967,14 @@ async function applyTypedReportNarrative(input = {}, deps = {}) {
       if (!banned.length) {
         value = text;
         // Care-instruction preservation is ENFORCED, not requested (codex
-        // P1 #3007 r2): on the Pest V2 override surface the narrative
-        // replaces the ratified body, so the typed next-step/care copy
-        // must survive verbatim. A narrative that only paraphrased it
-        // gets the ratified sentence appended (the client's containment
-        // rule then renders it once, in the body).
-        const nextStep = facts.todaysResult?.nextStep;
-        if (nextStep && !value.includes(nextStep)) {
-          value = `${value} ${nextStep}`.trim();
+        // P1 r2 + P2 r3): on the Pest V2 override surface the narrative
+        // replaces the ratified body, so BOTH the next-step copy and any
+        // mandatory care sentences embedded in the ratified body (flea
+        // cooperation/aftercare etc.) must survive verbatim. Sentences the
+        // narrative only paraphrased are appended in ratified form (the
+        // client's containment rule then renders each once, in the body).
+        for (const sentence of mandatoryCareCopy(facts.todaysResult)) {
+          if (!value.includes(sentence)) value = `${value} ${sentence}`.trim();
         }
       } else {
         logger.warn(`[typed-narrative] output hit guard (${banned.join(', ')}); using deterministic summary`);
