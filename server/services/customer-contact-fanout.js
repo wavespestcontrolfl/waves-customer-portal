@@ -249,7 +249,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
     .whereNull('archived_at')
     .whereRaw(`${NAME_KEY_SQL("(estimate_data #>> '{proposal,preparedFor}')")} = ?`, [oldFullKey])
-    .select('id', 'status', 'estimate_data');
+    .select('id', 'estimate_data');
   for (const row of repairRows) {
     const data = typeof row.estimate_data === 'string'
       ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
@@ -257,7 +257,12 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     const preparedFor = data?.proposal?.preparedFor;
     const targetName = newFull.slice(0, 100);
     if (!preparedFor || nameKey(preparedFor) !== oldFullKey || preparedFor === targetName) continue;
-    const inFlight = String(row.status || '') === 'sending';
+    // The keep-or-drop decision for the delivery marker is made IN the
+    // update from the status AT UPDATE TIME (a row selected as 'sending' can
+    // settle — its fresh settle-stamped marker refers to a PDF with the old
+    // name and must drop; a row claimed into 'sending' after the select must
+    // keep the marker its in-flight send is about to stamp). A select-time
+    // JS decision would act on a stale status either way.
     counts.estimates += await conn('estimates')
       .where({ id: row.id, customer_id: customerId })
       .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
@@ -265,10 +270,10 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
       .whereRaw("estimate_data #>> '{proposal,preparedFor}' IS NOT DISTINCT FROM ?", [preparedFor])
       .update({
         estimate_data: conn.raw(
-          inFlight
-            ? "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text))"
-            : "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'",
-          [targetName]
+          "CASE WHEN status = 'sending' "
+          + "THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) "
+          + "ELSE jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery' END",
+          [targetName, targetName]
         ),
         updated_at: now,
       });

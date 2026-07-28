@@ -190,28 +190,13 @@ describe('propagateCustomerNameChange', () => {
     expect(counts.estimates).toBe(2); // catch-up + repair
     const repairSync = conn.__updates('estimates')[1].arg;
     expect(repairSync.customer_name).toBeUndefined();
+    // The keep-or-drop decision for the delivery marker is made IN the update
+    // from the status AT UPDATE TIME: a 'sending' row keeps the marker its
+    // in-flight send is about to stamp; every other state drops the stale one.
+    expect(repairSync.estimate_data.__raw).toContain("CASE WHEN status = 'sending'");
     expect(repairSync.estimate_data.__raw).toContain('{proposal,preparedFor}');
-    expect(repairSync.estimate_data.__raw).toContain("- 'proposalDelivery'");
-    expect(repairSync.estimate_data.__bindings).toEqual(['Cathy Nunes Furao']);
-  });
-
-  test('the repair pass fixes an in-flight (sending) proposal WITHOUT dropping its delivery marker', async () => {
-    // The settle write merges only its own keys, so the preparedFor patch
-    // survives the send — but the marker the settle is about to stamp belongs
-    // to the send it actually made and must not be dropped here.
-    const conn = makeConn({
-      estimates: {
-        rowsQueue: [[], [{
-          id: 'est-3',
-          status: 'sending',
-          estimate_data: { proposal: { preparedFor: 'Kathy Nunez' } },
-        }]],
-      },
-    });
-    await propagateCustomerNameChange({ before: NAME_BEFORE, after: NAME_AFTER }, conn);
-    const repairSync = conn.__updates('estimates')[1].arg;
-    expect(repairSync.estimate_data.__raw).toContain('{proposal,preparedFor}');
-    expect(repairSync.estimate_data.__raw).not.toContain('proposalDelivery');
+    expect(repairSync.estimate_data.__raw).toContain("- 'proposalDelivery' END");
+    expect(repairSync.estimate_data.__bindings).toEqual(['Cathy Nunes Furao', 'Cathy Nunes Furao']);
   });
 
   test('no-ops when the name did not actually change', async () => {
