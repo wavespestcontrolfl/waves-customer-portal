@@ -101,7 +101,12 @@ async function resolveRecurringCardPolicyForEstimate({
   if (!isPlanMember && resolvedCustomerId) {
     try {
       const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, resolvedCustomerId);
+      // An auto-derived tier LABEL (waveguard_tier_source = 'auto') has no
+      // established membership billing or saved-card protection — it must
+      // not waive the card-on-file capture gate (Codex #3011 r8 P1).
+      const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
+      const labelOnly = await isAutoDerivedTierLabelCustomer(resolvedCustomerId);
+      const rows = labelOnly ? [] : await loadExistingRecurringQualifyingRows(db, resolvedCustomerId);
       isPlanMember = Array.isArray(rows) && rows.length > 0;
     } catch (err) {
       logger.warn('[recurring-cof] live plan-customer check failed — card stays required', { error: err.message });

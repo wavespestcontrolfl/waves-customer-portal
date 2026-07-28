@@ -1046,19 +1046,29 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
 // not start receiving the new-recurring welcome or the WaveGuard app-intro
 // email off the tier field alone. Fail-closed to false (legacy member
 // behavior) on lookup errors and whenever the gate is off.
+// Row-shape variant for callers that already hold the customer row (admin
+// membership lifecycle emails). Provenance is factual, so this deliberately
+// does NOT check the gate: once an 'auto' label exists, member-only
+// messaging and paid-member exemptions must keep treating it as a label even
+// if the gate is later switched off (no 'auto' rows exist before the gate
+// ever flips, so pre-flip behavior is unchanged). A row without the
+// provenance property (pre-migration) fails closed to member behavior.
+function isAutoDerivedTierLabelRow(customer = {}) {
+  return customer.waveguard_tier_source === 'auto'
+    && !!normalizeTierName(customer.waveguard_tier)
+    && Number(customer.monthly_rate || 0) <= 0
+    && isLabelOnlyLane(customer.billing_mode);
+}
+
 async function isAutoDerivedTierLabelCustomer(customerId, database = db) {
   if (!customerId) return false;
-  if (!isEnabled('autoWaveguardTierEnroll')) return false;
   try {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return false;
     // Provenance-gated (Codex #3011 r7 P1): only an 'auto'-stamped tier is a
     // label. A NULL-provenance tier (legacy/unclassified member) keeps full
     // member messaging.
-    return customer.waveguard_tier_source === 'auto'
-      && !!normalizeTierName(customer.waveguard_tier)
-      && Number(customer.monthly_rate || 0) <= 0
-      && isLabelOnlyLane(customer.billing_mode);
+    return isAutoDerivedTierLabelRow(customer);
   } catch {
     return false;
   }
@@ -1359,6 +1369,7 @@ module.exports = {
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isAutoDerivedTierLabelCustomer,
+  isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
   isOneTimeBookingSource,
   isRodentLedServiceRow,

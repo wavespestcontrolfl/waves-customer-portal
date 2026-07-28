@@ -8,6 +8,7 @@ const {
   buildCustomerWaveGuardAlignmentUpdates,
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
+  isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
   isRodentLedServiceRow,
   buildRecurringOccurrenceDates,
@@ -364,6 +365,22 @@ describe('self-booking plan sync helpers', () => {
       service_type: 'Pest & Rodent Control',
       service_name: 'Pest & Rodent Control',
     })).toBe(false);
+  });
+
+  test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {
+    // Labels: excluded from member messaging, lifecycle emails, and the
+    // deposit / card-on-file paid-member exemptions.
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: null })).toBe(true);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Silver', waveguard_tier_source: 'auto', monthly_rate: null, billing_mode: 'per_visit' })).toBe(true);
+
+    // Real members in every other shape — manual/NULL provenance, positive
+    // rate, or a paying lane — keep full member behavior.
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'manual', monthly_rate: 0, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 55, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: 'monthly_membership' })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: null, waveguard_tier_source: 'auto', monthly_rate: 0 })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({})).toBe(false);
   });
 
   test('realigns an auto-stamped label-only customer to exactly what upcoming coverage supports', () => {

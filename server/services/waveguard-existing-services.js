@@ -202,12 +202,18 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   }
   const { etDateString } = require('../utils/datetime-et');
   // Lazy require — self-booking-plan-sync requires this module at load time.
-  const { isCommercialServiceRow } = require('./self-booking-plan-sync');
+  // The commercial AND rodent-led classifiers both run against the JOINED
+  // row (Codex #3011 r8: a generic service_type 'Pest Control' whose catalog
+  // fields say rodent_general_one_time / "Rodent Pest Control" must be
+  // excluded from pricing evidence exactly as tier derivation excludes it —
+  // otherwise pricing counts a family the tier does not).
+  const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   const catalogById = await loadCatalogFieldsByRowId(database, customerId);
   const today = etDateString();
   return rows.filter((r) => {
     if (!rowPassesGatedPricingEvidence(r, today)) return false;
-    if (isCommercialServiceRow({ ...r, ...(catalogById.get(r.id) || {}) })) return false;
+    const joined = { ...r, ...(catalogById.get(r.id) || {}) };
+    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) return false;
     return toQualifyingKeys(r.service_type).length > 0;
   });
 }

@@ -159,7 +159,13 @@ async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm =
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
       const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+      // An auto-derived tier LABEL (waveguard_tier_source = 'auto': per-visit
+      // customer stamped from upcoming recurring coverage) is not an
+      // established membership billing relationship — it must not waive the
+      // acceptance-deposit commitment gate (Codex #3011 r8 P1).
+      const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
+      const labelOnly = await isAutoDerivedTierLabelCustomer(estimate.customer_id);
+      const rows = labelOnly ? [] : await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
       if (Array.isArray(rows) && rows.length > 0) {
         member = { ...(member || {}), isExistingCustomer: true };
       }

@@ -2827,11 +2827,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
-      const beforeHasMembership = hasMembership(before);
-      const afterHasMembership = hasMembership(after);
+      // EFFECTIVE membership for lifecycle emails: an auto-derived tier
+      // LABEL (waveguard_tier_source = 'auto', no positive rate, label-only
+      // lane) is not a membership the customer knows about — deactivating,
+      // reactivating, or clearing it must not send membership.canceled /
+      // reactivated / started emails (Codex #3011 r8 P1: the tier stamp is
+      // contractually comms-silent). A label that transitions to a REAL
+      // membership in this same save (rate/lane set) correctly counts as a
+      // membership start, because the label side evaluates to non-member.
+      const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
+      const beforeHasMembership = hasMembership(before) && !isAutoDerivedTierLabelRow(before);
+      const afterHasMembership = hasMembership(after) && !isAutoDerivedTierLabelRow(after);
       const membershipFieldChanged = membershipDetailsChanged(before, after);
       const membershipEventAt = new Date();
-      if (updates.active === false && before.active !== false && hasMembership(before)) {
+      if (updates.active === false && before.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2840,7 +2849,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           monthlyRate: before.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (updates.active === true && before.active === false && hasMembership(after)) {
+      } else if (updates.active === true && before.active === false && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipReactivated({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
