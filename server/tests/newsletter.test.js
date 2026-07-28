@@ -495,12 +495,22 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     // in the upsert (the normalizer recomputes it instead). It signals revival
     // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
     // the normalizer consumes), plus the curation re-open pair (curated_at /
-    // curation_note) — all safe to set in the ON CONFLICT update.
-    expect(Object.keys(f).sort()).toEqual(['curated_at', 'curation_note', 'freshness_revival_pending', 'normalized_at']);
+    // curation_note) AND the six structured-assessment columns (2026-07-28
+    // rubric) — a revived occurrence starts clean, so a later missing or
+    // malformed reassessment can never leave a prior occurrence's score
+    // attached. All nullable, all safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual([
+      'audience_tags', 'curated_at', 'curation_note', 'editorial_evidence',
+      'editorial_score', 'freshness_revival_pending', 'normalized_at',
+      'novelty_type', 'rejection_codes', 'score_breakdown',
+    ]);
   });
 
-  test('revival re-opens auto-curation: curated_at/curation_note clear on the SAME past→future gate', () => {
-    for (const col of ['curated_at', 'curation_note']) {
+  test('revival re-opens auto-curation: assessment columns clear on the SAME past→future gate', () => {
+    for (const col of [
+      'curated_at', 'curation_note', 'editorial_score', 'score_breakdown',
+      'rejection_codes', 'audience_tags', 'novelty_type', 'editorial_evidence',
+    ]) {
       const { sql } = revivalResetFields()[col].toSQL();
       const lower = sql.toLowerCase();
       expect(lower).toMatch(/case when/);
@@ -648,7 +658,7 @@ describe('event ingestion buildExtractionSystemPrompt — shared extraction prom
   });
 });
 
-describe('event ingestion normalizeExtractedEvent — validation + auto-approve gate', () => {
+describe('event ingestion normalizeExtractedEvent — validation (no auto-approval since the 2026-07-28 rubric)', () => {
   const { normalizeExtractedEvent, recurrenceMetadataFromIcalEvent } = require('../services/event-ingestion');
   const NOW = Date.parse('2026-06-11T12:00:00Z');
   const tier1 = { id: 'src-1', priority_tier: 1, coverage_geo: ['tampa'] };
@@ -669,14 +679,16 @@ describe('event ingestion normalizeExtractedEvent — validation + auto-approve 
     expect(normalizeExtractedEvent(tier2, undated, NOW)).not.toBeNull();
   });
 
-  test('tier-1 auto-approves ONLY when a real start date was extracted', () => {
+  test('NO source tier auto-approves — every automatic approval must come from the scored curation path', () => {
+    // Owner rubric 2026-07-28: an approval without an editorial score above
+    // the absolute floor must be impossible. Tier-1 rows insert pending and
+    // are examined by the 6:15 curation run like everything else.
     const dated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(dated.autoApprove).toBe(true);
-    const undated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: null }, NOW);
-    expect(undated).not.toBeNull();
-    expect(undated.autoApprove).toBe(false);
+    expect(dated.autoApprove).toBeUndefined();
+    expect(dated.row.admin_status).toBeUndefined();
     const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(tier2Dated.autoApprove).toBe(false);
+    expect(tier2Dated.autoApprove).toBeUndefined();
+    expect(Object.keys(dated).sort()).toEqual(['row']);
   });
 
   test('canonicalizes the dedup key and validates URLs', () => {

@@ -91,17 +91,79 @@ function repeatedDateTitleKeys(events) {
 async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
   const issueTuesday = getActiveNewsletterTuesday(reference);
   const issueStart = parseETDateTime(`${issueTuesday}T00:00:00`);
-  const horizonStart = parseETDateTime(
+  // Both bounds are anchored to whichever of (issue Tuesday, reference)
+  // reaches further — on a Monday run the issue Tuesday is TOMORROW, so an
+  // issue-only lower bound would start a day late and hide an earlier
+  // sibling in the Monday-to-Tuesday slice (Codex P2, mirror of the
+  // upper-bound fix below).
+  const issueLower = parseETDateTime(
     `${etDateString(addETDays(issueStart, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
   );
-  const horizonEnd = parseETDateTime(
+  const referenceLower = parseETDateTime(
+    `${etDateString(addETDays(reference, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
+  );
+  const horizonStart = referenceLower < issueLower ? referenceLower : issueLower;
+  // The pool must reach at least as far as curation's own candidate
+  // horizon (reference + 90 days). Anchored only to the issue Tuesday it
+  // ends 1–5 days short on Wed–Sun runs, and a daily/custom debut series
+  // whose siblings all sit in that uncovered tail would make EVERY row
+  // look like the first occurrence (Codex P2, 2026-07-28).
+  const issueEnd = parseETDateTime(
     `${etDateString(addETDays(issueStart, ROUTINE_IDENTITY_HORIZON_DAYS))}T23:59:59`,
   );
+  const referenceEnd = parseETDateTime(
+    `${etDateString(addETDays(reference, ROUTINE_IDENTITY_HORIZON_DAYS))}T23:59:59`,
+  );
+  const horizonEnd = referenceEnd > issueEnd ? referenceEnd : issueEnd;
   return knex('events_raw')
-    .select('id', 'title', 'start_at')
+    .select('id', 'title', 'start_at', 'venue_name', 'city')
     .whereNull('merged_into')
     .where('start_at', '>=', horizonStart)
     .where('start_at', '<=', horizonEnd);
+}
+
+const normalizeSeriesContext = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Same normalized title does not always mean same series — two venues can
+ * both run a "Trivia Night" launch. When BOTH rows carry a venue (or,
+ * failing that, both carry a city) and those disagree, they are distinct
+ * series and neither constrains the other's debut. When the context is
+ * missing on either side we assume same series — fail closed, the
+ * conservative reading for a debut claim.
+ */
+function isSameSeriesSibling(event, sibling) {
+  if (normalizeDigestTitle(sibling?.title) !== normalizeDigestTitle(event?.title)) return false;
+  const eventVenue = normalizeSeriesContext(event?.venue_name);
+  const siblingVenue = normalizeSeriesContext(sibling?.venue_name);
+  if (eventVenue && siblingVenue) return eventVenue === siblingVenue;
+  const eventCity = normalizeSeriesContext(event?.city);
+  const siblingCity = normalizeSeriesContext(sibling?.city);
+  if (eventCity && siblingCity) return eventCity === siblingCity;
+  return true;
+}
+
+/**
+ * A series DEBUT is the FIRST occurrence — nothing else. When ingestion
+ * fans a recurring series into many occurrence rows and each inherits
+ * the debut text (so freshness_status = fresh_series_launch on all of
+ * them), only the earliest-starting row in the ±90-day identity pool may
+ * use the debut carve-out; occurrences 2..n of "weekly trivia (grand
+ * opening!)" are routine again (owner spec 2026-07-28 — the carve-out
+ * was letting every sibling through). Missing dates fail closed: a row
+ * that can't prove it is first isn't a debut.
+ */
+function isFirstOccurrenceInPool(event, pool) {
+  const title = normalizeDigestTitle(event?.title);
+  if (!title) return true;
+  const start = event?.start_at ? new Date(event.start_at).getTime() : NaN;
+  if (Number.isNaN(start)) return false;
+  return !(Array.isArray(pool) ? pool : []).some((sibling) => {
+    if (String(sibling?.id) === String(event?.id)) return false;
+    if (!isSameSeriesSibling(event, sibling)) return false;
+    const siblingStart = sibling?.start_at ? new Date(sibling.start_at).getTime() : NaN;
+    return !Number.isNaN(siblingStart) && siblingStart < start;
+  });
 }
 
 /**
@@ -123,10 +185,13 @@ async function filterRepeatedDateIdentities(
     // (deliberate editorial override, consumed on ship) and the single-use
     // series DEBUT — whose own later occurrences share its normalized title
     // in the ±90-day pool, which is exactly what this filter keys on; an
-    // inaugural weekly market would otherwise never reach the digest. Both
-    // remain subject to every row-level gate (isEligibleForFreshDigest).
+    // inaugural weekly market would otherwise never reach the digest. The
+    // debut carve-out applies ONLY to the series' first occurrence in the
+    // pool. Both remain subject to every row-level gate
+    // (isEligibleForFreshDigest).
     if (event?.admin_status === 'featured') return true;
-    if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true;
+    if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
+        && isFirstOccurrenceInPool(event, pool)) return true;
     return !repeatedTitles.has(normalizeDigestTitle(event?.title));
   });
 }
@@ -171,7 +236,8 @@ function assessFlagshipEventSelection(
     // the repeated-title and identity-history checks; a series DEBUT
     // bypasses repeated-title only (prior shipped history disproves debut).
     const starred = event.admin_status === 'featured';
-    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
+      && isFirstOccurrenceInPool(event, issueIdentityPool);
     if (!approved || !inIssueWindow
         || (!starred && !debut && repeatedTitles.has(normalizeDigestTitle(event.title)))
         || !isEligibleForFreshDigest(event, reference)
@@ -219,6 +285,10 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
       'id', 'title', 'description', 'admin_status', 'start_at', 'end_at',
       'event_url', 'event_type', 'recurrence_type', 'freshness_status',
       'times_featured', 'last_featured_at', 'pulled_at', 'merged_into',
+      // Series context for isSameSeriesSibling — without these the final
+      // gate compares a context-free locked row against the context-rich
+      // pool and rejects a lineup planning accepted.
+      'venue_name', 'city',
     )
     .whereIn('id', [...new Set(ids)]);
   const featuredHistory = await loadFeaturedIdentityHistory(knex);
@@ -228,6 +298,7 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
 
 module.exports = {
   parseLockedEventIds,
+  isFirstOccurrenceInPool,
   isPreviouslyFeaturedIdentity,
   loadFeaturedIdentityHistory,
   filterPreviouslyFeaturedIdentities,
