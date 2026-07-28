@@ -139,6 +139,15 @@ function availableAtFor(brief) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(window)) {
     throw new Error(`category seed ${brief.id}: unrecognized window "${window}" (expected "immediate" or YYYY-MM-DD)`);
   }
+  // Reject shape-valid but impossible dates ("2026-02-31") instead of
+  // letting Date.UTC silently normalize them onto a different real day —
+  // these windows are seasonally load-bearing (fertilizer-ordinance and
+  // pest-cycle timing).
+  const [y, mo, d] = window.split('-').map(Number);
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) {
+    throw new Error(`category seed ${brief.id}: window "${window}" is not a real calendar date`);
+  }
   // Midnight ET of the window date — the row becomes claimable on that ET
   // day (the engine cron runs 9am ET).
   return parseETDateTime(`${window}T00:00`);
@@ -418,7 +427,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSour
     payload.slug ? `SLUG (exact, binding): ${payload.slug} — set the frontmatter slug to match exactly.` : null,
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
-    'INFORMATIONAL LANE (hard rule): no near-me or transactional phrasing anywhere in the post — this is the blog, not a service page.',
+    'INFORMATIONAL LANE (hard rule): no near-me phrasing anywhere, and no transactional/salesy language in the editorial body — this is the blog, not a service page. EXCEPTION: the required conversion CTAs from the CTA directives below are MANDATORY (the publish gate rejects a supporting blog without them) and are exempt from this rule — write them as natural CTA lines (e.g. "request a quote") with their relative links, and keep transactional language confined to those CTA lines.',
     city
       ? `LOCAL SPECIFICITY (mandatory): this is a ${city} post — ground it in ${city} genuinely (neighborhoods, soils, housing stock, local conditions the outline calls for) and mention ${city} by name at least twice in the body. Never write a city-swappable template article.`
       : 'LOCALITY: this is a Southwest-Florida-regional post — ground it in the region\'s real conditions and name at least two of our SWFL cities naturally in the body.',

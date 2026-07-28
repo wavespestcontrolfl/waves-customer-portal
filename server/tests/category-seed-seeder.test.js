@@ -89,6 +89,14 @@ describe('category-seed-seeder: manifest validation', () => {
       .toThrow(/unrecognized window/);
   });
 
+  test('rejects shape-valid but impossible calendar dates (Date.UTC must not silently normalize)', () => {
+    expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, window: '2026-02-31' }])))
+      .toThrow(/not a real calendar date/);
+    expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, window: '2026-13-01' }])))
+      .toThrow(/not a real calendar date/);
+    expect(() => seeder.loadManifest(writeManifest([{ ...VALID_BRIEF, window: '2026-02-28' }]))).not.toThrow();
+  });
+
   test('rejects an FAQ request on an FAQ-blocked pest topic (guards manifest drift)', () => {
     const drifted = {
       ...VALID_BRIEF,
@@ -194,7 +202,11 @@ describe('category-seed-seeder: overlay', () => {
   test('binding instructions carry the informational-lane rule, verify notes, and relative CTAs', () => {
     const overlay = overlayFor();
     const joined = overlay.operator_brief.binding_instructions.join('\n');
-    expect(joined).toMatch(/no near-me or transactional phrasing/i);
+    expect(joined).toMatch(/no near-me phrasing/i);
+    // The CTA exemption must ride WITH the ban — a blanket transactional ban
+    // contradicts the publish gate's required conversion CTA and dead-ends
+    // every post at the zero-P1 canary.
+    expect(joined).toMatch(/EXCEPTION: the required conversion CTAs .* are MANDATORY/);
     expect(joined).toMatch(/VERIFY BEFORE WRITING/);
     expect(joined).toMatch(/RELATIVE on-site path/);
     // Lawn/tree-shrub have no calculator flow — pricing questions route to
