@@ -47,6 +47,7 @@ const {
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
   isCommercialServiceRow,
+  isRodentLedServiceRow,
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
@@ -438,11 +439,12 @@ async function analyzeCustomer(customer, customerColumns, today) {
     // today or later count toward the tier, so a lapsed series (all visits in
     // the past) never enrolls anyone.
     recurringRows = recurringRows.filter((row) => {
-      // Commercial rows are never enrollment evidence, independent of the
-      // customer's sentinel — an un-sentineled commercial customer must not
-      // be stamped a residential tier (Codex #3011 r4 P1, mirrors the
-      // runtime detectUpcomingRecurringPlanKeys).
-      if (isCommercialServiceRow(row)) return false;
+      // Commercial and rodent-led rows are never enrollment evidence,
+      // independent of the customer's sentinel — an un-sentineled commercial
+      // customer must not be stamped a residential tier, and a "Rodent Pest
+      // Control" row is a rodent service, not pest coverage (Codex #3011
+      // r4/r6 P1, mirrors the runtime detectUpcomingRecurringPlanKeys).
+      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
       const rowDate = dateKey(row.scheduled_date);
       return rowDate && rowDate >= today;
     });

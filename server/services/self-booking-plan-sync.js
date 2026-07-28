@@ -856,7 +856,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     const rowDate = normalizeDateString(row.scheduled_date);
     if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
     if (upcomingOnly && (!rowDate || rowDate < today)) continue;
-    if (upcomingOnly && isCommercialServiceRow(row)) continue;
+    if (upcomingOnly && (isCommercialServiceRow(row) || isRodentLedServiceRow(row))) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
@@ -917,6 +917,17 @@ function isCommercialServiceRow(row = {}) {
   return rawTextForServiceRow(row).includes('commercial');
 }
 
+// Rodent-led names ("Rodent Pest Control") are rodent service rows, not pest
+// coverage — the authoritative qualifier (waveguard-existing-services
+// toQualifyingKeys) returns no keys for them, but the per-family plan
+// resolvers see the word "pest" and would map them to the quarterly pest
+// plan (Codex #3011 r6 P1). Mirror the exclusion: only a pest-primary
+// combined name ("Pest & Rodent Control") counts as pest coverage.
+function isRodentLedServiceRow(row = {}) {
+  const s = rawTextForServiceRow(row);
+  return /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+}
+
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
 // recurring qualifying rows — the basis for both enrollment and demotion, so
 // the two directions can never disagree about what counts as coverage.
@@ -925,7 +936,7 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   const detectedPlanKeys = [];
   for (const row of rows) {
     if (!serviceRowCountsTowardWaveGuard(row)) continue;
-    if (isCommercialServiceRow(row)) continue;
+    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     const rowDate = normalizeDateString(row.scheduled_date);
     if (!rowDate || rowDate < today) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
@@ -990,6 +1001,28 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
     inferredTier: enrollment.inferredTier,
     updates: enrollment.updates,
   };
+}
+
+// True when a customer's tier is an auto-derived LABEL (gate on, recognized
+// tier, no positive monthly_rate, label-only billing lane). Member-only
+// MESSAGING gates must treat these customers as non-members (Codex #3011 r6
+// P1): the 2026-07-28 directive promises the stamp itself never causes
+// customer communications, so a per-visit customer who gained a label must
+// not start receiving the new-recurring welcome or the WaveGuard app-intro
+// email off the tier field alone. Fail-closed to false (legacy member
+// behavior) on lookup errors and whenever the gate is off.
+async function isAutoDerivedTierLabelCustomer(customerId, database = db) {
+  if (!customerId) return false;
+  if (!isEnabled('autoWaveguardTierEnroll')) return false;
+  try {
+    const customer = await database('customers').where({ id: customerId }).first();
+    if (!customer) return false;
+    return !!normalizeTierName(customer.waveguard_tier)
+      && Number(customer.monthly_rate || 0) <= 0
+      && isLabelOnlyLane(customer.billing_mode);
+  } catch {
+    return false;
+  }
 }
 
 // Tier audit rows ride the same handle as the tier write they describe, in a
@@ -1266,8 +1299,10 @@ module.exports = {
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
+  isAutoDerivedTierLabelCustomer,
   isCommercialServiceRow,
   isOneTimeBookingSource,
+  isRodentLedServiceRow,
   normalizeTierName,
   reconcileRecurringTiers,
   representativePlanKeys,

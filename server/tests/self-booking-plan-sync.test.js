@@ -9,6 +9,7 @@ const {
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
   isCommercialServiceRow,
+  isRodentLedServiceRow,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -325,6 +326,18 @@ describe('self-booking plan sync helpers', () => {
     expect(isCommercialServiceRow({ service_type: 'Quarterly Pest Control Service' })).toBe(false);
     expect(isCommercialServiceRow({ service_type: 'Monthly Lawn Care' })).toBe(false);
     expect(isCommercialServiceRow({})).toBe(false);
+  });
+
+  test('rodent-led rows are never auto-tier evidence; pest-primary combined names still count', () => {
+    // Mirrors toQualifyingKeys in waveguard-existing-services: "Rodent Pest
+    // Control" is a rodent service row (no keys), not pest coverage, but the
+    // pest resolver would map it to the quarterly pest plan if unguarded.
+    expect(isRodentLedServiceRow({ service_type: 'Rodent Pest Control' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Rodent Bait Station Service' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Rat Control Quarterly' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Pest & Rodent Control' })).toBe(false);
+    expect(isRodentLedServiceRow({ service_type: 'Quarterly Pest Control Service' })).toBe(false);
+    expect(isRodentLedServiceRow({})).toBe(false);
   });
 
   test('realigns a label-only customer to exactly what upcoming coverage supports', () => {

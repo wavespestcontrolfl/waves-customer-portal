@@ -2914,6 +2914,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Global lock order for recurring creators: CUSTOMER ROW first, series
+      // advisory lock second — the same order estimate-converter uses (it
+      // updates the customer, then waits on the advisory lock). Taking the
+      // advisory lock below first and the customer row later (inside the
+      // WaveGuard sync at the end of this transaction) is the opposite
+      // order and deadlocks against a concurrent conversion for the same
+      // customer (Codex #3011 r6 P1).
+      if (isRecurring) {
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      }
       // Race-safe duplicate-series backstop (P0: check-then-insert race).
       // The preflight above ran OUTSIDE this transaction, so two concurrent
       // recurring creates for the same customer + service family could both

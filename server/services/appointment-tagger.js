@@ -104,7 +104,13 @@ class AppointmentTagger {
     // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
     if (!suppressWelcome && service.waveguard_tier && service.is_recurring) {
-      const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
+      // An auto-derived LABEL-ONLY tier (GATE_AUTO_WAVEGUARD_TIER stamp on a
+      // per-visit customer) must not satisfy this member gate — the tier
+      // stamp is contractually comms-silent, and pre-gate these customers
+      // (tierless) never received the welcome. Lazy require avoids a cycle.
+      const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
+      const labelOnly = await isAutoDerivedTierLabelCustomer(service.customer_id);
+      const isNewSignup = !labelOnly && await isNewRecurringSignupCandidate(service.customer_id, {
         excludeServiceId: service.id,
       });
       if (isNewSignup) {
