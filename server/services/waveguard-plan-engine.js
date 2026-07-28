@@ -994,9 +994,12 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   const stamped = String(cities.stampedCity || '').trim();
   const profileCity = String(profile.municipality || '').trim();
   const customerCity = String(cities.customerCity || '').trim();
-  const stampedDiverges = !!stamped && [profileCity, customerCity]
-    .filter(Boolean)
-    .every((known) => known.toLowerCase() !== stamped.toLowerCase());
+  // Divergence needs at least one KNOWN reference city — with none on file,
+  // .every() over an empty list would call any stamped city divergent and
+  // drop a county whose blackout may genuinely apply.
+  const knownCities = [profileCity, customerCity].filter(Boolean);
+  const stampedDiverges = !!stamped && knownCities.length > 0 &&
+    knownCities.every((known) => known.toLowerCase() !== stamped.toLowerCase());
   const county = stampedDiverges ? '' : String(profile.county || '').trim();
   const city = stamped || profileCity || customerCity;
   if (!county && !city) return [];

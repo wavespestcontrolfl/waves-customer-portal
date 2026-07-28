@@ -898,9 +898,12 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const stampedCity = String(svc.service_address_city || '').trim();
   const profileCity = String(profile.municipality || '').trim();
   const customerCity = String(svc.city || '').trim();
-  const stampedDiverges = !!stampedCity && [profileCity, customerCity]
-    .filter(Boolean)
-    .every((known) => known.toLowerCase() !== stampedCity.toLowerCase());
+  // Divergence needs at least one KNOWN reference city — with none on file,
+  // .every() over an empty list would call any stamped city divergent and
+  // drop a county whose blackout may genuinely apply.
+  const knownCities = [profileCity, customerCity].filter(Boolean);
+  const stampedDiverges = !!stampedCity && knownCities.length > 0 &&
+    knownCities.every((known) => known.toLowerCase() !== stampedCity.toLowerCase());
   const county = stampedDiverges ? '' : String(profile.county || '').trim();
   const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
