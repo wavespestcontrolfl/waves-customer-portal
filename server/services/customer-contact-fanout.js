@@ -168,7 +168,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
       : row.estimate_data;
     const targetName = newFull.slice(0, 100);
     const preparedFor = data?.proposal?.preparedFor;
-    const patchPreparedFor = !!(preparedFor && nameKey(preparedFor) === oldFullKey && preparedFor !== newFull);
+    const patchPreparedFor = !!(preparedFor && nameKey(preparedFor) === oldFullKey && preparedFor !== targetName);
     // A case-only edit (old key == new key) also matches rows that ALREADY
     // hold the exact new spelling everywhere — nothing displayed changes on
     // those, so they get no write (and keep their delivery marker).
@@ -184,7 +184,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     const expr = patchPreparedFor
       ? "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,preparedFor}', to_jsonb(?::text)) - 'proposalDelivery'"
       : "estimate_data - 'proposalDelivery'";
-    const bindings = patchPreparedFor ? [newFull] : [];
+    const bindings = patchPreparedFor ? [targetName] : [];
     let guarded = conn('estimates')
       .where({ id: row.id, customer_id: customerId, customer_name: row.customer_name })
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
