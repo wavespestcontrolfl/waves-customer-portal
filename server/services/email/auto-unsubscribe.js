@@ -265,7 +265,9 @@ async function autoUnsubscribe(email) {
         logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id}, confirmed=${confirmed})`);
         return { method: confirmed ? 'list_header_one_click' : 'list_header_get', confirmed, url: urlMatch[1] };
       } catch (err) {
-        logger.warn(`[unsubscribe] List-Unsubscribe URL failed: ${err.message}`);
+        // Code/name only — transport errors embed the sender-controlled
+        // hostname (which can carry recipient tokens) in err.message.
+        logger.warn(`[unsubscribe] List-Unsubscribe URL failed (email ${email.id}): ${err.code || err.name || 'request_failed'}`);
       }
     }
   }
@@ -294,7 +296,7 @@ async function autoUnsubscribe(email) {
       logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id}) — attempt only`);
       return { method: 'body_link', confirmed: false, url: unsubUrl };
     } catch (err) {
-      logger.warn(`[unsubscribe] Body link failed: ${err.message}`);
+      logger.warn(`[unsubscribe] Body link failed (email ${email.id}): ${err.code || err.name || 'request_failed'}`);
     }
   }
 

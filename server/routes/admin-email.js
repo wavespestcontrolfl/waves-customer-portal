@@ -514,7 +514,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
         return res.status(409).json({ error: 'Another reclassification is in progress — retry in a moment' });
       }
       claimedForReclass = true;
-      claimedFromState = 'spam_quarantined';
+      claimedFromState = email.quarantined_at ? 'spam_quarantined' : 'spam_quarantine_ambiguous';
     }
     const revertReclassClaim = async () => {
       if (!claimedForReclass) return;

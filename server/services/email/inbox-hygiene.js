@@ -181,10 +181,16 @@ async function sweepQuarantine(now = new Date()) {
     const staleReclass = await db('emails')
       .where('auto_action', 'spam_reclassifying')
       .where('updated_at', '<', claimGraceCutoff)
-      .select('id');
+      .select('id', 'quarantined_at');
     for (const row of staleReclass) {
+      // quarantined_at distinguishes the origin state: ambiguous rows never
+      // carried the stamp, and reverting one to plain 'spam_quarantined'
+      // (null stamp) would make it invisible to every recovery pass.
       await db('emails').where({ id: row.id, auto_action: 'spam_reclassifying' })
-        .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+        .update({
+          auto_action: row.quarantined_at ? 'spam_quarantined' : 'spam_quarantine_ambiguous',
+          updated_at: new Date(),
+        });
     }
     if (staleReclass.length) logger.info(`[inbox-hygiene] reverted ${staleReclass.length} stale reclassification claim(s)`);
   } catch (e) {
@@ -276,14 +282,17 @@ async function sweepQuarantine(now = new Date()) {
       const labels = await gmailClient.getMessageLabels(row.gmail_id);
       const rescuedByOperator = labels.includes('INBOX') || !labels.includes(quarantineLabelId);
       if (rescuedByOperator) {
-        // A label-only removal (operator clicked the label's ✕ without
-        // moving the message) leaves it archived in All Mail — finish the
-        // restore by putting it back in INBOX before settling.
-        if (!labels.includes('INBOX')) {
+        // Finish whichever half the operator's veto left undone: a
+        // label-only removal needs INBOX restored; an INBOX drag-back needs
+        // the lingering Quarantine label removed (or rescued mail piles up
+        // under a label that is supposed to mean pending-deletion).
+        const addLabels = labels.includes('INBOX') ? [] : ['INBOX'];
+        const removeLabels = labels.includes(quarantineLabelId) ? [quarantineLabelId] : [];
+        if (addLabels.length || removeLabels.length) {
           try {
-            await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], []);
+            await gmailClient.modifyLabels(row.gmail_id, addLabels, removeLabels);
           } catch (e) {
-            logger.warn(`[inbox-hygiene] veto INBOX restore failed (email ${row.id}) — quarantine state retained for retry: ${e.message}`);
+            logger.warn(`[inbox-hygiene] veto restore failed (email ${row.id}) — quarantine state retained for retry: ${e.message}`);
             continue;
           }
         }
@@ -379,6 +388,7 @@ async function rescueSpamFolder() {
   const { messages, truncated } = await gmailClient.listAllMessages('in:spam newer_than:2d', 500, { includeSpamTrash: true });
   if (truncated) logger.warn('[inbox-hygiene] spam rescue hit the 500-message cap — oldest spam not scanned this pass');
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
+  let perMessageFailures = 0;
   for (const m of messages || []) {
     counts.scanned += 1;
     try {
@@ -427,8 +437,14 @@ async function rescueSpamFolder() {
       }
       logger.info(`[inbox-hygiene] rescued ${verdict.kind} email from spam (${m.id})`);
     } catch (e) {
+      perMessageFailures += 1;
       logger.warn(`[inbox-hygiene] spam rescue failed for message ${m.id}: ${e.message}`);
     }
+  }
+  // Every message failing is not N isolated blips — it's a systemic Gmail
+  // failure (quota/token/permission) and the run must not read as success.
+  if (counts.scanned > 0 && perMessageFailures === counts.scanned) {
+    throw new Error(`spam rescue failed on all ${counts.scanned} message(s) — systemic Gmail failure`);
   }
   return counts;
 }

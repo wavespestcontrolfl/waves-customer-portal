@@ -991,6 +991,7 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
 
 async function handleCustomerRequest(email, classification) {
   let customer = await db('customers').where('email', email.from_address).first();
+  const matchedByAddress = !!customer;
 
   if (!customer && email.from_name) {
     const parts = email.from_name.split(' ');
@@ -1011,12 +1012,16 @@ async function handleCustomerRequest(email, classification) {
     // Known-customer conversation mail surfaces as important in Gmail.
     try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
   }
-  await draftReplyForEmail(email, { customer, tone: 'service' });
+  // Personalization only for ADDRESS-matched customers — a display name is
+  // attacker-typed, and a name-only match must not put a real customer's
+  // first name into a draft addressed to an unrelated sender.
+  await draftReplyForEmail(email, { customer: matchedByAddress ? customer : null, tone: 'service' });
 }
 
 async function handleComplaint(email, classification) {
   // Match customer
   let customer = await db('customers').where('email', email.from_address).first();
+  const matchedByAddress = !!customer;
   if (!customer && email.from_name) {
     const parts = email.from_name.split(' ');
     if (parts.length >= 2) {
@@ -1035,7 +1040,7 @@ async function handleComplaint(email, classification) {
   });
   // Complaints are always important in Gmail, matched or not.
   try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT', 'STARRED'], []); } catch (e) { /* non-critical */ }
-  await draftReplyForEmail(email, { customer, tone: 'complaint' });
+  await draftReplyForEmail(email, { customer: matchedByAddress ? customer : null, tone: 'complaint' });
 
   try { await gmailClient.modifyLabels(email.gmail_id, ['STARRED'], []); } catch (e) { /* non-critical */ }
 
