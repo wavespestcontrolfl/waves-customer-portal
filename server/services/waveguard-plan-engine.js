@@ -981,10 +981,29 @@ function selectProtocolVisit(profile, serviceDate) {
   return { trackKey, track, month, visit };
 }
 
-async function getApplicableOrdinances(knex, profile) {
+async function getApplicableOrdinances(knex, profile, cities = {}) {
   if (!profile) return [];
-  const county = String(profile.county || '').trim();
-  const city = String(profile.municipality || '').trim();
+  // Same city resolution the completion path uses (actualProductBlackoutBlocks):
+  // the STAMPED visit address outranks the turf-profile municipality — the 1:1
+  // profile describes the primary home, so a visit stamped at a rental in
+  // another city must evaluate the treated property's ordinances. Customer
+  // city is the last resort. When the stamped city DIVERGES from the profile's
+  // context, the profile county is dropped too — the query ORs county and city
+  // jurisdictions, and the rental's county is unknown, so keeping the primary
+  // home's county would bolt its blackout onto the rental's rules.
+  const stamped = String(cities.stampedCity || '').trim();
+  const profileCity = String(profile.municipality || '').trim();
+  const customerCity = String(cities.customerCity || '').trim();
+  // The county belongs to the PROFILE, so divergence is measured against the
+  // profile's own city context (its municipality, else the customer city as
+  // its implied context): a stamped visit in a different city drops the
+  // profile county even when the CUSTOMER's city happens to match the stamp
+  // (stale-profile case). No known reference city -> keep the county.
+  const countyReferenceCity = profileCity || customerCity;
+  const stampedDiverges = !!stamped && !!countyReferenceCity &&
+    countyReferenceCity.toLowerCase() !== stamped.toLowerCase();
+  const county = stampedDiverges ? '' : String(profile.county || '').trim();
+  const city = stamped || profileCity || customerCity;
   if (!county && !city) return [];
 
   let query = knex('municipality_ordinances').where({ active: true });
@@ -1292,7 +1311,16 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
-  const ordinances = await getApplicableOrdinances(knex, profile);
+  // One resolved city for BOTH the ordinance query and the property gate the
+  // panel displays — the restriction must be labeled with the city it was
+  // actually evaluated against (stamped visit address first).
+  const resolvedOrdinanceCity = String(
+    service.service_address_city || profile?.municipality || service.city || '',
+  ).trim() || null;
+  const ordinances = await getApplicableOrdinances(knex, profile, {
+    stampedCity: service.service_address_city,
+    customerCity: service.city,
+  });
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
@@ -1547,9 +1575,18 @@ async function buildPlanForService(serviceId, options = {}) {
       month,
       visit: visit?.visit || null,
       lawnSqft: profile?.lawn_sqft || null,
-      municipality: profile?.municipality || service.city || null,
+      municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
+      // Restriction windows ACTIVE on this service date, so the closeout can
+      // warn about tech-added N/P products the planned-item gate never saw —
+      // evaluated here against the property's real ordinances (no client-side
+      // month heuristics).
+      activeOrdinanceWindows: ordinanceSummary.activeWindows.map((rule) => ({
+        jurisdictionName: rule.jurisdiction_name || null,
+        restrictedNitrogen: !!rule.restricted_nitrogen,
+        restrictedPhosphorus: !!rule.restricted_phosphorus,
+      })),
       annualN: {
         ...annualN,
         ledgerSource: nutrientLedger.source || null,

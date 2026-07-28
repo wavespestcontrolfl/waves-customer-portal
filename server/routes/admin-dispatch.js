@@ -23,7 +23,7 @@ const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-d
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, amountToPounds } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -503,6 +503,29 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
+// Plan/approval-engine block messages predate the advisory policy and can
+// still phrase conditions as approval mandates ("manager review is required
+// before applying it", "requires manager approval"). Advisory records must
+// not persist copy that contradicts the non-blocking closeout, so soften the
+// wording before it lands in structured_notes / Customer 360.
+function advisorySafeMessage(text) {
+  return String(text || '')
+    .replace(/;\s*manager (?:review|approval) is required before applying it\.?/gi, ' — double-check before applying.')
+    .replace(/\brequires manager approval\b/gi, 'flagged for review')
+    .trim();
+}
+
+// Advisory messages recorded on a completion, flattened for the closeout
+// success view — the operator must see a recorded overrun/exception at
+// completion time, not only later in Customer 360.
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration }) {
+  return [blackout, nLimit, manager, calibration]
+    .filter((record) => record && record.advisory)
+    .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
+    .map((block) => block && block.message)
+    .filter(Boolean);
+}
+
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
     'missing_calibration',
@@ -879,8 +902,26 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   ]);
   if (!profile) return [];
 
-  const county = String(profile.county || '').trim();
-  const city = String(profile.municipality || svc.city || '').trim();
+  // Stamped visit address OUTRANKS the turf-profile municipality (matches
+  // the plan engine): the 1:1 profile describes the primary home, so a visit
+  // stamped at a rental in another city must use the treated property's
+  // ordinances, not the profile's — and when the stamped city diverges, the
+  // profile county is dropped too (the rental's county is unknown; keeping
+  // the primary home's county would OR its blackout onto the rental).
+  const stampedCity = String(svc.service_address_city || '').trim();
+  const profileCity = String(profile.municipality || '').trim();
+  const customerCity = String(svc.city || '').trim();
+  // The county belongs to the PROFILE, so divergence is measured against the
+  // profile's own city context (its municipality, else the customer city as
+  // its implied context): a stamped visit in a different city drops the
+  // profile county even when the CUSTOMER's city happens to match the stamp
+  // (stale-profile case: Charlotte profile, Bradenton customer+visit). No
+  // known reference city -> keep the county (can't prove divergence).
+  const countyReferenceCity = profileCity || customerCity;
+  const stampedDiverges = !!stampedCity && !!countyReferenceCity &&
+    countyReferenceCity.toLowerCase() !== stampedCity.toLowerCase();
+  const county = stampedDiverges ? '' : String(profile.county || '').trim();
+  const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
 
   let ordinanceQuery = db('municipality_ordinances').where({ active: true });
@@ -3800,11 +3841,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // that would trap the tech on the screen.
       const calibrationBypass = calibrationBlocks.length > 0;
       if (calibrationBypass) {
+        // Advisory record only — no acknowledgment claim. The closeout no
+        // longer displays a calibration confirm step, so stamping
+        // "acknowledged" here would assert the tech consciously accepted a
+        // warning that was never shown (Codex P2, PR #3022 round 1).
         waveguardCalibrationAdvisory = {
-          acknowledged: true,
-          acknowledgedByTechnicianId: req.technicianId,
-          acknowledgedByRole: req.techRole || null,
-          acknowledgedAt: new Date().toISOString(),
+          advisory: true,
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
           blocks: calibrationBlocks.map((block) => ({
             code: block.code,
             message: block.message,
@@ -3816,53 +3861,113 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ...blackoutLockoutBlocks(plan),
         ...await actualProductBlackoutBlocks(svc, products),
       ];
-      if (blackoutBlocks.length && (!normalizedOfficeApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard fertilizer blackout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Office approval required for fertilizer blackout',
-          code: 'waveguard_fertilizer_blackout_lockout',
-          details: blackoutBlocks.map((block) => block.message),
-          blocks: blackoutBlocks,
-        });
-      }
+      // Advisory, not a lockout (owner directive 2026-07-29: approval
+      // ceremonies removed from the closeout). Approval semantics require
+      // BOTH an explicit approval payload (legacy client) AND an admin
+      // actor — a tech-submitted or stale payload records as advisory, so
+      // the audit history can't present an unapproved closeout as approved.
       if (blackoutBlocks.length) {
-        waveguardBlackoutApproval = {
-          ...normalizedOfficeApproval,
-          approvedByTechnicianId: req.technicianId,
-          approvedByRole: req.techRole || null,
-          approvedAt: new Date().toISOString(),
-          blocks: blackoutBlocks.map((block) => ({
-            code: block.code,
-            message: block.message,
-            source: block.source || null,
-          })),
-        };
+        const mappedBlackoutBlocks = blackoutBlocks.map((block) => ({
+          code: block.code,
+          message: block.message,
+          source: block.source || null,
+        }));
+        waveguardBlackoutApproval = (normalizedOfficeApproval && req.techRole === 'admin')
+          ? {
+            ...normalizedOfficeApproval,
+            approvedByTechnicianId: req.technicianId,
+            approvedByRole: req.techRole || null,
+            approvedAt: new Date().toISOString(),
+            blocks: mappedBlackoutBlocks,
+          }
+          : {
+            advisory: true,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            blocks: mappedBlackoutBlocks,
+          };
       }
       const annualNBlocks = annualNLockoutBlocks(plan);
-      if (annualNBlocks.length && (!normalizedNLimitApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard annual N budget lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Admin approval required for annual N budget limit',
-          code: 'waveguard_annual_n_budget_lockout',
-          details: annualNBlocks.map((block) => block.message),
-          blocks: annualNBlocks,
-          annualN: plan?.propertyGate?.annualN || null,
-        });
+      // The plan's annualN only reflects PLANNED items. With the hard gate
+      // gone, the tech can add or upsize nitrogen products, so recompute the
+      // projection from the SUBMITTED actuals — otherwise a ledger-crossing
+      // application would complete with no advisory and no audit record.
+      const actualAnnualNBlocks = [];
+      try {
+        const annualN = plan?.propertyGate?.annualN || null;
+        const lawnSqft = Number(plan?.propertyGate?.lawnSqft || 0);
+        const limit = Number(annualN?.limit);
+        // The catalog scan runs whenever products were submitted — the
+        // unquantified-unit detection must NOT hide behind the area/limit
+        // gate (an incomplete turf profile is exactly when quantification
+        // is unavailable and the gap most needs surfacing).
+        if (Array.isArray(products) && products.length) {
+          const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
+          const catalogRows = ids.length
+            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n')
+            : [];
+          const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
+          let actualVisitN = 0;
+          const unquantifiedNProducts = [];
+          for (const p of products) {
+            const catalog = catalogById.get(String(p.productId));
+            if (!catalog || Number(catalog.analysis_n || 0) <= 0) continue;
+            // Same normalization the persistence path uses: a "/gal" unit is
+            // a mix concentration whose total is concentrate amount.
+            const pounds = amountToPounds(p.totalAmount, baseQuantityUnit(p.amountUnit || p.rateUnit || null));
+            if (pounds == null) {
+              // Fluid-volume amounts can't convert to lb N without a per-
+              // product density — the entire annual-N system (nutrient
+              // ledger and plan projection share amountToPounds) excludes
+              // them. Never SILENTLY: surface the gap as its own advisory
+              // instead of inventing a density here.
+              unquantifiedNProducts.push(catalog.name || 'nitrogen product');
+            } else if (lawnSqft > 0) {
+              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (lawnSqft / 1000);
+            }
+          }
+          const used = Number(annualN?.used || 0);
+          if (Number.isFinite(limit) && limit > 0 && actualVisitN > 0 && used + actualVisitN > limit) {
+            actualAnnualNBlocks.push({
+              code: 'actual_annual_n_budget_exceeded',
+              message: `Applied products add ${actualVisitN.toFixed(2)} lb N/1k (${(used + actualVisitN).toFixed(2)} of ${limit} lb N/1k for the year) — actuals exceed the annual N budget.`,
+            });
+          }
+          if (unquantifiedNProducts.length) {
+            actualAnnualNBlocks.push({
+              code: 'unquantified_liquid_nitrogen',
+              message: `${[...new Set(unquantifiedNProducts)].join(', ')} was applied in an amount the nutrient ledger can't convert to lb N/1k — the annual-N projection excludes it; track it manually if the property is near its budget.`,
+            });
+          }
+        }
+      } catch (nCalcErr) {
+        logger.warn(`[complete] actual annual-N projection failed for ${svc.id}: ${nCalcErr.message}`);
       }
-      if (annualNBlocks.length) {
-        waveguardNLimitApproval = {
-          ...normalizedNLimitApproval,
-          approvedByTechnicianId: req.technicianId,
-          approvedByRole: req.techRole || null,
-          approvedAt: new Date().toISOString(),
-          annualN: plan?.propertyGate?.annualN || null,
-          blocks: annualNBlocks.map((block) => ({
-            code: block.code,
-            message: block.message,
-          })),
-        };
+      const combinedAnnualNBlocks = [...annualNBlocks, ...actualAnnualNBlocks];
+      // Advisory, not a lockout (same rules as the blackout gate above).
+      if (combinedAnnualNBlocks.length) {
+        const mappedNBlocks = combinedAnnualNBlocks.map((block) => ({
+          code: block.code,
+          message: block.message,
+        }));
+        waveguardNLimitApproval = (normalizedNLimitApproval && req.techRole === 'admin')
+          ? {
+            ...normalizedNLimitApproval,
+            approvedByTechnicianId: req.technicianId,
+            approvedByRole: req.techRole || null,
+            approvedAt: new Date().toISOString(),
+            annualN: plan?.propertyGate?.annualN || null,
+            blocks: mappedNBlocks,
+          }
+          : {
+            advisory: true,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            annualN: plan?.propertyGate?.annualN || null,
+            blocks: mappedNBlocks,
+          };
       }
       const inventoryBlocks = [
         ...inventoryPlanLockoutBlocks(plan),
@@ -3886,68 +3991,86 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceDate: serviceDateOnly(svc.scheduled_date),
       });
       const managerBlocks = managerApprovalCheck.blocks || [];
-      if (managerBlocks.length && (!normalizedManagerApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard manager approval lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Admin approval required for WaveGuard protocol exception',
-          code: 'waveguard_manager_approval_lockout',
-          details: managerBlocks.map((block) => block.message),
-          blocks: managerBlocks,
-        });
-      }
+      // Advisory, not a lockout (same rules as the blackout gate above):
+      // managerApprovalSummary stamps approval semantics, so it only runs
+      // when an explicit approval payload arrived; otherwise the exception
+      // is recorded as an advisory the audit UI must not present as approved.
       if (managerBlocks.length) {
-        waveguardManagerApproval = managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
-          technicianId: req.technicianId,
-          role: req.techRole || null,
-        });
+        waveguardManagerApproval = (normalizedManagerApproval && req.techRole === 'admin')
+          ? managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
+            technicianId: req.technicianId,
+            role: req.techRole || null,
+          })
+          : {
+            advisory: true,
+            reasonCode: null,
+            note: null,
+            recordedByTechnicianId: req.technicianId,
+            recordedByRole: req.techRole || null,
+            recordedAt: new Date().toISOString(),
+            blocks: managerBlocks.map((block) => ({
+              code: block.code,
+              message: advisorySafeMessage(block.message),
+              productId: block.productId || null,
+              productName: block.productName || null,
+            })),
+          };
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
-      // Only adopt the plan's calibration when it's valid (no bypass). On a
-      // calibration bypass we keep whatever the tech explicitly passed (usually
-      // none) rather than recording an auto-picked, non-verified system as used.
+      // Only adopt the plan's calibration when it's valid (no bypass) AND it
+      // corresponds to something real for THIS visit: the visit's stored
+      // assignment or an explicitly submitted rig. With the equipment picker
+      // gone, the plan's global auto-pick (e.g. the sole active calibration
+      // in the DB) is a suggestion the tech never saw — recording it as used
+      // would fabricate equipment usage and overwrite the visit's assignment.
       if (selectedCalibration && !calibrationBypass) {
-        waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
-        waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
+        const selectedMatchesVisit =
+          (svc.assigned_calibration_id && String(selectedCalibration.id) === String(svc.assigned_calibration_id))
+          || (svc.assigned_equipment_system_id && String(selectedCalibration.equipment_system_id) === String(svc.assigned_equipment_system_id))
+          || (calibrationId && String(selectedCalibration.id) === String(calibrationId))
+          || (equipmentSystemId && String(selectedCalibration.equipment_system_id) === String(equipmentSystemId));
+        if (selectedMatchesVisit) {
+          waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
+          waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
+        }
       }
-      // On a calibration bypass, record "none" rather than persisting equipment
-      // the tech could not have chosen. We clear the IDs when EITHER:
-      //   - no equipment was submitted (so any value present is only a stale
-      //     assigned_equipment_system_id/assigned_calibration_id backfill), OR
-      //   - the selected calibration is not field verified — those rows are
-      //     filtered out of the dropdown (SchedulePage.jsx:5670), so a non-empty
-      //     ID for one can only come from a stale draft / direct API, never a real
-      //     tech selection.
-      // A field-verified-but-expired calibration DOES appear in the dropdown and
-      // can be deliberately selected, so we keep it (the advisory still warns).
+      // On a calibration bypass, record "none" only when the RESOLVED
+      // calibration (request field from a legacy client, the service's
+      // assignment, or the plan's selection) is not field verified — an
+      // unverified row was never a legitimate choice, so persisting it would
+      // fabricate equipment usage. A field-verified-but-EXPIRED assignment is
+      // kept: it is a real assignment and the advisory records the expiry.
+      // (The closeout no longer submits equipmentSystemId at all, so keying
+      // this off the raw request field would clear every resolved assignment
+      // and null out scheduled_services' assignment downstream — Codex P1.)
       const selectedIsFieldVerified =
         selectedCalibration?.calibration_status === 'field_verified';
-      if (calibrationBypass && (!equipmentSystemId || !selectedIsFieldVerified)) {
+      if (calibrationBypass && !selectedIsFieldVerified) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;
       }
-      // Tank cleanout attestation is required whenever we will actually persist an
-      // equipment system as used — i.e. waveguardEquipmentSystemId survived to here
-      // and the calibration was not cleared to "none". Keying off the ID we persist
-      // (rather than the raw request field) closes the gap where a backfilled, valid
-      // field-verified assignment is recorded as used by an older client / direct API
-      // with no cleanout. The earlier empty-dropdown / stale-assignment trap does not
-      // recur: those calibrations are non-field-verified, so the clear above already
-      // nulled the ID and this block is skipped.
+      // Tank cleanout is recorded whenever an equipment system is persisted as
+      // used — i.e. waveguardEquipmentSystemId survived to here and the
+      // calibration was not cleared to "none". Keyed off the ID we persist
+      // (rather than the raw request field) so a backfilled field-verified
+      // assignment still gets a cleanout record attached.
       if (waveguardEquipmentSystemId && !waveguardCalibrationCleared) {
+        // Advisory, not a lockout (owner directive 2026-07-29: the
+        // equipment/cleanout step is gone from the closeout UI). A missing
+        // cleanout record is noted on the completion instead of blocking it.
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
-        if (cleanoutBlocks.length) {
-          const validationErr = new Error('WaveGuard tank cleanout lockout');
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-          return res.status(400).json({
-            error: 'Tank cleanout record required',
-            code: 'waveguard_tank_cleanout_lockout',
-            details: cleanoutBlocks.map((block) => block.message),
-            blocks: cleanoutBlocks,
-          });
-        }
         waveguardTankCleanout = {
+          ...(cleanoutBlocks.length
+            ? {
+              advisory: true,
+              // No attestation collected (the closeout has no equipment
+              // step) is distinct from "tech answered no" — the audit view
+              // renders this as "Not recorded", never "Not completed".
+              notRecorded: !normalizedTankCleanout,
+              missing: cleanoutBlocks.map((block) => block.message),
+            }
+            : {}),
           ...normalizedTankCleanout,
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
@@ -5545,6 +5668,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         invoiceId: null,
         invoiceTotal: null,
         completionPhotoUpload: completionPhotoUploadResult,
+        completionAdvisories: completionAdvisoryMessages({
+          blackout: waveguardBlackoutApproval,
+          nLimit: waveguardNLimitApproval,
+          manager: waveguardManagerApproval,
+          calibration: waveguardCalibrationAdvisory,
+        }),
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -7978,6 +8107,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
       completionPhotoUpload: completionPhotoUploadResult,
+      completionAdvisories: completionAdvisoryMessages({
+        blackout: waveguardBlackoutApproval,
+        nLimit: waveguardNLimitApproval,
+        manager: waveguardManagerApproval,
+        calibration: waveguardCalibrationAdvisory,
+      }),
       ...(typedFindingsType ? {
         typedFindingsType,
         typedDeliveryMode,
