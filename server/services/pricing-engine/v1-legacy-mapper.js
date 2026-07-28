@@ -605,7 +605,10 @@ function mapV1ToLegacyShape(v1Result) {
       ai: selectedSystem === 'advance' ? installPrice : null,
       ti: selectedSystem === 'trelona' ? installPrice : null,
       // Bracketed station-check monthly (owner 2026-07-28): tiers are
-      // retired, so both legacy fields carry the line's priced monthly.
+      // retired, so both legacy fields carry the line's priced monthly, and
+      // monMonthly is the canonical name the V2 results panel reads (the
+      // client fallback engine emits the same field).
+      monMonthly,
       bmo: monMonthly,
       pmo: monMonthly,
       perim: tbLI.perimeter || 0,

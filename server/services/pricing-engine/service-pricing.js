@@ -3933,9 +3933,11 @@ function priceTermiteStationRental(installPrice) {
 
 function priceTermiteBait(property, options = {}) {
   const {
-    // Default switched to Advance Apr 2026 (was 'trelona') for competitive
-    // doorstep pricing. Trelona remains available as the premium upgrade.
-    system = 'advance',
+    // No destructure default (codex P2): an absent system must reach
+    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
+    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
+    // it and quote 10-ft Advance for direct callers.
+    system,
     monitoringTier = 'basic',
     // 'own' (customer buys the stations, one-time install charge) or 'rent'
     // (Waves retains ownership, $0 install, recovery rides the quarterly).

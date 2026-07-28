@@ -7861,15 +7861,36 @@ export default function EstimateToolViewV2({
                                       bracket pricing (owner 2026-07-28) —
                                       the retired flat Basic/Premier figures
                                       must never render beside a bracketed
-                                      quote total. */}
-                                  {R.tmBait.ti != null && (
-                                    <TierRowV2
-                                      name="Trelona"
-                                      detail={`${fmtInt(R.tmBait.ti)} install | ${R.tmBait.sta} stations | $${R.tmBait.monMonthly}/mo station check`}
-                                      price={`$${Math.round((R.tmBait.monMonthly ?? 0) * 3)}/app`}
-                                      recommended
-                                    />
-                                  )}{" "}
+                                      quote total. Renders whichever system
+                                      the result actually priced: new quotes
+                                      are Trelona, but a replayed pre-change
+                                      Advance draft still shows ITS row
+                                      (server adapter exposes monMonthly;
+                                      bmo is the legacy fallback name). */}
+                                  {(() => {
+                                    const tmSys =
+                                      R.tmBait.selectedSystem === "advance"
+                                        ? "advance"
+                                        : "trelona";
+                                    const tmInstallPrice =
+                                      tmSys === "advance"
+                                        ? R.tmBait.ai
+                                        : R.tmBait.ti;
+                                    const tmMon =
+                                      R.tmBait.monMonthly ?? R.tmBait.bmo;
+                                    return tmInstallPrice != null ? (
+                                      <TierRowV2
+                                        name={
+                                          tmSys === "advance"
+                                            ? "Advance (legacy)"
+                                            : "Trelona"
+                                        }
+                                        detail={`${fmtInt(tmInstallPrice)} install | ${R.tmBait.sta} stations | $${tmMon}/mo station check`}
+                                        price={`$${Math.round((tmMon ?? 0) * 3)}/app`}
+                                        recommended
+                                      />
+                                    ) : null;
+                                  })()}{" "}
                                 </TierGridV2>{" "}
                                 <div className="text-11 text-ink-secondary mt-1">
                                   Install cost is a one-time setup fee, not a
