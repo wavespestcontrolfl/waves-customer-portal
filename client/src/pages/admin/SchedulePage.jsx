@@ -771,6 +771,27 @@ function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
 
+// A completed visit whose REQUIRED completion-invoice mint failed (503
+// backfill_invoice_mint_failed) still owes its resume: the server released
+// the completion attempt to the immediately-resumable state and the visit
+// row is already 'completed', so without a marker no dispatch surface would
+// reopen completion after a reload/dismiss and the mint could strand until
+// Billing Recovery sweeps it. CompletionPanel sets the marker when the 503
+// lands and clears it on success; DispatchPageV2's completion-open gates
+// honor it for completed visits. Exported for DispatchPageV2 — one key
+// derivation, no drift.
+export function completionResumeOwedKey(serviceId) {
+  return `waves_completion_resume_owed_${serviceId}`;
+}
+
+export function completionResumeOwed(serviceId) {
+  try {
+    return localStorage.getItem(completionResumeOwedKey(serviceId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
 function timeToMinutes(value) {
   if (typeof value !== "string") return null;
@@ -8780,10 +8801,27 @@ export function CompletionPanel({
     invoiceAlreadyPaid ||
     autopayCoversVisit ||
     !!service.completionInvoiceAlreadySent;
+  // Typed one-time completions bill by PROFILE: since the billing pre-gate
+  // removal (2026-07-27) the server mints the completion invoice at the row
+  // price for a billingType 'one_time' profile even without the scheduler
+  // flag or a tier. Mirror that conjunction here (row-priced, performed,
+  // non-callback, not an included follow-up) so the SMS preview, pay-link
+  // toggle, and review controls show the completion the server actually
+  // performs.
+  const typedOneTimeBilling =
+    String(service.completionProfile?.billingType || "").toLowerCase() ===
+      "one_time" &&
+    service.followupIncluded !== true &&
+    hasVisitPrice &&
+    !isCallback &&
+    visitOutcome !== "inspection_only" &&
+    visitOutcome !== "customer_declined";
   const willInvoice =
     !oneTimeRecapOnly &&
     !reportOnlyCompletion &&
-    (!!service.createInvoiceOnComplete || !!service.waveguardTier) &&
+    (!!service.createInvoiceOnComplete ||
+      !!service.waveguardTier ||
+      typedOneTimeBilling) &&
     invoiceAmount > 0;
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
@@ -10964,6 +11002,9 @@ export function CompletionPanel({
         );
       }
       localStorage.removeItem(completionDraftKey(service.id));
+      try {
+        localStorage.removeItem(completionResumeOwedKey(service.id));
+      } catch { /* storage unavailable — marker never existed either */ }
       setCompletionResult(result || null);
       setSuccess(true);
       const smsNeedsAttention = ["blocked", "failed"].includes(
@@ -10983,6 +11024,29 @@ export function CompletionPanel({
     } catch (e) {
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
+      }
+      if (e?.code === "backfill_invoice_mint_failed") {
+        // The closeout committed but its REQUIRED invoice didn't mint. Mark
+        // the visit as owing a resume so the dispatch page can reopen this
+        // panel for the (now completed) visit even after a reload — the
+        // re-submitted completion replays through the server's resume claim
+        // and retries the mint.
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage full — the mounted panel's retry still works */ }
+      } else if (e?.code === "completion_resume_payload_mismatch") {
+        // A marker-resume rebuilt from the draft can differ from the
+        // committed body (photos live only in memory). The closeout itself
+        // is saved; the office bills the visit from Billing Recovery — stop
+        // re-offering a resume that can never match.
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
+        alert(
+          "This closeout is already saved — the retry didn't match the original submission (photos don't survive a reload). The office can bill the visit from Billing Recovery.",
+        );
+        setSubmitting(false);
+        return;
       }
       alert("Failed to complete service: " + e.message);
     }

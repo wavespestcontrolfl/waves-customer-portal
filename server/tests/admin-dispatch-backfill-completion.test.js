@@ -2357,19 +2357,27 @@ describe('completion route wiring (source contracts)', () => {
     // existing-invoice chain incl. the estimate first-application lookup,
     // pre-minted Charge-Now lookup).
     expect((source.match(/invoiceLookupFailed = true/g) || []).length).toBe(3);
-    // Advisory-lock find-or-create on the SHARED schedule.invoice.mint
-    // namespace — the same two-key lock every pre-completion invoice writer
-    // (Charge Now / checkout, admin-schedule's
-    // mintScheduledServiceInvoiceWithDeposit) takes, so completion actually
-    // contends with them; the in-lock re-query adopts a concurrent invoice
+    // The live typed mint goes through the ONE transaction-aware helper
+    // every scheduled-service invoice writer shares
+    // (services/scheduled-invoice-mint): the shared two-key
+    // schedule.invoice.mint advisory lock serializes the writers, the
+    // in-lock replay re-check adopts a concurrent invoice (reused: true)
     // instead of minting a second collectible one
-    // (invoices.scheduled_service_id is not unique). Key derivation must
-    // stay byte-identical across the writers or they silently stop
-    // contending.
-    expect(source).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\n\s*\['schedule\.invoice\.mint', String\(svc\.id\)\],/);
+    // (invoices.scheduled_service_id is not unique), and create() runs on
+    // the lock transaction's own connection — no second pooled connection
+    // is held while the lock is. Key derivation must stay byte-identical
+    // across the writers or they silently stop contending — the ONE
+    // definition lives in the service module; admin-schedule imports it
+    // (no drifting local copy).
+    expect(source).toMatch(/const \{ mintScheduledServiceInvoiceWithDeposit \} = require\('\.\.\/services\/scheduled-invoice-mint'\);/);
+    expect(source).toMatch(/const minted = await mintScheduledServiceInvoiceWithDeposit\(\{\s*\n\s*svc,/);
+    expect(source).toMatch(/adoptedConcurrentInvoice = minted\.reused === true;/);
+    const mintServiceSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
+    expect(mintServiceSource).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\n\s*\['schedule\.invoice\.mint', String\(svc\.id\)\],/);
+    expect(mintServiceSource).toMatch(/database: trx,/);
     const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-    expect(scheduleSource).toMatch(/\['schedule\.invoice\.mint', String\(svc\.id\)\],/);
-    expect(source).toMatch(/if \(concurrentInvoice\) \{\s*\n\s*adoptedConcurrentInvoice = true;\s*\n\s*return concurrentInvoice;\s*\n\s*\}\s*\n\s*return InvoiceService\.createFromService\(record\.id, mintOptions\);/);
+    expect(scheduleSource).toMatch(/require\('\.\.\/services\/scheduled-invoice-mint'\)/);
+    expect(scheduleSource).not.toMatch(/async function mintScheduledServiceInvoiceWithDeposit/);
     // An adopted settled invoice takes the already-paid SMS branch, never a
     // fresh-invoice promise.
     expect(source).toMatch(/if \(adoptedConcurrentInvoice && \['paid', 'prepaid'\]\.includes\(invoice\.status\)\) \{\s*\n\s*alreadyPaid = true;/);

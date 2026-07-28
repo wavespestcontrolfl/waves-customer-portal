@@ -6174,41 +6174,65 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           skipAccrual: isBackfillCompletion,
         };
         // Serialized find-or-create for the live typed mint (pre-push Codex
-        // P0, gate-removal rounds 2-3): invoices.scheduled_service_id is
+        // P0, gate-removal rounds 2-4): invoices.scheduled_service_id is
         // NOT unique, and the pre-completion writers (office Charge Now
         // pre-mint, checkout tender sheets) can race this mint — two
-        // collectible invoices for one visit could collect twice. Those
-        // writers all serialize on the SHARED two-key advisory lock
-        // ['schedule.invoice.mint', svc.id] (admin-schedule's
-        // mintScheduledServiceInvoiceWithDeposit) — take the SAME lock here
-        // so completion actually contends with them: a checkout mint either
-        // commits before our in-lock re-query (adopted below) or blocks
-        // until our transaction commits and then replays our invoice via
-        // its own in-lock re-check. createFromService is not trx-aware, but
-        // the lock held on this connection for the block is what serializes
-        // (the trx exists to scope the lock). The adoption filter mirrors
-        // the helper's replay filter — a refunded/cancelled invoice is not
-        // adoptable; the replacement mints fresh. Every other lane keeps
-        // the direct mint.
+        // collectible invoices for one visit could collect twice. Mint
+        // through the ONE transaction-aware helper every scheduled-service
+        // invoice writer shares (services/scheduled-invoice-mint): the
+        // shared two-key ['schedule.invoice.mint', svc.id] advisory lock
+        // serializes the writers, the in-lock replay re-check adopts any
+        // invoice that landed after the suppressor lookups ran (reused:
+        // true), create() runs on the lock transaction's own connection so
+        // no second pooled connection is held while the lock is, and the
+        // estimate-deposit roll-forward keeps its hardened retry/fallback
+        // discipline. Replay line items are built BEFORE the lock
+        // (read-only); a REQUIRED resume mints the frozen single line for
+        // the provable-money reason mintOptions documents. Every other
+        // lane keeps the direct createFromService mint.
         let adoptedConcurrentInvoice = false;
         if (typedLiveRequiredMint) {
-          invoice = await db.transaction(async (trx) => {
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-              ['schedule.invoice.mint', String(svc.id)],
-            );
-            const concurrentInvoice = await trx('invoices')
-              .where((q) => q.where('scheduled_service_id', svc.id).orWhere('service_record_id', record.id))
-              .whereNot('status', 'void')
-              .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
-              .orderBy('created_at', 'desc')
-              .first();
-            if (concurrentInvoice) {
-              adoptedConcurrentInvoice = true;
-              return concurrentInvoice;
-            }
-            return InvoiceService.createFromService(record.id, mintOptions);
+          const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
+          const useReplayLines = !resumingCommittedCompletion;
+          const scheduledInvoice = useReplayLines
+            ? await InvoiceService.buildLineItemsForScheduledService(svc.id, {
+              fallbackAmount: mintInvoiceAmount,
+              fallbackDescription: svc.service_type,
+            })
+            : null;
+          let typedMintLines = scheduledInvoice?.lineItems?.length
+            ? scheduledInvoice.lineItems
+            : [{
+              description: svc.service_type,
+              quantity: 1,
+              unit_price: mintInvoiceAmount,
+              amount: mintInvoiceAmount,
+              category: svc.service_type,
+            }];
+          if (secureSetupFee) {
+            typedMintLines = [...typedMintLines, {
+              description: 'One-time setup fee',
+              quantity: 1,
+              unit_price: secureSetupFee.amount,
+              amount: secureSetupFee.amount,
+              category: 'Setup fee',
+            }];
+          }
+          const minted = await mintScheduledServiceInvoiceWithDeposit({
+            svc,
+            buildCreateParams: () => ({
+              customerId: svc.customer_id,
+              serviceRecordId: record.id,
+              scheduledServiceId: svc.id,
+              lineItems: typedMintLines,
+              discountIds: scheduledInvoice?.discountIds || undefined,
+              taxRate: mintInvoiceTaxRate,
+              dueDate: serviceDateOnly(record.service_date),
+              trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
+            }),
           });
+          invoice = minted.invoice;
+          adoptedConcurrentInvoice = minted.reused === true;
         } else {
           invoice = await InvoiceService.createFromService(record.id, mintOptions);
         }

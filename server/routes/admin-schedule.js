@@ -1820,6 +1820,10 @@ router.get('/', async (req, res, next) => {
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        // Included follow-up appointments (schedule-followup endpoint) never
+        // bill — CompletionPanel's typed one-time willInvoice prediction
+        // mirrors the server's completion billing on this flag.
+        followupIncluded: s.followup_included === true,
         billingLane,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
@@ -2031,6 +2035,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
+          'scheduled_services.followup_included',
           'scheduled_services.payer_id', 'scheduled_services.po_number',
           ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
           'scheduled_services.technician_id',
@@ -2194,6 +2199,7 @@ router.get('/week', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
+          followupIncluded: s.followup_included === true,
           billingLane,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
@@ -5387,94 +5393,10 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // double-charge window. See services/prepaid-pi-guard.
 const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 
-// Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
-// estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
-// of calling InvoiceService.createFromService (the only other roll-forward
-// site), so a mint here that skips the deposit credit permanently strands the
-// customer's paid deposit — accepted estimates are deliberately outside the
-// terminal-refund sweep — and the visit double-collects (deposit + full price).
-// Same discipline as createFromService: request the full unapplied balance,
-// let create() cap it against the after-tax total, consume exactly the
-// effective amount in the SAME transaction; a mismatch throws (the mint rolls
-// back), one retry re-reads the fresh balance, and a second failure falls back
-// to an UNCREDITED mint + reconcile alert — deposit machinery failures never
-// block door collection. The advisory lock serializes the two mint callers
-// (this helper's callers and Charge-now) so a double-tap can't race a visit
-// into two open invoices; the in-lock re-check returns the first request's
-// invoice to the replay.
-async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, assertEligibleInTrx = null }) {
-  const InvoiceService = require('../services/invoice');
-  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
-  const sourceEstimateId = svc.source_estimate_id || null;
-  let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const withDeposit = attempt < 2 && !!sourceEstimateId;
-    try {
-      return await db.transaction(async (trx) => {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['schedule.invoice.mint', String(svc.id)],
-        );
-        // Caller-supplied in-lock authorization recheck (technician
-        // ownership): the caller's pre-transaction SELECT alone leaves a
-        // window where dispatch reassigns the visit before this lock
-        // lands, letting the FORMER tech mint and receive the invoice's
-        // bearer payment token.
-        if (assertEligibleInTrx) await assertEligibleInTrx(trx);
-        // Replay = the double-tap window returning the FIRST request's fresh
-        // invoice. Terminal invoices (refunded/cancelled — every payment
-        // route rejects them) are not replay candidates: returning one here
-        // would resurrect a dead invoice the caller's reuse filter just
-        // skipped, instead of minting the replacement.
-        const replayed = await trx('invoices')
-          .where({ scheduled_service_id: svc.id })
-          .whereNot('status', 'void')
-          .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
-          .orderBy('created_at', 'desc')
-          .first();
-        if (replayed) return { invoice: replayed, reused: true };
-        const depositCredit = withDeposit
-          ? await pendingDepositCredit(sourceEstimateId, trx)
-          : null;
-        const created = await InvoiceService.create({
-          ...buildCreateParams(),
-          database: trx,
-          ...(depositCredit && Number(depositCredit.amount) > 0
-            ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
-            : {}),
-        });
-        const effective = Number(created?.applied_deposit_credit) || 0;
-        if (effective > 0) {
-          const allocated = await consumeDepositCredit({
-            estimateId: sourceEstimateId,
-            amount: effective,
-            invoiceId: created.id,
-            trx,
-          });
-          if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
-            throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
-          }
-        }
-        return { invoice: created, reused: false };
-      });
-    } catch (err) {
-      lastErr = err;
-      // Authorization failures are terminal — retrying can't fix them.
-      if (err.status) throw err;
-      if (!withDeposit) throw err;
-      logger.warn(`[schedule] mint deposit roll-forward failed for service ${svc.id} (attempt ${attempt + 1}): ${err.message}`);
-      if (attempt === 1) {
-        try {
-          const { triggerNotification } = require('../services/notification-triggers');
-          await triggerNotification('estimate_deposit_reconcile_needed', { estimateId: sourceEstimateId });
-        } catch (notifyErr) {
-          logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
-        }
-      }
-    }
-  }
-  throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
-}
+// Shared pre-completion mint moved to services/scheduled-invoice-mint (the
+// dispatch completion mint shares it — see that module's header). Re-imported
+// here for the local callers and the _test export.
+const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
