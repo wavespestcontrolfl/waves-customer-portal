@@ -43,12 +43,12 @@ async function isKnownSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return { known: false };
   if (isOperationalDomain(domainFromAddress(normalized))) return { known: true, kind: 'operational' };
-  const customer = await db('customers').where('email', normalized).whereNull('deleted_at').first();
+  const customer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first();
   if (customer) return { known: true, kind: 'customer', customer };
   // OPEN leads only — a lost/disqualified/duplicate lead's address must not
   // keep a spam exemption (or a spam-folder rescue) after the lead closes.
   const lead = await db('leads')
-    .where('email', normalized)
+    .whereRaw('LOWER(email) = ?', [normalized])
     .whereNull('deleted_at')
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .first();

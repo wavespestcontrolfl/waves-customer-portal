@@ -133,15 +133,15 @@ async function blockSpamSender(email) {
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();
   if (isVendor) return;
 
-  // Don't block customer emails
-  const isCustomer = await db('customers').where('email', fromAddress).first();
+  // Don't block customer emails (stored casing may differ)
+  const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [fromAddress]).first();
   if (isCustomer) return;
 
   // Don't block live leads either — a prospect whose first email tripped
   // the classifier must stay reachable while the lead is OPEN. Closed leads
   // (lost/disqualified/duplicate/unresponsive) get no exemption.
   const isLead = await db('leads')
-    .where('email', fromAddress)
+    .whereRaw('LOWER(email) = ?', [fromAddress])
     .whereNull('deleted_at')
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .first();
@@ -228,7 +228,7 @@ async function isBlocked(fromAddress) {
 
   // Known customers, vendors, and protected roots must fail open for broad
   // domain blocks. Exact sender blocks were already honored above.
-  const isCustomer = await db('customers').where('email', normalized).first();
+  const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first();
   if (isCustomer) return false;
 
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();

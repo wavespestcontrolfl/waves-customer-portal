@@ -451,7 +451,21 @@ router.post('/message/:id/reclassify', async (req, res) => {
         .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
       email.auto_action = 'spam_quarantined';
     }
-    const wasQuarantined = /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '');
+    // Rows the sweep already trashed are reclassifiable ONLY after the
+    // operator restores them from Gmail Trash — verify live, then treat the
+    // restored row like any quarantined one (cancellation clears the label
+    // and the trashed accounting).
+    let restoredFromTrash = false;
+    if (/^spam_trashed_(after_quarantine|block_pending)/.test(email.auto_action || '')) {
+      const gmailClient = require('../services/email/gmail-client');
+      const labels = await gmailClient.getMessageLabels(email.gmail_id);
+      if (labels.includes('TRASH')) {
+        return res.status(409).json({ error: 'Message is in Gmail Trash — restore it there first, then reclassify' });
+      }
+      restoredFromTrash = true;
+    }
+    const wasQuarantined = restoredFromTrash
+      || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '');
 
     // Classify FIRST — if the classifier is down (null result) or returns an
     // off-vocabulary category, the quarantine stays exactly as it was;

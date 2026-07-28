@@ -180,8 +180,15 @@ async function autoUnsubscribe(email) {
   // outcome). The attempt log is the claim record.
   const prior = await db('email_unsubscribe_log').where({ email_id: email.id }).first();
   if (prior) {
-    logger.info(`[unsubscribe] Skipped: attempt already recorded (email ${email.id})`);
-    return { method: 'none', confirmed: false, note: 'already attempted' };
+    // Replay (stale newsletter-claim recovery) must not downgrade a
+    // CONFIRMED outcome recorded by the first attempt — report what
+    // actually happened.
+    logger.info(`[unsubscribe] Skipped: attempt already recorded (email ${email.id}, status=${prior.status})`);
+    return {
+      method: prior.status === 'claimed' ? 'none' : (prior.unsubscribe_method || 'none'),
+      confirmed: prior.status === 'confirmed',
+      note: 'already attempted',
+    };
   }
   // The claim row lands BEFORE any external request — a crash mid-request
   // leaves 'claimed', which the check above treats as attempted, so stale

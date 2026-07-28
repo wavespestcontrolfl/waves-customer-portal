@@ -73,7 +73,7 @@ describe('email spam blocker safety helpers', () => {
         return { where: jest.fn(() => ({ first: jest.fn(async () => null) })) };
       }
       if (table === 'customers') {
-        return { where: jest.fn(() => ({ first: jest.fn(async () => null) })) };
+        return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => null) })) };
       }
       if (table === 'vendor_email_domains') {
         return { where: jest.fn(() => ({ first: jest.fn(async () => ({ domain: 'vendor.example' })) })) };
