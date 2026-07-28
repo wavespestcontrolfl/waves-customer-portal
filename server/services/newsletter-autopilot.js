@@ -37,6 +37,7 @@ const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
 } = require('./newsletter-event-selection');
+const { selectPortfolio, rankAlternates, MAX_COUNT: MAX_PORTFOLIO } = require('./newsletter-portfolio');
 const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
@@ -61,7 +62,8 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
       'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
       'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
       'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.source_id',
-      'e.region_zone', 'e.family_friendly', 'e.is_free',
+      'e.region_zone', 'e.family_friendly', 'e.is_free', 'e.price_text',
+      'e.editorial_score', 'e.score_breakdown', 'e.novelty_type', 'e.audience_tags',
       's.name as source_name', 's.priority_tier as source_priority_tier',
     )
     .whereIn('e.admin_status', ['approved', 'featured'])
@@ -264,24 +266,37 @@ async function autoDraftFlagship() {
   const homeownerMinuteTopic = calendarEntry?.homeowner_minute_topic;
   const preferredEventIds = Array.isArray(calendarEntry?.event_ids) ? calendarEntry.event_ids : [];
 
-  const topEvents = scored.slice(0, 12);
+  // Portfolio selection (owner spec 2026-07-28): the lineup is the
+  // strongest COMBINATION — floor-enforced, weekend/zone/audience
+  // balanced, capped per venue/source — not the raw top-N. Calendar-
+  // curated picks still take precedence: a full operator slate is used
+  // verbatim; a partial one SEEDS the selector, so caps and coverage are
+  // enforced against the combined lineup, not just the supplement.
   const byId = new Map(scored.map((ev) => [ev.id, ev]));
   // Dedupe preferred ids — a calendar row may carry duplicates (admin save
   // validates UUID/length, not uniqueness); dupes would inflate the lineup.
   const eligiblePreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
+  const preferredEvents = eligiblePreferred.map((id) => byId.get(id));
 
   let lineupEvents;
+  let portfolio;
   if (eligiblePreferred.length >= 5) {
     // Calendar picks are all eligible — use them, in the operator's order
-    lineupEvents = eligiblePreferred.map((id) => byId.get(id));
-  } else if (eligiblePreferred.length > 0) {
-    // Some calendar picks are eligible — supplement with top-scored
-    const preferredSet = new Set(eligiblePreferred);
-    const supplement = topEvents.filter((ev) => !preferredSet.has(ev.id));
-    lineupEvents = [...eligiblePreferred.map((id) => byId.get(id)), ...supplement].slice(0, 12);
+    lineupEvents = preferredEvents;
+    portfolio = { selected: preferredEvents, unmet: [], stats: null };
   } else {
-    // No calendar picks are eligible — use top-scored
-    lineupEvents = topEvents;
+    portfolio = selectPortfolio(scored, { seeded: preferredEvents });
+    lineupEvents = portfolio.selected.slice(0, MAX_PORTFOLIO);
+  }
+  // Alternates rank against the FINAL lineup — an operator-preferred
+  // event capped out of the selection must never be stored as both a
+  // locked event and its own replacement. Operator-full slates skip
+  // alternates entirely (the slate is the operator's intent).
+  const lineupAlternates = eligiblePreferred.length >= 5
+    ? []
+    : rankAlternates(scored, lineupEvents.map((ev) => ev.id));
+  if (portfolio.unmet.length) {
+    logger.info(`[newsletter-autopilot] portfolio shortfalls (publishing anyway, never padding): ${portfolio.unmet.join('; ')}`);
   }
 
   // 6. Preflight gate — enforce the flagship type's declared quality
@@ -362,12 +377,14 @@ async function autoDraftFlagship() {
   // Verify selected events still exist — supplement if stale IDs reduced the count
   const resolvedCount = await db('events_raw').whereIn('id', safeEventIds).count('* as c').first();
   const actualCount = Number(resolvedCount?.c || 0);
-  if (actualCount < 5 && topEvents.length > 0) {
-    const supplementIds = topEvents
+  if (actualCount < 5 && portfolio.selected.length > 0) {
+    // Supplement ONLY from the floor-passing portfolio selection — never
+    // pad a thin lineup with sub-floor events.
+    const supplementIds = portfolio.selected
       .map((ev) => ev.id)
       .filter((id) => !safeEventIds.includes(id));
-    safeEventIds = [...safeEventIds, ...supplementIds].slice(0, 12);
-    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, padded to ${safeEventIds.length}`);
+    safeEventIds = [...safeEventIds, ...supplementIds].slice(0, MAX_PORTFOLIO);
+    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, filled to ${safeEventIds.length} from the portfolio`);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
@@ -430,6 +447,17 @@ async function autoDraftFlagship() {
       newsletterType: NEWSLETTER_TYPE,
       knex: trx,
     });
+
+    // Ranked alternates ride the send row for the proof diagnostics and
+    // as named replacements if a locked event dies before dispatch.
+    const alternateIds = lineupAlternates
+      .map((ev) => ev.id)
+      .filter((id) => typeof id === 'string' && uuidRe.test(id));
+    if (alternateIds.length) {
+      await trx('newsletter_sends')
+        .where({ id: send.id })
+        .update({ alternate_event_ids: JSON.stringify(alternateIds), updated_at: trx.fn.now() });
+    }
     // transaction commits → lock auto-releases
   });
 
@@ -504,7 +532,7 @@ async function autoDraftFlagship() {
     });
   }
 
-  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${topEvents.length}`);
+  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${safeEventIds.length}`);
 
   // 10. Notify admin that a draft is ready
   try {
@@ -512,7 +540,7 @@ async function autoDraftFlagship() {
     await triggerNotification('newsletter_autopilot_draft', {
       sendId: send.id,
       subject: send.subject,
-      eventCount: topEvents.length,
+      eventCount: safeEventIds.length,
       calendarWeek: weekOf,
       hadCalendarEntry: !!calendarEntry,
       preflightWarnings: preflight.warnings,
@@ -531,7 +559,7 @@ async function autoDraftFlagship() {
     logger.warn(`[newsletter-autopilot] proof send failed: ${e.message}`);
   }
 
-  return { skipped: false, sendId: send.id, eventCount: topEvents.length };
+  return { skipped: false, sendId: send.id, eventCount: safeEventIds.length };
 }
 
 module.exports = { autoDraftFlagship, buildDigestPlan, preflightDigest, formatPreflightReport };

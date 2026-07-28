@@ -32,6 +32,7 @@ const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
+const { reverifyEvents } = require('./event-reverify');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -377,6 +378,15 @@ async function sendCampaign(sendId, opts = {}) {
       if (!eventSelection.valid) {
         const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
         err.code = 'EVENT_SELECTION_INVALID';
+        throw err;
+      }
+      // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
+      // fail closed ONLY on confirmed dead-event evidence — a listed event
+      // whose page is gone or explicitly cancelled must not reach inboxes.
+      const recheck = await reverifyEvents(eventSelection.events);
+      if (!recheck.ok) {
+        const err = new Error(`live page recheck failed: ${recheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`);
+        err.code = 'EVENT_REVERIFY_FAILED';
         throw err;
       }
       const now = new Date();

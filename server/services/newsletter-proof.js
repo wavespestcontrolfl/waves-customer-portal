@@ -24,7 +24,27 @@ const { wrapNewsletter } = require('./email-template');
 const { validateNewsletterDraft } = require('./newsletter-validator');
 const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
-const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
+const { reverifyEvents } = require('./event-reverify');
+
+/**
+ * Named replacements for a dead locked event: the ranked alternates the
+ * autopilot stored on the send row (newsletter_sends.alternate_event_ids).
+ * Best-effort — a lookup failure just omits the suggestion line.
+ */
+async function alternateSuggestionLine(send) {
+  try {
+    const ids = parseLockedEventIds(send?.alternate_event_ids);
+    if (!ids.length) return null;
+    const rows = await db('events_raw').whereIn('id', ids).select('id', 'title');
+    if (!rows.length) return null;
+    const byId = new Map(rows.map((r) => [String(r.id), r.title]));
+    const titles = ids.map((id) => byId.get(String(id))).filter(Boolean);
+    return titles.length ? `Suggested replacements (ranked): ${titles.join(' · ')}` : null;
+  } catch {
+    return null;
+  }
+}
 const { assertInternalEmailRecipient, normalizeEmail } = require('../utils/internal-email-recipients');
 
 const PROOF_SUBJECT_RE = /\[PROOF-([0-9a-f]{8})\]/i;
@@ -311,6 +331,17 @@ async function sendNewsletterProof(sendId) {
     await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
     return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors };
   }
+  // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
+  // don't proof a lineup carrying a confirmed-dead event — the owner
+  // would approve a broken issue.
+  const proofRecheck = await reverifyEvents(eventSelection.events);
+  if (!proofRecheck.ok) {
+    const errors = proofRecheck.failures.map((f) => `Locked event failed live recheck: ${f.title} — ${f.reason}`);
+    const suggestion = await alternateSuggestionLine(send);
+    if (suggestion) errors.push(suggestion);
+    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    return { skipped: true, reason: 'live_reverify_failed', errors };
+  }
 
   // Atomic proof claim BEFORE the external SendGrid call: overlapping
   // autopilot/catch-up workers must not both email proofs (the second
@@ -498,6 +529,18 @@ async function maybeHandleProofApproval(email) {
       subject: send.subject,
       errors: ['Approved, but the locked event lineup is no longer eligible — nothing scheduled', ...eventSelection.errors],
     });
+    return true;
+  }
+  // Same live recheck at approval time — the proof may be hours old.
+  const approvalRecheck = await reverifyEvents(eventSelection.events);
+  if (!approvalRecheck.ok) {
+    const errors = [
+      'Approved, but a locked event failed the live page recheck — nothing scheduled',
+      ...approvalRecheck.failures.map((f) => `${f.title} — ${f.reason}`),
+    ];
+    const suggestion = await alternateSuggestionLine(send);
+    if (suggestion) errors.push(suggestion);
+    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
     return true;
   }
 
