@@ -191,6 +191,24 @@ async function rollbackPriceKeys(knex, configKey, fallbackPrices, reason) {
       capturedNew = audit.new_value ? JSON.parse(audit.new_value) : null;
     }
   }
+  // up() inserted this row (audit old_value is null) — rollback means removing
+  // the DB override entirely so the in-code defaults apply again, not writing
+  // fallback prices into a row that never existed. Only deleted while it still
+  // holds exactly what up() applied; an operator-edited row is left alone.
+  if (capturedNew && capturedOld === null) {
+    if (JSON.stringify(current) === JSON.stringify(capturedNew)) {
+      await knex('pricing_config').where({ config_key: configKey }).del();
+      await knex('pricing_config_audit').insert({
+        config_key: configKey,
+        old_value: JSON.stringify(current),
+        new_value: null,
+        changed_by: `${MIGRATION_TAG}:down`,
+        reason: `${reason} (row inserted by up(), removed)`,
+      });
+    }
+    return;
+  }
+
   const newData = { ...current };
   for (const key of Object.keys(fallbackPrices)) {
     if (capturedNew) {
